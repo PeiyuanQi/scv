@@ -1,0 +1,88 @@
+[package]
+name = "peon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A small, extensible terminal agent runtime"
+repository = "https://github.com/PeiyuanQi/peon"
+readme = "README.md"
+publish = false
+
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/PeiyuanQi/peon"
+
+[workspace.dependencies]
+anyhow = "1.0.99"
+async-trait = "0.1.89"
+cap-std = "3.4.4"
+clap = { version = "4.5.47", features = ["derive"] }
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+criterion = "0.5.1"
+dirs = "6.0.0"
+futures-util = "0.3.31"
+libc = "0.2.175"
+ratatui = "0.29.0"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+tempfile = "3.21.0"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7.16"
+toml = "0.9.5"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+which = "8.0.0"
+
+peon-core = { version = "0.1.0", path = "crates/peon-core" }
+peon-protocol = { version = "0.1.0", path = "crates/peon-protocol" }
+peon-provider-openai = { version = "0.1.0", path = "crates/peon-provider-openai" }
+peon-server = { version = "0.1.0", path = "crates/peon-server" }
+peon-tools = { version = "0.1.0", path = "crates/peon-tools" }
+peon-tui = { version = "0.1.0", path = "crates/peon-tui" }
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+peon-server.workspace = true
+peon-tui.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+peon-core.workspace = true
+peon-protocol.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[[bench]]
+name = "runtime"
+harness = false
+
+[[bin]]
+name = "peon"
+path = "src/main.rs"
+
+[[bin]]
+name = "peon-server"
+path = "src/bin/peon-server.rs"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
+
+[profile.dev]
+debug = 1

@@ -1,0 +1,22 @@
+[package]
+name = "peon-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cap-std.workspace = true
+libc.workspace = true
+peon-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
