@@ -1,9 +1,9 @@
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use peon_core::{AgentConfig as CoreAgentConfig, ContextConfig, HistoryLimits};
-use peon_provider_openai::ProviderLimits;
-use peon_tools::{AgentAdapterConfig, ToolsConfig};
+use scv_core::{AgentConfig as CoreAgentConfig, ContextConfig, HistoryLimits};
+use scv_provider_openai::ProviderLimits;
+use scv_tools::{AgentAdapterConfig, ToolsConfig};
 use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;

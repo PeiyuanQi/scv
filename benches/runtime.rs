@@ -1,6 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use peon_core::{BudgetContextPolicy, ContextConfig, ContextPolicy, Message};
-use peon_protocol::{ClientMessage, ServerEvent};
+use scv_core::{BudgetContextPolicy, ContextConfig, ContextPolicy, Message};
+use scv_protocol::{ClientMessage, ServerEvent};
 
 fn protocol(c: &mut Criterion) {
     let event = ServerEvent::AssistantDelta {

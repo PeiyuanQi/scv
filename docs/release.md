@@ -14,7 +14,7 @@ The release workflow builds and tests four target archives:
 - `peon-aarch64-unknown-linux-gnu.tar.gz`;
 - `peon-x86_64-unknown-linux-gnu.tar.gz`.
 
-Each archive contains `peon`, `peon-server`, `README.md`, `LICENSE`, and
+Each archive contains `scv`, `scv-server`, `README.md`, `LICENSE`, and
 `NOTICE`. Checksums are published beside the archives. Release builds use Cargo
 locked mode. The project does not ship a curl-to-shell installer in v0.1.
 

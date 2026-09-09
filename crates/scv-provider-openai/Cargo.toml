@@ -1,24 +1,19 @@
 [package]
-name = "peon-tools"
+name = "scv-provider-openai"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Workspace-scoped filesystem, process, skill, and agent tools for Peon"
+description = "OpenAI-compatible streaming provider for Peon"
 readme = "../../README.md"
 
 [dependencies]
 async-trait.workspace = true
-cap-std.workspace = true
-libc.workspace = true
-peon-core.workspace = true
+futures-util.workspace = true
+scv-core.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-which.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

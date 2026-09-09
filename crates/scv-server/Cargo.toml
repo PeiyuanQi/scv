@@ -1,5 +1,5 @@
 [package]
-name = "peon-server"
+name = "scv-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,10 +12,10 @@ readme = "../../README.md"
 anyhow.workspace = true
 async-trait.workspace = true
 dirs.workspace = true
-peon-core.workspace = true
-peon-protocol.workspace = true
-peon-provider-openai.workspace = true
-peon-tools.workspace = true
+scv-core.workspace = true
+scv-protocol.workspace = true
+scv-provider-openai.workspace = true
+scv-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

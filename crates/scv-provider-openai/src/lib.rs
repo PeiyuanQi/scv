@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use peon_core::{
+use scv_core::{
     AssistantResponse, Message, Provider, ProviderError, ProviderErrorKind, ProviderRequest,
     TextDeltaSink, ToolCall, Usage,
 };

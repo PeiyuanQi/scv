@@ -35,10 +35,10 @@
 
 - Use stable Rust 1.88 or newer, Rust 2024 edition, `cargo fmt`, and Clippy with
   warnings denied.
-- Keep protocol types and framing in `peon-protocol`, loop and extension traits
-  in `peon-core`, provider transport in provider crates, tool implementations in
-  `peon-tools`, policy and session authority in `peon-server`, and terminal
-  presentation in `peon-tui`.
+- Keep protocol types and framing in `scv-protocol`, loop and extension traits
+  in `scv-core`, provider transport in provider crates, tool implementations in
+  `scv-tools`, policy and session authority in `scv-server`, and terminal
+  presentation in `scv-tui`.
 - Design cross-cutting changes to the agent loop, protocol, trust boundaries,
   or crate architecture in `docs/` first. Obtain an independent design PASS
   before implementation and an independent completeness/safety review before
@@ -55,7 +55,7 @@
 
 - Run `git diff --check` for every documentation or code change.
 - Setup/build: `cargo build --workspace --locked`.
-- Local TUI: set `OPENAI_API_KEY`, then run `cargo run --bin peon`.
+- Local TUI: set `OPENAI_API_KEY`, then run `cargo run --bin scv`.
 - Tests: `cargo test --workspace --locked`.
 - Format: `cargo fmt --check`.
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`.

@@ -17,13 +17,13 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use config::Config;
 pub use config::{ApprovalPolicy, ConfigOverrides};
-use peon_core::{
+use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
     EventSink, Message, ToolRisk,
 };
-use peon_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent, Usage};
-use peon_provider_openai::OpenAiProvider;
-use peon_tools::{SkillMap, builtin_registry};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent, Usage};
+use scv_provider_openai::OpenAiProvider;
+use scv_tools::{SkillMap, builtin_registry};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
@@ -114,7 +114,7 @@ where
                         send_event(&output_tx, ServerEvent::Initialized {
                             request_id,
                             protocol_version: PROTOCOL_VERSION,
-                            server: PeerInfo { name: "peon-server".into(), version: env!("CARGO_PKG_VERSION").into() },
+                            server: PeerInfo { name: "scv-server".into(), version: env!("CARGO_PKG_VERSION").into() },
                         }, Config::default().protocol.max_server_frame_bytes).await?;
                     }
                     other if !initialized => {
@@ -556,7 +556,7 @@ struct TurnDone {
     request_id: String,
     session_id: String,
     turn_id: String,
-    result: Result<peon_core::TurnOutcome, AgentError>,
+    result: Result<scv_core::TurnOutcome, AgentError>,
 }
 
 #[derive(Clone)]

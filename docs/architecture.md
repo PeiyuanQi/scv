@@ -34,13 +34,13 @@ The repository is one Cargo workspace with these packages:
 
 | Package | Responsibility |
 | --- | --- |
-| `peon-protocol` | Wire messages and the protocol version. It contains no runtime policy. |
-| `peon-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
-| `peon-provider-openai` | Streaming OpenAI-compatible chat-completions transport. |
-| `peon-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
-| `peon-server` | Configuration, session lifecycle, protocol dispatch, cancellation, approval routing, and stdout event serialization. |
-| `peon-tui` | Terminal state, rendering, input editing, scrolling, approval prompts, and the stdio client. |
-| root `peon` package | Installable `peon` and `peon-server` binaries. |
+| `scv-protocol` | Wire messages and the protocol version. It contains no runtime policy. |
+| `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
+| `scv-provider-openai` | Streaming OpenAI-compatible chat-completions transport. |
+| `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
+| `scv-server` | Configuration, session lifecycle, protocol dispatch, cancellation, approval routing, and stdout event serialization. |
+| `scv-tui` | Terminal state, rendering, input editing, scrolling, approval prompts, and the stdio client. |
+| root `scv` package | Installable `scv` and `scv-server` binaries. |
 
 Dependencies point inward: binaries and UI depend on the server/client
 interfaces; the server depends on core, tools, provider, and protocol; tools and
@@ -50,9 +50,9 @@ core package imports TUI code.
 
 ## Runtime topology
 
-`peon` starts `peon server --stdio` as its canonical child command and speaks
+`scv` starts `peon server --stdio` as its canonical child command and speaks
 the protocol over the child's stdin and stdout. The separately installed
-`peon-server --stdio` binary is a thin entry-point wrapper around the same
+`scv-server --stdio` binary is a thin entry-point wrapper around the same
 server library for editors, tests, and other clients. Diagnostics go to stderr
 so stdout remains a valid protocol stream.
 

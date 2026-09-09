@@ -58,7 +58,7 @@ are not cross-project quality scores.
 | Warm first TUI paint, 10 samples | 16.86 ms median | under 250 ms |
 | Server idle RSS | 4.31 MiB median | informational |
 | Combined TUI/server idle RSS | 8.00 MiB median | under 75 MiB |
-| Release binary size | `peon` 5.3 MiB; `peon-server` 4.8 MiB | informational |
+| Release binary size | `scv` 5.3 MiB; `scv-server` 4.8 MiB | informational |
 
 The first post-link process/TUI samples were 315 ms and 295 ms respectively,
 consistent with a macOS cold-cache outlier; they are reported rather than

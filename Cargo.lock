@@ -1194,16 +1194,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "peon"
+name = "scv-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "criterion",
- "peon-core",
- "peon-protocol",
- "peon-server",
- "peon-tui",
+ "scv-core",
+ "scv-protocol",
+ "scv-server",
+ "scv-tui",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1211,7 +1211,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "peon-core"
+name = "scv-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -1223,7 +1223,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "peon-protocol"
+name = "scv-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1231,12 +1231,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "peon-provider-openai"
+name = "scv-provider-openai"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
- "peon-core",
+ "scv-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1245,16 +1245,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "peon-server"
+name = "scv-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "dirs",
- "peon-core",
- "peon-protocol",
- "peon-provider-openai",
- "peon-tools",
+ "scv-core",
+ "scv-protocol",
+ "scv-provider-openai",
+ "scv-tools",
  "serde",
  "serde_json",
  "tokio",
@@ -1265,13 +1265,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "peon-tools"
+name = "scv-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "cap-std",
  "libc",
- "peon-core",
+ "scv-core",
  "serde",
  "serde_json",
  "sha2",
@@ -1282,13 +1282,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "peon-tui"
+name = "scv-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
  "futures-util",
- "peon-protocol",
+ "scv-protocol",
  "ratatui",
  "serde_json",
  "tokio",

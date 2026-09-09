@@ -17,7 +17,7 @@ and provides a responsive Rust TUI for coding work.
 - Configurable, bounded context selection and deterministic compaction
 - Server-enforced approvals, timeouts, output caps, and cancellation
 - Separate stdio server and Ratatui client processes
-- Interactive TUI plus a headless `peon exec` mode
+- Interactive TUI plus a headless `scv exec` mode
 - Linux and macOS support on ARM64 and x86-64
 
 ## Install
@@ -25,43 +25,43 @@ and provides a responsive Rust TUI for coding work.
 Peon requires Rust 1.88 or newer and `/bin/bash`.
 
 ```bash
-cargo install --locked --git https://github.com/PeiyuanQi/peon
+cargo install --locked --git https://github.com/PeiyuanQi/scv
 ```
 
 Until release archives are published, build from source:
 
 ```bash
 git clone https://github.com/PeiyuanQi/peon.git
-cd peon
+cd scv
 cargo build --release --locked
 ```
 
-The package installs two binaries: `peon` and the standalone protocol entry
-point `peon-server`.
+The package installs two binaries: `scv` and the standalone protocol entry
+point `scv-server`.
 
 To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
 ```bash
-cargo publish --locked -p peon-core
-cargo publish --locked -p peon-protocol
-cargo publish --locked -p peon-provider-openai
-cargo publish --locked -p peon-tools
-cargo publish --locked -p peon-server
-cargo publish --locked -p peon-tui
-cargo publish --locked -p peon
+cargo publish --locked -p scv-core
+cargo publish --locked -p scv-protocol
+cargo publish --locked -p scv-provider-openai
+cargo publish --locked -p scv-tools
+cargo publish --locked -p scv-server
+cargo publish --locked -p scv-tui
+cargo publish --locked -p scv-cli
 ```
 
 The server is a long-running JSONL backend. Keep it attached to a supervisor
-such as systemd; the checked-in [`peon-server.service`](peon-server.service)
+such as systemd; the checked-in [`scv-server.service`](scv-server.service)
 unit is a starting point:
 
 ```bash
-install -Dm644 peon-server.service ~/.config/systemd/user/peon-server.service
+install -Dm644 scv-server.service ~/.config/systemd/user/scv-server.service
 systemctl --user daemon-reload
-systemctl --user enable --now peon-server.service
-journalctl --user -u peon-server.service -f
+systemctl --user enable --now scv-server.service
+journalctl --user -u scv-server.service -f
 ```
 
 The stdio protocol is intentionally local and one-session-per-connection. A
@@ -75,7 +75,7 @@ long-polling and `POST /ilink/bot/sendmessage`. Incoming messages include a
 `context_token`; replies must echo that token. The Peon integration boundary is
 therefore an adapter that maps each inbound text message to `session.start` and
 `turn.start`, forwards the final assistant response to `sendmessage`, and
-resolves approvals through a trusted local operator channel. The `peon clawbot`
+resolves approvals through a trusted local operator channel. The `scv clawbot`
 command provides the polling and reply adapter. Credentials are the
 `bot_token`, `ilink_bot_id`, `ilink_user_id`, and returned `baseurl` from the
 official QR status API; do not put them in project configuration or logs.
@@ -87,7 +87,7 @@ Peon's first provider speaks the OpenAI-compatible Chat Completions API.
 ```bash
 export OPENAI_API_KEY="your-key"
 cd /path/to/your/project
-peon
+scv
 ```
 
 Use another compatible model or endpoint:
@@ -100,8 +100,8 @@ Run one non-interactive prompt. Risky tools are denied unless `--yes` is
 present:
 
 ```bash
-peon exec "Explain this repository"
-peon exec --yes "Run the tests and fix the failure"
+scv exec "Explain this repository"
+scv exec --yes "Run the tests and fix the failure"
 ```
 
 In the TUI, `Enter` sends, `Ctrl+J` inserts a newline, `Esc` cancels, `Ctrl+O`
@@ -157,14 +157,14 @@ timeout limits as other process tools.
 
 Peon is a Cargo workspace with deliberately narrow packages:
 
-- `peon-core`: loop and extension traits;
-- `peon-protocol`: versioned wire types with no runtime policy;
-- `peon-provider-openai`: streaming provider transport;
-- `peon-tools`: filesystem, process, skill, and nested-agent tools;
-- `peon-server`: configuration, sessions, permissions, and protocol dispatch;
-- `peon-tui`: terminal client and headless protocol client.
+- `scv-core`: loop and extension traits;
+- `scv-protocol`: versioned wire types with no runtime policy;
+- `scv-provider-openai`: streaming provider transport;
+- `scv-tools`: filesystem, process, skill, and nested-agent tools;
+- `scv-server`: configuration, sessions, permissions, and protocol dispatch;
+- `scv-tui`: terminal client and headless protocol client.
 
-The TUI spawns `peon server --stdio`; `peon-server --stdio` exposes the same
+The TUI spawns `peon server --stdio`; `scv-server --stdio` exposes the same
 server library to other local clients. Start with the final v0.1
 [`architecture`](docs/architecture.md), then see the
 [`protocol`](docs/protocol.md), [`context`](docs/context-management.md),

@@ -18,7 +18,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use peon_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -150,7 +150,7 @@ struct Client {
 
 impl Client {
     async fn spawn(cwd: &Path, options: &LaunchOptions) -> Result<(Self, SessionInfo)> {
-        let executable = std::env::current_exe().context("locate peon executable")?;
+        let executable = std::env::current_exe().context("locate scv executable")?;
         let mut command = Command::new(executable);
         if let Some(model) = &options.model {
             command.args(["--model", model]);
@@ -167,7 +167,7 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = command.spawn().context("launch peon server")?;
+        let mut child = command.spawn().context("launch scv server")?;
         let stdin = child.stdin.take().context("server stdin unavailable")?;
         let stdout = child.stdout.take().context("server stdout unavailable")?;
         let mut client = Self {
@@ -181,7 +181,7 @@ impl Client {
                 request_id: "initialize".into(),
                 protocol_version: PROTOCOL_VERSION,
                 client: PeerInfo {
-                    name: "peon-tui".into(),
+                    name: "scv-tui".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                 },
             })

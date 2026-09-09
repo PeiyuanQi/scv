@@ -1,12 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use peon_server::{ApprovalPolicy, ConfigOverrides};
-use peon_tui::LaunchOptions;
+use scv_server::{ApprovalPolicy, ConfigOverrides};
+use scv_tui::LaunchOptions;
 use serde_json::json;
 use uuid::Uuid;
 
 #[derive(Parser)]
-#[command(name = "peon", version, about = "A small, extensible terminal agent")]
+#[command(name = "scv", version, about = "SCV — Search, Construct, Verify")]
 struct Cli {
     #[arg(long, global = true)]
     model: Option<String>,
@@ -74,14 +74,14 @@ async fn main() -> Result<()> {
             .map(|value| value.to_possible_value().unwrap().get_name().to_owned()),
     };
     match cli.command.unwrap_or(Command::Tui) {
-        Command::Tui => peon_tui::run_tui(&cwd, launch).await,
-        Command::Exec { prompt, yes } => peon_tui::run_exec(&cwd, prompt, yes, launch).await,
+        Command::Tui => scv_tui::run_tui(&cwd, launch).await,
+        Command::Exec { prompt, yes } => scv_tui::run_exec(&cwd, prompt, yes, launch).await,
         Command::Server { stdio } => {
             if !stdio {
                 anyhow::bail!("v0.1 supports only --stdio");
             }
             init_tracing();
-            peon_server::run_stdio(ConfigOverrides {
+            scv_server::run_stdio(ConfigOverrides {
                 model: cli.model,
                 base_url: cli.base_url,
                 approval_policy: cli.approval_policy.map(Into::into),

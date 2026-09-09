@@ -1,5 +1,5 @@
 [package]
-name = "peon"
+name = "scv-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -47,18 +47,18 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 which = "8.0.0"
 
-peon-core = { version = "0.1.0", path = "crates/peon-core" }
-peon-protocol = { version = "0.1.0", path = "crates/peon-protocol" }
-peon-provider-openai = { version = "0.1.0", path = "crates/peon-provider-openai" }
-peon-server = { version = "0.1.0", path = "crates/peon-server" }
-peon-tools = { version = "0.1.0", path = "crates/peon-tools" }
-peon-tui = { version = "0.1.0", path = "crates/peon-tui" }
+scv-core = { version = "0.1.0", path = "crates/scv-core" }
+scv-protocol = { version = "0.1.0", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "0.1.0", path = "crates/scv-provider-openai" }
+scv-server = { version = "0.1.0", path = "crates/scv-server" }
+scv-tools = { version = "0.1.0", path = "crates/scv-tools" }
+scv-tui = { version = "0.1.0", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-peon-server.workspace = true
-peon-tui.workspace = true
+scv-server.workspace = true
+scv-tui.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
@@ -67,8 +67,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-peon-core.workspace = true
-peon-protocol.workspace = true
+scv-core.workspace = true
+scv-protocol.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
@@ -77,12 +77,12 @@ name = "runtime"
 harness = false
 
 [[bin]]
-name = "peon"
+name = "scv"
 path = "src/main.rs"
 
 [[bin]]
-name = "peon-server"
-path = "src/bin/peon-server.rs"
+name = "scv-server"
+path = "src/bin/scv-server.rs"
 
 [profile.release]
 codegen-units = 1

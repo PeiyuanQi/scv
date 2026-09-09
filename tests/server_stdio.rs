@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use peon_protocol::{ClientMessage, PeerInfo, ServerEvent};
+use scv_protocol::{ClientMessage, PeerInfo, ServerEvent};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -16,7 +16,7 @@ use tokio::{
 async fn server_handshake_and_session_start() {
     let workspace = tempfile::tempdir().unwrap();
     let config_home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_peon-server"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
         .arg("--stdio")
         .env("OPENAI_API_KEY", "test-only")
         .env("XDG_CONFIG_HOME", config_home.path())
@@ -94,7 +94,7 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
 
     let workspace = tempfile::tempdir().unwrap();
     let config_home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_peon-server"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
         .args([
             "--stdio",
             "--model",

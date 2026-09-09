@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use peon_server::{ApprovalPolicy, ConfigOverrides};
+use scv_server::{ApprovalPolicy, ConfigOverrides};
 
 #[derive(Parser)]
-#[command(name = "peon-server", version, about = "Peon stdio agent server")]
+#[command(name = "scv-server", version, about = "SCV stdio agent server")]
 struct Cli {
     #[arg(long, default_value_t = true)]
     stdio: bool,
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
-    peon_server::run_stdio(ConfigOverrides {
+    scv_server::run_stdio(ConfigOverrides {
         model: cli.model,
         base_url: cli.base_url,
         approval_policy: cli.approval_policy.map(Into::into),
