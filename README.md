@@ -39,6 +39,47 @@ cargo build --release --locked
 The package installs two binaries: `peon` and the standalone protocol entry
 point `peon-server`.
 
+To publish from a clean checkout, authenticate with `cargo login` and publish
+the workspace in dependency order (Cargo will refuse a package whose local
+dependencies are not already on crates.io):
+
+```bash
+cargo publish --locked -p peon-core
+cargo publish --locked -p peon-protocol
+cargo publish --locked -p peon-provider-openai
+cargo publish --locked -p peon-tools
+cargo publish --locked -p peon-server
+cargo publish --locked -p peon-tui
+cargo publish --locked -p peon
+```
+
+The server is a long-running JSONL backend. Keep it attached to a supervisor
+such as systemd; the checked-in [`peon-server.service`](peon-server.service)
+unit is a starting point:
+
+```bash
+install -Dm644 peon-server.service ~/.config/systemd/user/peon-server.service
+systemctl --user daemon-reload
+systemctl --user enable --now peon-server.service
+journalctl --user -u peon-server.service -f
+```
+
+The stdio protocol is intentionally local and one-session-per-connection. A
+remote client should use SSH or a small authenticated stdio proxy rather than
+exposing the raw server socket.
+
+## ClawBot / WeChat iLink
+
+ClawBot uses WeChat's iLink HTTP API: QR login, then `POST /ilink/bot/getupdates`
+long-polling and `POST /ilink/bot/sendmessage`. Incoming messages include a
+`context_token`; replies must echo that token. The Peon integration boundary is
+therefore an adapter that maps each inbound text message to `session.start` and
+`turn.start`, forwards the final assistant response to `sendmessage`, and
+resolves approvals through a trusted local operator channel. The `peon clawbot`
+command provides the polling and reply adapter. Credentials are the
+`bot_token`, `ilink_bot_id`, `ilink_user_id`, and returned `baseurl` from the
+official QR status API; do not put them in project configuration or logs.
+
 ## Quick start
 
 Peon's first provider speaks the OpenAI-compatible Chat Completions API.

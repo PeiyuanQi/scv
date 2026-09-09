@@ -1,0 +1,18 @@
+[Unit]
+Description=Peon agent protocol server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/peon
+ExecStart=%h/.local/bin/peon-server --stdio
+Environment=RUST_LOG=info
+EnvironmentFile=-%h/.config/peon/environment
+Restart=on-failure
+RestartSec=3
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

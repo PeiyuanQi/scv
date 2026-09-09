@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Authoritative session and tool server for Peon"
+readme = "../../README.md"
 
 [dependencies]
 anyhow.workspace = true
