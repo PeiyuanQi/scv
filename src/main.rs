@@ -36,6 +36,11 @@ enum Command {
         stdio: bool,
     },
     /// Connect a Peon workspace to a WeChat ClawBot/iLink account.
+    ClawbotLogin {
+        /// Login API base URL.
+        #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
+        login_url: String,
+    },
     Clawbot {
         /// iLink bot bearer token (or set PEON_CLAWBOT_TOKEN).
         #[arg(long, env = "PEON_CLAWBOT_TOKEN")]
@@ -88,6 +93,7 @@ async fn main() -> Result<()> {
             })
             .await
         }
+        Command::ClawbotLogin { login_url } => clawbot_login(&login_url).await,
         Command::Clawbot { token, base_url } => run_clawbot(&token, &base_url).await,
     }
 }
@@ -111,6 +117,25 @@ async fn run_clawbot(token: &str, base_url: &str) -> Result<()> {
             let reply = String::from_utf8_lossy(&output.stdout).into_owned();
             client.post(format!("{base_url}/ilink/bot/sendmessage")).header("AuthorizationType", "ilink_bot_token").bearer_auth(token).header("X-WECHAT-UIN", "cGVvbg==").json(&json!({"msg":{"to_user_id":to_user_id,"client_id":Uuid::new_v4().to_string(),"message_type":2,"message_state":2,"context_token":context_token,"item_list":[{"type":1,"text_item":{"text":reply}}]},"base_info":{"channel_version":"1.0.2"}})).send().await?;
         }
+    }
+}
+
+async fn clawbot_login(base: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let qr: serde_json::Value = client.post(format!("{base}/api/v1/wechat/qrcode")).send().await?.error_for_status()?.json().await?;
+    let data = qr.get("data").unwrap_or(&qr);
+    let url = data.get("qrcode_url").and_then(|v| v.as_str()).unwrap_or("");
+    let code = data.get("qrcode").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing qrcode token"))?;
+    println!("Scan this QR code URL in a browser:\n{url}");
+    loop {
+        let status: serde_json::Value = client.post(format!("{base}/api/v1/wechat/qrcode/status")).json(&json!({"qrcode":code})).send().await?.error_for_status()?.json().await?;
+        let data = status.get("data").unwrap_or(&status);
+        if data.get("status").and_then(|v| v.as_str()) == Some("confirmed") {
+            let c = data.get("credentials").ok_or_else(|| anyhow::anyhow!("login confirmed without credentials"))?;
+            println!("PEON_CLAWBOT_TOKEN={}", c.get("bot_token").and_then(|v| v.as_str()).unwrap_or(""));
+            println!("CLAWBOT_BASE_URL={}", c.get("baseurl").and_then(|v| v.as_str()).unwrap_or(base)); return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
 
