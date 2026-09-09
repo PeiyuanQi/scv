@@ -31,7 +31,7 @@ cargo install --locked --git https://github.com/PeiyuanQi/scv
 Until release archives are published, build from source:
 
 ```bash
-git clone https://github.com/PeiyuanQi/peon.git
+git clone https://github.com/PeiyuanQi/scv.git
 cd scv
 cargo build --release --locked
 ```

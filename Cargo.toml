@@ -5,11 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "A small, extensible terminal agent runtime with a TUI and headless server"
-repository = "https://github.com/PeiyuanQi/peon"
+repository = "https://github.com/PeiyuanQi/scv"
 readme = "README.md"
 keywords = ["agent", "coding-agent", "terminal", "tui", "llm"]
 categories = ["command-line-utilities", "development-tools"]
-homepage = "https://github.com/PeiyuanQi/peon"
+homepage = "https://github.com/PeiyuanQi/scv"
 
 [workspace]
 members = ["crates/*"]
@@ -20,7 +20,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
-repository = "https://github.com/PeiyuanQi/peon"
+repository = "https://github.com/PeiyuanQi/scv"
 
 [workspace.dependencies]
 anyhow = "1.0.99"
