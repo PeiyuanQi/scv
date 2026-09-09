@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/peon
+WorkingDirectory=%h/projects/scv
 ExecStart=%h/.local/bin/scv-server --stdio
 Environment=RUST_LOG=info
 EnvironmentFile=-%h/.config/peon/environment
