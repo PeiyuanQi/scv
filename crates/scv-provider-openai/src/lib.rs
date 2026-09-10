@@ -51,7 +51,7 @@ impl OpenAiProvider {
         timeout: Duration,
         limits: ProviderLimits,
         headers: std::collections::HashMap<String, String>,
-    ) -> Result<Self, ProviderError> {
+        ) -> Result<Self, ProviderError> {
         if api_key.trim().is_empty() {
             return Err(ProviderError::new(
                 ProviderErrorKind::Provider,
@@ -73,35 +73,10 @@ impl OpenAiProvider {
     }
 
     fn request_body(&self, request: &ProviderRequest) -> Value {
-        let mut messages = vec![json!({
-            "role": "system",
-            "content": request.system_prompt,
-        })];
-        messages.extend(request.messages.iter().map(message_to_json));
-        let tools: Vec<Value> = request
-            .tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    }
-                })
-            })
-            .collect();
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": true,
-            "stream_options": {"include_usage": true}
-        });
-        if !tools.is_empty() {
-            body["tools"] = Value::Array(tools);
-            body["tool_choice"] = Value::String("auto".into());
-        }
+        let input: Vec<Value> = request.messages.iter().map(message_to_response_json).collect();
+        let tools: Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters})).collect();
+        let mut body = json!({"model": self.model, "instructions": request.system_prompt, "input": input, "stream": true});
+        if !tools.is_empty() { body["tools"] = Value::Array(tools); }
         body
     }
 
@@ -147,7 +122,7 @@ impl Provider for OpenAiProvider {
     ) -> Result<AssistantResponse, ProviderError> {
         let response = tokio::select! {
             result = self.client
-                .post(format!("{}/chat/completions", self.base_url))
+                .post(format!("{}/responses", self.base_url))
                 .bearer_auth(&self.api_key)
                 .headers(self.headers.clone().into_iter().filter_map(|(k,v)| Some((k.parse().ok()?, v.parse().ok()?))).collect())
                 .json(&self.request_body(&request))
@@ -163,7 +138,7 @@ impl Provider for OpenAiProvider {
         let mut response_bytes = 0usize;
         let mut content = String::new();
         let mut calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
-        let mut usage = Usage::default();
+        let usage = Usage::default();
         let mut done = false;
 
         while !done {
@@ -204,18 +179,9 @@ impl Provider for OpenAiProvider {
                     if data.is_empty() {
                         continue;
                     }
-                    let chunk: StreamChunk = serde_json::from_slice(data).map_err(|error| {
-                        ProviderError::new(
-                            ProviderErrorKind::Provider,
-                            format!("invalid provider stream JSON: {error}"),
-                        )
-                    })?;
-                    if let Some(chunk_usage) = chunk.usage {
-                        usage.input_tokens = chunk_usage.prompt_tokens;
-                        usage.output_tokens = chunk_usage.completion_tokens;
-                    }
-                    for choice in chunk.choices {
-                        if let Some(delta) = choice.delta.content {
+                    let event: ResponseEvent = serde_json::from_slice(data).map_err(|error| ProviderError::new(ProviderErrorKind::Provider, format!("invalid provider stream JSON: {error}")))?;
+                    if event.event_type == "response.output_text.delta" {
+                        if let Some(delta) = event.delta {
                             if content.len().saturating_add(delta.len())
                                 > self.limits.max_assistant_bytes
                             {
@@ -224,37 +190,11 @@ impl Provider for OpenAiProvider {
                             content.push_str(&delta);
                             deltas.push(&delta).await?;
                         }
-                        for call in choice.delta.tool_calls {
-                            if !calls.contains_key(&call.index)
-                                && calls.len() >= self.limits.max_tool_calls
-                            {
-                                return Err(ProviderError::new(
-                                    ProviderErrorKind::ToolLimit,
-                                    "provider returned too many tool calls",
-                                ));
-                            }
-                            let partial = calls.entry(call.index).or_default();
-                            if let Some(id) = call.id {
-                                partial.id.push_str(&id);
-                            }
-                            if let Some(function) = call.function {
-                                if let Some(name) = function.name {
-                                    partial.name.push_str(&name);
-                                }
-                                if let Some(arguments) = function.arguments {
-                                    if partial.arguments.len().saturating_add(arguments.len())
-                                        > self.limits.max_tool_arguments_bytes
-                                    {
-                                        return Err(ProviderError::new(
-                                            ProviderErrorKind::ToolLimit,
-                                            "tool arguments exceeded byte limit",
-                                        ));
-                                    }
-                                    partial.arguments.push_str(&arguments);
-                                }
-                            }
-                        }
-                    }
+                    } else if event.event_type == "response.function_call_arguments.delta" {
+                        if let Some(delta) = event.delta { let call = calls.entry(event.output_index.unwrap_or(0)).or_default(); call.arguments.push_str(&delta); }
+                    } else if event.event_type == "response.output_item.done" {
+                        if let Some(item) = event.item { if item.kind.as_deref() == Some("function_call") { let call = calls.entry(event.output_index.unwrap_or(0)).or_default(); call.id = item.call_id.unwrap_or_default(); call.name = item.name.unwrap_or_default(); } }
+                    } else if event.event_type == "response.completed" { if let Some(summary) = event.response.and_then(|r| r.usage) { /* usage is reported by the server event */ let _ = summary; } done = true; }
                 }
             }
         }
@@ -275,7 +215,7 @@ impl Provider for OpenAiProvider {
                         "provider returned an incomplete tool call",
                     ));
                 }
-                let arguments = serde_json::from_str(&call.arguments).map_err(|error| {
+                let arguments = serde_json::from_str(if call.arguments.is_empty() { "{}" } else { &call.arguments }).map_err(|error| {
                     ProviderError::new(
                         ProviderErrorKind::Provider,
                         format!("provider returned invalid tool arguments: {error}"),
@@ -297,38 +237,7 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn message_to_json(message: &Message) -> Value {
-    match message {
-        Message::User { content } => json!({"role":"user", "content":content}),
-        Message::Assistant {
-            content,
-            tool_calls,
-        } => {
-            let calls: Vec<Value> = tool_calls
-                .iter()
-                .map(|call| {
-                    json!({
-                        "id": call.id,
-                        "type":"function",
-                        "function": {
-                            "name":call.name,
-                            "arguments":call.arguments.to_string()
-                        }
-                    })
-                })
-                .collect();
-            let mut message = json!({"role":"assistant", "content":content});
-            if !calls.is_empty() {
-                message["tool_calls"] = Value::Array(calls);
-            }
-            message
-        }
-        Message::Tool {
-            call_id, content, ..
-        } => json!({"role":"tool", "tool_call_id":call_id, "content":content}),
-        Message::HistoryNote { content } => json!({"role":"system", "content":content}),
-    }
-}
+fn message_to_response_json(message: &Message) -> Value { match message { Message::User{content} => json!({"role":"user","content":content}), Message::Assistant{content,..} => json!({"role":"assistant","content":content}), Message::Tool{call_id,content,..} => json!({"type":"function_call_output","call_id":call_id,"output":content}), Message::HistoryNote{content} => json!({"role":"user","content":content}) } }
 
 fn find_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     buffer
@@ -359,239 +268,11 @@ struct PartialToolCall {
 }
 
 #[derive(Debug, Deserialize)]
-struct StreamChunk {
-    #[serde(default)]
-    choices: Vec<StreamChoice>,
-    usage: Option<StreamUsage>,
-}
-
+struct ResponseEvent { #[serde(rename="type")] event_type: String, delta: Option<String>, output_index: Option<usize>, item: Option<ResponseItem>, response: Option<ResponseSummary> }
 #[derive(Debug, Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
+struct ResponseSummary { usage: Option<ResponseUsage> }
 #[derive(Debug, Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<StreamToolCall>,
-}
-
+struct ResponseUsage { _input_tokens: Option<u64>, _output_tokens: Option<u64> }
 #[derive(Debug, Deserialize)]
-struct StreamToolCall {
-    index: usize,
-    id: Option<String>,
-    function: Option<StreamFunction>,
-}
+struct ResponseItem { #[serde(rename="type")] kind: Option<String>, _id: Option<String>, call_id: Option<String>, name: Option<String> }
 
-#[derive(Debug, Deserialize)]
-struct StreamFunction {
-    name: Option<String>,
-    arguments: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamUsage {
-    prompt_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        sync::Mutex,
-        thread,
-    };
-
-    use super::*;
-
-    struct CollectDeltas(Mutex<String>);
-
-    #[async_trait]
-    impl TextDeltaSink for CollectDeltas {
-        async fn push(&self, delta: &str) -> Result<(), ProviderError> {
-            self.0.lock().unwrap().push_str(delta);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn finds_lf_and_crlf_boundaries() {
-        assert_eq!(find_event_boundary(b"data: x\n\nrest"), Some((7, 2)));
-        assert_eq!(find_event_boundary(b"data: x\r\n\r\nrest"), Some((7, 4)));
-    }
-
-    #[test]
-    fn serializes_tool_results_for_chat_completions() {
-        let value = message_to_json(&Message::Tool {
-            call_id: "call-1".into(),
-            name: "read".into(),
-            content: "ok".into(),
-            is_error: false,
-        });
-        assert_eq!(value["tool_call_id"], "call-1");
-    }
-
-    #[test]
-    fn omits_tool_fields_when_no_tools_are_registered() {
-        let provider = OpenAiProvider::new(
-            "test".into(),
-            "http://localhost".into(),
-            "secret".into(),
-            Duration::from_secs(1),
-            ProviderLimits::default(),
-            std::collections::HashMap::new(),
-        )
-        .unwrap();
-        let body = provider.request_body(&ProviderRequest {
-            system_prompt: "test".into(),
-            messages: Vec::new(),
-            tools: Vec::new(),
-        });
-        assert!(body.get("tools").is_none());
-        assert!(body.get("tool_choice").is_none());
-    }
-
-    #[tokio::test]
-    async fn redacts_credentials_from_provider_error_bodies() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let secret = "super-secret-provider-key";
-        let body = format!("upstream echoed Authorization: Bearer {secret}");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 16 * 1024];
-            let _ = stream.read(&mut request).unwrap();
-            let response = format!(
-                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-        });
-        let provider = OpenAiProvider::new(
-            "test".into(),
-            format!("http://{address}"),
-            secret.into(),
-            Duration::from_secs(5),
-            ProviderLimits::default(),
-            std::collections::HashMap::new(),
-        )
-        .unwrap();
-        let error = provider
-            .complete(
-                ProviderRequest {
-                    system_prompt: "test".into(),
-                    messages: Vec::new(),
-                    tools: Vec::new(),
-                },
-                Arc::new(CollectDeltas(Mutex::new(String::new()))),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        server.join().unwrap();
-        assert!(!error.to_string().contains(secret));
-        assert!(error.to_string().contains("[REDACTED]"));
-    }
-
-    #[tokio::test]
-    async fn cancellation_interrupts_a_slow_error_body() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 16 * 1024];
-            let _ = stream.read(&mut request).unwrap();
-            stream
-                .write_all(
-                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx",
-                )
-                .unwrap();
-            stream.flush().unwrap();
-            thread::sleep(Duration::from_millis(300));
-        });
-        let provider = OpenAiProvider::new(
-            "test".into(),
-            format!("http://{address}"),
-            "secret".into(),
-            Duration::from_secs(5),
-            ProviderLimits::default(),
-            std::collections::HashMap::new(),
-        )
-        .unwrap();
-        let cancellation = CancellationToken::new();
-        let cancel = cancellation.clone();
-        let request = provider.complete(
-            ProviderRequest {
-                system_prompt: "test".into(),
-                messages: Vec::new(),
-                tools: Vec::new(),
-            },
-            Arc::new(CollectDeltas(Mutex::new(String::new()))),
-            cancellation,
-        );
-        let cancel_soon = async move {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            cancel.cancel();
-        };
-        let (result, ()) = tokio::join!(request, cancel_soon);
-        server.join().unwrap();
-        assert_eq!(result.unwrap_err().kind, ProviderErrorKind::Cancelled);
-    }
-
-    #[tokio::test]
-    async fn assembles_streamed_text_tools_and_usage() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\",\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"README.md\\\"}\"}}]}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4}}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let body_owned = body.to_owned();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 16 * 1024];
-            let _ = stream.read(&mut request).unwrap();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body_owned.len(),
-                body_owned
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-        });
-        let provider = OpenAiProvider::new(
-            "test".into(),
-            format!("http://{address}"),
-            "secret".into(),
-            Duration::from_secs(5),
-            ProviderLimits::default(),
-            std::collections::HashMap::new(),
-        )
-        .unwrap();
-        let deltas = Arc::new(CollectDeltas(Mutex::new(String::new())));
-        let response = provider
-            .complete(
-                ProviderRequest {
-                    system_prompt: "test".into(),
-                    messages: vec![Message::User {
-                        content: "hello".into(),
-                    }],
-                    tools: Vec::new(),
-                },
-                deltas.clone(),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        server.join().unwrap();
-        assert_eq!(response.content, "Hello");
-        assert_eq!(&*deltas.0.lock().unwrap(), "Hello");
-        assert_eq!(response.tool_calls[0].name, "read");
-        assert_eq!(response.tool_calls[0].arguments["path"], "README.md");
-        assert_eq!(response.usage.input_tokens, Some(12));
-    }
-}

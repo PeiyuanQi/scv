@@ -31,6 +31,7 @@ pub struct Config {
 pub struct ProviderConfig {
     pub active: Option<String>,
     pub kind: String,
+    pub wire_api: String,
     pub model: String,
     pub base_url: String,
     pub api_key: Option<String>,
@@ -45,6 +46,7 @@ impl Default for ProviderConfig {
         Self {
             active: None,
             kind: "openai-compatible".into(),
+            wire_api: "responses".into(),
             model: "gpt-4.1-mini".into(),
             base_url: "https://api.openai.com/v1".into(),
             api_key: None,
