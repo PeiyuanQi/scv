@@ -60,7 +60,7 @@ impl Config {
         let path = user_config_path().ok_or_else(|| anyhow::anyhow!("cannot determine user config path"))?;
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).context("create config directory")?; }
         if !path.exists() {
-            std::fs::write(&path, include_str!("../../../config.example.toml")).context("write example configuration")?;
+            std::fs::write(&path, "[provider]\nactive = \"openai\"\n\n[providers.openai]\nkind = \"openai-compatible\"\nmodel = \"gpt-4.1-mini\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n").context("write example configuration")?;
             #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).context("secure config file")?; }
         }
         Ok(path)
