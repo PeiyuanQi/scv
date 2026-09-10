@@ -16,6 +16,10 @@
 
 ## Git Workflow
 
+- Follow semantic versioning for releases. Increment the patch component by
+  `0.0.1` for features and bug fixes; use minor or major bumps only for the
+  corresponding semver-compatible or breaking changes.
+
 - For every feature, first write a plan/spec and update the final-state design
   documents in `docs/`; obtain explicit approval before implementation.
 - Implement approved work in a dedicated sibling worktree. At delivery, run the
