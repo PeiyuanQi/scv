@@ -41,6 +41,7 @@ const SERVER_EXIT_GRACE: Duration = Duration::from_secs(7);
 #[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
     pub model: Option<String>,
+    pub provider: Option<String>,
     pub base_url: Option<String>,
     pub approval_policy: Option<String>,
 }
@@ -155,6 +156,7 @@ impl Client {
         if let Some(model) = &options.model {
             command.args(["--model", model]);
         }
+        if let Some(provider) = &options.provider { command.args(["--provider", provider]); }
         if let Some(base_url) = &options.base_url {
             command.args(["--base-url", base_url]);
         }

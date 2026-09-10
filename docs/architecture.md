@@ -204,3 +204,5 @@ Peon's boundaries are informed by primary project documentation:
 
 These are behavioral and architectural references. Peon contains no copied
 source code from them.
+
+User configuration supports named provider profiles with per-profile endpoints, credentials, and headers; project configuration cannot redirect that trust boundary.

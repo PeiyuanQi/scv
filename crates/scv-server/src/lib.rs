@@ -17,6 +17,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use config::Config;
 pub use config::{ApprovalPolicy, ConfigOverrides};
+pub fn init_user_config() -> anyhow::Result<std::path::PathBuf> { config::Config::init_user_config() }
 use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
     EventSink, Message, ToolRisk,
@@ -578,20 +579,19 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
         return Err(anyhow!("cwd is not a directory"));
     }
     let config = Config::load(&workspace, overrides)?;
-    let api_key = std::env::var(&config.provider.api_key_env).with_context(|| {
-        format!(
-            "provider credential environment variable {} is not set",
-            config.provider.api_key_env
-        )
-    })?;
+    let provider_config = config.provider.clone();
+    let api_key = provider_config.api_key.clone().or_else(|| {
+        provider_config.api_key_env.as_deref().and_then(|name| std::env::var(name).ok())
+    }).filter(|key| !key.trim().is_empty()).ok_or_else(|| anyhow!("provider credential is not configured; set provider.api_key or provider.api_key_env"))?;
     let (skills, skill_roots, skill_prompt) = discover_skills(&workspace, &config)?;
     let system_prompt = build_system_prompt(&workspace, &config, &skill_prompt)?;
     let provider = Arc::new(OpenAiProvider::new(
-        config.provider.model.clone(),
-        config.provider.base_url.clone(),
+        provider_config.model.clone(),
+        provider_config.base_url.clone(),
         api_key,
-        Duration::from_secs(config.provider.timeout_seconds),
+        Duration::from_secs(provider_config.timeout_seconds),
         config.provider_limits(),
+        provider_config.headers.clone(),
     )?);
     let tools = Arc::new(builtin_registry(
         config.tools(),

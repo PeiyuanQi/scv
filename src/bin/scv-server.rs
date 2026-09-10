@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .try_init();
     scv_server::run_stdio(ConfigOverrides {
+        provider: None,
         model: cli.model,
         base_url: cli.base_url,
         approval_policy: cli.approval_policy.map(Into::into),

@@ -2,10 +2,12 @@
 
 Status: final design for v0.1
 
+Run `scv config init` on first use to create the user file from `config.example.toml`. Select a profile with `provider.active` or `--provider`.
+
 Peon merges configuration in this order, from lowest to highest precedence:
 
 1. built-in defaults;
-2. `$XDG_CONFIG_HOME/peon/config.toml` or `~/.config/peon/config.toml`;
+2. `$SCV_HOME/config.toml` or `~/.scv/config.toml`;
 3. `<workspace>/.peon/config.toml`;
 4. documented environment variables;
 5. command-line flags.
@@ -18,10 +20,22 @@ interactive approval required by user-level policy.
 
 ```toml
 [provider]
+active = "openai"
+
+[providers.openai]
 kind = "openai-compatible"
 model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+api_key = "sk-your-key"
+api_key_env = "OPENAI_API_KEY" # optional fallback
+timeout_seconds = 120
+
+[providers.custom]
+kind = "openai-compatible"
+model = "your-model"
+base_url = "https://provider.example/v1"
+api_key_env = "CUSTOM_PROVIDER_KEY"
+headers = { "X-Organization" = "example" }
 timeout_seconds = 120
 
 [agent]
@@ -64,7 +78,7 @@ max_tool_calls = 32
 max_tool_arguments_bytes = 262144
 
 [skills]
-user_dir = "~/.config/peon/skills"
+user_dir = "~/.scv/skills"
 project_dir = ".peon/skills"
 max_skills = 128
 max_skill_bytes = 262144

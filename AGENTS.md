@@ -16,6 +16,12 @@
 
 ## Git Workflow
 
+- For every feature, first write a plan/spec and update the final-state design
+  documents in `docs/`; obtain explicit approval before implementation.
+- Implement approved work in a dedicated sibling worktree. At delivery, run the
+  required checks, commit, push, merge to `main`, publish affected crates, and
+  remove the completed worktree and local task branch.
+
 - The default branch is `main` and the canonical remote is `origin`.
 - Treat existing uncommitted changes as user-owned unless told otherwise.
 - Prefer git worktrees for parallel or unrelated agent work so multiple agents

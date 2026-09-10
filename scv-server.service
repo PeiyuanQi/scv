@@ -7,7 +7,7 @@ Type=simple
 WorkingDirectory=%h/projects/scv
 ExecStart=%h/.local/bin/scv-server --stdio
 Environment=RUST_LOG=info
-EnvironmentFile=-%h/.config/peon/environment
+EnvironmentFile=-%h/.scv/environment
 Restart=on-failure
 RestartSec=3
 StandardInput=null

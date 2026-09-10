@@ -11,6 +11,8 @@ struct Cli {
     #[arg(long, global = true)]
     model: Option<String>,
     #[arg(long, global = true)]
+    provider: Option<String>,
+    #[arg(long, global = true)]
     base_url: Option<String>,
     #[arg(long, global = true, value_enum)]
     approval_policy: Option<ApprovalArg>,
@@ -20,6 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Config { #[command(subcommand)] command: ConfigCommand },
     /// Start the interactive terminal client (the default).
     Tui,
     /// Run one prompt without the terminal UI.
@@ -49,6 +52,8 @@ enum Command {
         base_url: String,
     },
 }
+#[derive(Subcommand)]
+enum ConfigCommand { Init }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ApprovalArg {
@@ -73,12 +78,14 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let launch = LaunchOptions {
         model: cli.model.clone(),
+        provider: cli.provider.clone(),
         base_url: cli.base_url.clone(),
         approval_policy: cli
             .approval_policy
             .map(|value| value.to_possible_value().unwrap().get_name().to_owned()),
     };
     match cli.command.unwrap_or(Command::Tui) {
+        Command::Config { command: ConfigCommand::Init } => { let path = scv_server::init_user_config()?; println!("Created configuration at {}", path.display()); Ok(()) },
         Command::Tui => scv_tui::run_tui(&cwd, launch).await,
         Command::Exec { prompt, yes } => scv_tui::run_exec(&cwd, prompt, yes, launch).await,
         Command::Server { stdio } => {
@@ -87,6 +94,7 @@ async fn main() -> Result<()> {
             }
             init_tracing();
             scv_server::run_stdio(ConfigOverrides {
+                provider: cli.provider,
                 model: cli.model,
                 base_url: cli.base_url,
                 approval_policy: cli.approval_policy.map(Into::into),

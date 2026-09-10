@@ -82,3 +82,5 @@ safe; these inputs can influence a model or launch software with user authority.
 
 Security reports follow the private process in `SECURITY.md`; public issues
 should not contain unreleased vulnerability details.
+
+User configuration may contain provider credentials and must be mode 0600 on Unix. Project configuration cannot select provider profiles, endpoints, headers, or credentials.

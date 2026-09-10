@@ -1,0 +1,17 @@
+[provider]
+active = "openai"
+
+[providers.openai]
+kind = "openai-compatible"
+model = "gpt-4.1-mini"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-your-key"
+api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 120
+
+[providers.local]
+kind = "openai-compatible"
+model = "llama3.1"
+base_url = "http://localhost:11434/v1"
+api_key = "local"
+timeout_seconds = 120

@@ -12,6 +12,9 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub provider: ProviderConfig,
+    /// Named provider profiles. When non-empty, `provider.active` selects one.
+    pub providers: HashMap<String, ProviderConfig>,
+    pub provider_active: Option<String>,
     pub agent: AgentConfig,
     pub session: SessionConfig,
     pub context: ContextConfigFile,
@@ -26,22 +29,47 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderConfig {
+    pub active: Option<String>,
     pub kind: String,
     pub model: String,
     pub base_url: String,
-    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
     pub timeout_seconds: u64,
+    pub headers: HashMap<String, String>,
 }
+
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
+            active: None,
             kind: "openai-compatible".into(),
             model: "gpt-4.1-mini".into(),
             base_url: "https://api.openai.com/v1".into(),
-            api_key_env: "OPENAI_API_KEY".into(),
+            api_key: None,
+            api_key_env: Some("OPENAI_API_KEY".into()),
             timeout_seconds: 120,
+            headers: HashMap::new(),
         }
+    }
+}
+
+impl Config {
+    pub fn init_user_config() -> Result<PathBuf> {
+        let path = user_config_path().ok_or_else(|| anyhow::anyhow!("cannot determine user config path"))?;
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).context("create config directory")?; }
+        if !path.exists() {
+            std::fs::write(&path, include_str!("../../../config.example.toml")).context("write example configuration")?;
+            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).context("secure config file")?; }
+        }
+        Ok(path)
+    }
+    pub fn active_provider(&self) -> Result<ProviderConfig> {
+        if let Some(name) = self.provider_active.as_deref().or(self.provider.active.as_deref()) {
+            return self.providers.get(name).cloned().ok_or_else(|| anyhow::anyhow!("active provider profile {name:?} was not found"));
+        }
+        Ok(self.provider.clone())
     }
 }
 
@@ -223,7 +251,7 @@ pub struct SkillsConfig {
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            user_dir: PathBuf::from("~/.config/peon/skills"),
+            user_dir: PathBuf::from("~/.scv/skills"),
             project_dir: PathBuf::from(".peon/skills"),
             max_skills: 128,
             max_skill_bytes: 256 * 1024,
@@ -267,6 +295,7 @@ impl Default for AgentsConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
@@ -281,6 +310,7 @@ impl Config {
         if let Some(user_path) = user_config_path()
             && user_path.is_file()
         {
+            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; if std::fs::metadata(&user_path)?.permissions().mode() & 0o077 != 0 { bail!("user configuration is readable by group or others; run chmod 600"); } }
             merge(&mut value, read_layer(&user_path)?);
         }
         let user_baseline: Self = value
@@ -312,6 +342,9 @@ impl Config {
             merge(&mut value, read_layer(&path)?);
         }
         let mut config: Self = value.try_into().context("parse merged configuration")?;
+        if let Some(name) = overrides.provider.as_deref() { config.provider_active = Some(name.to_owned()); }
+        let selected = config.active_provider()?;
+        config.provider = selected;
         if let Ok(model) = std::env::var("PEON_MODEL") {
             config.provider.model = model;
         }
@@ -319,7 +352,7 @@ impl Config {
             config.provider.base_url = base_url;
         }
         if let Ok(api_key_env) = std::env::var("PEON_API_KEY_ENV") {
-            config.provider.api_key_env = api_key_env;
+            config.provider.api_key_env = Some(api_key_env);
         }
         if let Some(model) = overrides.model {
             config.provider.model = model;
@@ -329,6 +362,9 @@ impl Config {
         }
         if let Some(policy) = overrides.approval_policy {
             config.tools.approval_policy = policy;
+        }
+        if config.skills.user_dir == PathBuf::from("~/.scv/skills") {
+            if let Some(home) = std::env::var_os("SCV_HOME") { config.skills.user_dir = PathBuf::from(home).join("skills"); }
         }
         config.skills.user_dir = expand_home(&config.skills.user_dir);
         config.validate()?;
@@ -391,9 +427,10 @@ impl Config {
         }
         if self.provider.model.trim().is_empty()
             || self.provider.base_url.trim().is_empty()
-            || self.provider.api_key_env.trim().is_empty()
+            || self.provider.api_key.as_deref().unwrap_or("").trim().is_empty()
+                && self.provider.api_key_env.as_deref().unwrap_or("").trim().is_empty()
         {
-            bail!("provider model, base_url, and api_key_env must be non-empty");
+            bail!("provider model and base_url must be non-empty; configure api_key or api_key_env");
         }
         for (name, adapter) in [
             ("agents.claude.command", &self.agents.claude),
@@ -540,10 +577,9 @@ impl Config {
 }
 
 fn user_config_path() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|path| path.join(".config")))
-        .map(|path| path.join("peon/config.toml"))
+    std::env::var_os("SCV_HOME").map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))
+        .map(|path| path.join("config.toml"))
 }
 
 fn read_layer(path: &std::path::Path) -> Result<toml::Value> {
@@ -578,7 +614,7 @@ fn validate_project_keys(value: &toml::Value) -> Result<()> {
     let Some(table) = value.as_table() else {
         bail!("project configuration must be a TOML table");
     };
-    for forbidden in ["provider", "agents"] {
+    for forbidden in ["provider", "providers", "provider_active", "agents"] {
         if table.contains_key(forbidden) {
             bail!("project configuration cannot set [{forbidden}]");
         }

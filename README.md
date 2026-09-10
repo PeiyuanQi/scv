@@ -109,7 +109,8 @@ toggles the latest tool result, and `/help` lists the compact command set.
 
 ## Configuration
 
-User configuration lives at `~/.config/peon/config.toml`. A workspace may add
+User configuration lives at `~/.scv/config.toml` (or `$SCV_HOME/config.toml`); copy
+[`config.example.toml`](config.example.toml) there to get started. A workspace may add
 `.peon/config.toml`, but project configuration cannot redirect provider
 credentials or replace native-agent executables.
 
@@ -117,7 +118,8 @@ credentials or replace native-agent executables.
 [provider]
 model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+api_key = "sk-your-key"
+api_key_env = "OPENAI_API_KEY" # optional fallback
 
 [context]
 max_tokens = 128000
@@ -144,7 +146,8 @@ approval gates, and event sinks. Registering a new `Tool` does not require a
 change to the agent loop or TUI.
 
 Skills use `.peon/skills/<name>/SKILL.md` in a project or
-`~/.config/peon/skills/<name>/SKILL.md` for the user. Only skill metadata enters
+`~/.scv/skills/<name>/SKILL.md` for the user. Set `SCV_HOME` to relocate all user
+configuration and skills. Only skill metadata enters
 the initial prompt; the model loads full instructions through the contained
 `read_skill` tool when needed.
 

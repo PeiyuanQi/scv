@@ -40,6 +40,7 @@ pub struct OpenAiProvider {
     base_url: String,
     api_key: String,
     limits: ProviderLimits,
+    headers: std::collections::HashMap<String, String>,
 }
 
 impl OpenAiProvider {
@@ -49,6 +50,7 @@ impl OpenAiProvider {
         api_key: String,
         timeout: Duration,
         limits: ProviderLimits,
+        headers: std::collections::HashMap<String, String>,
     ) -> Result<Self, ProviderError> {
         if api_key.trim().is_empty() {
             return Err(ProviderError::new(
@@ -66,6 +68,7 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key,
             limits,
+            headers,
         })
     }
 
@@ -146,6 +149,7 @@ impl Provider for OpenAiProvider {
             result = self.client
                 .post(format!("{}/chat/completions", self.base_url))
                 .bearer_auth(&self.api_key)
+                .headers(self.headers.clone().into_iter().filter_map(|(k,v)| Some((k.parse().ok()?, v.parse().ok()?))).collect())
                 .json(&self.request_body(&request))
                 .send() => result.map_err(|error| ProviderError::new(ProviderErrorKind::Provider, error.to_string()))?,
             _ = cancellation.cancelled() => return Err(cancelled()),
@@ -438,6 +442,7 @@ mod tests {
             "secret".into(),
             Duration::from_secs(1),
             ProviderLimits::default(),
+            std::collections::HashMap::new(),
         )
         .unwrap();
         let body = provider.request_body(&ProviderRequest {
@@ -472,6 +477,7 @@ mod tests {
             secret.into(),
             Duration::from_secs(5),
             ProviderLimits::default(),
+            std::collections::HashMap::new(),
         )
         .unwrap();
         let error = provider
@@ -513,6 +519,7 @@ mod tests {
             "secret".into(),
             Duration::from_secs(5),
             ProviderLimits::default(),
+            std::collections::HashMap::new(),
         )
         .unwrap();
         let cancellation = CancellationToken::new();
@@ -562,6 +569,7 @@ mod tests {
             "secret".into(),
             Duration::from_secs(5),
             ProviderLimits::default(),
+            std::collections::HashMap::new(),
         )
         .unwrap();
         let deltas = Arc::new(CollectDeltas(Mutex::new(String::new())));
