@@ -141,7 +141,7 @@ trust rules.
 
 ## Extending Peon
 
-The core exposes small Rust traits for providers, tools, context policies,
+The built-in provider uses the OpenAI Responses API at `/responses`, with streaming text and function-call events. The core exposes small Rust traits for providers, tools, context policies,
 approval gates, and event sinks. Registering a new `Tool` does not require a
 change to the agent loop or TUI.
 
