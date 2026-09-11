@@ -1,5 +1,5 @@
 [Unit]
-Description=Peon agent protocol server
+Description=SCV agent protocol server
 After=network-online.target
 
 [Service]

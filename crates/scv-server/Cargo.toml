@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Authoritative session and tool server for Peon"
+description = "Authoritative session and tool server for SCV"
 readme = "../../README.md"
 
 [dependencies]

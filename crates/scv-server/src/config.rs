@@ -84,7 +84,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_steps: 32,
-            system_prompt: "You are Peon, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
+            system_prompt: "You are SCV, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
         }
     }
 }
@@ -252,7 +252,7 @@ impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
             user_dir: PathBuf::from("~/.scv/skills"),
-            project_dir: PathBuf::from(".peon/skills"),
+            project_dir: PathBuf::from(".scv/skills"),
             max_skills: 128,
             max_skill_bytes: 256 * 1024,
         }
@@ -318,7 +318,7 @@ impl Config {
             .try_into()
             .context("parse user configuration")?;
 
-        let project_path = workspace.join(".peon/config.toml");
+        let project_path = workspace.join(".scv/config.toml");
         if project_path.is_file() {
             let canonical_project = std::fs::canonicalize(&project_path)
                 .with_context(|| format!("resolve configuration {}", project_path.display()))?;
@@ -337,7 +337,7 @@ impl Config {
             value = candidate_value;
         }
 
-        if let Some(explicit) = std::env::var_os("PEON_CONFIG") {
+        if let Some(explicit) = std::env::var_os("SCV_CONFIG") {
             let path = PathBuf::from(explicit);
             merge(&mut value, read_layer(&path)?);
         }
@@ -345,13 +345,13 @@ impl Config {
         if let Some(name) = overrides.provider.as_deref() { config.provider_active = Some(name.to_owned()); }
         let selected = config.active_provider()?;
         config.provider = selected;
-        if let Ok(model) = std::env::var("PEON_MODEL") {
+        if let Ok(model) = std::env::var("SCV_MODEL") {
             config.provider.model = model;
         }
-        if let Ok(base_url) = std::env::var("PEON_BASE_URL") {
+        if let Ok(base_url) = std::env::var("SCV_BASE_URL") {
             config.provider.base_url = base_url;
         }
-        if let Ok(api_key_env) = std::env::var("PEON_API_KEY_ENV") {
+        if let Ok(api_key_env) = std::env::var("SCV_API_KEY_ENV") {
             config.provider.api_key_env = Some(api_key_env);
         }
         if let Some(model) = overrides.model {

@@ -1,4 +1,4 @@
-//! Peon's terminal client.
+//! SCV's terminal client.
 
 use std::{
     collections::VecDeque,
@@ -18,7 +18,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -402,6 +402,10 @@ struct App {
     active_turn: Option<String>,
     started_at: Option<Instant>,
     pending_approval: Option<PendingApproval>,
+    queue: VecDeque<QueueEntry>,
+    queue_paused: bool,
+    queue_editing: Option<QueueEntry>,
+    queue_selected: Option<usize>,
     last_seq: u64,
     connected: bool,
     quit: bool,
@@ -433,6 +437,10 @@ impl App {
             active_turn: None,
             started_at: None,
             pending_approval: None,
+            queue: VecDeque::new(),
+            queue_paused: false,
+            queue_editing: None,
+            queue_selected: None,
             last_seq: 0,
             connected: true,
             quit: false,
@@ -492,6 +500,40 @@ impl App {
     fn handle_server_event(&mut self, event: ServerEvent) {
         self.update_seq(&event);
         match event {
+            ServerEvent::QueueSnapshot { entries, paused, .. } => {
+                self.queue = entries.into();
+                self.queue_paused = paused;
+                self.queue_selected = None;
+            }
+            ServerEvent::QueueEnqueued { entry, position, .. } => {
+                self.queue.insert(position.min(self.queue.len()), entry);
+            }
+            ServerEvent::QueueUpdated { entry, .. } => {
+                if let Some(existing) = self
+                    .queue
+                    .iter_mut()
+                    .find(|existing| existing.queue_id == entry.queue_id)
+                {
+                    *existing = entry;
+                }
+            }
+            ServerEvent::QueueMoved { queue_id, position, revision, .. } => {
+                if let Some(index) = self.queue.iter().position(|entry| entry.queue_id == queue_id)
+                    && let Some(mut entry) = self.queue.remove(index)
+                {
+                    entry.revision = revision;
+                    self.queue.insert(position.min(self.queue.len()), entry);
+                }
+            }
+            ServerEvent::QueueRemoved { queue_id, .. } | ServerEvent::QueueDequeued { queue_id, .. } => {
+                if let Some(index) = self.queue.iter().position(|entry| entry.queue_id == queue_id) {
+                    self.queue.remove(index);
+                    self.queue_selected = self.queue_selected.and_then(|selected| {
+                        if self.queue.is_empty() { None } else { Some(selected.min(self.queue.len() - 1)) }
+                    });
+                }
+            }
+            ServerEvent::SessionPaused { paused, .. } => self.queue_paused = paused,
             ServerEvent::TurnStarted { turn_id, .. } => {
                 self.running = true;
                 self.active_turn = Some(turn_id);
@@ -640,6 +682,7 @@ impl App {
                 self.items_bytes = 0;
                 self.prompt_history.clear();
                 self.prompt_history_bytes = 0;
+                self.queue.clear();
             }
             ServerEvent::Error { code, message, .. } => {
                 self.push_item(TranscriptItem::Error(format!("{code}: {message}")));
@@ -787,12 +830,47 @@ async fn handle_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result
                 }
                 return Ok(());
             }
+            KeyCode::Char('x') if app.running && app.queue_selected.is_some() => {
+                let index = app.queue_selected.unwrap();
+                if let Some(entry) = app.queue.get(index).cloned() {
+                    client.send(&ClientMessage::QueueRemove {
+                        request_id: new_id(), session_id: app.session_id.clone(),
+                        queue_id: entry.queue_id, revision: entry.revision,
+                    }).await?;
+                }
+                return Ok(());
+            }
             _ => {}
         }
     }
 
     match key.code {
-        KeyCode::Enter if !app.running => submit_input(client, app).await?,
+        KeyCode::Enter => submit_input(client, app).await?,
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) && app.running => {
+            let index = app.queue_selected.unwrap_or_else(|| app.queue.len().saturating_sub(1));
+            if let Some(entry) = app.queue.get(index).cloned() {
+                app.input = entry.prompt.clone();
+                app.cursor = app.input.chars().count();
+                app.queue_editing = Some(entry);
+                app.queue_selected = Some(index);
+            }
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) && app.running => {
+            if !app.queue.is_empty() {
+                let index = app.queue_selected.map_or(0, |index| (index + 1).min(app.queue.len() - 1));
+                app.queue_selected = Some(index);
+                if let Some(entry) = app.queue.get(index).cloned() {
+                    app.input = entry.prompt.clone();
+                    app.cursor = app.input.chars().count();
+                    app.queue_editing = Some(entry);
+                }
+            }
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) && app.running => {
+            client.send(&ClientMessage::SessionPause {
+                request_id: new_id(), session_id: app.session_id.clone(), paused: !app.queue_paused,
+            }).await?;
+        }
         KeyCode::Char(character) => insert_char(app, character),
         KeyCode::Backspace => backspace(app),
         KeyCode::Delete => delete(app),
@@ -864,17 +942,23 @@ async fn submit_input(client: &mut Client, app: &mut App) -> Result<()> {
         }
         _ => {}
     }
-    client
-        .send(&ClientMessage::TurnStart {
-            request_id: new_id(),
-            session_id: app.session_id.clone(),
-            prompt: prompt.clone(),
-        })
-        .await?;
-    app.push_item(TranscriptItem::User(prompt.clone()));
-    app.add_prompt_history(prompt);
-    app.running = true;
-    app.started_at = Some(Instant::now());
+    if let Some(entry) = app.queue_editing.take() {
+        client.send(&ClientMessage::QueueUpdate {
+            request_id: new_id(), session_id: app.session_id.clone(),
+            queue_id: entry.queue_id, revision: entry.revision, prompt,
+        }).await?;
+    } else {
+        client.send(&ClientMessage::TurnStart {
+            request_id: new_id(), session_id: app.session_id.clone(), prompt: prompt.clone(),
+        }).await?;
+        if !app.running {
+            app.push_item(TranscriptItem::User(prompt.clone()));
+            app.add_prompt_history(prompt);
+            app.running = true;
+            app.started_at = Some(Instant::now());
+        }
+        app.queue_selected = None;
+    }
     clear_input(app);
     Ok(())
 }
@@ -969,7 +1053,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     };
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " PEON ",
+            " SCV ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -1048,10 +1132,12 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         |tokens| format!("ctx ~{tokens}/{}", app.context_max_tokens),
     );
     let footer = Paragraph::new(format!(
-        " {}{}  ·  {}  ·  Enter send  Ctrl+J newline  /help",
+        " {}{}  ·  {}  ·  {} queue{}  ·  Enter send  Ctrl+J newline  /help",
         if app.running { "working" } else { "ready" },
         elapsed,
-        context
+        context,
+        app.queue.len(),
+        if app.queue_paused { " paused" } else { "" },
     ))
     .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, layout[3]);
@@ -1065,9 +1151,22 @@ fn transcript_text(app: &App) -> Text<'static> {
     let mut lines = Vec::new();
     if app.items.is_empty() {
         lines.push(Line::styled(
-            "Ask Peon to inspect, change, or explain this workspace.",
+            "Ask SCV to inspect, change, or explain this workspace.",
             Style::default().fg(Color::DarkGray),
         ));
+    }
+    if !app.queue.is_empty() {
+        lines.push(Line::styled(
+            format!("queue ({}{})", app.queue.len(), if app.queue_paused { ", paused" } else { "" }),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        for (index, entry) in app.queue.iter().enumerate() {
+            lines.push(Line::styled(
+                format!("  {}. {}", index + 1, bounded_text(&entry.prompt, 180).replace('\n', " ↵ ")),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        lines.push(Line::raw(""));
     }
     for item in &app.items {
         match item {
@@ -1080,7 +1179,7 @@ fn transcript_text(app: &App) -> Text<'static> {
                     .add_modifier(Modifier::BOLD),
             ),
             TranscriptItem::Assistant { content, streaming } => {
-                let label = if *streaming { "peon…" } else { "peon" };
+                let label = if *streaming { "scv…" } else { "scv" };
                 push_content(
                     &mut lines,
                     label,
@@ -1205,6 +1304,13 @@ fn event_seq(event: &ServerEvent) -> Option<u64> {
         | ServerEvent::TurnCompleted { seq, .. }
         | ServerEvent::TurnCancelled { seq, .. }
         | ServerEvent::TurnFailed { seq, .. } => Some(*seq),
+        ServerEvent::QueueSnapshot { seq, .. }
+        | ServerEvent::QueueEnqueued { seq, .. }
+        | ServerEvent::QueueUpdated { seq, .. }
+        | ServerEvent::QueueMoved { seq, .. }
+        | ServerEvent::QueueRemoved { seq, .. }
+        | ServerEvent::QueueDequeued { seq, .. }
+        | ServerEvent::SessionPaused { seq, .. } => Some(*seq),
         ServerEvent::Initialized { .. }
         | ServerEvent::SessionStarted { .. }
         | ServerEvent::Error { .. } => None,
@@ -1293,7 +1399,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(contents.contains("PEON"));
+        assert!(contents.contains("SCV"));
         assert!(contents.contains("connected"));
         assert!(contents.contains("message"));
         assert!(contents.contains("Enter send"));

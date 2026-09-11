@@ -1,4 +1,4 @@
-//! Peon's bounded, workspace-aware built-in tools.
+//! SCV's bounded, workspace-aware built-in tools.
 
 use std::{
     collections::HashMap,
@@ -210,7 +210,7 @@ impl Tool for ReadSkillTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "read_skill".into(),
-            description: "Load a discovered Peon skill by name".into(),
+            description: "Load a discovered SCV skill by name".into(),
             parameters: json!({
                 "type":"object",
                 "properties":{"name":{"type":"string"}},
@@ -842,7 +842,7 @@ fn open_workspace(workspace: &Path) -> Result<Dir, ToolError> {
 
 fn unique_temporary_path(parent: &Path) -> PathBuf {
     let id = TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(".peon-write-{}-{id}.tmp", std::process::id()))
+    parent.join(format!(".scv-write-{}-{id}.tmp", std::process::id()))
 }
 
 fn map_cap_error(action: &str, path: &str, error: std::io::Error) -> ToolError {

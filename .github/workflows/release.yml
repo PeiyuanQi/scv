@@ -34,10 +34,10 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          archive="peon-${{ matrix.target }}"
+          archive="scv-${{ matrix.target }}"
           mkdir "$archive"
-          cp "target/${{ matrix.target }}/release/peon" "$archive/"
-          cp "target/${{ matrix.target }}/release/peon-server" "$archive/"
+          cp "target/${{ matrix.target }}/release/scv" "$archive/"
+          cp "target/${{ matrix.target }}/release/scv-server" "$archive/"
           cp README.md LICENSE NOTICE "$archive/"
           tar -czf "$archive.tar.gz" "$archive"
           if command -v shasum >/dev/null 2>&1; then
@@ -47,10 +47,10 @@ jobs:
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: peon-${{ matrix.target }}
+          name: scv-${{ matrix.target }}
           path: |
-            peon-${{ matrix.target }}.tar.gz
-            peon-${{ matrix.target }}.tar.gz.sha256
+            scv-${{ matrix.target }}.tar.gz
+            scv-${{ matrix.target }}.tar.gz.sha256
 
   publish:
     needs: build

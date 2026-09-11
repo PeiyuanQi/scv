@@ -2,7 +2,7 @@
 
 Status: final design for v0.1
 
-Peon keeps canonical session history separate from the model-visible context.
+SCV keeps canonical session history separate from the model-visible context.
 Context selection is deterministic, configurable, and replaceable through the
 `ContextPolicy` trait.
 
@@ -25,7 +25,7 @@ token counts are used only for post-request accounting. The heuristic is
 intentionally provider-neutral and must not be presented as exact billing data.
 
 Static configuration is rejected at startup when the reserve and safety margin
-consume the window. At turn time, Peon estimates the actual system prompt, tool
+consume the window. At turn time, SCV estimates the actual system prompt, tool
 schemas, and newest user message. If required content alone exceeds the window,
 the turn ends with `context_limit`; it is never silently truncated.
 

@@ -1,4 +1,4 @@
-# Peon v0.1 Evaluation
+# SCV v0.1 Evaluation
 
 Status: final v0.1 evaluation
 
@@ -6,7 +6,7 @@ Date: 2026-09-08
 
 ## Outcome
 
-Peon v0.1 implements the minimal coding-agent slice: a bounded agent
+SCV v0.1 implements the minimal coding-agent slice: a bounded agent
 loop, extension traits, deterministic context selection, OpenAI-compatible
 streaming, built-in coding tools, native Claude/Codex/Pi adapters, a versioned
 client/server boundary, and an interactive TUI. The workspace builds on Linux
@@ -25,18 +25,18 @@ production hardening.
 - Pi was not installed locally, so it is included in the source-backed feature
   comparison but not the runtime measurements.
 
-The comparison is architectural: Peon does not copy source from these projects.
+The comparison is architectural: SCV does not copy source from these projects.
 Its Apache-2.0 implementation uses ordinary ecosystem crates documented in the
 Cargo manifests and lockfile.
 
 ## Feature comparison
 
-| Capability | Peon v0.1 | Codex/Pi/Claude maturity comparison |
+| Capability | SCV v0.1 | Codex/Pi/Claude maturity comparison |
 | --- | --- | --- |
-| Agent loop | Bounded streamed multi-step tool loop with cancellation and usage accounting | Peon covers the minimal loop; mature agents handle more response modes, recovery paths, and provider-specific behavior |
+| Agent loop | Bounded streamed multi-step tool loop with cancellation and usage accounting | SCV covers the minimal loop; mature agents handle more response modes, recovery paths, and provider-specific behavior |
 | Extension boundary | Rust traits for providers, tools, context, approvals, and event sinks; Markdown skills | Pi has a particularly broad extension/event surface; Codex has a larger internal service ecosystem |
-| Context | Deterministic token-budget selection, whole tool-call groups, bounded summaries, configurable limits | Peon lacks mature agents' richer persistence, resume, caching, and model-aware compaction strategies |
-| Coding tools | Contained read, atomic write, Bash, skill loading, and native Claude/Codex/Pi subprocess adapters | Peon lacks a true OS sandbox, patch/diff workflow, MCP, web tools, and broad tool catalogs |
+| Context | Deterministic token-budget selection, whole tool-call groups, bounded summaries, configurable limits | SCV lacks mature agents' richer persistence, resume, caching, and model-aware compaction strategies |
+| Coding tools | Contained read, atomic write, Bash, skill loading, and native Claude/Codex/Pi subprocess adapters | SCV lacks a true OS sandbox, patch/diff workflow, MCP, web tools, and broad tool catalogs |
 | Process split | Versioned JSONL stdio server with concurrent I/O, sessions, approvals, cancellation, and bounded queues/frames | Comparable architectural seam, with a much smaller protocol and no remote transport |
 | Terminal UX | Streaming transcript, multiline editing, history, scrolling, folded tool output, approvals, cancel, clear, context, help | Useful baseline, but behind mature Markdown/diff rendering, completion, themes, resume/history browsing, and accessibility polish |
 | Distribution | Cargo install/source build plus four Linux/macOS release archives | No package-manager distribution, updater, signing, or Windows support yet |
@@ -48,7 +48,7 @@ macOS 26.6.2 (arm64). They exclude model and network time. Criterion intervals
 are the reported estimate ranges; startup numbers are small local samples and
 are not cross-project quality scores.
 
-| Peon measurement | Result | v0.1 target |
+| SCV measurement | Result | v0.1 target |
 | --- | ---: | ---: |
 | Protocol encode | 252-254 ns | under 100 us/message |
 | Protocol decode | 347-349 ns | under 100 us/message |
@@ -68,7 +68,7 @@ A narrow five-sample PTY comparison measured time to first output and idle RSS:
 
 | Local executable | First output median | Idle RSS median |
 | --- | ---: | ---: |
-| Peon v0.1 | 16.86 ms (10-sample Peon run) | 8.00 MiB including server |
+| SCV v0.1 | 16.86 ms (10-sample SCV run) | 8.00 MiB including server |
 | Codex CLI 0.146.0 | 28.59 ms | 22.34 MiB |
 | Claude Code 2.1.220 | 249.55 ms | 356.77 MiB |
 

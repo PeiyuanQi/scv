@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Workspace-scoped filesystem, process, skill, and agent tools for Peon"
+description = "Workspace-scoped filesystem, process, skill, and agent tools for SCV"
 readme = "../../README.md"
 
 [dependencies]

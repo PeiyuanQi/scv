@@ -1,4 +1,4 @@
-//! Peon's provider-independent agent loop and extension traits.
+//! SCV's provider-independent agent loop and extension traits.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -360,7 +360,7 @@ impl BudgetContextPolicy {
 
     fn summarize(&self, messages: &[Message]) -> String {
         let mut output = format!(
-            "[Peon compacted {} earlier messages. Bounded extracts follow.]\n",
+            "[SCV compacted {} earlier messages. Bounded extracts follow.]\n",
             messages.len()
         );
         for message in messages {
@@ -912,7 +912,7 @@ fn history_bytes(history: &[Message]) -> usize {
 
 fn summarize_history_trim(messages: &[Message], removed: usize, max_chars: usize) -> String {
     let mut note =
-        format!("[Peon trimmed {removed} earlier canonical messages to enforce session limits.]\n");
+        format!("[SCV trimmed {removed} earlier canonical messages to enforce session limits.]\n");
     for message in messages {
         let (label, content) = match message {
             Message::User { content } => ("user", content.as_str()),

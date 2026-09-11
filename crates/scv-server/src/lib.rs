@@ -1,9 +1,9 @@
-//! Peon's authoritative stdio server.
+//! SCV's authoritative stdio server.
 
 mod config;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::Read as _,
     path::{Path, PathBuf},
     sync::{
@@ -22,7 +22,7 @@ use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
     EventSink, Message, ToolRisk,
 };
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent, Usage};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, Usage};
 use scv_provider_openai::OpenAiProvider;
 use scv_tools::{SkillMap, builtin_registry};
 use tokio::{
@@ -37,6 +37,8 @@ const PROMPT_LIMIT_BYTES: usize = 256 * 1024;
 const OUTPUT_QUEUE_CAPACITY: usize = 256;
 const OUTPUT_QUEUE_MIN_BYTES: usize = 16 * 1024 * 1024;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+const MAX_QUEUE_ITEMS: usize = 64;
+const MAX_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 
 pub async fn run_stdio(overrides: ConfigOverrides) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -144,12 +146,22 @@ where
                                     max_prompt_history_items: new_session.config.tui.max_prompt_history_items,
                                 };
                                 send_event(&output_tx, event, new_session.config.protocol.max_server_frame_bytes).await?;
+                                send_event(&output_tx, ServerEvent::QueueSnapshot {
+                                    request_id: None,
+                                    session_id: new_session.id.clone(),
+                                    seq: next_seq(&new_session.seq),
+                                    entries: new_session.queue.lock().await.iter().cloned().collect(),
+                                    paused: new_session.paused.load(Ordering::Acquire),
+                                }, new_session.config.protocol.max_server_frame_bytes).await?;
                                 session = Some(new_session);
                             }
                             Err(error) => {
                                 send_error(&output_tx, &request_id, "invalid_request", &error.to_string(), false, server_frame_limit(&session)).await?;
                             }
                         }
+                    }
+                    ClientMessage::SessionAttach { request_id, .. } => {
+                        send_error(&output_tx, &request_id, "unsupported", "session attach requires the shared socket server", false, server_frame_limit(&session)).await?;
                     }
                     ClientMessage::TurnStart { request_id, session_id, prompt } => {
                         let Some(current) = session.as_ref() else {
@@ -160,12 +172,19 @@ where
                             send_error(&output_tx, &request_id, "session_not_found", "session id does not match", false, server_frame_limit(&session)).await?;
                             continue;
                         }
-                        if active.is_some() {
-                            send_error(&output_tx, &request_id, "turn_active", "a turn is already active", false, server_frame_limit(&session)).await?;
-                            continue;
-                        }
                         if prompt.trim().is_empty() || prompt.len() > PROMPT_LIMIT_BYTES {
                             send_error(&output_tx, &request_id, "invalid_request", "prompt must be non-empty and no larger than 256 KiB", false, server_frame_limit(&session)).await?;
+                            continue;
+                        }
+                        if active.is_some() {
+                            let entry = match current.enqueue(prompt, request_id.clone()).await {
+                                Ok(entry) => entry,
+                                Err(code) => { send_error(&output_tx, &request_id, code, "session queue limit reached", false, server_frame_limit(&session)).await?; continue; }
+                            };
+                            let position = current.queue.lock().await.len().saturating_sub(1);
+                            send_event(&output_tx, ServerEvent::QueueEnqueued {
+                                request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), entry, position,
+                            }, current.config.protocol.max_server_frame_bytes).await?;
                             continue;
                         }
                         let turn_id = Uuid::new_v4().to_string();
@@ -213,6 +232,35 @@ where
                         });
                         active = Some(ActiveTurn { turn_id, cancellation, task });
                     }
+                    ClientMessage::QueueUpdate { request_id, session_id, queue_id, revision, prompt } => {
+                        let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
+                        if current.id != session_id { send_error(&output_tx, &request_id, "session_not_found", "session id does not match", false, server_frame_limit(&session)).await?; continue; }
+                        if prompt.trim().is_empty() || prompt.len() > PROMPT_LIMIT_BYTES { send_error(&output_tx, &request_id, "invalid_request", "prompt must be non-empty and no larger than 256 KiB", false, server_frame_limit(&session)).await?; continue; }
+                        match current.update_queue(&queue_id, revision, prompt).await {
+                            Ok(entry) => send_event(&output_tx, ServerEvent::QueueUpdated { request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), entry }, current.config.protocol.max_server_frame_bytes).await?,
+                            Err(code) => send_error(&output_tx, &request_id, &code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
+                        }
+                    }
+                    ClientMessage::QueueMove { request_id, session_id, queue_id, revision, before_queue_id } => {
+                        let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
+                        match current.move_queue(&session_id, &queue_id, revision, before_queue_id).await {
+                            Ok((id, rev, pos)) => send_event(&output_tx, ServerEvent::QueueMoved { request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), queue_id: id, position: pos, revision: rev }, current.config.protocol.max_server_frame_bytes).await?,
+                            Err(code) => send_error(&output_tx, &request_id, &code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
+                        }
+                    }
+                    ClientMessage::QueueRemove { request_id, session_id, queue_id, revision } => {
+                        let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
+                        match current.remove_queue(&session_id, &queue_id, revision).await {
+                            Ok((id, rev)) => send_event(&output_tx, ServerEvent::QueueRemoved { request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), queue_id: id, revision: rev }, current.config.protocol.max_server_frame_bytes).await?,
+                            Err(code) => send_error(&output_tx, &request_id, &code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
+                        }
+                    }
+                    ClientMessage::SessionPause { request_id, session_id, paused } => {
+                        let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
+                        if current.id != session_id { send_error(&output_tx, &request_id, "session_not_found", "session id does not match", false, server_frame_limit(&session)).await?; continue; }
+                        current.paused.store(paused, Ordering::Release);
+                        send_event(&output_tx, ServerEvent::SessionPaused { request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), paused }, current.config.protocol.max_server_frame_bytes).await?;
+                    }
                     ClientMessage::TurnCancel { request_id, session_id, turn_id } => {
                         match (&session, &active) {
                             (Some(current), Some(running)) if current.id == session_id && running.turn_id == turn_id => running.cancellation.cancel(),
@@ -237,11 +285,13 @@ where
                             send_error(&output_tx, &request_id, "turn_active", "cancel the active turn before clearing", false, server_frame_limit(&session)).await?;
                         } else {
                             current.history.lock().await.clear();
+                            current.queue.lock().await.clear();
                             send_event(&output_tx, ServerEvent::SessionCleared {
                                 request_id,
                                 session_id: current.id.clone(),
                                 seq: next_seq(&current.seq),
                             }, current.config.protocol.max_server_frame_bytes).await?;
+                            send_event(&output_tx, ServerEvent::QueueSnapshot { request_id: None, session_id: current.id.clone(), seq: next_seq(&current.seq), entries: Vec::new(), paused: current.paused.load(Ordering::Acquire) }, current.config.protocol.max_server_frame_bytes).await?;
                         }
                     }
                 }
@@ -283,6 +333,45 @@ where
                     }
                     if let Some(active) = active.take() {
                         let _ = active.task.await;
+                    }
+                    if let Some(current) = session.as_ref()
+                        && !current.paused.load(Ordering::Acquire)
+                        && let Some(entry) = current.queue.lock().await.pop_front()
+                    {
+                        let turn_id = Uuid::new_v4().to_string();
+                        let cancellation = CancellationToken::new();
+                        send_event(&output_tx, ServerEvent::QueueDequeued {
+                            request_id: entry.submitter.clone(),
+                            session_id: current.id.clone(),
+                            seq: next_seq(&current.seq),
+                            queue_id: entry.queue_id,
+                            turn_id: turn_id.clone(),
+                        }, current.config.protocol.max_server_frame_bytes).await?;
+                        send_event(&output_tx, ServerEvent::TurnStarted {
+                            request_id: entry.submitter.clone(),
+                            session_id: current.id.clone(),
+                            turn_id: turn_id.clone(),
+                            seq: next_seq(&current.seq),
+                        }, current.config.protocol.max_server_frame_bytes).await?;
+                        let meta = TurnMeta {
+                            request_id: entry.submitter.clone(), session_id: current.id.clone(), turn_id: turn_id.clone(),
+                            seq: Arc::clone(&current.seq), max_server_frame: current.config.protocol.max_server_frame_bytes,
+                        };
+                        let sink: Arc<dyn EventSink> = Arc::new(ProtocolSink { meta: meta.clone(), output: output_tx.clone(), cancellation: cancellation.clone() });
+                        let gate: Arc<dyn ApprovalGate> = Arc::new(ProtocolApprovalGate { policy: current.config.tools.approval_policy, broker: Arc::clone(&approvals), meta, output: output_tx.clone() });
+                        let runtime = Arc::clone(&current.runtime);
+                        let history = Arc::clone(&current.history);
+                        let task_done = done_tx.clone();
+                        let task_request = entry.submitter;
+                        let task_session = current.id.clone();
+                        let task_turn = turn_id.clone();
+                        let task_cancel = cancellation.clone();
+                        let task = tokio::spawn(async move {
+                            let mut history = history.lock().await;
+                            let result = runtime.run_turn(&mut history, entry.prompt, sink, gate, task_cancel).await;
+                            let _ = task_done.send(TurnDone { request_id: task_request, session_id: task_session, turn_id: task_turn, result }).await;
+                        });
+                        active = Some(ActiveTurn { turn_id, cancellation, task });
                     }
                 }
             }
@@ -517,6 +606,63 @@ struct Session {
     runtime: Arc<AgentRuntime>,
     history: Arc<Mutex<Vec<Message>>>,
     seq: Arc<AtomicU64>,
+    queue: Arc<Mutex<VecDeque<QueueEntry>>>,
+    paused: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Session {
+    async fn enqueue(&self, prompt: String, submitter: String) -> std::result::Result<QueueEntry, &'static str> {
+        let entry = QueueEntry { queue_id: Uuid::new_v4().to_string(), revision: 1, prompt, submitter };
+        let mut queue = self.queue.lock().await;
+        let bytes: usize = queue.iter().map(|item| item.prompt.len()).sum();
+        if queue.len() >= MAX_QUEUE_ITEMS || bytes.saturating_add(entry.prompt.len()) > MAX_QUEUE_BYTES {
+            return Err("queue_limit");
+        }
+        queue.push_back(entry.clone());
+        Ok(entry)
+    }
+
+    async fn update_queue(&self, id: &str, revision: u64, prompt: String) -> std::result::Result<QueueEntry, &'static str> {
+        let mut queue = self.queue.lock().await;
+        let bytes: usize = queue.iter().map(|item| item.prompt.len()).sum();
+        let entry = queue.iter_mut().find(|entry| entry.queue_id == id).ok_or("queue_not_found")?;
+        if entry.revision != revision { return Err("queue_conflict"); }
+        if bytes.saturating_sub(entry.prompt.len()).saturating_add(prompt.len()) > MAX_QUEUE_BYTES { return Err("queue_limit"); }
+        entry.prompt = prompt;
+        entry.revision += 1;
+        Ok(entry.clone())
+    }
+
+    async fn move_queue(&self, session_id: &str, id: &str, revision: u64, before: Option<String>) -> std::result::Result<(String, u64, usize), &'static str> {
+        if self.id != session_id { return Err("session_not_found"); }
+        let mut queue = self.queue.lock().await;
+        let index = queue.iter().position(|entry| entry.queue_id == id).ok_or("queue_not_found")?;
+        if queue[index].revision != revision { return Err("queue_conflict"); }
+        // Validate the destination while the source is still present. This keeps
+        // the operation atomic and handles a self move as a no-op reorder.
+        let target_index = match before.as_deref() {
+            Some(target) if target == id => return Ok((id.to_string(), revision, index)),
+            Some(target) => Some(queue.iter().position(|item| item.queue_id == target).ok_or("queue_not_found")?),
+            None => None,
+        };
+        let mut entry = queue.remove(index).expect("queue index exists");
+        let target = target_index.map_or(queue.len(), |target| target.saturating_sub(usize::from(target > index)));
+        let pos = target.min(queue.len());
+        let id = entry.queue_id.clone();
+        let rev = entry.revision + 1;
+        entry.revision = rev;
+        queue.insert(pos, entry);
+        Ok((id, rev, pos))
+    }
+
+    async fn remove_queue(&self, session_id: &str, id: &str, revision: u64) -> std::result::Result<(String, u64), &'static str> {
+        if self.id != session_id { return Err("session_not_found"); }
+        let mut queue = self.queue.lock().await;
+        let index = queue.iter().position(|entry| entry.queue_id == id).ok_or("queue_not_found")?;
+        if queue[index].revision != revision { return Err("queue_conflict"); }
+        let entry = queue.remove(index).expect("queue index exists");
+        Ok((entry.queue_id, entry.revision))
+    }
 }
 
 struct ActiveTurn {
@@ -615,6 +761,8 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
         runtime,
         history: Arc::new(Mutex::new(Vec::new())),
         seq: Arc::new(AtomicU64::new(0)),
+        queue: Arc::new(Mutex::new(VecDeque::new())),
+        paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
 }
 

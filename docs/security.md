@@ -2,7 +2,7 @@
 
 Status: final design for v0.1
 
-Peon is a local agent running with the user's operating-system account. v0.1
+SCV is a local agent running with the user's operating-system account. v0.1
 provides workspace path containment, bounded I/O, transparent side effects, and
 interactive approval. It does not provide an OS security boundary.
 
@@ -32,10 +32,10 @@ the write; it does not lock out an external concurrent writer. Both tools cap
 output or input according to configuration.
 
 `bash` runs the configured command through `/bin/bash -lc` with the session
-workspace as its current directory. It inherits the Peon process environment,
+workspace as its current directory. It inherits the SCV process environment,
 runs with the user's full permissions, and is not sandboxed. It requires
 approval under the default policy, has a wall-clock timeout, and bounds combined
-stdout/stderr. Peon starts it in a new process group; cancellation or timeout
+stdout/stderr. SCV starts it in a new process group; cancellation or timeout
 sends a group-wide termination signal and ends with `KILL` if any member
 remains. Cancellation permits up to two seconds of graceful cleanup; reaching
 the execution deadline kills immediately. Descendants and retained output pipes
@@ -75,7 +75,7 @@ not-yet-started call from that response is executed.
 
 ## Responsible operation
 
-Users should run Peon in a version-controlled workspace, inspect approvals, and
+Users should run SCV in a version-controlled workspace, inspect approvals, and
 use operating-system sandboxing or a container when executing untrusted
 repositories. Installing a skill or configuring a delegate does not make it
 safe; these inputs can influence a model or launch software with user authority.

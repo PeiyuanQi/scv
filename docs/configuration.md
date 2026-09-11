@@ -4,11 +4,11 @@ Status: final design for v0.1
 
 Run `scv config init` on first use to create the user file from `config.example.toml`. Select a profile with `provider.active` or `--provider`.
 
-Peon merges configuration in this order, from lowest to highest precedence:
+SCV merges configuration in this order, from lowest to highest precedence:
 
 1. built-in defaults;
 2. `$SCV_HOME/config.toml` or `~/.scv/config.toml`;
-3. `<workspace>/.peon/config.toml`;
+3. `<workspace>/.scv/config.toml`;
 4. documented environment variables;
 5. command-line flags.
 
@@ -40,7 +40,7 @@ timeout_seconds = 120
 
 [agent]
 max_steps = 32
-system_prompt = "You are Peon, a concise and careful coding agent."
+system_prompt = "You are SCV, a concise and careful coding agent."
 
 [session]
 max_history_bytes = 16777216
@@ -79,7 +79,7 @@ max_tool_arguments_bytes = 262144
 
 [skills]
 user_dir = "~/.scv/skills"
-project_dir = ".peon/skills"
+project_dir = ".scv/skills"
 max_skills = 128
 max_skill_bytes = 262144
 
@@ -96,13 +96,13 @@ command = "pi"
 args = ["-p"]
 ```
 
-`agents.*.args` is an argument vector, not a shell string. Peon appends the
+`agents.*.args` is an argument vector, not a shell string. SCV appends the
 delegated prompt as the final argument and runs the child in the session
 workspace. The three built-in adapters are enabled when their executable is
 available; attempting to call a missing adapter returns a clear tool error.
 
 `provider`, `agents.*`, and `skills.user_dir` are accepted only from built-in,
-user, explicit `PEON_CONFIG`, environment, and CLI layers. Project configuration
+user, explicit `SCV_CONFIG`, environment, and CLI layers. Project configuration
 cannot change a model endpoint, credential-variable name, user skill root,
 executable, or fixed arguments. A native-agent approval shows the resolved
 absolute executable, the complete fixed argument vector, the workspace, and
@@ -115,7 +115,7 @@ are startup errors rather than ignored fields.
 
 Cross-field validation requires every specific content limit plus serialization
 overhead to fit its protocol frame limit, tool arguments to fit provider
-responses, and all count/byte limits to be positive. Peon fails startup with the
+responses, and all count/byte limits to be positive. SCV fails startup with the
 conflicting key names instead of silently clamping values.
 
 Approval policies are:
@@ -131,12 +131,12 @@ choice for that invocation.
 
 ## Environment variables
 
-Peon v0.1 reads:
+SCV v0.1 reads:
 
-- `PEON_MODEL`;
-- `PEON_BASE_URL`;
-- `PEON_API_KEY_ENV` (the name of the credential variable, not its value);
-- `PEON_CONFIG` for one additional explicit configuration file;
+- `SCV_MODEL`;
+- `SCV_BASE_URL`;
+- `SCV_API_KEY_ENV` (the name of the credential variable, not its value);
+- `SCV_CONFIG` for one additional explicit configuration file;
 - the credential variable named by `provider.api_key_env`;
 - `RUST_LOG` for diagnostics.
 

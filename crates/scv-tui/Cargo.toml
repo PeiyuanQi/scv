@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Ratatui terminal client and headless client for Peon"
+description = "Ratatui terminal client and headless client for SCV"
 readme = "../../README.md"
 
 [dependencies]
