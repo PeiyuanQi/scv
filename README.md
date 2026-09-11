@@ -186,11 +186,14 @@ full [`security model`](docs/security.md).
 ## Development
 
 Read [`AGENTS.md`](AGENTS.md) before using a coding agent in this repository.
-Use a sibling git worktree for parallel or unrelated work. For cross-cutting
-agent-loop, protocol, security, or architecture changes, update the final-state
-design in `docs/` and pass an independent design review before implementation.
-Keep one coherent requested outcome in one commit by default, and commit or
-push only at an explicit delivery boundary.
+Use a sibling git worktree for parallel or unrelated work. Keep final-state
+design documents in `docs/` aligned with behavior changes, including
+cross-cutting agent-loop, protocol, security, or architecture work. Reasonable
+redesign and cleanup are part of feature work when they leave the project
+clearer, smaller, safer, or more efficient. Prefer one complete end-to-end
+implementation of the requested outcome, including tests and documentation,
+over artificial vertical slices. Commit or push only at an explicit delivery
+boundary.
 
 ```bash
 cargo fmt --check

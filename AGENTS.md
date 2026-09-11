@@ -20,8 +20,10 @@
   `0.0.1` for features and bug fixes; use minor or major bumps only for the
   corresponding semver-compatible or breaking changes.
 
-- For every feature, first write a plan/spec and update the final-state design
-  documents in `docs/`; obtain explicit approval before implementation.
+- For each feature, define the intended final behavior and keep the relevant
+  final-state documents in `docs/` aligned as part of the same change. Do not
+  require a separate approval round or split implementation into artificial
+  vertical slices when the requested outcome is clear.
 - Implement approved work in a dedicated sibling worktree. At delivery, run the
   required checks, commit, push, merge to `main`, publish affected crates, and
   remove the completed worktree and local task branch.
@@ -50,16 +52,23 @@
   `scv-tools`, policy and session authority in `scv-server`, and terminal
   presentation in `scv-tui`.
 - Design cross-cutting changes to the agent loop, protocol, trust boundaries,
-  or crate architecture in `docs/` first. Obtain an independent design PASS
-  before implementation and an independent completeness/safety review before
-  delivery.
+  or crate architecture in `docs/` as needed, and review the design while
+  implementing it. A reasonable redesign, refactor, or cleanup is encouraged
+  when it keeps the project smaller, clearer, safer, or more efficient and is
+  necessary for the requested feature. Reserve extra review gates for changes
+  with material compatibility, security, or operational risk.
 - Record only the accepted final state in `docs/`; do not keep planning diaries
   or stale alternatives in the design documents.
 - Commit the workspace manifest and lockfile together when dependencies change,
   and document exact setup, run, and verification commands in `README.md` and
   this file.
 - Do not add dependencies or tooling solely to manufacture a default workflow.
-- Keep changes focused and avoid unrelated cleanup.
+- Keep changes focused on the requested outcome, but include the cleanup and
+  refactoring needed to leave that outcome complete and maintainable. Prefer
+  one end-to-end implementation that includes its API, behavior, tests,
+  documentation, and integration work over a sequence of incomplete vertical
+  slices. Split work only when a boundary is independently useful or required
+  by a real dependency, release, or safety constraint.
 
 ## Verification
 
