@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use scv_protocol::{ClientMessage, PeerInfo, ServerEvent};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -31,9 +31,10 @@ async fn server_handshake_and_session_start() {
         .write_all(
             format!(
                 concat!(
-                    "{{\"type\":\"initialize\",\"request_id\":\"1\",\"protocol_version\":1,\"client\":{{\"name\":\"test\",\"version\":\"0\"}}}}\n",
+                    "{{\"type\":\"initialize\",\"request_id\":\"1\",\"protocol_version\":{},\"client\":{{\"name\":\"test\",\"version\":\"0\"}}}}\n",
                     "{{\"type\":\"session.start\",\"request_id\":\"2\",\"cwd\":{:?}}}\n"
                 ),
+                PROTOCOL_VERSION,
                 workspace.path().display().to_string()
             )
             .as_bytes(),
@@ -120,7 +121,7 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
         &mut input,
         &ClientMessage::Initialize {
             request_id: "init".into(),
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             client: PeerInfo {
                 name: "integration-test".into(),
                 version: "0".into(),

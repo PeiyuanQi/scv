@@ -44,10 +44,10 @@ only reduce the configured maximum. The result contains exit status and bounded
 combined stdout/stderr, with truncation metadata. Shell execution has process
 risk and is not sandboxed.
 
-Peon creates a new process group for shell and native-agent children. On
+SCV creates a new process group for shell and native-agent children. On
 cancellation it sends `TERM` to the whole group, allows up to two seconds for
 cleanup, then sends `KILL` to any remaining members. Reaching the configured
-deadline sends `KILL` immediately. Peon also cleans up descendants after the
+deadline sends `KILL` immediately. SCV also cleans up descendants after the
 group leader exits and bounds output-pipe draining, so a background child cannot
 keep a tool call alive indefinitely.
 
@@ -74,7 +74,7 @@ The default invocation contracts are:
 | `agent_codex` | `codex exec <prompt>` |
 | `agent_pi` | `pi -p <prompt>` |
 
-Before approval, Peon resolves the executable through the server environment
+Before approval, SCV resolves the executable through the server environment
 and displays its absolute path, full fixed argument vector, bounded prompt,
 workspace, and delegate-risk warning. Project configuration cannot replace the
 executable or arguments.

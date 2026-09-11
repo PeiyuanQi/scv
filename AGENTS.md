@@ -6,7 +6,7 @@
 
 ## Project Context
 
-- This repository contains Peon, a Rust workspace for a small extensible agent
+- This repository contains SCV, a Rust workspace for a small extensible agent
   runtime with a separate stdio server and Ratatui client.
 - Read `README.md` for the human development flow.
 - Treat `docs/architecture.md` as the dependency-boundary source of truth and
@@ -30,7 +30,7 @@
 - Treat existing uncommitted changes as user-owned unless told otherwise.
 - Prefer git worktrees for parallel or unrelated agent work so multiple agents
   can develop concurrently without colliding. Put worktrees in a sibling
-  directory such as `../peon-<task>`; this repository does not define an ignored
+  directory such as `../scv-<task>`; this repository does not define an ignored
   project-local worktree directory.
 - Treat commits as explicit delivery boundaries, not progress checkpoints. Do
   not commit after every file, subtask, test, or agent turn.

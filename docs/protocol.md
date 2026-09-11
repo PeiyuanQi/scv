@@ -1,14 +1,14 @@
-# Peon Client Protocol
+# SCV Client Protocol
 
-Status: final design for v0.1
+Status: proposed protocol version 2 for the stdio queue
 
-The Peon client protocol is bidirectional newline-delimited JSON over stdin and
+The SCV client protocol is bidirectional newline-delimited JSON over stdin and
 stdout. Each line is one UTF-8 JSON object. The server writes diagnostics only
 to stderr.
 
 ## Version and envelopes
 
-The protocol version is the integer `1`. Every client message has a `type` and
+The protocol version is the integer `2`. Every client message has a `type` and
 `request_id`. Every server event has a `type`; events produced in response to a
 request also carry its `request_id`. Session events carry a monotonically
 increasing `seq`, allowing clients to detect a dropped or duplicated frame.
@@ -42,7 +42,23 @@ rejects a missing or non-directory workspace.
 {"type":"turn.start","request_id":"3","session_id":"...","prompt":"Fix the failing test."}
 ```
 
-Only one turn may run at once. Empty prompts are rejected.
+An idle session starts this prompt immediately. When another turn is active,
+the server appends it to the session queue and emits `queue.enqueued`. Empty
+prompts are rejected.
+
+### Queue operations
+
+```json
+{"type":"queue.update","request_id":"4","session_id":"...","queue_id":"...","revision":2,"prompt":"Run the focused tests after the fix."}
+{"type":"queue.move","request_id":"5","session_id":"...","queue_id":"...","revision":3,"before_queue_id":"..."}
+{"type":"queue.remove","request_id":"6","session_id":"...","queue_id":"...","revision":3}
+{"type":"session.pause","request_id":"7","session_id":"...","paused":true}
+```
+
+`queue.update`, `queue.move`, and `queue.remove` apply only to queued work and
+require the entry's current revision. Stale changes receive `queue_conflict`
+with the current entry. `session.pause` prevents automatic dequeue without
+altering queue order.
 
 ### `turn.cancel`
 
@@ -70,9 +86,9 @@ v0.1 has no "always allow" protocol state.
 ```
 
 The session must be idle. The server drops canonical messages, history
-compaction metadata, and usage totals while preserving the monotonic session
-sequence, then replies with `session.cleared`. The client clears its transcript
-only after that event.
+compaction metadata, usage totals, and queued prompts while preserving the
+monotonic session sequence, then replies with `session.cleared`. The client
+clears its transcript only after that event.
 
 ## Server events
 
@@ -95,6 +111,17 @@ only after that event.
 `assistant.delta` is append-only streamed text. `assistant.completed` is the
 canonical complete message and may contain an empty `content` when the response
 only requests tools.
+
+### Shared queue
+
+On session start, the server emits a `queue.snapshot` containing the
+ordered queue entries, each with `queue_id`, `revision`, prompt, and submitter
+label. It emits `queue.enqueued`, `queue.updated`, `queue.moved`,
+`queue.removed`, and `queue.dequeued` on that connection. Queue events carry the
+session sequence and never reorder relative to terminal turn events. The server
+validates and assigns IDs, revisions, and positions; clients never infer queue
+state from local input. Cross-client broadcast is deferred until a shared local
+transport is implemented.
 
 ### Tool lifecycle and approval
 
@@ -129,7 +156,8 @@ Usage fields are omitted when the provider does not report them.
 
 Stable request/server error codes are `invalid_json`, `not_initialized`,
 `version_mismatch`, `invalid_request`, `session_not_found`, `turn_active`,
-`turn_not_found`, `approval_not_found`, and `internal_error`. Stable
+`turn_not_found`, `approval_not_found`, `queue_not_found`, `queue_conflict`,
+and `internal_error`. Stable
 `turn.failed` codes are `provider_error`, `context_limit`, `step_limit`,
 `history_limit`, `response_limit`, `tool_limit`, and `internal_error`. An error
 after `turn.started`, including a provider error, is represented only by

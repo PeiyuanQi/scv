@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Provider-independent agent loop and extension traits for Peon"
+description = "Provider-independent agent loop and extension traits for SCV"
 readme = "../../README.md"
 
 [dependencies]

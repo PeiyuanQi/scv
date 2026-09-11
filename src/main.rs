@@ -38,15 +38,15 @@ enum Command {
         #[arg(long, default_value_t = true)]
         stdio: bool,
     },
-    /// Connect a Peon workspace to a WeChat ClawBot/iLink account.
+    /// Connect a SCV workspace to a WeChat ClawBot/iLink account.
     ClawbotLogin {
         /// Login API base URL.
         #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
         login_url: String,
     },
     Clawbot {
-        /// iLink bot bearer token (or set PEON_CLAWBOT_TOKEN).
-        #[arg(long, env = "PEON_CLAWBOT_TOKEN")]
+        /// iLink bot bearer token (or set SCV_CLAWBOT_TOKEN).
+        #[arg(long, env = "SCV_CLAWBOT_TOKEN")]
         token: String,
         #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
         base_url: String,
@@ -140,7 +140,7 @@ async fn clawbot_login(base: &str) -> Result<()> {
         let data = status.get("data").unwrap_or(&status);
         if data.get("status").and_then(|v| v.as_str()) == Some("confirmed") {
             let c = data.get("credentials").ok_or_else(|| anyhow::anyhow!("login confirmed without credentials"))?;
-            println!("PEON_CLAWBOT_TOKEN={}", c.get("bot_token").and_then(|v| v.as_str()).unwrap_or(""));
+            println!("SCV_CLAWBOT_TOKEN={}", c.get("bot_token").and_then(|v| v.as_str()).unwrap_or(""));
             println!("CLAWBOT_BASE_URL={}", c.get("baseurl").and_then(|v| v.as_str()).unwrap_or(base)); return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

@@ -1,14 +1,14 @@
-# Peon Architecture
+# SCV Architecture
 
-Status: final design for v0.1
+Status: proposed v0.2 design for the stdio server queue
 
-Peon is a small Rust agent runtime with a terminal client. Its core is useful for
+SCV is a small Rust agent runtime with a terminal client. Its core is useful for
 coding work, while its provider, context, tool, approval, and event interfaces
 are general enough to host other kinds of agents.
 
 ## Product boundary
 
-Peon v0.1 provides:
+SCV v0.1 provides:
 
 - a provider-independent agent loop with bounded tool iterations;
 - an OpenAI-compatible chat-completions provider;
@@ -50,15 +50,11 @@ core package imports TUI code.
 
 ## Runtime topology
 
-`scv` starts `peon server --stdio` as its canonical child command and speaks
-the protocol over the child's stdin and stdout. The separately installed
-`scv-server --stdio` binary is a thin entry-point wrapper around the same
-server library for editors, tests, and other clients. Diagnostics go to stderr
-so stdout remains a valid protocol stream.
-
-Each stdio server hosts one session and at most one active turn. The protocol
-reader remains live while the turn task runs so that approvals and cancellation
-can be resolved without deadlocking the agent loop.
+The stdio server owns one session and an ordered queue for that connection.
+`scv` starts it on demand as its child. The queue automatically starts its next
+prompt after every terminal turn state unless the session is paused. Queue state
+survives neither client disconnect nor server restart in v0.2. Multi-client
+attachment and queue broadcast require a future Unix-domain socket transport.
 
 ## Agent loop
 
@@ -101,15 +97,15 @@ Rust traits are the stable internal extension seam:
 
 `ToolRegistry` accepts built-in or downstream `Arc<dyn Tool>` values without
 changes to the loop. `AgentRuntime` is constructed from trait objects so another
-binary can embed Peon with different providers, policies, and tools.
+binary can embed SCV with different providers, policies, and tools.
 
 Process extensions use the same internal adapter behind `agent_claude`,
 `agent_codex`, and `agent_pi`. Adapters are declarative
-executable-plus-argument templates. Peon does not load third-party dynamic
+executable-plus-argument templates. SCV does not load third-party dynamic
 libraries in v0.1 because Rust has no stable dylib ABI and in-process plugins
-would share all of Peon's authority.
+would share all of SCV's authority.
 
-Skills are Markdown instruction packages discovered from `.peon/skills/*/SKILL.md`
+Skills are Markdown instruction packages discovered from `.scv/skills/*/SKILL.md`
 and the configured user skill directory. The v0.1 loader exposes their name and
 description in the system prompt. The model loads an applicable skill by name
 through `read_skill`, which resolves only the immutable discovery map and checks
@@ -157,7 +153,7 @@ matrix builds `aarch64` and `x86_64` archives for both operating systems.
 
 The primary installation paths are a GitHub Release archive and
 `cargo install --locked --git <repository-url>`. The root package installs both
-executables. Peon does not modify shell profiles or install provider CLIs.
+executables. SCV does not modify shell profiles or install provider CLIs.
 
 ## Verification and performance budgets
 
@@ -170,7 +166,7 @@ The full correctness and performance plan is defined in
 [`quality.md`](quality.md). Tests use scripted providers and fake executables;
 they never require a live API key or an installed delegated agent.
 
-The benchmark harness measures operations Peon controls rather than provider
+The benchmark harness measures operations SCV controls rather than provider
 latency. On a release build and warm filesystem, the targets are:
 
 - context selection over 10,000 small messages: under 20 ms;
@@ -186,7 +182,7 @@ shared runners are noisy.
 
 ## Reference baseline
 
-Peon's boundaries are informed by primary project documentation:
+SCV's boundaries are informed by primary project documentation:
 
 - [Codex app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
   demonstrates a typed, bidirectional server boundary for multiple clients.
@@ -202,7 +198,7 @@ Peon's boundaries are informed by primary project documentation:
   is the UX reference for visible tool activity, interruption, permissions,
   project instructions, and terminal-centered workflows.
 
-These are behavioral and architectural references. Peon contains no copied
+These are behavioral and architectural references. SCV contains no copied
 source code from them.
 
 User configuration supports named provider profiles with per-profile endpoints, credentials, and headers; project configuration cannot redirect that trust boundary.

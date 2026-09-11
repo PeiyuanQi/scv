@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Versioned JSON protocol types for Peon clients and servers"
+description = "Versioned JSON protocol types for SCV clients and servers"
 readme = "../../README.md"
 
 [dependencies]

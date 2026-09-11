@@ -1,8 +1,8 @@
 # Testing and Performance
 
-Status: final design and verification record for v0.1
+Status: final v0.1 record with proposed v0.2 TUI additions
 
-Peon correctness tests require no network, provider credential, or installed
+SCV correctness tests require no network, provider credential, or installed
 third-party agent. The checked-in v0.1 suite contains 46 tests covering:
 
 - core completion, grouped context selection, repeatable history trimming,
@@ -31,6 +31,15 @@ The v0.1 suite is a foundation, not a claim of exhaustive terminal or provider
 compatibility. Snapshot coverage for every TUI state, randomized protocol
 fuzzing, every malformed SSE variant, and sustained backpressure/load tests are
 release-expansion work.
+
+For the proposed TUI v0.2 release, stable render-buffer assertions cover idle,
+streaming, scrolled, tool-running, tool-inspector, approval, command-palette,
+help, error, and disconnected states across normal and constrained terminal
+sizes. Focused state tests cover multiline editing, Unicode boundaries,
+bracketed paste, queued prompts, command dispatch, Markdown and diff rendering,
+wrapped-row scrolling, overlay precedence, and terminal-content sanitization. A
+pseudo-terminal integration test covers paste, resize, interruption, and
+terminal-mode restoration. These additions do not require a live provider.
 
 ## Performance harness
 

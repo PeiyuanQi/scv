@@ -1,6 +1,6 @@
-# Contributing to Peon
+# Contributing to SCV
 
-Thank you for helping make Peon smaller, safer, and easier to use.
+Thank you for helping make SCV smaller, safer, and easier to use.
 
 ## Development setup
 

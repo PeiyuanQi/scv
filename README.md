@@ -1,10 +1,10 @@
-# Peon
+# SCV
 
-Peon is a small, fast, extensible agent runtime for the terminal. It keeps the
+SCV is a small, fast, extensible agent runtime for the terminal. It keeps the
 agent loop simple, puts model and tool authority in a separate server process,
 and provides a responsive Rust TUI for coding work.
 
-> **Project status:** Peon is an early v0.1 implementation. Its protocol and
+> **Project status:** SCV is an early v0.1 implementation. Its protocol and
 > configuration may change before 1.0. Run it in version-controlled workspaces
 > and review every approval.
 
@@ -22,7 +22,7 @@ and provides a responsive Rust TUI for coding work.
 
 ## Install
 
-Peon requires Rust 1.88 or newer and `/bin/bash`.
+SCV requires Rust 1.88 or newer and `/bin/bash`.
 
 ```bash
 cargo install --locked --git https://github.com/PeiyuanQi/scv
@@ -72,7 +72,7 @@ exposing the raw server socket.
 
 ClawBot uses WeChat's iLink HTTP API: QR login, then `POST /ilink/bot/getupdates`
 long-polling and `POST /ilink/bot/sendmessage`. Incoming messages include a
-`context_token`; replies must echo that token. The Peon integration boundary is
+`context_token`; replies must echo that token. The SCV integration boundary is
 therefore an adapter that maps each inbound text message to `session.start` and
 `turn.start`, forwards the final assistant response to `sendmessage`, and
 resolves approvals through a trusted local operator channel. The `scv clawbot`
@@ -82,7 +82,7 @@ official QR status API; do not put them in project configuration or logs.
 
 ## Quick start
 
-Peon's first provider speaks the OpenAI-compatible Chat Completions API.
+SCV's first provider speaks the OpenAI-compatible Chat Completions API.
 
 ```bash
 export OPENAI_API_KEY="your-key"
@@ -93,7 +93,7 @@ scv
 Use another compatible model or endpoint:
 
 ```bash
-peon --model gpt-4.1-mini --base-url https://api.openai.com/v1
+scv --model gpt-4.1-mini --base-url https://api.openai.com/v1
 ```
 
 Run one non-interactive prompt. Risky tools are denied unless `--yes` is
@@ -111,7 +111,7 @@ toggles the latest tool result, and `/help` lists the compact command set.
 
 User configuration lives at `~/.scv/config.toml` (or `$SCV_HOME/config.toml`); copy
 [`config.example.toml`](config.example.toml) there to get started. A workspace may add
-`.peon/config.toml`, but project configuration cannot redirect provider
+`.scv/config.toml`, but project configuration cannot redirect provider
 credentials or replace native-agent executables.
 
 ```toml
@@ -134,18 +134,18 @@ command = "codex"
 args = ["exec"]
 ```
 
-Precedence is CLI, environment, explicit `PEON_CONFIG`, project configuration,
+Precedence is CLI, environment, explicit `SCV_CONFIG`, project configuration,
 user configuration, then defaults. Unknown keys fail startup. See
 [`docs/configuration.md`](docs/configuration.md) for the complete schema and
 trust rules.
 
-## Extending Peon
+## Extending SCV
 
 The built-in provider uses the OpenAI Responses API at `/responses`, with streaming text and function-call events. The core exposes small Rust traits for providers, tools, context policies,
 approval gates, and event sinks. Registering a new `Tool` does not require a
 change to the agent loop or TUI.
 
-Skills use `.peon/skills/<name>/SKILL.md` in a project or
+Skills use `.scv/skills/<name>/SKILL.md` in a project or
 `~/.scv/skills/<name>/SKILL.md` for the user. Set `SCV_HOME` to relocate all user
 configuration and skills. Only skill metadata enters
 the initial prompt; the model loads full instructions through the contained
@@ -158,7 +158,7 @@ timeout limits as other process tools.
 
 ## Architecture
 
-Peon is a Cargo workspace with deliberately narrow packages:
+SCV is a Cargo workspace with deliberately narrow packages:
 
 - `scv-core`: loop and extension traits;
 - `scv-protocol`: versioned wire types with no runtime policy;
@@ -167,7 +167,7 @@ Peon is a Cargo workspace with deliberately narrow packages:
 - `scv-server`: configuration, sessions, permissions, and protocol dispatch;
 - `scv-tui`: terminal client and headless protocol client.
 
-The TUI spawns `peon server --stdio`; `scv-server --stdio` exposes the same
+The TUI spawns `scv server --stdio`; `scv-server --stdio` exposes the same
 server library to other local clients. Start with the final v0.1
 [`architecture`](docs/architecture.md), then see the
 [`protocol`](docs/protocol.md), [`context`](docs/context-management.md),
@@ -176,7 +176,7 @@ server library to other local clients. Start with the final v0.1
 
 ## Security
 
-Peon is **not an OS sandbox**. `bash` and nested agents run with your user
+SCV is **not an OS sandbox**. `bash` and nested agents run with your user
 permissions and inherited environment after approval. File tools reject
 absolute paths, parent traversal, and symlink escapes, but an approved process
 can access anything your account can access. Use a container or operating-system
