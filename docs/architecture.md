@@ -111,6 +111,13 @@ selection can change between TUI clients without restarting the daemon or
 mutating another session's runtime. Queue state survives neither client
 disconnect nor server restart.
 
+The managed daemon is started as a user-level systemd service and defaults to
+the `on-risk` approval policy. `scv start --allow-sudo` may authenticate the
+current user's existing sudo policy before the service starts, but SCV does not
+modify sudoers or elevate the daemon itself. A start without verified sudo
+authorization is confirmed interactively, or rejected when no terminal is
+available.
+
 ## Agent loop
 
 For each user turn, the server-owned session performs this sequence:

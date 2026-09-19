@@ -2,8 +2,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use scv_server::{ApprovalPolicy, ConfigOverrides};
 use scv_tui::LaunchOptions;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 
 #[derive(Parser)]
 #[command(name = "scv", version, about = "SCV — Search, Construct, Verify")]
@@ -38,9 +39,21 @@ enum Command {
         workspace: PathBuf,
     },
     /// Manage the single user-level SCV daemon.
-    Start { #[arg(long, value_name = "PATH", default_value = ".")] workspace: PathBuf },
+    Start {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        workspace: PathBuf,
+        /// Verify that the current user can authenticate with sudo before starting.
+        #[arg(long)]
+        allow_sudo: bool,
+    },
     Stop,
-    Restart { #[arg(long, value_name = "PATH", default_value = ".")] workspace: PathBuf },
+    Restart {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        workspace: PathBuf,
+        /// Verify that the current user can authenticate with sudo before restarting.
+        #[arg(long)]
+        allow_sudo: bool,
+    },
     Status,
     /// Run the authoritative server.
     Server {
@@ -143,10 +156,10 @@ async fn main() -> Result<()> {
             approval_policy: cli.approval_policy.map(Into::into),
             no_tools: false,
         }).await,
-        Command::Start { workspace } => daemon_control("start", Some(&workspace)),
-        Command::Stop => daemon_control("stop", None),
-        Command::Restart { workspace } => daemon_control("restart", Some(&workspace)),
-        Command::Status => daemon_control("status", None),
+        Command::Start { workspace, allow_sudo } => daemon_control("start", Some(&workspace), cli.approval_policy, allow_sudo),
+        Command::Stop => daemon_control("stop", None, cli.approval_policy, false),
+        Command::Restart { workspace, allow_sudo } => daemon_control("restart", Some(&workspace), cli.approval_policy, allow_sudo),
+        Command::Status => daemon_control("status", None, cli.approval_policy, false),
         Command::Clawbot { command, base_url } => match command.unwrap_or(ClawbotCommand::Login { account: "default".into(), login_url: base_url }) {
             ClawbotCommand::Login { account, login_url } => scv_clawbot::login(&login_url, &account).await,
             ClawbotCommand::Run { account, workspace } => clawbot_run(&account, &workspace).await,
@@ -162,13 +175,19 @@ fn service_path() -> Result<PathBuf> {
     Ok(home.join(".config/systemd/user/scv.service"))
 }
 
-fn daemon_control(action: &str, workspace: Option<&Path>) -> Result<()> {
+fn daemon_control(action: &str, workspace: Option<&Path>, approval_policy: Option<ApprovalArg>, allow_sudo: bool) -> Result<()> {
+    if action == "start" || action == "restart" {
+        ensure_sudo_expectation(allow_sudo)?;
+    }
     if let Some(workspace) = workspace {
         let workspace = std::fs::canonicalize(workspace).context("resolve daemon workspace")?;
         let path = service_path()?;
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
         let binary = std::env::current_exe()?.display().to_string();
-        let unit = format!("[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={} run --workspace {}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=default.target\n", workspace.display(), binary, workspace.display());
+        let approval = approval_policy
+            .map(|policy| format!(" --approval-policy {}", policy.to_possible_value().expect("value enum").get_name()))
+            .unwrap_or_default();
+        let unit = format!("[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={} run --workspace {}{}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=default.target\n", workspace.display(), binary, workspace.display(), approval);
         std::fs::write(path, unit).context("write SCV systemd unit")?;
     }
     let status = ProcessCommand::new("systemctl").args(["--user", "daemon-reload"]).status().context("run systemctl")?;
@@ -180,6 +199,47 @@ fn daemon_control(action: &str, workspace: Option<&Path>) -> Result<()> {
     command.arg("scv.service");
     let status = command.status().context("run systemctl")?;
     if !status.success() { bail!("systemctl {action} scv.service failed"); }
+    Ok(())
+}
+
+fn sudo_available() -> bool {
+    ProcessCommand::new("sudo")
+        .args(["-n", "-v"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn ensure_sudo_expectation(allow_sudo: bool) -> Result<()> {
+    if allow_sudo {
+        if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+            bail!("`scv start --allow-sudo` requires an interactive terminal so sudo can authenticate the current user");
+        }
+        let status = ProcessCommand::new("sudo")
+            .arg("-v")
+            .status()
+            .context("check sudo authorization")?;
+        if !status.success() {
+            bail!("sudo authorization failed; SCV cannot grant sudo access. Ask an administrator to add your user to the system sudo policy.");
+        }
+        return Ok(());
+    }
+    if sudo_available() {
+        return Ok(());
+    }
+    let warning = "SCV is starting without verified sudo authorization. The daemon will run as your user, and commands requiring sudo may fail. Continue? [Y/n] ";
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        bail!("SCV has no verified sudo authorization. Re-run interactively to confirm continuing, or use `scv start --allow-sudo` to authenticate the current user's existing sudo rights.");
+    }
+    eprint!("{warning}");
+    io::stderr().flush().context("flush sudo warning")?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).context("read sudo warning response")?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+        bail!("SCV start cancelled because sudo authorization was not verified.");
+    }
     Ok(())
 }
 

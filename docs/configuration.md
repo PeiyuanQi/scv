@@ -125,6 +125,18 @@ Approval policies are:
 - `always`: prompt for every tool;
 - `never`: deny tools whose declared risk is not read-only.
 
+The daemon uses `on-risk` when no policy is supplied. Set the policy explicitly
+for a managed daemon with a global flag, for example
+`scv --approval-policy always start --workspace /path/to/workspace`.
+
+Starting or restarting the daemon also checks whether the current user has
+usable sudo authorization. An interactive start without it asks whether to
+continue; `--allow-sudo` invokes sudo authentication first. That option only
+validates the user's existing operating-system policy; SCV never edits sudoers
+or grants privileges. A non-interactive start without verified sudo
+authorization fails so unattended jobs do not silently run with reduced
+capability.
+
 Project configuration may make policy stricter but not weaker than user
 configuration. A command-line flag may weaken policy because it is an explicit
 choice for that invocation.

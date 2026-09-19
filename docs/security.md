@@ -6,6 +6,12 @@ SCV is a local agent running with the user's operating-system account. v0.1
 provides workspace path containment, bounded I/O, transparent side effects, and
 interactive approval. It does not provide an OS security boundary.
 
+The daemon remains a user-level process. `scv start --allow-sudo` asks sudo to
+authenticate the current user's existing policy so later approved commands can
+use the user's sudo credential cache; it cannot add the user to sudoers, grant
+new privileges, or run the daemon as root. Without verified sudo authorization,
+interactive starts ask whether to continue and non-interactive starts fail.
+
 ## Trust boundaries
 
 - Model output, tool arguments, project files, project configuration, skill

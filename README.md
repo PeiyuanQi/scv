@@ -75,6 +75,16 @@ scv restart --workspace /path/to/workspace
 scv stop
 ```
 
+Daemon starts use the server's `on-risk` approval policy by default. Pass
+`--approval-policy always` or `--approval-policy never` before `start` or
+`restart` when that invocation needs a different explicit policy. SCV runs the
+daemon as the current user. If the user has no currently valid sudo
+authorization, an interactive start asks whether to continue with reduced
+capability; `--allow-sudo` asks sudo to authenticate the current user's
+existing policy first. This flag cannot grant sudoers membership or turn the
+daemon into a root service, and non-interactive starts without verified sudo
+authorization fail with an actionable error.
+
 With no subcommand, `scv` starts the TUI and connects to the local server
 socket. It does not start a private server child. If the daemon is unavailable,
 SCV reports the socket path and suggests `scv start` or `scv run`. Model and
