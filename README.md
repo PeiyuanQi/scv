@@ -88,10 +88,11 @@ scv --provider local --model llama3.1 --base-url http://localhost:11434/v1
 ```
 
 Authenticate the WeChat ClawBot bridge once with `scv clawbot login`. The QR
-login stores the bearer token at `$SCV_HOME/clawbot.toml` (normally
-`~/.scv/clawbot.toml`) with mode `0600`; the token is never printed. The
-foreground and supervised daemon both use that saved credential. Remove it
-with `scv clawbot logout`. See the [ClawBot design and API contract](docs/clawbot.md).
+login stores the bearer token at `$SCV_HOME/clawbot/accounts/<account>.json`
+(normally under `~/.scv`) with mode `0600`; the token is never printed. Start
+the bridge explicitly with `scv clawbot run --workspace /path/to/workspace`.
+Remove an account with `scv clawbot logout`. See the [ClawBot design and API
+contract](docs/clawbot.md).
 
 ## Quick start
 
