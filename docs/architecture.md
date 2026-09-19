@@ -1,6 +1,6 @@
 # SCV Architecture
 
-Status: proposed v0.2 design for the stdio server queue
+Status: current v0.1 architecture
 
 SCV is a small Rust agent runtime with a terminal client. Its core is useful for
 coding work, while its provider, context, tool, approval, and event interfaces
@@ -11,22 +11,21 @@ are general enough to host other kinds of agents.
 SCV v0.1 provides:
 
 - a provider-independent agent loop with bounded tool iterations;
-- an OpenAI-compatible chat-completions provider;
+- an OpenAI-compatible Responses API provider;
 - configurable, deterministic context budgeting and compaction;
 - built-in `read`, `read_skill`, `write`, `bash`, `agent_claude`,
   `agent_codex`, and `agent_pi` tools;
 - a versioned newline-delimited JSON protocol;
-- a server process that owns agent state and a TUI process that owns terminal
-  state;
+- one Unix-socket daemon that owns agent state and per-connection sessions;
+- a TUI and ClawBot bridge that attach to the daemon through the same protocol;
 - interactive approval for tools with filesystem, shell, or subprocess side
   effects;
 - Linux and macOS source builds and release archives.
 
-The first release does not include network server transports, dynamic library
-loading, OS-level sandboxing, session resume, a provider login flow, image
-input, syntax-highlighted diffs, or feature parity with mature coding agents.
-Those features may be added without moving policy or model-provider code into
-the TUI.
+The current release does not include dynamic library loading, OS-level
+sandboxing, session resume, provider login, image input, syntax-highlighted
+diffs, or feature parity with mature coding agents. Those features may be added
+without moving policy or model-provider code into the TUI.
 
 ## Workspace layout
 
@@ -36,23 +35,68 @@ The repository is one Cargo workspace with these packages:
 | --- | --- |
 | `scv-protocol` | Wire messages and the protocol version. It contains no runtime policy. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
-| `scv-provider-openai` | Streaming OpenAI-compatible chat-completions transport. |
+| `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
 | `scv-server` | Configuration, session lifecycle, protocol dispatch, cancellation, approval routing, and stdout event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approval prompts, and the stdio client. |
 | `scv-clawbot` | WeChat iLink authentication, polling, durable delivery state, and daemon-session adapter. |
 | root `scv` package | Installable `scv` and `scv-server` binaries. |
 
-Dependencies point inward: binaries and UI depend on the server/client
+Dependencies point inward: binaries and adapters depend on the server/client
 interfaces; the server depends on core, tools, provider, and protocol; tools and
 providers depend on core; core contains no concrete transport, provider, tool,
 server, or TUI dependency; and the protocol package stays dependency-light. No
-core package imports TUI code.
+core package imports TUI or adapter code.
 
 `scv-clawbot` is an external-client adapter. It speaks the versioned protocol
 over the Unix-socket daemon, using one long-lived session per remote sender.
 Session policy, history, queueing, cancellation, and approvals remain
 authoritative in `scv-server`.
+
+## Dependency diagram
+
+The diagram shows compile-time crate dependencies and the runtime direction of
+client connections. Arrows point from a dependent crate or process toward the
+crate or service it uses.
+
+```mermaid
+flowchart LR
+    cli["scv CLI\nroot package"]
+    tui["scv-tui\nRatatui client"]
+    claw["scv-clawbot\nWeChat iLink adapter"]
+    daemon["scv-server\nUnix-socket daemon"]
+    stdio["scv-server\nstdio endpoint"]
+    protocol["scv-protocol\nJSONL wire types"]
+    core["scv-core\nagent loop + traits"]
+    tools["scv-tools\nworkspace tools"]
+    provider["scv-provider-openai\nResponses transport"]
+    model[("OpenAI-compatible API")]
+    wechat[("WeChat iLink API")]
+
+    cli --> tui
+    cli --> claw
+    cli --> daemon
+    tui --> daemon
+    claw --> daemon
+    claw --> wechat
+    cli --> stdio
+    daemon --> protocol
+    stdio --> protocol
+    tui --> protocol
+    claw --> protocol
+    daemon --> core
+    daemon --> tools
+    daemon --> provider
+    tools --> core
+    provider --> core
+    provider --> model
+```
+
+The daemon and stdio endpoint share the same server implementation. The
+Unix-socket daemon is the normal long-running backend; the stdio endpoint is a
+one-session local transport for embedding and headless commands. TUI and
+ClawBot connections create independent sessions, so provider and model
+overrides are resolved at `session.start` without restarting the daemon.
 
 ## Runtime topology
 
@@ -125,12 +169,11 @@ beyond the tools and approvals available to the session.
 
 ## Provider boundary
 
-The built-in provider uses a streaming OpenAI-compatible `/chat/completions`
-endpoint and function-tool schema. It assembles interleaved streamed tool-call
-arguments by their provider index and validates the final JSON before returning
-a call to the loop. The base URL, API-key environment variable, model, and
-timeout are configuration. API keys are read from the environment and never
-accepted in project configuration.
+The built-in provider uses the OpenAI-compatible `/responses` endpoint and
+function-tool schema. It assembles streamed tool-call arguments and validates
+the final JSON before returning a call to the loop. The base URL, API-key
+environment variable, model, and timeout are configuration. API keys are read
+from the environment and never accepted in project configuration.
 
 The core `Provider` trait does not expose HTTP types. Native Anthropic,
 Responses API, local-model, streaming, and subscription-auth providers can be
@@ -138,8 +181,9 @@ added independently.
 
 ## TUI contract
 
-The TUI keeps no authoritative conversation or tool state. It renders server
-events and sends protocol commands. Its v0.1 interaction contract is:
+The TUI keeps no authoritative conversation or tool state. It connects to the
+daemon socket, renders server events, and sends protocol commands. Its current
+interaction contract is:
 
 - a persistent transcript, multi-line composer, status line, and model/context
   footer;
@@ -212,4 +256,6 @@ SCV's boundaries are informed by primary project documentation:
 These are behavioral and architectural references. SCV contains no copied
 source code from them.
 
-User configuration supports named provider profiles with per-profile endpoints, credentials, and headers; project configuration cannot redirect that trust boundary.
+User configuration supports named provider profiles with per-profile endpoints,
+credentials, and headers; project configuration cannot redirect that trust
+boundary.
