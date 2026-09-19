@@ -134,6 +134,9 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
         &ClientMessage::SessionStart {
             request_id: "session".into(),
             cwd: workspace.path().display().to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
         },
     )
     .await;

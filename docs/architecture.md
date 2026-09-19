@@ -50,11 +50,16 @@ core package imports TUI code.
 
 ## Runtime topology
 
-The stdio server owns one session and an ordered queue for that connection.
-`scv` starts it on demand as its child. The queue automatically starts its next
-prompt after every terminal turn state unless the session is paused. Queue state
-survives neither client disconnect nor server restart in v0.2. Multi-client
-attachment and queue broadcast require a future Unix-domain socket transport.
+The Unix-socket daemon owns one independent session and ordered queue for each
+client connection. The default `scv` TUI attaches to that socket and reports a
+clear not-started error when no daemon is listening. `server --stdio` remains
+available for one-shot local clients such as `scv exec`.
+
+Each `session.start` request can carry provider, model, and base-URL overrides.
+The daemon resolves those values when creating the session, so model/provider
+selection can change between TUI clients without restarting the daemon or
+mutating another session's runtime. Queue state survives neither client
+disconnect nor server restart.
 
 ## Agent loop
 

@@ -194,3 +194,6 @@ concurrently. An EOF from the client cancels the active turn and shuts down the
 server. A broken stdout pipe or a backpressure timeout enters common cleanup;
 active work and the writer receive a three-second grace period and are then
 aborted and joined rather than left in the background.
+`session.start` may include optional `provider`, `model`, and `base_url` fields.
+These overrides are resolved for that session only, allowing clients attached
+to the same daemon to switch providers or models without restarting it.

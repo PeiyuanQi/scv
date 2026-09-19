@@ -16,7 +16,7 @@ and provides a responsive Rust TUI for coding work.
 - Progressive-disclosure Markdown skills from user and project directories
 - Configurable, bounded context selection and deterministic compaction
 - Server-enforced approvals, timeouts, output caps, and cancellation
-- Separate stdio server and Ratatui client processes
+- A Unix-socket daemon with a Ratatui client, plus a stdio server for one-shot clients
 - Interactive TUI plus a headless `scv exec` mode
 - Linux and macOS support on ARM64 and x86-64
 
@@ -73,6 +73,18 @@ scv start --workspace /path/to/workspace
 scv status
 scv restart --workspace /path/to/workspace
 scv stop
+```
+
+With no subcommand, `scv` starts the TUI and connects to the local server
+socket. It does not start a private server child. If the daemon is unavailable,
+SCV reports the socket path and suggests `scv start` or `scv run`. Model and
+provider overrides are sent when the TUI creates its session, so a running
+daemon can serve sessions using different models or providers without a daemon
+restart:
+
+```bash
+scv --model gpt-4.1-mini
+scv --provider local --model llama3.1 --base-url http://localhost:11434/v1
 ```
 
 Authenticate the WeChat ClawBot bridge once with `scv clawbot login`. The QR
@@ -168,8 +180,8 @@ SCV is a Cargo workspace with deliberately narrow packages:
 - `scv-server`: configuration, sessions, permissions, and protocol dispatch;
 - `scv-tui`: terminal client and headless protocol client.
 
-The TUI spawns `scv server --stdio`; `scv-server --stdio` exposes the same
-server library to other local clients. Start with the final v0.1
+The TUI connects to the local Unix-socket daemon; `scv-server --stdio` exposes
+the same server library to one-shot local clients. Start with the final v0.1
 [`architecture`](docs/architecture.md), then see the
 [`protocol`](docs/protocol.md), [`context`](docs/context-management.md),
 [`tools`](docs/tools.md), [`TUI`](docs/tui.md), and

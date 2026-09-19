@@ -37,7 +37,16 @@ pub enum ClientMessage {
         client: PeerInfo,
     },
     #[serde(rename = "session.start")]
-    SessionStart { request_id: String, cwd: String },
+    SessionStart {
+        request_id: String,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
     #[serde(rename = "session.attach")]
     SessionAttach { request_id: String, session_id: String, cwd: String },
     #[serde(rename = "turn.start")]

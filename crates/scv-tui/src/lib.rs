@@ -29,6 +29,7 @@ use ratatui::{
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{UnixStream, unix::{OwnedReadHalf, OwnedWriteHalf}},
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 use uuid::Uuid;
@@ -47,7 +48,7 @@ pub struct LaunchOptions {
 }
 
 pub async fn run_tui(cwd: &Path, options: LaunchOptions) -> Result<()> {
-    let (mut client, session) = Client::spawn(cwd, &options).await?;
+    let (mut client, session) = Client::connect(cwd, &options).await?;
     let mut terminal = TerminalGuard::enter()?;
     let mut app = App::new(session);
     let result = run_event_loop(&mut terminal.terminal, &mut client, &mut app).await;
@@ -143,13 +144,40 @@ struct SessionInfo {
 }
 
 struct Client {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    child: Option<Child>,
+    stdin: ClientOutput,
+    stdout: ClientInput,
     max_server_frame: usize,
 }
 
+enum ClientOutput {
+    Child(ChildStdin),
+    Socket(OwnedWriteHalf),
+}
+
+enum ClientInput {
+    Child(BufReader<ChildStdout>),
+    Socket(BufReader<OwnedReadHalf>),
+}
+
 impl Client {
+    async fn connect(cwd: &Path, options: &LaunchOptions) -> Result<(Self, SessionInfo)> {
+        let path = scv_server::default_socket_path()?;
+        let stream = UnixStream::connect(&path).await.with_context(|| format!(
+            "SCV server not started or not found at {}. Start it with `scv start --workspace {}` or run `scv run` in another terminal",
+            path.display(),
+            cwd.display()
+        ))?;
+        let (reader, writer) = stream.into_split();
+        let client = Self {
+            child: None,
+            stdin: ClientOutput::Socket(writer),
+            stdout: ClientInput::Socket(BufReader::new(reader)),
+            max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
+        };
+        client.initialize(cwd, options).await
+    }
+
     async fn spawn(cwd: &Path, options: &LaunchOptions) -> Result<(Self, SessionInfo)> {
         let executable = std::env::current_exe().context("locate scv executable")?;
         let mut command = Command::new(executable);
@@ -172,13 +200,17 @@ impl Client {
         let mut child = command.spawn().context("launch scv server")?;
         let stdin = child.stdin.take().context("server stdin unavailable")?;
         let stdout = child.stdout.take().context("server stdout unavailable")?;
-        let mut client = Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
+        let client = Self {
+            child: Some(child),
+            stdin: ClientOutput::Child(stdin),
+            stdout: ClientInput::Child(BufReader::new(stdout)),
             max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
         };
-        client
+        client.initialize(cwd, options).await
+    }
+
+    async fn initialize(mut self, cwd: &Path, options: &LaunchOptions) -> Result<(Self, SessionInfo)> {
+        self
             .send(&ClientMessage::Initialize {
                 request_id: "initialize".into(),
                 protocol_version: PROTOCOL_VERSION,
@@ -188,20 +220,22 @@ impl Client {
                 },
             })
             .await?;
-        match client.read_event().await? {
+        match self.read_event().await? {
             Some(ServerEvent::Initialized { .. }) => {}
             Some(ServerEvent::Error { code, message, .. }) => {
                 bail!("server initialization failed ({code}): {message}")
             }
             other => bail!("unexpected server initialization response: {other:?}"),
         }
-        client
-            .send(&ClientMessage::SessionStart {
-                request_id: "session-start".into(),
-                cwd: cwd.display().to_string(),
-            })
+        self.send(&ClientMessage::SessionStart {
+            request_id: "session-start".into(),
+            cwd: cwd.display().to_string(),
+            provider: options.provider.clone(),
+            model: options.model.clone(),
+            base_url: options.base_url.clone(),
+        })
             .await?;
-        let session = match client.read_event().await? {
+        let session = match self.read_event().await? {
             Some(ServerEvent::SessionStarted {
                 session_id,
                 cwd,
@@ -229,20 +263,33 @@ impl Client {
             }
             other => bail!("unexpected session startup response: {other:?}"),
         };
-        client.max_server_frame = session.max_server_frame_bytes;
-        Ok((client, session))
+        self.max_server_frame = session.max_server_frame_bytes;
+        Ok((self, session))
     }
 
     async fn send(&mut self, message: &ClientMessage) -> Result<()> {
         let bytes = serde_json::to_vec(message).context("encode client message")?;
-        self.stdin.write_all(&bytes).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        match &mut self.stdin {
+            ClientOutput::Child(writer) => {
+                writer.write_all(&bytes).await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await?;
+            }
+            ClientOutput::Socket(writer) => {
+                writer.write_all(&bytes).await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await?;
+            }
+        }
         Ok(())
     }
 
     async fn read_event(&mut self) -> Result<Option<ServerEvent>> {
-        let Some(frame) = read_bounded_frame(&mut self.stdout, self.max_server_frame).await? else {
+        let frame = match &mut self.stdout {
+            ClientInput::Child(reader) => read_bounded_frame(reader, self.max_server_frame).await?,
+            ClientInput::Socket(reader) => read_bounded_frame(reader, self.max_server_frame).await?,
+        };
+        let Some(frame) = frame else {
             return Ok(None);
         };
         Ok(Some(
@@ -251,13 +298,15 @@ impl Client {
     }
 
     async fn shutdown(&mut self) {
-        let _ = self.stdin.shutdown().await;
-        if tokio::time::timeout(SERVER_EXIT_GRACE, self.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = self.child.start_kill();
-            let _ = self.child.wait().await;
+        match &mut self.stdin {
+            ClientOutput::Child(writer) => { let _ = writer.shutdown().await; }
+            ClientOutput::Socket(writer) => { let _ = writer.shutdown().await; }
+        }
+        if let Some(child) = &mut self.child {
+            if tokio::time::timeout(SERVER_EXIT_GRACE, child.wait()).await.is_err() {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
         }
     }
 }

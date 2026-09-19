@@ -120,7 +120,12 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Command::Run { workspace } => run_daemon(&workspace).await,
+        Command::Run { workspace } => run_daemon(&workspace, ConfigOverrides {
+            provider: cli.provider,
+            model: cli.model,
+            base_url: cli.base_url,
+            approval_policy: cli.approval_policy.map(Into::into),
+        }).await,
         Command::Start { workspace } => daemon_control("start", Some(&workspace)),
         Command::Stop => daemon_control("stop", None),
         Command::Restart { workspace } => daemon_control("restart", Some(&workspace)),
@@ -196,9 +201,18 @@ fn daemon_control(action: &str, workspace: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-async fn run_daemon(workspace: &Path) -> Result<()> {
-    let credentials = read_credentials().context("ClawBot is not logged in; run `scv clawbot login`")?;
-    run_clawbot(&credentials.token, &credentials.base_url, workspace).await
+async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> {
+    let socket = scv_server::default_socket_path()?;
+    let server = scv_server::run_socket(&socket, overrides);
+    match read_credentials() {
+        Ok(credentials) => {
+            tokio::select! {
+                result = server => result,
+                result = run_clawbot(&credentials.token, &credentials.base_url, workspace) => result,
+            }
+        }
+        Err(_) => server.await,
+    }
 }
 
 async fn run_clawbot(token: &str, base_url: &str, workspace: &Path) -> Result<()> {
