@@ -46,6 +46,8 @@ pub enum ClientMessage {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        no_tools: Option<bool>,
     },
     #[serde(rename = "session.attach")]
     SessionAttach { request_id: String, session_id: String, cwd: String },

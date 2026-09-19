@@ -301,6 +301,7 @@ pub struct ConfigOverrides {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
+    pub no_tools: bool,
 }
 
 impl Config {

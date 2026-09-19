@@ -233,6 +233,7 @@ impl Client {
             provider: options.provider.clone(),
             model: options.model.clone(),
             base_url: options.base_url.clone(),
+            no_tools: None,
         })
             .await?;
         let session = match self.read_event().await? {

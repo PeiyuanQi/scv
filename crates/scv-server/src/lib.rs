@@ -20,7 +20,7 @@ pub use config::{ApprovalPolicy, ConfigOverrides};
 pub fn init_user_config() -> anyhow::Result<std::path::PathBuf> { config::Config::init_user_config() }
 use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
-    EventSink, Message, ToolRisk,
+    EventSink, Message, ToolRegistry, ToolRisk,
 };
 use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, Usage};
 use scv_provider_openai::OpenAiProvider;
@@ -169,7 +169,7 @@ where
                     other if !initialized => {
                         send_error(&output_tx, other.request_id(), "not_initialized", "initialize must be the first message", false, server_frame_limit(&session)).await?;
                     }
-                    ClientMessage::SessionStart { request_id, cwd, provider, model, base_url } => {
+                    ClientMessage::SessionStart { request_id, cwd, provider, model, base_url, no_tools } => {
                         if session.is_some() {
                             send_error(&output_tx, &request_id, "invalid_request", "this connection already has a session", false, server_frame_limit(&session)).await?;
                             continue;
@@ -179,6 +179,7 @@ where
                             model: model.or_else(|| overrides.model.clone()),
                             base_url: base_url.or_else(|| overrides.base_url.clone()),
                             approval_policy: overrides.approval_policy,
+                            no_tools: no_tools.unwrap_or(overrides.no_tools),
                         };
                         match build_session(&cwd, session_overrides).await {
                             Ok(new_session) => {
@@ -776,6 +777,7 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
     if !workspace.is_dir() {
         return Err(anyhow!("cwd is not a directory"));
     }
+    let no_tools = overrides.no_tools;
     let config = Config::load(&workspace, overrides)?;
     let provider_config = config.provider.clone();
     let api_key = provider_config.api_key.clone().or_else(|| {
@@ -791,13 +793,17 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
         config.provider_limits(),
         provider_config.headers.clone(),
     )?);
-    let tools = Arc::new(builtin_registry(
-        config.tools(),
-        skills,
-        skill_roots,
-        config.skills.max_skill_bytes,
-        config.adapters(),
-    )?);
+    let tools = if no_tools {
+        Arc::new(ToolRegistry::default())
+    } else {
+        Arc::new(builtin_registry(
+            config.tools(),
+            skills,
+            skill_roots,
+            config.skills.max_skill_bytes,
+            config.adapters(),
+        )?)
+    };
     let context = Arc::new(BudgetContextPolicy::new((&config.context).into())?);
     let runtime = Arc::new(AgentRuntime::new(
         provider,

@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         model: cli.model,
         base_url: cli.base_url,
         approval_policy: cli.approval_policy.map(Into::into),
+        no_tools: false,
     })
     .await
 }

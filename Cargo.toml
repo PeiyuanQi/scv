@@ -16,13 +16,14 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/PeiyuanQi/scv"
 
 [workspace.dependencies]
+base64 = "0.22.1"
 anyhow = "1.0.99"
 async-trait = "0.1.89"
 cap-std = "3.4.4"
@@ -48,6 +49,7 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 which = "8.0.0"
 
 scv-core = { version = "0.1.0", path = "crates/scv-core" }
+scv-clawbot = { version = "0.1.0", path = "crates/scv-clawbot" }
 scv-protocol = { version = "0.1.0", path = "crates/scv-protocol" }
 scv-provider-openai = { version = "0.1.0", path = "crates/scv-provider-openai" }
 scv-server = { version = "0.1.0", path = "crates/scv-server" }
@@ -59,6 +61,7 @@ anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
 scv-server.workspace = true
+scv-clawbot.workspace = true
 scv-tui.workspace = true
 tokio.workspace = true
 reqwest.workspace = true

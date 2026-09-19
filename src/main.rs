@@ -1,12 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
 use scv_server::{ApprovalPolicy, ConfigOverrides};
 use scv_tui::LaunchOptions;
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "scv", version, about = "SCV — Search, Construct, Verify")]
@@ -69,10 +66,28 @@ enum Command {
 enum ConfigCommand { Init }
 
 #[derive(Subcommand)]
-enum ClawbotCommand { Login { #[arg(long, default_value = "https://ilinkai.weixin.qq.com")] login_url: String }, Logout }
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ClawbotCredentials { token: String, base_url: String }
+enum ClawbotCommand {
+    Login {
+        #[arg(long, default_value = "default")]
+        account: String,
+        #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
+        login_url: String,
+    },
+    Run {
+        #[arg(long, default_value = "default")]
+        account: String,
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+    },
+    Status {
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
+    Logout {
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
+}
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ApprovalArg {
@@ -117,6 +132,7 @@ async fn main() -> Result<()> {
                 model: cli.model,
                 base_url: cli.base_url,
                 approval_policy: cli.approval_policy.map(Into::into),
+                no_tools: false,
             })
             .await
         }
@@ -125,53 +141,19 @@ async fn main() -> Result<()> {
             model: cli.model,
             base_url: cli.base_url,
             approval_policy: cli.approval_policy.map(Into::into),
+            no_tools: false,
         }).await,
         Command::Start { workspace } => daemon_control("start", Some(&workspace)),
         Command::Stop => daemon_control("stop", None),
         Command::Restart { workspace } => daemon_control("restart", Some(&workspace)),
         Command::Status => daemon_control("status", None),
-        Command::Clawbot { command, base_url } => match command.unwrap_or(ClawbotCommand::Login { login_url: base_url }) {
-            ClawbotCommand::Login { login_url } => clawbot_login(&login_url).await,
-            ClawbotCommand::Logout => { remove_credentials()?; println!("Removed SCV ClawBot credentials."); Ok(()) }
+        Command::Clawbot { command, base_url } => match command.unwrap_or(ClawbotCommand::Login { account: "default".into(), login_url: base_url }) {
+            ClawbotCommand::Login { account, login_url } => scv_clawbot::login(&login_url, &account).await,
+            ClawbotCommand::Run { account, workspace } => clawbot_run(&account, &workspace).await,
+            ClawbotCommand::Status { account } => clawbot_status(&account),
+            ClawbotCommand::Logout { account } => { scv_clawbot::state::remove(&account)?; println!("Removed SCV ClawBot account {account:?}."); Ok(()) }
         },
-        Command::ClawbotLogin { login_url } => clawbot_login(&login_url).await,
-    }
-}
-
-fn credentials_path() -> Result<PathBuf> {
-    let root = std::env::var_os("SCV_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|p| p.join(".scv"))).ok_or_else(|| anyhow!("cannot determine SCV_HOME"))?;
-    Ok(root.join("clawbot.toml"))
-}
-
-fn read_credentials() -> Result<ClawbotCredentials> {
-    let path = credentials_path()?;
-    let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    toml::from_str(&text).context("parse ClawBot credentials")
-}
-
-fn write_credentials(credentials: &ClawbotCredentials) -> Result<()> {
-    let path = credentials_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("create SCV config directory")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .context("secure SCV config directory")?;
-        }
-    }
-    let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, toml::to_string(credentials).context("encode ClawBot credentials")?).context("write credentials")?;
-    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).context("secure credentials")?; }
-    std::fs::rename(&temporary, &path).context("install credentials")
-}
-
-fn remove_credentials() -> Result<()> {
-    let path = credentials_path()?;
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+        Command::ClawbotLogin { login_url } => scv_clawbot::login(&login_url, "default").await,
     }
 }
 
@@ -203,61 +185,22 @@ fn daemon_control(action: &str, workspace: Option<&Path>) -> Result<()> {
 
 async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> {
     let socket = scv_server::default_socket_path()?;
-    let server = scv_server::run_socket(&socket, overrides);
-    match read_credentials() {
-        Ok(credentials) => {
-            tokio::select! {
-                result = server => result,
-                result = run_clawbot(&credentials.token, &credentials.base_url, workspace) => result,
-            }
-        }
-        Err(_) => server.await,
-    }
+    std::env::set_current_dir(workspace).with_context(|| format!("change to daemon workspace {}", workspace.display()))?;
+    scv_server::run_socket(&socket, overrides).await
 }
 
-async fn run_clawbot(token: &str, base_url: &str, workspace: &Path) -> Result<()> {
-    let client = reqwest::Client::new();
-    let mut cursor = String::new();
-    loop {
-        let response: serde_json::Value = client.post(format!("{base_url}/ilink/bot/getupdates"))
-            .header("AuthorizationType", "ilink_bot_token")
-            .bearer_auth(token)
-            .header("X-WECHAT-UIN", "cGVvbg==")
-            .json(&json!({"get_updates_buf": cursor, "base_info": {"channel_version": "1.0.2"}}))
-            .timeout(std::time::Duration::from_secs(45)).send().await?.json().await?;
-        if let Some(next) = response.get("get_updates_buf").and_then(|v| v.as_str()) { cursor = next.into(); }
-        for msg in response.get("msgs").and_then(|v| v.as_array()).into_iter().flatten() {
-            let Some(text) = msg.get("item_list").and_then(|v| v.as_array()).and_then(|items| items.iter().find_map(|i| i.get("text_item")?.get("text")?.as_str())) else { continue };
-            let Some(to_user_id) = msg.get("from_user_id").and_then(|v| v.as_str()) else { continue };
-            let Some(context_token) = msg.get("context_token").and_then(|v| v.as_str()) else { continue };
-            let output = tokio::process::Command::new(std::env::current_exe()?).current_dir(workspace).args(["exec", "--yes", text]).output().await?;
-            let reply = String::from_utf8_lossy(&output.stdout).into_owned();
-            client.post(format!("{base_url}/ilink/bot/sendmessage")).header("AuthorizationType", "ilink_bot_token").bearer_auth(token).header("X-WECHAT-UIN", "cGVvbg==").json(&json!({"msg":{"to_user_id":to_user_id,"client_id":Uuid::new_v4().to_string(),"message_type":2,"message_state":2,"context_token":context_token,"item_list":[{"type":1,"text_item":{"text":reply}}]},"base_info":{"channel_version":"1.0.2"}})).send().await?;
-        }
-    }
+async fn clawbot_run(account: &str, workspace: &Path) -> Result<()> {
+    let credentials = scv_clawbot::state::account(account)?.ok_or_else(|| anyhow!("ClawBot account {account:?} is not logged in; run `scv clawbot login --account {account}`"))?;
+    let workspace = std::fs::canonicalize(workspace).context("resolve ClawBot workspace")?;
+    scv_clawbot::run(&credentials.token, &credentials.base_url, account, &workspace).await
 }
 
-async fn clawbot_login(base: &str) -> Result<()> {
-    let client = reqwest::Client::new();
-    let qr: serde_json::Value = client.get(format!("{base}/ilink/bot/get_bot_qrcode?bot_type=3")).send().await?.error_for_status()?.json().await?;
-    let code = qr.get("qrcode").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("login response omitted qrcode"))?;
-    let url = qr.get("qrcode_img_content").and_then(|v| v.as_str()).unwrap_or(code);
-    println!("Scan this QR code in WeChat:\n{url}");
-    loop {
-        let status: serde_json::Value = client.get(format!("{base}/ilink/bot/get_qrcode_status")).query(&[("qrcode", code)]).send().await?.error_for_status()?.json().await?;
-        if status.get("status").and_then(|v| v.as_str()) == Some("confirmed") {
-            let token = status.get("bot_token").and_then(|v| v.as_str()).filter(|v| !v.is_empty()).ok_or_else(|| anyhow!("confirmed login omitted bot_token"))?;
-            let base_url = status
-                .get("baseurl")
-                .or_else(|| status.get("base_url"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(base);
-            write_credentials(&ClawbotCredentials { token: token.to_owned(), base_url: base_url.to_owned() })?;
-            println!("ClawBot login saved securely.");
-            return Ok(())
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+fn clawbot_status(account: &str) -> Result<()> {
+    match scv_clawbot::state::account(account)? {
+        Some(value) => println!("ClawBot account {account:?} is logged in at {}.", value.base_url),
+        None => println!("ClawBot account {account:?} is not logged in."),
     }
+    Ok(())
 }
 
 fn init_tracing() {
