@@ -27,6 +27,7 @@ use scv_provider_openai::OpenAiProvider;
 use scv_tools::{SkillMap, builtin_registry};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     task::JoinHandle,
 };
@@ -44,6 +45,51 @@ pub async fn run_stdio(overrides: ConfigOverrides) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     run(stdin, stdout, overrides).await
+}
+
+/// Return the local Unix socket used by the SCV daemon and TUI.
+pub fn default_socket_path() -> Result<PathBuf> {
+    let root = std::env::var_os("SCV_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))
+        .ok_or_else(|| anyhow!("cannot determine SCV_HOME"))?;
+    Ok(root.join("server.sock"))
+}
+
+/// Run the authoritative server on the local Unix socket.
+pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.context("create SCV socket directory")?;
+    }
+    if path.exists() {
+        if UnixStream::connect(path).await.is_ok() {
+            return Err(anyhow!("SCV server is already running at {}", path.display()));
+        }
+        tokio::fs::remove_file(path).await.with_context(|| format!("remove stale SCV socket {}", path.display()))?;
+    }
+    let listener = UnixListener::bind(path).with_context(|| format!("bind SCV server socket {}", path.display()))?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).context("secure SCV socket")?;
+    }
+    let result = loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.context("accept SCV client")?;
+                let child_overrides = overrides.clone();
+                tokio::spawn(async move {
+                    let (reader, writer) = stream.into_split();
+                    if let Err(error) = run(reader, writer, child_overrides).await {
+                        tracing::warn!(%error, "SCV socket client stopped");
+                    }
+                });
+            }
+            _ = tokio::signal::ctrl_c() => break Ok(()),
+        }
+    };
+    drop(listener);
+    let _ = tokio::fs::remove_file(path).await;
+    result
 }
 
 async fn run<R, W>(reader: R, writer: W, overrides: ConfigOverrides) -> Result<()>
@@ -123,12 +169,18 @@ where
                     other if !initialized => {
                         send_error(&output_tx, other.request_id(), "not_initialized", "initialize must be the first message", false, server_frame_limit(&session)).await?;
                     }
-                    ClientMessage::SessionStart { request_id, cwd } => {
+                    ClientMessage::SessionStart { request_id, cwd, provider, model, base_url } => {
                         if session.is_some() {
                             send_error(&output_tx, &request_id, "invalid_request", "this connection already has a session", false, server_frame_limit(&session)).await?;
                             continue;
                         }
-                        match build_session(&cwd, overrides.clone()).await {
+                        let session_overrides = ConfigOverrides {
+                            provider: provider.or_else(|| overrides.provider.clone()),
+                            model: model.or_else(|| overrides.model.clone()),
+                            base_url: base_url.or_else(|| overrides.base_url.clone()),
+                            approval_policy: overrides.approval_policy,
+                        };
+                        match build_session(&cwd, session_overrides).await {
                             Ok(new_session) => {
                                 output_tx.ensure_capacity(output_queue_bytes(
                                     new_session.config.protocol.max_server_frame_bytes,

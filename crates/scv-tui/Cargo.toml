@@ -14,6 +14,7 @@ crossterm.workspace = true
 futures-util.workspace = true
 scv-protocol.workspace = true
 ratatui.workspace = true
+scv-server.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 uuid.workspace = true
