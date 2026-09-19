@@ -137,6 +137,7 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             provider: None,
             model: None,
             base_url: None,
+            no_tools: None,
         },
     )
     .await;
