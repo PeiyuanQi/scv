@@ -28,20 +28,118 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
 }
 
 pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -> Result<()> {
+    const MAX_REPLY_BYTES: usize = 16 * 1024;
     let client = reqwest::Client::new(); let base_url = normalize_base_url(base_url)?; let mut state = state::load_state(account)?; let mut cursor = state.cursor.clone(); let mut seen: VecDeque<String> = state.seen.iter().cloned().collect(); let mut sessions: HashMap<String, protocol::Session> = HashMap::new(); let mut backoff = Duration::from_secs(1);
-    if let Some(pending) = state.pending.clone() { bridge::send_reply(&client, token, &base_url, &pending.to_user_id, &pending.context_token, &pending.reply, 16 * 1024).await?; state.pending = None; state::save_state(account, &state)?; }
+    deliver_pending(&client, token, &base_url, account, &mut state, MAX_REPLY_BYTES).await?;
     loop {
         let response: Value = match client.post(format!("{base_url}/ilink/bot/getupdates")).headers(bridge::auth_headers(token, u32::from_le_bytes(*Uuid::new_v4().as_bytes().first_chunk::<4>().unwrap()))).json(&serde_json::json!({"get_updates_buf":cursor,"base_info":{"channel_version":"1.0.0"}})).timeout(Duration::from_secs(50)).send().await { Ok(r) => match r.json().await { Ok(v) => v, Err(_) => { tokio::time::sleep(backoff).await; backoff = (backoff * 2).min(Duration::from_secs(60)); continue; } }, Err(_) => { tokio::time::sleep(backoff).await; backoff = (backoff * 2).min(Duration::from_secs(60)); continue; } };
         check_envelope(&response)?; backoff = Duration::from_secs(1); sessions.retain(|_, s| s.last_used.elapsed() < Duration::from_secs(1800));
-        for msg in response.get("msgs").and_then(Value::as_array).into_iter().flatten() { if msg.get("message_type").and_then(Value::as_i64) != Some(1) { continue; } let id = msg.get("message_id").or_else(|| msg.get("msg_id")).and_then(Value::as_str).unwrap_or(""); if id.is_empty() || seen.iter().any(|x| x == id) { continue; } seen.push_back(id.into()); if seen.len() > 4096 { seen.pop_front(); } let Some(text) = msg.get("item_list").and_then(Value::as_array).and_then(|xs| xs.iter().find_map(|x| x.get("text_item")?.get("text")?.as_str())) else { continue }; let Some(sender) = msg.get("from_user_id").and_then(Value::as_str) else { continue }; let Some(ctx) = msg.get("context_token").and_then(Value::as_str) else { continue }; if !sessions.contains_key(sender) && sessions.len() >= 32 { sessions.clear(); } let session = match sessions.entry(sender.into()) { std::collections::hash_map::Entry::Occupied(e) => e.into_mut(), std::collections::hash_map::Entry::Vacant(e) => e.insert(protocol::Session::spawn(workspace).await?) }; let reply = tokio::time::timeout(Duration::from_secs(300), session.turn(text, 16 * 1024)).await.ok().and_then(Result::ok).unwrap_or_else(|| "SCV could not complete that request.".into()); state.pending = Some(state::PendingDelivery { to_user_id: sender.into(), context_token: ctx.into(), reply: reply.clone() }); state::save_state(account, &state)?; bridge::send_reply(&client, token, &base_url, sender, ctx, &reply, 16 * 1024).await?; state.pending = None; }
+        for msg in response.get("msgs").and_then(Value::as_array).into_iter().flatten() {
+            let id = msg.get("message_id").or_else(|| msg.get("msg_id")).and_then(Value::as_str).unwrap_or("");
+            if id.is_empty() || seen.iter().any(|x| x == id) { continue; }
+            if msg.get("message_type").and_then(Value::as_i64) != Some(1) {
+                mark_seen(&mut seen, &mut state, id);
+                state::save_state(account, &state)?;
+                continue;
+            }
+            let Some(text) = msg.get("item_list").and_then(Value::as_array).and_then(|xs| xs.iter().find_map(|x| x.get("text_item")?.get("text")?.as_str())) else {
+                mark_seen(&mut seen, &mut state, id);
+                state::save_state(account, &state)?;
+                continue;
+            };
+            let Some(sender) = msg.get("from_user_id").and_then(Value::as_str) else {
+                mark_seen(&mut seen, &mut state, id);
+                state::save_state(account, &state)?;
+                continue;
+            };
+            let Some(ctx) = msg.get("context_token").and_then(Value::as_str) else {
+                mark_seen(&mut seen, &mut state, id);
+                state::save_state(account, &state)?;
+                continue;
+            };
+            if !sessions.contains_key(sender) && sessions.len() >= 32 {
+                if let Some(oldest) = sessions.iter().min_by_key(|(_, session)| session.last_used).map(|(key, _)| key.clone()) {
+                    sessions.remove(&oldest);
+                }
+            }
+            let result = {
+                let session = match sessions.entry(sender.into()) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => e.insert(protocol::Session::spawn(workspace).await?),
+                };
+                tokio::time::timeout(Duration::from_secs(300), session.turn(text, MAX_REPLY_BYTES)).await
+            };
+            let reply = match result {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(_)) | Err(_) => {
+                    sessions.remove(sender);
+                    "SCV could not complete that request.".into()
+                }
+            };
+            let reply = if reply.trim().is_empty() { "SCV completed without a text response.".into() } else { reply };
+            state.pending = Some(new_pending(id, sender, ctx, &reply, MAX_REPLY_BYTES));
+            state::save_state(account, &state)?;
+            deliver_pending(&client, token, &base_url, account, &mut state, MAX_REPLY_BYTES).await?;
+            seen = state.seen.iter().cloned().collect();
+        }
         if let Some(next) = response.get("get_updates_buf").and_then(Value::as_str) { cursor = next.into(); } state.cursor = cursor.clone(); state.seen = seen.iter().cloned().collect(); state::save_state(account, &state)?;
     }
 }
 
+fn new_pending(message_id: &str, to_user_id: &str, context_token: &str, reply: &str, max_bytes: usize) -> state::PendingDelivery {
+    let chunks = split_utf8(reply, max_bytes);
+    state::PendingDelivery {
+        message_id: message_id.to_owned(),
+        to_user_id: to_user_id.to_owned(),
+        context_token: context_token.to_owned(),
+        reply: reply.to_owned(),
+        client_ids: chunks.iter().map(|_| Uuid::new_v4().to_string()).collect(),
+        next_chunk: 0,
+    }
+}
+
+async fn deliver_pending(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    account: &str,
+    state: &mut state::BridgeState,
+    max_bytes: usize,
+) -> Result<()> {
+    let Some(mut pending) = state.pending.take() else { return Ok(()); };
+    let chunks = split_utf8(&pending.reply, max_bytes);
+    while pending.client_ids.len() < chunks.len() { pending.client_ids.push(Uuid::new_v4().to_string()); }
+    if pending.next_chunk > chunks.len() { pending.next_chunk = 0; }
+    state.pending = Some(pending.clone());
+    state::save_state(account, state)?;
+    while pending.next_chunk < chunks.len() {
+        let index = pending.next_chunk;
+        bridge::send_reply_chunk(client, token, base_url, &pending.to_user_id, &pending.context_token, &chunks[index], &pending.client_ids[index]).await?;
+        pending.next_chunk += 1;
+        state.pending = Some(pending.clone());
+        state::save_state(account, state)?;
+    }
+    if !pending.message_id.is_empty() {
+        if !state.seen.iter().any(|id| id == &pending.message_id) {
+            state.seen.push(pending.message_id.clone());
+            state.seen.truncate(4096);
+        }
+    }
+    state.pending = None;
+    state::save_state(account, state)?;
+    Ok(())
+}
+
 pub fn normalize_base_url(value: &str) -> Result<String> {
     let url = reqwest::Url::parse(value.trim()).map_err(|e| anyhow!("invalid ClawBot base URL: {e}"))?;
-    if url.scheme() != "https" || url.host_str().is_none() || (url.path() != "/" && !url.path().is_empty()) || url.query().is_some() || url.fragment().is_some() { bail!("ClawBot base URL must be an HTTPS origin") }
+    if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || (url.path() != "/" && !url.path().is_empty()) || url.query().is_some() || url.fragment().is_some() { bail!("ClawBot base URL must be an HTTPS origin") }
     Ok(value.trim().trim_end_matches('/').to_owned())
+}
+
+fn mark_seen(seen: &mut VecDeque<String>, state: &mut state::BridgeState, id: &str) {
+    seen.push_back(id.to_owned());
+    if seen.len() > 4096 { seen.pop_front(); }
+    state.seen = seen.iter().cloned().collect();
 }
 
 pub fn check_envelope(value: &serde_json::Value) -> Result<()> {
@@ -51,15 +149,16 @@ pub fn check_envelope(value: &serde_json::Value) -> Result<()> {
 }
 
 pub fn split_utf8(value: &str, max: usize) -> Vec<String> {
-    let mut out = Vec::new(); let mut rest = value;
-    while rest.len() > max { let mut end = max; while !rest.is_char_boundary(end) { end -= 1; } out.push(rest[..end].to_owned()); rest = &rest[end..]; }
+    let mut out = Vec::new(); let mut rest = value; let max = max.max(1);
+    while rest.len() > max { let mut end = max; while end > 0 && !rest.is_char_boundary(end) { end -= 1; } if end == 0 { end = rest.char_indices().nth(1).map_or(rest.len(), |(index, _)| index); } out.push(rest[..end].to_owned()); rest = &rest[end..]; }
     if !rest.is_empty() { out.push(rest.to_owned()); } if out.is_empty() { out.push(String::new()); } out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn validates_origins() { assert!(normalize_base_url("https://example.test").is_ok()); assert!(normalize_base_url("http://example.test").is_err()); }
+    #[test] fn validates_origins() { assert!(normalize_base_url("https://example.test").is_ok()); assert!(normalize_base_url("http://example.test").is_err()); assert!(normalize_base_url("https://user@example.test").is_err()); }
     #[test] fn chunks_on_utf8_boundaries() { let chunks = split_utf8("a🙂b", 4); assert_eq!(chunks, vec!["a", "🙂", "b"]); }
+    #[test] fn chunks_make_progress_below_codepoint_size() { assert_eq!(split_utf8("🙂", 1), vec!["🙂"]); assert_eq!(split_utf8("🙂", 0), vec!["🙂"]); }
     #[test] fn validates_ret() { assert!(check_envelope(&serde_json::json!({"ret":0})).is_ok()); assert!(check_envelope(&serde_json::json!({"ret":1})).is_err()); }
 }

@@ -40,6 +40,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
 | `scv-server` | Configuration, session lifecycle, protocol dispatch, cancellation, approval routing, and stdout event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approval prompts, and the stdio client. |
+| `scv-clawbot` | WeChat iLink authentication, polling, durable delivery state, and daemon-session adapter. |
 | root `scv` package | Installable `scv` and `scv-server` binaries. |
 
 Dependencies point inward: binaries and UI depend on the server/client
@@ -47,6 +48,11 @@ interfaces; the server depends on core, tools, provider, and protocol; tools and
 providers depend on core; core contains no concrete transport, provider, tool,
 server, or TUI dependency; and the protocol package stays dependency-light. No
 core package imports TUI code.
+
+`scv-clawbot` is an external-client adapter. It speaks the versioned protocol
+over the Unix-socket daemon, using one long-lived session per remote sender.
+Session policy, history, queueing, cancellation, and approvals remain
+authoritative in `scv-server`.
 
 ## Runtime topology
 
