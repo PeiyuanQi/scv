@@ -57,11 +57,14 @@ scv-tui = { version = "0.1.0", path = "crates/scv-tui" }
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+dirs.workspace = true
 scv-server.workspace = true
 scv-tui.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 uuid.workspace = true
 tracing-subscriber.workspace = true
 
