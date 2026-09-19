@@ -53,32 +53,33 @@ cargo publish --locked -p scv-tui
 cargo publish --locked -p scv-cli
 ```
 
-The server is a long-running JSONL backend. Keep it attached to a supervisor
-such as systemd; the checked-in [`scv-server.service`](scv-server.service)
-unit is a starting point:
+The server is a JSONL backend for local clients. It is normally started by the
+TUI or by an embedding client and is not the user-facing daemon:
 
 ```bash
-install -Dm644 scv-server.service ~/.config/systemd/user/scv-server.service
-systemctl --user daemon-reload
-systemctl --user enable --now scv-server.service
-journalctl --user -u scv-server.service -f
+scv server --stdio
 ```
 
-The stdio protocol is intentionally local and one-session-per-connection. A
-remote client should use SSH or a small authenticated stdio proxy rather than
-exposing the raw server socket.
+The stdio protocol is intentionally local and one-session-per-connection.
 
-## ClawBot / WeChat iLink
+## Daemon and ClawBot / WeChat iLink
 
-ClawBot uses WeChat's iLink HTTP API: QR login, then `POST /ilink/bot/getupdates`
-long-polling and `POST /ilink/bot/sendmessage`. Incoming messages include a
-`context_token`; replies must echo that token. The SCV integration boundary is
-therefore an adapter that maps each inbound text message to `session.start` and
-`turn.start`, forwards the final assistant response to `sendmessage`, and
-resolves approvals through a trusted local operator channel. The `scv clawbot`
-command provides the polling and reply adapter. Credentials are the
-`bot_token`, `ilink_bot_id`, `ilink_user_id`, and returned `baseurl` from the
-official QR status API; do not put them in project configuration or logs.
+SCV has one long-running daemon. Run it attached to the terminal with
+`scv run --workspace /path/to/workspace`, or let the user service supervise the
+same process:
+
+```bash
+scv start --workspace /path/to/workspace
+scv status
+scv restart --workspace /path/to/workspace
+scv stop
+```
+
+Authenticate the WeChat ClawBot bridge once with `scv clawbot login`. The QR
+login stores the bearer token at `$SCV_HOME/clawbot.toml` (normally
+`~/.scv/clawbot.toml`) with mode `0600`; the token is never printed. The
+foreground and supervised daemon both use that saved credential. Remove it
+with `scv clawbot logout`. See the [ClawBot design and API contract](docs/clawbot.md).
 
 ## Quick start
 
