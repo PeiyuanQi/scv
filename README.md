@@ -39,6 +39,25 @@ cargo build --release --locked
 The package installs two binaries: `scv` and the standalone protocol entry
 point `scv-server`.
 
+Update an installed SCV binary from crates.io with:
+
+```bash
+scv update
+```
+
+The registry index can be selected in `~/.scv/config.toml`:
+
+```toml
+[update]
+index_url = "https://mirrors.ustc.edu.cn/crates.io-index"
+```
+
+`SCV_CARGO_INDEX_URL` or `scv update --index-url URL` can override that value.
+SCV passes the URL to Cargo and does not handle registry credentials itself.
+When the user-level daemon is active, the update command restarts it after the
+new binary is installed. Connected TUI clients automatically reconnect and
+create a fresh session.
+
 To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):

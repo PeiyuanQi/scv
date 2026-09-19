@@ -137,6 +137,18 @@ or grants privileges. A non-interactive start without verified sudo
 authorization fails so unattended jobs do not silently run with reduced
 capability.
 
+The updater reads an optional Cargo registry index from the user configuration:
+
+```toml
+[update]
+index_url = "https://mirrors.ustc.edu.cn/crates.io-index"
+```
+
+`SCV_CARGO_INDEX_URL` and `scv update --index-url URL` override the configured
+value in that order. Project configuration cannot select an update registry.
+SCV passes the URL to Cargo, which remains responsible for registry
+authentication and downloads.
+
 Project configuration may make policy stricter but not weaker than user
 configuration. A command-line flag may weaken policy because it is an explicit
 choice for that invocation.

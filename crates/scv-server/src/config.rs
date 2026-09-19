@@ -21,6 +21,7 @@ pub struct Config {
     pub tools: ToolConfig,
     pub protocol: ProtocolConfig,
     pub tui: TuiConfig,
+    pub update: UpdateConfig,
     pub provider_limits: ProviderLimitsFile,
     pub skills: SkillsConfig,
     pub agents: AgentsConfig,
@@ -38,6 +39,13 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     pub timeout_seconds: u64,
     pub headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateConfig {
+    /// Optional Cargo registry index URL used by `scv update`.
+    pub index_url: Option<String>,
 }
 
 
@@ -617,7 +625,7 @@ fn validate_project_keys(value: &toml::Value) -> Result<()> {
     let Some(table) = value.as_table() else {
         bail!("project configuration must be a TOML table");
     };
-    for forbidden in ["provider", "providers", "provider_active", "agents"] {
+    for forbidden in ["provider", "providers", "provider_active", "agents", "update"] {
         if table.contains_key(forbidden) {
             bail!("project configuration cannot set [{forbidden}]");
         }

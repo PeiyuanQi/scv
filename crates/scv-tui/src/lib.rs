@@ -51,7 +51,7 @@ pub async fn run_tui(cwd: &Path, options: LaunchOptions) -> Result<()> {
     let (mut client, session) = Client::connect(cwd, &options).await?;
     let mut terminal = TerminalGuard::enter()?;
     let mut app = App::new(session);
-    let result = run_event_loop(&mut terminal.terminal, &mut client, &mut app).await;
+    let result = run_event_loop(&mut terminal.terminal, &mut client, &mut app, cwd, &options).await;
     client.shutdown().await;
     result
 }
@@ -520,6 +520,30 @@ impl App {
         self.follow_output = true;
     }
 
+    fn reconnect(&mut self, session: SessionInfo) {
+        self.session_id = session.id;
+        self.cwd = session.cwd;
+        self.model = session.model;
+        self.context_max_tokens = session.context_max_tokens;
+        self.max_items = session.max_transcript_items;
+        self.max_items_bytes = session.max_transcript_bytes;
+        self.max_prompt_history_items = session.max_prompt_history_items;
+        self.max_prompt_history_bytes = session.max_prompt_history_bytes;
+        self.context_after_tokens = None;
+        self.history_bytes = None;
+        self.running = false;
+        self.active_turn = None;
+        self.started_at = None;
+        self.pending_approval = None;
+        self.queue.clear();
+        self.queue_paused = false;
+        self.queue_editing = None;
+        self.queue_selected = None;
+        self.last_seq = 0;
+        self.connected = true;
+        self.push_item(TranscriptItem::System("Reconnected to the SCV server after restart.".into()));
+    }
+
     fn add_prompt_history(&mut self, prompt: String) {
         if prompt.len() > self.max_prompt_history_bytes {
             return;
@@ -793,9 +817,12 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     client: &mut Client,
     app: &mut App,
+    cwd: &Path,
+    options: &LaunchOptions,
 ) -> Result<()> {
     let mut terminal_events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
+    let mut reconnect_after = Instant::now();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     loop {
@@ -804,12 +831,28 @@ async fn run_event_loop(
             return Ok(());
         }
         tokio::select! {
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                if !app.connected && Instant::now() >= reconnect_after {
+                    reconnect_after = Instant::now() + Duration::from_secs(1);
+                    if let Ok((new_client, session)) = Client::connect(cwd, options).await {
+                        *client = new_client;
+                        app.reconnect(session);
+                    }
+                }
+            }
             _ = terminate.recv() => app.quit = true,
             _ = hangup.recv() => app.quit = true,
             terminal_event = terminal_events.next() => {
                 match terminal_event {
-                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => handle_key(client, app, key).await?,
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        if app.connected {
+                            handle_key(client, app, key).await?
+                        } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('c')
+                        {
+                            app.quit = true;
+                        }
+                    }
                     Some(Ok(Event::Resize(_, _))) => {},
                     Some(Ok(_)) => {},
                     Some(Err(error)) => return Err(error.into()),
@@ -817,14 +860,15 @@ async fn run_event_loop(
                 }
             }
             server_event = client.read_event(), if app.connected => {
-                match server_event? {
-                    Some(event) => app.handle_server_event(event),
-                    None => {
+                match server_event {
+                    Ok(Some(event)) => app.handle_server_event(event),
+                    Ok(None) | Err(_) => {
                         app.push_item(TranscriptItem::Error("Server disconnected. Press Ctrl+C to exit.".into()));
                         app.running = false;
                         app.active_turn = None;
                         app.pending_approval = None;
                         app.connected = false;
+                        reconnect_after = Instant::now();
                     }
                 }
             }

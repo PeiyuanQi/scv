@@ -18,6 +18,9 @@ use async_trait::async_trait;
 use config::Config;
 pub use config::{ApprovalPolicy, ConfigOverrides};
 pub fn init_user_config() -> anyhow::Result<std::path::PathBuf> { config::Config::init_user_config() }
+pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<String>> {
+    Ok(config::Config::load(workspace, ConfigOverrides::default())?.update.index_url)
+}
 use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
     EventSink, Message, ToolRegistry, ToolRisk,

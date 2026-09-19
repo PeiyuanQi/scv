@@ -118,6 +118,12 @@ modify sudoers or elevate the daemon itself. A start without verified sudo
 authorization is confirmed interactively, or rejected when no terminal is
 available.
 
+`scv update` installs the latest CLI from the configured Cargo index and
+restarts an active user daemon through systemd. The socket closes as the old
+process exits; TUI clients retry the socket and establish a new session after
+the replacement daemon is ready. Session transcript and queued work are
+client-local and are not promised to survive an upgrade.
+
 ## Agent loop
 
 For each user turn, the server-owned session performs this sequence:

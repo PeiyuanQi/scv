@@ -108,7 +108,9 @@ Queue size and prompt bytes are server-configured limits. Enqueueing beyond a
 limit fails without losing the composer input. `session.clear` clears queued
 prompts as well as history, and a session can be paused to prevent automatic
 dequeue while preserving its queue. Queue state is retained while the local
-server is running but is not durable across a server restart in v0.2.
+server is running but is not durable across a server restart. When the daemon
+is upgraded or restarted, the TUI retries the Unix socket and creates a fresh
+session; the prior queue and active turn are not replayed.
 
 ## Commands and overlays
 

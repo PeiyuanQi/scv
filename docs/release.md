@@ -29,6 +29,11 @@ prerequisites, provider configuration, source build, binary usage, safety
 limits, extension entry points, development checks, architecture links,
 contribution guidance, and license information.
 
+Installed clients can update with `scv update`. The command uses crates.io by
+default, accepts a Cargo index override through `[update].index_url`,
+`SCV_CARGO_INDEX_URL`, or `--index-url`, and restarts an active user daemon
+after installation. Existing TUI clients reconnect and start a new session.
+
 ## Compatibility policy
 
 - The stdio protocol is versioned independently from the crate version.

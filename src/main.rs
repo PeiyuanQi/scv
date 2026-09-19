@@ -61,6 +61,12 @@ enum Command {
         #[arg(long, default_value_t = true)]
         stdio: bool,
     },
+    /// Install the latest SCV release from crates.io or a configured mirror.
+    Update {
+        /// Cargo registry index URL, overriding `[update].index_url` and `SCV_CARGO_INDEX_URL`.
+        #[arg(long, value_name = "URL")]
+        index_url: Option<String>,
+    },
     /// Connect a SCV workspace to a WeChat ClawBot/iLink account.
     Clawbot {
         #[command(subcommand)]
@@ -160,6 +166,7 @@ async fn main() -> Result<()> {
         Command::Stop => daemon_control("stop", None, cli.approval_policy, false),
         Command::Restart { workspace, allow_sudo } => daemon_control("restart", Some(&workspace), cli.approval_policy, allow_sudo),
         Command::Status => daemon_control("status", None, cli.approval_policy, false),
+        Command::Update { index_url } => update_cli(&cwd, index_url),
         Command::Clawbot { command, base_url } => match command.unwrap_or(ClawbotCommand::Login { account: "default".into(), login_url: base_url }) {
             ClawbotCommand::Login { account, login_url } => scv_clawbot::login(&login_url, &account).await,
             ClawbotCommand::Run { account, workspace } => clawbot_run(&account, &workspace).await,
@@ -168,6 +175,44 @@ async fn main() -> Result<()> {
         },
         Command::ClawbotLogin { login_url } => scv_clawbot::login(&login_url, "default").await,
     }
+}
+
+fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<()> {
+    let configured = scv_server::update_index_url(workspace)?;
+    let index_url = index_url
+        .or_else(|| std::env::var("SCV_CARGO_INDEX_URL").ok())
+        .or(configured);
+    let mut cargo = ProcessCommand::new("cargo");
+    cargo.args(["install", "--locked", "--force"]);
+    if let Some(index_url) = index_url.as_deref() {
+        cargo.args(["--index", index_url]);
+        println!("Updating SCV from Cargo index {index_url}");
+    } else {
+        println!("Updating SCV from crates.io");
+    }
+    cargo.arg("scv-cli");
+    let status = cargo.status().context("run cargo install for scv-cli")?;
+    if !status.success() {
+        bail!("SCV update failed while installing scv-cli");
+    }
+
+    let active = ProcessCommand::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "scv.service"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if active {
+        let status = ProcessCommand::new("systemctl")
+            .args(["--user", "restart", "scv.service"])
+            .status()
+            .context("restart SCV daemon after update")?;
+        if !status.success() {
+            bail!("SCV updated, but restarting scv.service failed");
+        }
+        println!("SCV updated and the running daemon was restarted; clients can reconnect.");
+    } else {
+        println!("SCV updated. No active user daemon was found to restart.");
+    }
+    Ok(())
 }
 
 fn service_path() -> Result<PathBuf> {
