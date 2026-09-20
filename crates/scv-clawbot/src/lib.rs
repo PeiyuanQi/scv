@@ -324,7 +324,15 @@ async fn run_loop(
 }
 
 fn validate_updates(value: &Value) -> Result<()> {
-    check_envelope(value)?;
+    // Current iLink getupdates responses omit `ret` on success, while error
+    // responses and older servers use the common envelope. Accept both forms.
+    if value.get("ret").is_some() || value.get("errcode").is_some() {
+        check_envelope(value)?;
+    } else if !value.get("msgs").is_some_and(Value::is_array)
+        || !value.get("get_updates_buf").is_some_and(Value::is_string)
+    {
+        bail!("iLink updates response omitted success fields")
+    }
     if value
         .get("msgs")
         .and_then(Value::as_array)
@@ -516,5 +524,28 @@ mod tests {
     fn validates_ret() {
         assert!(check_envelope(&serde_json::json!({"ret":0})).is_ok());
         assert!(check_envelope(&serde_json::json!({"ret":1})).is_err());
+    }
+
+    #[test]
+    fn accepts_live_getupdates_success_without_ret() {
+        assert!(
+            validate_updates(&serde_json::json!({
+                "msgs": [],
+                "sync_buf": "sync",
+                "get_updates_buf": "cursor"
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_getupdates_error_without_ret() {
+        assert!(
+            validate_updates(&serde_json::json!({
+                "errcode": -14,
+                "errmsg": "session timeout"
+            }))
+            .is_err()
+        );
     }
 }

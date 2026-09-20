@@ -164,7 +164,7 @@ async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
         respond(
             &mut stream,
             "200 OK",
-            &json!({"ret":0,"msgs":[inbound()],"get_updates_buf":"next"}).to_string(),
+            &json!({"msgs":[inbound()],"sync_buf":"sync","get_updates_buf":"next"}).to_string(),
             "",
         )
         .await;

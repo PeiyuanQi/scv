@@ -105,8 +105,11 @@ out. Confirmation must provide `bot_token`, `ilink_bot_id`, and
 
 Authenticated calls use JSON, `AuthorizationType: ilink_bot_token`, bearer
 authorization, and a fresh `X-WECHAT-UIN` containing base64 of a random `u32`.
-Bodies include `base_info.channel_version = "1.0.0"`. `ret != 0`, `errcode`,
-and `errmsg` are validated and converted to redacted bridge errors.
+Bodies include `base_info.channel_version = "1.0.0"`. Error responses with
+`ret != 0` or a non-zero `errcode` are converted to redacted bridge errors.
+Successful `getupdates` responses from the live iLink API omit `ret` and are
+accepted only when they contain an array `msgs` field and a string
+`get_updates_buf` cursor.
 
 `POST /ilink/bot/getupdates` long-polls with the opaque `get_updates_buf`
 cursor. Only inbound user text messages with sender ID, message ID, context
