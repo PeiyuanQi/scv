@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.10`, with exact `=0.1.10` pins for dependencies
+All packages use version `0.1.11`, with exact `=0.1.11` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -101,6 +101,21 @@ scv reload
 scv restart --workspace /path/to/workspace
 scv stop
 ```
+
+Each SCV instance owns an explicit profile root. Use `--scv-home PATH` (or
+`SCV_HOME`) to run independent daemons with separate provider/model settings,
+sockets, credentials, skills, ClawBot state, and systemd units:
+
+```bash
+scv --scv-home ~/.scv/work --model gpt-4.1-mini start --workspace /path/to/workspace
+scv --scv-home ~/.scv/review --model o4-mini start --workspace /path/to/workspace
+scv --scv-home ~/.scv/work status
+```
+
+`--config PATH` (or `SCV_CONFIG`) selects an additional explicit configuration
+file for that instance. The selected home and config are persisted into the
+instance's service unit, so a restart does not fall back to the default
+`~/.scv` configuration. `scv update` restarts only the selected instance.
 
 Daemon starts use the server's `on-risk` approval policy by default. Pass
 `--approval-policy always` or `--approval-policy never` before `start` or
@@ -226,7 +241,11 @@ the initial prompt; the model loads full instructions through the contained
 The built-in `agent_claude`, `agent_codex`, and `agent_pi` tools launch those
 installed CLIs directly, without shell interpolation. They are optional,
 approval-gated, cancellable subprocess adapters and share the same output and
-timeout limits as other process tools.
+timeout limits as other process tools. Each adapter receives an instance-private
+`HOME`, `SCV_HOME`, XDG directories, and (for Codex) `CODEX_HOME` under
+`$SCV_HOME/adapters/<name>`. SCV never reuses or modifies the user's normal
+`~/.codex` configuration. Authenticate a Codex adapter separately in its
+instance directory when needed.
 
 ## Architecture
 

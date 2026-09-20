@@ -61,6 +61,11 @@ The tools `agent_claude`, `agent_codex`, and `agent_pi` share this schema:
 
 Each tool resolves only its configured executable and fixed argument vector,
 appends the prompt as one argument, and starts it directly in the workspace.
+Native adapters receive an instance-private `HOME`, `SCV_HOME`, and XDG
+configuration/data/state directory, plus `CODEX_HOME` for Codex. SCV selector
+variables are removed so a nested Codex process cannot reuse the parent
+instance's configuration. The `bash` tool retains the normal inherited
+environment for compatibility.
 The model cannot supply flags or a different executable. Output, timeout,
 cancellation, and process-group behavior match `bash`. Adapter execution has
 delegate risk because the child agent may independently read, write, run
@@ -78,6 +83,12 @@ Before approval, SCV resolves the executable through the server environment
 and displays its absolute path, full fixed argument vector, bounded prompt,
 workspace, and delegate-risk warning. Project configuration cannot replace the
 executable or arguments.
+
+Adapter processes use instance-private state directories under
+`$SCV_HOME/adapters/<name>`. In particular, `agent_codex` receives
+`CODEX_HOME=$SCV_HOME/adapters/codex` and does not read the user's normal
+`~/.codex` state. Run Codex authentication separately with that `CODEX_HOME`
+when the adapter requires it.
 
 A fake executable verifies native-agent argument boundaries and workspace
 selection without requiring these CLIs in CI. Shared process-runner tests cover

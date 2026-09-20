@@ -17,7 +17,8 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use config::Config;
-pub use config::{ApprovalPolicy, ConfigOverrides};
+pub use config::{ApprovalPolicy, ConfigOverrides, user_home_path};
+use sha2::{Digest, Sha256};
 pub fn init_user_config() -> anyhow::Result<std::path::PathBuf> {
     config::Config::init_user_config()
 }
@@ -25,6 +26,26 @@ pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<St
     Ok(config::Config::load(workspace, ConfigOverrides::default())?
         .update
         .index_url)
+}
+
+/// Return the user service name for the selected SCV instance.
+pub fn service_name() -> anyhow::Result<String> {
+    if std::env::var_os("SCV_HOME").is_none() {
+        return Ok("scv.service".into());
+    }
+    let home = user_home_path().ok_or_else(|| anyhow!("cannot determine SCV instance home"))?;
+    let digest = Sha256::digest(home.to_string_lossy().as_bytes());
+    let suffix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("scv-{suffix}.service"))
+}
+
+pub fn service_unit_path() -> anyhow::Result<std::path::PathBuf> {
+    let config =
+        dirs::config_dir().ok_or_else(|| anyhow!("cannot determine XDG config directory"))?;
+    Ok(config.join("systemd/user").join(service_name()?))
 }
 use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
@@ -1006,6 +1027,9 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
     }
     let no_tools = overrides.no_tools;
     let config = Config::load(&workspace, overrides)?;
+    if !no_tools {
+        config.prepare_adapter_homes()?;
+    }
     let provider_config = config.provider.clone();
     let api_key = provider_config.api_key.clone().or_else(|| {
         provider_config.api_key_env.as_deref().and_then(|name| std::env::var(name).ok())

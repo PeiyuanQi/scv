@@ -75,7 +75,7 @@ The integration dependency chain is `server -> clawbot -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
 on core; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.10` and exact workspace dependency pins.
+`0.1.11` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
@@ -213,6 +213,22 @@ containment under the configured skill roots. A skill does not gain authority
 beyond the tools and approvals available to the session.
 
 ## Provider boundary
+
+### Instance configuration boundary
+
+An SCV process owns one immutable instance root selected by `--scv-home` or
+`SCV_HOME` (default `~/.scv`). The root is the namespace for configuration,
+socket, service unit identity, skills, credentials, ClawBot state, and nested
+adapter state. `--config`/`SCV_CONFIG` selects an explicit additional config
+layer for that instance. Custom roots never fall back to the default user
+configuration, allowing forked SCV processes to choose different providers and
+models without sharing mutable state. The systemd launcher persists the
+selectors and `scv update` restarts only the selected instance.
+
+Native agent adapters receive a derived private home under
+`<instance>/adapters/<name>`. Codex receives the matching `CODEX_HOME`; SCV
+also removes SCV selector variables from the child environment. This prevents
+an SCV adapter from reusing or changing the user's normal Codex configuration.
 
 The built-in provider uses the OpenAI-compatible `/responses` endpoint and
 function-tool schema. It assembles streamed tool-call arguments and validates

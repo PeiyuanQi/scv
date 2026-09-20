@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{collections::HashMap, ffi::OsString, io::Write, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use scv_core::{AgentConfig as CoreAgentConfig, ContextConfig, HistoryLimits};
@@ -25,6 +25,9 @@ pub struct Config {
     pub provider_limits: ProviderLimitsFile,
     pub skills: SkillsConfig,
     pub agents: AgentsConfig,
+    /// The process-owned root used for sockets, credentials, skills, and adapters.
+    #[serde(skip)]
+    pub instance_home: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,14 +73,34 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("cannot determine user config path"))?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("create config directory")?;
+            ensure_private_dir(parent)?;
         }
+        let content = "[provider]\nactive = \"openai\"\n\n[providers.openai]\nkind = \"openai-compatible\"\nmodel = \"gpt-4.1-mini\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n";
         if !path.exists() {
-            std::fs::write(&path, "[provider]\nactive = \"openai\"\n\n[providers.openai]\nkind = \"openai-compatible\"\nmodel = \"gpt-4.1-mini\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n").context("write example configuration")?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("configuration path has no parent"))?;
+            let mut temporary = tempfile::NamedTempFile::new_in(parent)
+                .context("create temporary example configuration")?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                    .context("secure config file")?;
+                temporary
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .context("secure temporary configuration")?;
+            }
+            temporary
+                .write_all(content.as_bytes())
+                .context("write example configuration")?;
+            temporary
+                .as_file()
+                .sync_all()
+                .context("sync example configuration")?;
+            match temporary.persist(&path) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.error).context("install example configuration"),
             }
         }
         Ok(path)
@@ -329,6 +352,10 @@ pub struct ConfigOverrides {
 
 impl Config {
     pub fn load(workspace: &std::path::Path, overrides: ConfigOverrides) -> Result<Self> {
+        let instance_home = user_home_path()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine SCV instance home"))?;
+        std::fs::create_dir_all(&instance_home).context("create SCV instance home")?;
+        ensure_private_dir(&instance_home)?;
         let mut value: toml::Value = toml::from_str(
             &toml::to_string(&Self::default()).context("serialize default configuration")?,
         )?;
@@ -371,6 +398,13 @@ impl Config {
 
         if let Some(explicit) = std::env::var_os("SCV_CONFIG") {
             let path = PathBuf::from(explicit);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&path)?.permissions().mode() & 0o077 != 0 {
+                    bail!("explicit configuration is readable by group or others; run chmod 600");
+                }
+            }
             merge(&mut value, read_layer(&path)?);
         }
         let mut config: Self = value.try_into().context("parse merged configuration")?;
@@ -403,6 +437,7 @@ impl Config {
             config.skills.user_dir = PathBuf::from(home).join("skills");
         }
         config.skills.user_dir = expand_home(&config.skills.user_dir);
+        config.instance_home = instance_home;
         config.validate()?;
         Ok(config)
     }
@@ -446,15 +481,52 @@ impl Config {
         ]
         .into_iter()
         .map(|(name, config)| {
+            let adapter_name = name.strip_prefix("agent_").unwrap_or(name);
+            let adapter_home = self.instance_home.join("adapters").join(adapter_name);
+            let mut environment = vec![
+                (OsString::from("SCV_HOME"), adapter_home.clone().into()),
+                (OsString::from("HOME"), adapter_home.clone().into()),
+                (
+                    OsString::from("XDG_CONFIG_HOME"),
+                    adapter_home.join("config").into(),
+                ),
+                (
+                    OsString::from("XDG_DATA_HOME"),
+                    adapter_home.join("data").into(),
+                ),
+                (
+                    OsString::from("XDG_STATE_HOME"),
+                    adapter_home.join("state").into(),
+                ),
+            ];
+            if adapter_name == "codex" {
+                environment.push((OsString::from("CODEX_HOME"), adapter_home.clone().into()));
+            }
             (
                 name.to_owned(),
                 AgentAdapterConfig {
                     command: config.command.clone(),
                     args: config.args.clone(),
+                    environment,
                 },
             )
         })
         .collect()
+    }
+
+    pub fn prepare_adapter_homes(&self) -> Result<()> {
+        for name in ["claude", "codex", "pi"] {
+            let path = self.instance_home.join("adapters").join(name);
+            std::fs::create_dir_all(&path)
+                .with_context(|| format!("create isolated {name} adapter home"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("secure isolated {name} adapter home"))?;
+            }
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
@@ -627,10 +699,30 @@ impl Config {
 }
 
 fn user_config_path() -> Option<PathBuf> {
-    std::env::var_os("SCV_HOME")
+    user_home_path().map(|path| path.join("config.toml"))
+}
+
+pub fn user_home_path() -> Option<PathBuf> {
+    let path = std::env::var_os("SCV_HOME")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))
-        .map(|path| path.join("config.toml"))
+        .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))?;
+    if path.exists() {
+        Some(std::fs::canonicalize(path.clone()).unwrap_or(path))
+    } else if path.is_absolute() {
+        Some(path)
+    } else {
+        std::env::current_dir().ok().map(|cwd| cwd.join(path))
+    }
+}
+
+fn ensure_private_dir(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("secure directory {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn read_layer(path: &std::path::Path) -> Result<toml::Value> {
@@ -902,5 +994,23 @@ command = "/tmp/fake"
         let mut config = Config::default();
         config.protocol.max_server_frame_bytes = config.provider_limits.max_assistant_bytes;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn adapters_are_bound_to_the_instance_home() {
+        let config = Config {
+            instance_home: PathBuf::from("/tmp/scv-instance"),
+            ..Config::default()
+        };
+        let adapters = config.adapters();
+        let codex = &adapters["agent_codex"];
+        assert!(codex.environment.contains(&(
+            OsString::from("CODEX_HOME"),
+            OsString::from("/tmp/scv-instance/adapters/codex")
+        )));
+        assert!(codex.environment.contains(&(
+            OsString::from("SCV_HOME"),
+            OsString::from("/tmp/scv-instance/adapters/codex")
+        )));
     }
 }

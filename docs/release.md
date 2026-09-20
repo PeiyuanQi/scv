@@ -2,8 +2,8 @@
 
 Status: final design for v0.1
 
-The current workspace release is `0.1.10`. All crates share that version, and
-dependencies between workspace packages use exact `=0.1.10` pins.
+The current workspace release is `0.1.11`. All crates share that version, and
+dependencies between workspace packages use exact `=0.1.11` pins.
 
 SCV v0.1 supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -39,6 +39,12 @@ binary through Cargo. It restarts an active systemd user daemon after
 installation. A foreground `scv run` daemon requires an explicit restart.
 Existing TUI clients reconnect and start fresh sessions without restoring
 server history or automatically replaying submitted or queued work.
+
+Multiple SCV profiles may run concurrently. Select one with `--scv-home` or
+`SCV_HOME`; each profile has an independent socket, systemd user unit, provider
+configuration, model selection, credentials, ClawBot state, and nested-agent
+state. Custom profile selectors are persisted by `scv start`/`restart`, and
+`scv update` restarts only the selected daemon.
 
 Before enabling supervised ClawBot accounts, stop any `0.1.9` standalone bridge
 processes manually: they do not honor the new account locks. Legacy credentials

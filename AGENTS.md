@@ -63,6 +63,11 @@
 - Keep all crate versions aligned and internal workspace dependency versions
   exactly pinned. Publish in dependency order: core, protocol, client,
   provider-openai, tools, clawbot, server, tui, cli.
+- Treat `SCV_HOME` or `--scv-home` as the instance ownership boundary. Separate
+  profiles must not share sockets, service units, credentials, adapter state,
+  or provider/model configuration. SCV-created native-agent subprocesses must
+  receive instance-private `HOME`/XDG state and Codex state, and must not
+  silently reuse the user's normal Codex configuration.
 - Design cross-cutting changes to the agent loop, protocol, trust boundaries,
   or crate architecture in `docs/` as needed, and review the design while
   implementing it. A reasonable redesign, refactor, or cleanup is encouraged

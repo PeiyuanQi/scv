@@ -18,6 +18,9 @@ interactive starts ask whether to continue and non-interactive starts fail.
   text, command output, and delegated-agent output are untrusted.
 - User configuration and an approval response express policy but are not
   additional filesystem or process isolation.
+- Each SCV instance is isolated by its `SCV_HOME` root. Its socket, service
+  unit, configuration, skills, credentials, ClawBot state, and nested-agent
+  state remain within that profile; custom homes do not fall back to `~/.scv`.
 - Provider credentials are secrets. They remain server-side and are sent only
   to the configured provider endpoint, never to the TUI.
 - Project configuration cannot select the provider endpoint, credential
@@ -51,8 +54,11 @@ Each `agent_*` tool launches only its configured adapter. It uses an executable
 and argument vector without shell interpolation, appends the model-provided
 prompt as one argument, uses the workspace as current directory, applies the
 same timeout/output bounds, kills the process group on cancellation, and
-requires approval. The delegated CLI has the user's full permissions and may
-implement its own tools and approvals.
+requires approval. SCV supplies an instance-private `HOME`, `SCV_HOME`, XDG
+directories, and `CODEX_HOME` for Codex, while removing SCV selector variables
+from the child environment. The delegated CLI still has the user's operating
+system permissions and may implement its own tools and approvals, but it cannot
+silently reuse the user's normal Codex state.
 
 ## Approval behavior
 

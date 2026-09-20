@@ -53,6 +53,8 @@ impl Default for ToolsConfig {
 pub struct AgentAdapterConfig {
     pub command: String,
     pub args: Vec<String>,
+    /// Environment for the nested process. SCV supplies an instance-private home.
+    pub environment: Vec<(OsString, OsString)>,
 }
 
 pub type SkillMap = HashMap<String, PathBuf>;
@@ -488,6 +490,8 @@ impl Tool for BashTool {
                 executable: OsString::from("/bin/bash"),
                 args: vec![OsString::from("-lc"), OsString::from(args.command)],
                 cwd: context.workspace,
+                environment: Vec::new(),
+                sanitize_scv_environment: false,
                 timeout: requested,
                 output_limit: self.output_limit,
             },
@@ -502,6 +506,7 @@ struct NativeAgentTool {
     command: String,
     resolved: Option<PathBuf>,
     args: Vec<String>,
+    environment: Vec<(OsString, OsString)>,
     timeout: Duration,
     output_limit: usize,
 }
@@ -519,6 +524,7 @@ impl NativeAgentTool {
             command: config.command,
             resolved,
             args: config.args,
+            environment: config.environment,
             timeout,
             output_limit,
         }
@@ -598,6 +604,8 @@ impl Tool for NativeAgentTool {
                 executable: executable.as_os_str().to_owned(),
                 args: command_args,
                 cwd: context.workspace,
+                environment: self.environment.clone(),
+                sanitize_scv_environment: true,
                 timeout: requested,
                 output_limit: self.output_limit,
             },
@@ -611,6 +619,8 @@ struct ProcessSpec {
     executable: OsString,
     args: Vec<OsString>,
     cwd: PathBuf,
+    environment: Vec<(OsString, OsString)>,
+    sanitize_scv_environment: bool,
     timeout: Duration,
     output_limit: usize,
 }
@@ -624,10 +634,35 @@ async fn execute_process(
     command
         .args(&spec.args)
         .current_dir(&spec.cwd)
+        .envs(spec.environment)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    if spec.sanitize_scv_environment {
+        for variable in [
+            "SCV_CONFIG",
+            "SCV_MODEL",
+            "SCV_PROVIDER",
+            "SCV_BASE_URL",
+            "SCV_API_KEY_ENV",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT_ID",
+            "CODEX_API_KEY",
+            "CODEX_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "AZURE_OPENAI_API_KEY",
+            "AZURE_OPENAI_ENDPOINT",
+        ] {
+            command.env_remove(variable);
+        }
+    }
     command.as_std_mut().process_group(0);
     let mut child = command
         .spawn()
@@ -1153,6 +1188,7 @@ mod tests {
             AgentAdapterConfig {
                 command: executable.display().to_string(),
                 args: vec!["--fixed".into()],
+                environment: Vec::new(),
             },
             Duration::from_secs(2),
             1024,
@@ -1174,5 +1210,53 @@ mod tests {
                 .content
                 .contains(&workspace.path().display().to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn native_agent_uses_instance_private_environment() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = workspace.path().join("private-home");
+        let executable = workspace.path().join("fake-agent");
+        std::fs::write(
+            &executable,
+            "#!/bin/bash\nprintf 'HOME=%s\\nSCV_HOME=%s\\nCODEX_HOME=%s\\nSCV_CONFIG=%s\\nOPENAI_API_KEY=%s\\nCODEX_API_KEY=%s\\n' \"$HOME\" \"$SCV_HOME\" \"$CODEX_HOME\" \"${SCV_CONFIG-unset}\" \"${OPENAI_API_KEY-unset}\" \"${CODEX_API_KEY-unset}\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let tool = NativeAgentTool::new(
+            "agent_codex".into(),
+            AgentAdapterConfig {
+                command: executable.display().to_string(),
+                args: Vec::new(),
+                environment: vec![
+                    ("HOME".into(), home.clone().into()),
+                    ("SCV_HOME".into(), home.clone().into()),
+                    ("CODEX_HOME".into(), home.join("codex").into()),
+                ],
+            },
+            Duration::from_secs(2),
+            1024,
+        );
+        let output = tool
+            .execute(
+                json!({"prompt":"print environment"}),
+                ToolContext {
+                    workspace: workspace.path().canonicalize().unwrap(),
+                    cancellation: tokio_util::sync::CancellationToken::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(output.content.contains(&format!("HOME={}", home.display())));
+        assert!(
+            output
+                .content
+                .contains(&format!("CODEX_HOME={}/codex", home.display()))
+        );
+        assert!(output.content.contains("SCV_CONFIG=unset"));
+        assert!(output.content.contains("OPENAI_API_KEY=unset"));
+        assert!(output.content.contains("CODEX_API_KEY=unset"));
     }
 }

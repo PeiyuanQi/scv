@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use scv_protocol::{DaemonCommand, DaemonStatus};
 use scv_server::{ApprovalPolicy, ConfigOverrides};
@@ -10,6 +10,12 @@ use std::process::{Command as ProcessCommand, Stdio};
 #[derive(Parser)]
 #[command(name = "scv", version, about = "SCV — Search, Construct, Verify")]
 struct Cli {
+    /// Isolated SCV instance root. `SCV_HOME` remains supported for scripts.
+    #[arg(long, global = true, value_name = "PATH", env = "SCV_HOME")]
+    scv_home: Option<PathBuf>,
+    /// Explicit configuration file for this SCV instance.
+    #[arg(long, global = true, value_name = "PATH", env = "SCV_CONFIG")]
+    config_path: Option<PathBuf>,
     #[arg(long, global = true)]
     model: Option<String>,
     #[arg(long, global = true)]
@@ -142,6 +148,7 @@ impl From<ApprovalArg> for ApprovalPolicy {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
+    apply_process_config(cli.scv_home.as_deref(), cli.config_path.as_deref(), &cwd)?;
     let launch = LaunchOptions {
         model: cli.model.clone(),
         provider: cli.provider.clone(),
@@ -190,12 +197,28 @@ async fn main() -> Result<()> {
         Command::Start {
             workspace,
             allow_sudo,
-        } => daemon_control("start", Some(&workspace), cli.approval_policy, allow_sudo),
-        Command::Stop => daemon_control("stop", None, cli.approval_policy, false),
+        } => daemon_control(
+            "start",
+            Some(&workspace),
+            cli.approval_policy,
+            cli.provider.as_deref(),
+            cli.model.as_deref(),
+            cli.base_url.as_deref(),
+            allow_sudo,
+        ),
+        Command::Stop => daemon_control("stop", None, None, None, None, None, false),
         Command::Restart {
             workspace,
             allow_sudo,
-        } => daemon_control("restart", Some(&workspace), cli.approval_policy, allow_sudo),
+        } => daemon_control(
+            "restart",
+            Some(&workspace),
+            cli.approval_policy,
+            cli.provider.as_deref(),
+            cli.model.as_deref(),
+            cli.base_url.as_deref(),
+            allow_sudo,
+        ),
         Command::Status => show_status(None).await,
         Command::Reload => {
             control(DaemonCommand::Reload).await?;
@@ -251,17 +274,20 @@ fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<()> {
         bail!("SCV update failed while installing scv-cli");
     }
 
+    let service = scv_server::service_name()?;
     let active = ProcessCommand::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "scv.service"])
+        .args(["--user", "is-active", "--quiet"])
+        .arg(&service)
         .status()
         .is_ok_and(|status| status.success());
     if active {
         let status = ProcessCommand::new("systemctl")
-            .args(["--user", "restart", "scv.service"])
+            .args(["--user", "restart"])
+            .arg(&service)
             .status()
             .context("restart SCV daemon after update")?;
         if !status.success() {
-            bail!("SCV updated, but restarting scv.service failed");
+            bail!("SCV updated, but restarting {service} failed");
         }
         println!("SCV updated and the running daemon was restarted; clients can reconnect.");
     } else {
@@ -270,15 +296,13 @@ fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn service_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
-    Ok(home.join(".config/systemd/user/scv.service"))
-}
-
 fn daemon_control(
     action: &str,
     workspace: Option<&Path>,
     approval_policy: Option<ApprovalArg>,
+    provider: Option<&str>,
+    model: Option<&str>,
+    base_url: Option<&str>,
     allow_sudo: bool,
 ) -> Result<()> {
     if action == "start" || action == "restart" {
@@ -286,27 +310,49 @@ fn daemon_control(
     }
     if let Some(workspace) = workspace {
         let workspace = std::fs::canonicalize(workspace).context("resolve daemon workspace")?;
-        let path = service_path()?;
+        let service = scv_server::service_name()?;
+        stop_legacy_instance(&service)?;
+        let path = scv_server::service_unit_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let binary = std::env::current_exe()?.display().to_string();
-        let approval = approval_policy
-            .map(|policy| {
-                format!(
-                    " --approval-policy {}",
-                    policy.to_possible_value().expect("value enum").get_name()
-                )
-            })
+        let binary = std::env::current_exe()?;
+        let mut command = vec![
+            systemd_quote(binary.as_os_str()),
+            "run".into(),
+            "--workspace".into(),
+            systemd_quote(workspace.as_os_str()),
+        ];
+        for (flag, value) in [
+            ("--provider", provider),
+            ("--model", model),
+            ("--base-url", base_url),
+        ] {
+            if let Some(value) = value {
+                command.push(flag.into());
+                command.push(systemd_quote(std::ffi::OsStr::new(value)));
+            }
+        }
+        if let Some(policy) = approval_policy {
+            command.push("--approval-policy".into());
+            command.push(systemd_quote(std::ffi::OsStr::new(
+                policy.to_possible_value().expect("value enum").get_name(),
+            )));
+        }
+        let instance_environment = std::env::var_os("SCV_HOME")
+            .map(|home| format!("Environment=SCV_HOME={}\n", systemd_quote(&home)))
+            .unwrap_or_default();
+        let config_environment = std::env::var_os("SCV_CONFIG")
+            .map(|config| format!("Environment=SCV_CONFIG={}\n", systemd_quote(&config)))
             .unwrap_or_default();
         let unit = format!(
-            "[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={} run --workspace {}{}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=default.target\n",
-            workspace.display(),
-            binary,
-            workspace.display(),
-            approval
+            "[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n{}{}\n[Install]\nWantedBy=default.target\n",
+            systemd_quote(workspace.as_os_str()),
+            command.join(" "),
+            instance_environment,
+            config_environment
         );
-        std::fs::write(path, unit).context("write SCV systemd unit")?;
+        write_atomic(&path, unit.as_bytes()).context("write SCV systemd unit")?;
     }
     let status = ProcessCommand::new("systemctl")
         .args(["--user", "daemon-reload"])
@@ -323,10 +369,10 @@ fn daemon_control(
     let mut command = ProcessCommand::new("systemctl");
     command.args(["--user", verb]);
     command.args(extra);
-    command.arg("scv.service");
+    command.arg(scv_server::service_name()?);
     let status = command.status().context("run systemctl")?;
     if !status.success() {
-        bail!("systemctl {action} scv.service failed");
+        bail!("systemctl {action} {} failed", scv_server::service_name()?);
     }
     Ok(())
 }
@@ -376,6 +422,96 @@ fn ensure_sudo_expectation(allow_sudo: bool) -> Result<()> {
         .context("read sudo warning response")?;
     if matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no") {
         bail!("SCV start cancelled because sudo authorization was not verified.");
+    }
+    Ok(())
+}
+
+fn apply_process_config(home: Option<&Path>, config: Option<&Path>, cwd: &Path) -> Result<()> {
+    if let Some(home) = home {
+        let home = absolute_path(home, cwd);
+        std::fs::create_dir_all(&home).context("create SCV instance home")?;
+        let home = std::fs::canonicalize(home).context("resolve SCV instance home")?;
+        // This runs before any SCV async work or child process is started.
+        unsafe { std::env::set_var("SCV_HOME", home) };
+    }
+    if let Some(config) = config {
+        let config = absolute_path(config, cwd);
+        // This runs before any SCV async work or child process is started.
+        unsafe { std::env::set_var("SCV_CONFIG", config) };
+    }
+    Ok(())
+}
+
+fn absolute_path(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn systemd_quote(value: &std::ffi::OsStr) -> String {
+    let value = value.to_string_lossy();
+    format!(
+        "\"{}\"",
+        value
+            .replace('%', "%%")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    )
+}
+
+fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent"))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).context("create temporary systemd unit")?;
+    temporary
+        .write_all(contents)
+        .context("write temporary systemd unit")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("sync temporary systemd unit")?;
+    temporary
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
+        .context("install systemd unit")
+}
+
+fn stop_legacy_instance(service: &str) -> Result<()> {
+    if service == "scv.service" {
+        return Ok(());
+    }
+    let Some(home) = std::env::var_os("SCV_HOME") else {
+        return Ok(());
+    };
+    let expected_home = format!("SCV_HOME={}", PathBuf::from(home).display());
+    let output = ProcessCommand::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            "scv.service",
+            "-p",
+            "Environment",
+            "--value",
+        ])
+        .output()
+        .context("inspect legacy SCV service")?;
+    if output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .any(|entry| entry == expected_home)
+    {
+        let status = ProcessCommand::new("systemctl")
+            .args(["--user", "disable", "--now", "scv.service"])
+            .status()
+            .context("stop legacy SCV service")?;
+        if !status.success() {
+            bail!("failed to stop legacy scv.service for this SCV profile");
+        }
     }
     Ok(())
 }

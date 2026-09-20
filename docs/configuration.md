@@ -4,6 +4,18 @@ Status: final design for v0.1
 
 Run `scv config init` on first use to create the user file from `config.example.toml`. Select a profile with `provider.active` or `--provider`.
 
+An SCV instance is identified by its home root. Use `--scv-home PATH` or
+`SCV_HOME` to isolate a daemon and its configuration from other SCV processes;
+the root owns the config file, socket, skills, ClawBot state, adapter state, and
+systemd unit identity. Use `--config PATH` or `SCV_CONFIG` for an additional
+explicit file. Both selectors are captured before SCV starts its server or
+TUI child. A custom home never merges or falls back to the default `~/.scv`
+file.
+
+For concurrently running daemons, each process must use a different
+`--scv-home` root. A different `--config` file alone does not create a separate
+socket or systemd service identity.
+
 SCV merges configuration in this order, from lowest to highest precedence:
 
 1. built-in defaults;
@@ -159,13 +171,32 @@ SCV v0.1 reads:
 
 - `SCV_HOME` for the user configuration, skills, daemon socket, and ClawBot state
   root (default `~/.scv`);
+- `SCV_CONFIG` for one additional explicit configuration file;
 - `SCV_MODEL`;
 - `SCV_BASE_URL`;
 - `SCV_API_KEY_ENV` (the name of the credential variable, not its value);
-- `SCV_CONFIG` for one additional explicit configuration file;
 - `SCV_CARGO_INDEX_URL` for the update registry;
 - the credential variable named by `provider.api_key_env`;
 - `RUST_LOG` for diagnostics.
+
+For example, two independent daemons can use different models without sharing
+their sockets or settings:
+
+```bash
+scv --scv-home ~/.scv/work --model gpt-4.1-mini start --workspace /repo
+scv --scv-home ~/.scv/review --model o4-mini start --workspace /repo
+```
+
+The default `scv.service` is retained for the default home. Custom homes use a
+stable hashed service name and persist `SCV_HOME`/`SCV_CONFIG` in that unit.
+`scv update` installs the shared binary but restarts only the selected instance.
+
+Native agent adapters run with an instance-private `HOME`, `SCV_HOME`, XDG
+configuration/data/state directories, and `CODEX_HOME` for Codex. They do not
+inherit `SCV_CONFIG`, `SCV_MODEL`, `SCV_PROVIDER`, `SCV_BASE_URL`, or
+`SCV_API_KEY_ENV`, and therefore cannot silently reuse or alter the user's
+normal Codex configuration. Authenticate Codex separately under
+`$SCV_HOME/adapters/codex` when the adapter needs credentials.
 
 Secrets are never included in diagnostics, protocol events, approval summaries,
 or tool results.

@@ -41,10 +41,21 @@ fn successful_install_restarts_active_daemon_after_cargo_finishes() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let mut lines = log.lines();
     assert_eq!(
-        log,
-        "cargo install --locked --force --index https://example.invalid/index scv-cli\nsystemctl --user is-active --quiet scv.service\nsystemctl --user restart scv.service\n"
+        lines.next(),
+        Some("cargo install --locked --force --index https://example.invalid/index scv-cli")
     );
+    let active = lines.next().unwrap();
+    let service = active
+        .strip_prefix("systemctl --user is-active --quiet ")
+        .unwrap();
+    assert!(service.starts_with("scv-") && service.ends_with(".service"));
+    assert_eq!(
+        lines.next(),
+        Some(format!("systemctl --user restart {service}").as_str())
+    );
+    assert!(lines.next().is_none());
 }
 
 #[test]
