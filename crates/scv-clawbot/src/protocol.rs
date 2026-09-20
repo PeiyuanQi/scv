@@ -1,11 +1,14 @@
 //! Protocol client for the single SCV Unix-socket daemon.
 
 use anyhow::{Context, Result, anyhow, bail};
-use scv_protocol::{ClientMessage, PeerInfo, ServerEvent, PROTOCOL_VERSION};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
 use std::path::Path;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixStream, unix::{OwnedReadHalf, OwnedWriteHalf}};
+use tokio::net::{
+    UnixStream,
+    unix::{OwnedReadHalf, OwnedWriteHalf},
+};
 use uuid::Uuid;
 
 pub struct Session {
@@ -17,11 +20,16 @@ pub struct Session {
 
 impl Session {
     pub async fn spawn(workspace: &Path) -> Result<Self> {
-        let socket = scv_server::default_socket_path()?;
-        let stream = UnixStream::connect(&socket).await.with_context(|| format!(
-            "SCV server not started or not found at {}. Start it with `scv start` or `scv run`",
-            socket.display()
-        ))?;
+        Self::connect(&scv_client::default_socket_path()?, workspace).await
+    }
+
+    pub async fn connect(socket: &Path, workspace: &Path) -> Result<Self> {
+        let stream = UnixStream::connect(socket).await.with_context(|| {
+            format!(
+                "SCV server not started or not found at {}. Start it with `scv start` or `scv run`",
+                socket.display()
+            )
+        })?;
         let (reader, writer) = stream.into_split();
         let mut session = Self {
             stdin: writer,
@@ -42,8 +50,12 @@ impl Session {
         )
         .await?;
         match session.event().await? {
-            ServerEvent::Initialized { protocol_version, .. } if protocol_version == PROTOCOL_VERSION => {}
-            ServerEvent::Error { message, .. } => bail!("ClawBot protocol initialization failed: {message}"),
+            ServerEvent::Initialized {
+                protocol_version, ..
+            } if protocol_version == PROTOCOL_VERSION => {}
+            ServerEvent::Error { message, .. } => {
+                bail!("ClawBot protocol initialization failed: {message}")
+            }
             _ => bail!("ClawBot protocol initialization failed"),
         }
         write(
@@ -64,7 +76,9 @@ impl Session {
                     session.session_id = session_id;
                     break;
                 }
-                ServerEvent::Error { message, .. } => bail!("ClawBot protocol session failed: {message}"),
+                ServerEvent::Error { message, .. } => {
+                    bail!("ClawBot protocol session failed: {message}")
+                }
                 _ => {}
             }
         }
@@ -108,8 +122,13 @@ impl Session {
         let mut answer = String::new();
         loop {
             match self.event().await? {
-                ServerEvent::AssistantCompleted { content, .. } => answer = content,
-                ServerEvent::AssistantDelta { content, .. } => answer.push_str(&content),
+                ServerEvent::AssistantCompleted { content, .. } => {
+                    answer.clear();
+                    append_bounded(&mut answer, &content, max_bytes)?;
+                }
+                ServerEvent::AssistantDelta { content, .. } => {
+                    append_bounded(&mut answer, &content, max_bytes)?
+                }
                 ServerEvent::ApprovalRequested { approval_id, .. } => {
                     write(
                         &mut self.stdin,
@@ -123,14 +142,24 @@ impl Session {
                     .await?;
                 }
                 ServerEvent::TurnCompleted { .. } => {
-                    return Ok(crate::split_utf8(&answer, max_bytes).join(""));
+                    return Ok(answer);
                 }
-                ServerEvent::TurnFailed { message, .. } | ServerEvent::Error { message, .. } => bail!("{message}"),
+                ServerEvent::TurnFailed { message, .. } | ServerEvent::Error { message, .. } => {
+                    bail!("{message}")
+                }
                 ServerEvent::TurnCancelled { .. } => bail!("turn cancelled"),
                 _ => {}
             }
         }
     }
+}
+
+fn append_bounded(answer: &mut String, content: &str, max_bytes: usize) -> Result<()> {
+    if content.len() > max_bytes.saturating_sub(answer.len()) {
+        bail!("ClawBot protocol reply exceeds limit")
+    }
+    answer.push_str(content);
+    Ok(())
 }
 
 async fn write(writer: &mut OwnedWriteHalf, message: &ClientMessage) -> Result<()> {
@@ -139,4 +168,18 @@ async fn write(writer: &mut OwnedWriteHalf, message: &ClientMessage) -> Result<(
     writer.write_all(&bytes).await?;
     writer.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulated_reply_cannot_exceed_byte_limit() {
+        let mut answer = String::new();
+        append_bounded(&mut answer, "hello", 8).unwrap();
+        assert!(append_bounded(&mut answer, "more", 8).is_err());
+        assert_eq!(answer, "hello");
+        assert!(append_bounded(&mut String::new(), "oversized", 8).is_err());
+    }
 }

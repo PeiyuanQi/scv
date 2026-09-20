@@ -157,12 +157,64 @@ choice for that invocation.
 
 SCV v0.1 reads:
 
+- `SCV_HOME` for the user configuration, skills, daemon socket, and ClawBot state
+  root (default `~/.scv`);
 - `SCV_MODEL`;
 - `SCV_BASE_URL`;
 - `SCV_API_KEY_ENV` (the name of the credential variable, not its value);
 - `SCV_CONFIG` for one additional explicit configuration file;
+- `SCV_CARGO_INDEX_URL` for the update registry;
 - the credential variable named by `provider.api_key_env`;
 - `RUST_LOG` for diagnostics.
 
 Secrets are never included in diagnostics, protocol events, approval summaries,
 or tool results.
+
+## Daemon and component settings
+
+`scv-client` resolves the default socket as `$SCV_HOME/server.sock`, normally
+`~/.scv/server.sock`. The TUI and daemon control commands use this same path.
+`scv status` queries the running server; `scv reload` immediately reconciles
+saved accounts and component settings without restarting unrelated sessions.
+The daemon also reconciles on startup and every two seconds.
+
+ClawBot credentials live in `clawbot/accounts/<account>.json` and durable
+delivery state in `clawbot/state/<account>.json` under the same root. Per-account
+settings are separate from project TOML, at
+`$SCV_HOME/clawbot/settings/<account>.json`:
+
+```json
+{"enabled":true,"workspace":"/absolute/path/to/workspace"}
+```
+
+Missing settings default to `enabled: true`; an omitted or null `workspace`
+uses the daemon workspace. An explicit workspace must be an existing absolute
+directory. Saved accounts autostart when enabled, but QR login is always
+explicit. Logging in again preserves a saved disabled setting.
+
+Account settings reject unknown keys. The daemon reads credentials and settings
+together under the account transaction lock. Login can rotate a token for the
+same known bot/user identity and normalized API origin while preserving delivery
+state. A different identity/origin requires explicit logout first; legacy
+credentials without both IDs are conservatively bound to their token and also
+require logout before replacement with an identified account.
+A busy transaction during the snapshot defers reconciliation; the current
+instance keeps running until a later pass can read the account.
+
+`scv clawbot run --account NAME --workspace PATH` persists enablement and the
+resolved workspace through the live daemon, then returns. `scv clawbot stop
+--account NAME` persists `enabled: false` and joins the instance while retaining
+credentials. Credential or settings changes join the old instance before a
+replacement starts. `scv clawbot logout --account NAME` requires a live daemon
+and removes credentials, delivery state, and settings only after joining.
+
+For an offline opt-out, create or edit the account settings to contain
+`{"enabled":false}` before starting the daemon. Keep ClawBot directories mode
+`0700` and files mode `0600`; account, settings, and state files must be private
+regular files. Invalid or inaccessible settings fail that account closed.
+Project configuration cannot select accounts, component workspaces, or remote
+authority. See [ClawBot](clawbot.md) for the lifecycle and status contract.
+
+`scv update` installs the published binary and restarts an active systemd user
+daemon. A foreground daemon requires an explicit restart; its in-memory code
+does not change when the executable is replaced.

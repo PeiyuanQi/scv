@@ -1,10 +1,12 @@
 # SCV Client Protocol
 
-Status: proposed protocol version 2 for the stdio queue
+Status: protocol version 2
 
-The SCV client protocol is bidirectional newline-delimited JSON over stdin and
-stdout. Each line is one UTF-8 JSON object. The server writes diagnostics only
-to stderr.
+The SCV client protocol is bidirectional newline-delimited JSON over the local
+Unix socket or stdin/stdout. Each line is one UTF-8 JSON object. The server
+writes diagnostics only to stderr. `scv-client` owns the default socket path
+(`$SCV_HOME/server.sock`, normally `~/.scv/server.sock`) and the daemon control
+helper; it depends on wire types in `scv-protocol`, not server implementation.
 
 ## Version and envelopes
 
@@ -24,13 +26,51 @@ semantics.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":1,"client":{"name":"scv-tui","version":"0.1.0"}}
+{"type":"initialize","request_id":"1","protocol_version":2,"client":{"name":"scv-tui","version":"0.1.10"}}
 ```
+
+### `daemon.control`
+
+After initialization, a socket client may manage components without creating
+an agent session. The `command` object is tagged by `action`:
+
+```json
+{"type":"daemon.control","request_id":"d1","command":{"action":"status"}}
+{"type":"daemon.control","request_id":"d2","command":{"action":"reload"}}
+{"type":"daemon.control","request_id":"d3","command":{"action":"clawbot_set","account":"default","enabled":true,"workspace":"/workspace/project"}}
+{"type":"daemon.control","request_id":"d4","command":{"action":"clawbot_set","account":"default","enabled":false,"workspace":null}}
+{"type":"daemon.control","request_id":"d5","command":{"action":"clawbot_logout","account":"default"}}
+```
+
+`status` reads live daemon health. `reload` reconciles saved accounts and
+settings immediately; periodic reconciliation also runs every two seconds.
+`clawbot_set` persists enablement and an optional existing absolute workspace;
+an omitted or null workspace leaves the saved workspace unchanged. Without a
+saved workspace, the account uses the daemon workspace. Replacements stop and
+join the old instance first. `clawbot_logout` persists disablement and joins
+before removing credentials, delivery state, and settings. Successful actions
+return `daemon.status`; enablement does not imply successful remote contact.
+
+Component management is unsupported on stdio. The client helper bounds its
+exchange and never automatically retries a mutation after an ambiguous failure;
+query status before retrying.
+
+The control helper has a 20-second timeout. Status and other control commands
+can wait for the component lock while reconciliation joins replacements. Many
+slow replacements can therefore make even a status query time out; a timeout
+does not prove the daemon is down or that a mutation failed. Query status again
+before deciding whether to retry a mutation; mutations are never automatically
+retried. Current ClawBot cancellation drops its owned I/O and sessions
+immediately, but future components with slower shutdown can expose this limit.
 
 ### `session.start`
 
 `cwd` is an absolute path chosen by the client. The server canonicalizes it and
 rejects a missing or non-directory workspace.
+
+Optional `provider`, `model`, and `base_url` overrides apply only to this session.
+`no_tools: true` disables all tools in the server-owned runtime; ClawBot remote
+sessions always set it.
 
 ```json
 {"type":"session.start","request_id":"2","cwd":"/workspace/project"}
@@ -95,9 +135,31 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":1,"server":{"name":"scv-server","version":"0.1.0"}}
+{"type":"initialized","request_id":"1","protocol_version":2,"server":{"name":"scv-server","version":"0.1.10"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
+
+### `daemon.status`
+
+```json
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.10","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0}]}}
+```
+
+Version and PID identify the responding server, not the installed client.
+Component states are `disabled`, `starting`, `connected`, `disconnected`,
+`backoff`, `stopping`, `stopped`, and `failed`. Identity fields may be null for
+legacy or unavailable credentials. `last_success_unix_seconds` is null until
+successful contact and is a historical timestamp, not a guarantee of current
+connectivity. Errors are sanitized; credentials never appear in status.
+Loading credentials alone cannot produce `connected`. Management responses
+carry the request ID but no session or sequence number.
+
+`status` contains exactly `version`, `pid`, and `components` in the current
+implementation. Each component contains `id`, `account`, `bot_id`, `user_id`,
+`enabled`, `state`, `last_success_unix_seconds`, `error`, and `restarts`.
+For ClawBot, successful contact means an authenticated, validated `getupdates`
+response. The state fingerprint, bearer token, and delivery state are private
+storage fields, not health fields.
 
 ### Turn and assistant output
 
@@ -120,8 +182,8 @@ label. It emits `queue.enqueued`, `queue.updated`, `queue.moved`,
 `queue.removed`, and `queue.dequeued` on that connection. Queue events carry the
 session sequence and never reorder relative to terminal turn events. The server
 validates and assigns IDs, revisions, and positions; clients never infer queue
-state from local input. Cross-client broadcast is deferred until a shared local
-transport is implemented.
+state from local input. Sessions remain independent per connection; the shared
+daemon socket does not imply cross-client queue broadcast or session attachment.
 
 ### Tool lifecycle and approval
 
@@ -157,7 +219,8 @@ Usage fields are omitted when the provider does not report them.
 Stable request/server error codes are `invalid_json`, `not_initialized`,
 `version_mismatch`, `invalid_request`, `session_not_found`, `turn_active`,
 `turn_not_found`, `approval_not_found`, `queue_not_found`, `queue_conflict`,
-and `internal_error`. Stable
+`unsupported`, `component_error`, and `internal_error`. Component failures use
+sanitized messages without credential or raw transport details. Stable
 `turn.failed` codes are `provider_error`, `context_limit`, `step_limit`,
 `history_limit`, `response_limit`, `tool_limit`, and `internal_error`. An error
 after `turn.started`, including a provider error, is represented only by
@@ -190,10 +253,17 @@ cancels the HTTP body, executes no unstarted call from that response, and emits
 `turn.failed` with `response_limit` or `tool_limit`.
 
 Input, completed-turn notifications, and writer failure are selected
-concurrently. An EOF from the client cancels the active turn and shuts down the
-server. A broken stdout pipe or a backpressure timeout enters common cleanup;
+concurrently. Client EOF cancels the active turn and closes that connection;
+it ends a stdio server but does not stop the shared daemon. A broken transport
+or a backpressure timeout enters common cleanup;
 active work and the writer receive a three-second grace period and are then
 aborted and joined rather than left in the background.
-`session.start` may include optional `provider`, `model`, and `base_url` fields.
-These overrides are resolved for that session only, allowing clients attached
-to the same daemon to switch providers or models without restarting it.
+
+SIGTERM or Ctrl+C stops the daemon with bounded cancellation and joining of
+supervised components and tracked session tasks. Reconnecting TUI clients
+initialize and start fresh sessions. Server history and queues are not restored,
+and submitted work is never automatically replayed.
+
+Writer and turn tasks are tracked and joined even if their connection handler
+must be aborted. Daemon management releases the component lock before response
+writes, so a blocked client does not hold component management or reconciliation.

@@ -1,5 +1,6 @@
 //! SCV's authoritative stdio server.
 
+pub mod components;
 mod config;
 
 use std::{
@@ -17,9 +18,13 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use config::Config;
 pub use config::{ApprovalPolicy, ConfigOverrides};
-pub fn init_user_config() -> anyhow::Result<std::path::PathBuf> { config::Config::init_user_config() }
+pub fn init_user_config() -> anyhow::Result<std::path::PathBuf> {
+    config::Config::init_user_config()
+}
 pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<String>> {
-    Ok(config::Config::load(workspace, ConfigOverrides::default())?.update.index_url)
+    Ok(config::Config::load(workspace, ConfigOverrides::default())?
+        .update
+        .index_url)
 }
 use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
@@ -29,12 +34,13 @@ use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, Server
 use scv_provider_openai::OpenAiProvider;
 use scv_tools::{SkillMap, builtin_registry};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 const PROMPT_LIMIT_BYTES: usize = 256 * 1024;
@@ -47,55 +53,135 @@ const MAX_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 pub async fn run_stdio(overrides: ConfigOverrides) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    run(stdin, stdout, overrides).await
+    let tasks = TaskTracker::new();
+    let result = run_managed(
+        stdin,
+        stdout,
+        overrides,
+        None,
+        CancellationToken::new(),
+        tasks.clone(),
+    )
+    .await;
+    tasks.close();
+    tasks.wait().await;
+    result
 }
 
 /// Return the local Unix socket used by the SCV daemon and TUI.
 pub fn default_socket_path() -> Result<PathBuf> {
-    let root = std::env::var_os("SCV_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))
-        .ok_or_else(|| anyhow!("cannot determine SCV_HOME"))?;
-    Ok(root.join("server.sock"))
+    scv_client::default_socket_path()
 }
 
 /// Run the authoritative server on the local Unix socket.
 pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.context("create SCV socket directory")?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("create SCV socket directory")?;
     }
+    let _lock = SocketLock::acquire(path)?;
     if path.exists() {
         if UnixStream::connect(path).await.is_ok() {
-            return Err(anyhow!("SCV server is already running at {}", path.display()));
+            return Err(anyhow!(
+                "SCV server is already running at {}",
+                path.display()
+            ));
         }
-        tokio::fs::remove_file(path).await.with_context(|| format!("remove stale SCV socket {}", path.display()))?;
+        use std::os::unix::fs::FileTypeExt;
+        if !std::fs::symlink_metadata(path)?.file_type().is_socket() {
+            return Err(anyhow!(
+                "refusing to remove a non-socket at SCV socket path"
+            ));
+        }
+        tokio::fs::remove_file(path)
+            .await
+            .with_context(|| format!("remove stale SCV socket {}", path.display()))?;
     }
-    let listener = UnixListener::bind(path).with_context(|| format!("bind SCV server socket {}", path.display()))?;
-    #[cfg(unix)] {
+    let listener = UnixListener::bind(path)
+        .with_context(|| format!("bind SCV server socket {}", path.display()))?;
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).context("secure SCV socket")?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .context("secure SCV socket")?;
     }
+    let components = Arc::new(Mutex::new(components::Components::new(
+        path.to_owned(),
+        std::env::current_dir()?,
+    )));
+    let cancellation = CancellationToken::new();
+    let tasks = TaskTracker::new();
+    let mut clients = tokio::task::JoinSet::new();
+    let refresh_components = components.clone();
+    let refresh_cancel = cancellation.clone();
+    let mut refresh_task = tokio::spawn(async move {
+        let mut refresh = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                biased;
+                _ = refresh_cancel.cancelled() => break,
+                _ = refresh.tick() => {
+                    tokio::select! {
+                        biased;
+                        _ = refresh_cancel.cancelled() => break,
+                        result = async { refresh_components.lock().await.reconcile().await } => {
+                            if result.is_err() { tracing::warn!("Component account discovery failed"); }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let _refresh_abort = AbortGuard(refresh_task.abort_handle());
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let result = loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted.context("accept SCV client")?;
+                let (stream, _) = match accepted { Ok(value) => value, Err(error) => break Err(error.into()) };
                 let child_overrides = overrides.clone();
-                tokio::spawn(async move {
+                let components = components.clone();
+                let cancellation = cancellation.clone();
+                let tasks = tasks.clone();
+                clients.spawn(async move {
                     let (reader, writer) = stream.into_split();
-                    if let Err(error) = run(reader, writer, child_overrides).await {
-                        tracing::warn!(%error, "SCV socket client stopped");
+                    if run_managed(reader, writer, child_overrides, Some(components), cancellation, tasks).await.is_err() {
+                        tracing::warn!("SCV socket client stopped");
                     }
                 });
             }
+            _ = clients.join_next(), if !clients.is_empty() => {},
             _ = tokio::signal::ctrl_c() => break Ok(()),
+            _ = terminate.recv() => break Ok(()),
         }
     };
     drop(listener);
+    cancellation.cancel();
+    let _ = (&mut refresh_task).await;
+    components.lock().await.shutdown().await;
+    if tokio::time::timeout(Duration::from_secs(8), async {
+        while clients.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        clients.abort_all();
+        while clients.join_next().await.is_some() {}
+    }
+    tasks.close();
+    tasks.wait().await;
     let _ = tokio::fs::remove_file(path).await;
     result
 }
 
-async fn run<R, W>(reader: R, writer: W, overrides: ConfigOverrides) -> Result<()>
+async fn run_managed<R, W>(
+    reader: R,
+    writer: W,
+    overrides: ConfigOverrides,
+    components: Option<Arc<Mutex<components::Components>>>,
+    cancellation: CancellationToken,
+    tasks: TaskTracker,
+) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -103,7 +189,7 @@ where
     let initial_output_bytes =
         output_queue_bytes(Config::default().protocol.max_server_frame_bytes)?;
     let (output_tx, mut output_rx) = outbound_channel(initial_output_bytes);
-    let mut writer_task = tokio::spawn(async move {
+    let mut writer_task = tasks.spawn(async move {
         let mut writer = writer;
         while let Some(frame) = output_rx.recv().await {
             writer.write_all(&frame.bytes).await?;
@@ -112,9 +198,11 @@ where
         }
         Ok::<(), std::io::Error>(())
     });
+    let _writer_abort = AbortGuard(writer_task.abort_handle());
     let (done_tx, mut done_rx) = mpsc::channel::<TurnDone>(4);
     let approvals = Arc::new(ApprovalBroker::default());
     let mut reader = BufReader::new(reader);
+    let mut frames = FrameBuffer::default();
     let mut initialized = false;
     let mut session: Option<Session> = None;
     let mut active: Option<ActiveTurn> = None;
@@ -128,7 +216,8 @@ where
             |value| value.config.protocol.max_client_frame_bytes,
         );
         tokio::select! {
-            read = read_bounded_frame(&mut reader, frame_limit) => {
+            _ = cancellation.cancelled() => break,
+            read = frames.read(&mut reader, frame_limit) => {
                 let frame = match read.context("read protocol input")? {
                     FrameRead::Eof => {
                         if let Some(active) = &active { active.cancellation.cancel(); }
@@ -171,6 +260,21 @@ where
                     }
                     other if !initialized => {
                         send_error(&output_tx, other.request_id(), "not_initialized", "initialize must be the first message", false, server_frame_limit(&session)).await?;
+                    }
+                    ClientMessage::DaemonControl { request_id, command } => {
+                        if let Some(components) = &components {
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancellation.cancelled() => break,
+                                result = async { components.lock().await.control(command).await } => result,
+                            };
+                            match result {
+                                Ok(status) => send_event(&output_tx, ServerEvent::DaemonStatus { request_id, status }, server_frame_limit(&session)).await?,
+                                Err(_) => send_error(&output_tx, &request_id, "component_error", "Component operation failed; check account credentials, private file permissions and absolute workspace", false, server_frame_limit(&session)).await?,
+                            }
+                        } else {
+                            send_error(&output_tx, &request_id, "unsupported", "Component management requires the daemon socket", false, server_frame_limit(&session)).await?;
+                        }
                     }
                     ClientMessage::SessionStart { request_id, cwd, provider, model, base_url, no_tools } => {
                         if session.is_some() {
@@ -244,7 +348,7 @@ where
                             continue;
                         }
                         let turn_id = Uuid::new_v4().to_string();
-                        let cancellation = CancellationToken::new();
+                        let cancellation = cancellation.child_token();
                         let meta = TurnMeta {
                             request_id: request_id.clone(),
                             session_id: current.id.clone(),
@@ -276,7 +380,7 @@ where
                         let task_request = request_id.clone();
                         let task_session = current.id.clone();
                         let task_turn = turn_id.clone();
-                        let task = tokio::spawn(async move {
+                        let task = tasks.spawn(async move {
                             let mut history = history.lock().await;
                             let result = runtime.run_turn(&mut history, prompt, sink, gate, task_cancel).await;
                             let _ = task_done.send(TurnDone {
@@ -294,21 +398,21 @@ where
                         if prompt.trim().is_empty() || prompt.len() > PROMPT_LIMIT_BYTES { send_error(&output_tx, &request_id, "invalid_request", "prompt must be non-empty and no larger than 256 KiB", false, server_frame_limit(&session)).await?; continue; }
                         match current.update_queue(&queue_id, revision, prompt).await {
                             Ok(entry) => send_event(&output_tx, ServerEvent::QueueUpdated { request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), entry }, current.config.protocol.max_server_frame_bytes).await?,
-                            Err(code) => send_error(&output_tx, &request_id, &code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
+                            Err(code) => send_error(&output_tx, &request_id, code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
                         }
                     }
                     ClientMessage::QueueMove { request_id, session_id, queue_id, revision, before_queue_id } => {
                         let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
                         match current.move_queue(&session_id, &queue_id, revision, before_queue_id).await {
                             Ok((id, rev, pos)) => send_event(&output_tx, ServerEvent::QueueMoved { request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), queue_id: id, position: pos, revision: rev }, current.config.protocol.max_server_frame_bytes).await?,
-                            Err(code) => send_error(&output_tx, &request_id, &code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
+                            Err(code) => send_error(&output_tx, &request_id, code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
                         }
                     }
                     ClientMessage::QueueRemove { request_id, session_id, queue_id, revision } => {
                         let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
                         match current.remove_queue(&session_id, &queue_id, revision).await {
                             Ok((id, rev)) => send_event(&output_tx, ServerEvent::QueueRemoved { request_id, session_id: current.id.clone(), seq: next_seq(&current.seq), queue_id: id, revision: rev }, current.config.protocol.max_server_frame_bytes).await?,
-                            Err(code) => send_error(&output_tx, &request_id, &code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
+                            Err(code) => send_error(&output_tx, &request_id, code, "queue entry was not found or revision is stale", false, server_frame_limit(&session)).await?,
                         }
                     }
                     ClientMessage::SessionPause { request_id, session_id, paused } => {
@@ -387,15 +491,15 @@ where
                         };
                         send_event(&output_tx, event, current.config.protocol.max_server_frame_bytes).await?;
                     }
-                    if let Some(active) = active.take() {
-                        let _ = active.task.await;
+                    if let Some(mut active) = active.take() {
+                        let _ = (&mut active.task).await;
                     }
                     if let Some(current) = session.as_ref()
                         && !current.paused.load(Ordering::Acquire)
                         && let Some(entry) = current.queue.lock().await.pop_front()
                     {
                         let turn_id = Uuid::new_v4().to_string();
-                        let cancellation = CancellationToken::new();
+                        let cancellation = cancellation.child_token();
                         send_event(&output_tx, ServerEvent::QueueDequeued {
                             request_id: entry.submitter.clone(),
                             session_id: current.id.clone(),
@@ -422,7 +526,7 @@ where
                         let task_session = current.id.clone();
                         let task_turn = turn_id.clone();
                         let task_cancel = cancellation.clone();
-                        let task = tokio::spawn(async move {
+                        let task = tasks.spawn(async move {
                             let mut history = history.lock().await;
                             let result = runtime.run_turn(&mut history, entry.prompt, sink, gate, task_cancel).await;
                             let _ = task_done.send(TurnDone { request_id: task_request, session_id: task_session, turn_id: task_turn, result }).await;
@@ -610,42 +714,89 @@ fn output_queue_bytes(max_frame_bytes: usize) -> Result<usize> {
     Ok(required)
 }
 
-async fn read_bounded_frame<R>(reader: &mut R, max_bytes: usize) -> std::io::Result<FrameRead>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut frame = Vec::with_capacity(max_bytes.min(8192));
-    let read_limit = u64::try_from(max_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(2);
-    let mut limited = reader.take(read_limit);
-    let read = limited.read_until(b'\n', &mut frame).await?;
-    drop(limited);
-    if read == 0 {
-        return Ok(FrameRead::Eof);
-    }
-    let ended_with_newline = frame.last() == Some(&b'\n');
-    while matches!(frame.last(), Some(b'\n' | b'\r')) {
-        frame.pop();
-    }
-    if frame.len() <= max_bytes {
-        return Ok(FrameRead::Frame(frame));
-    }
-    if !ended_with_newline {
+/// A persistent decoder keeps consumed partial bytes across select cancellation.
+#[derive(Default)]
+struct FrameBuffer {
+    bytes: Vec<u8>,
+    oversized: bool,
+}
+
+impl FrameBuffer {
+    async fn read<R>(&mut self, reader: &mut R, max_bytes: usize) -> std::io::Result<FrameRead>
+    where
+        R: AsyncBufRead + Unpin,
+    {
         loop {
             let available = reader.fill_buf().await?;
-            if available.is_empty() {
-                break;
+            let eof = available.is_empty();
+            let end = available.iter().position(|b| *b == b'\n');
+            let take = end.map_or(available.len(), |n| n + 1);
+            if !self.oversized {
+                if self.bytes.len().saturating_add(take) > max_bytes.saturating_add(2) {
+                    self.oversized = true;
+                    self.bytes.clear();
+                } else {
+                    self.bytes.extend_from_slice(&available[..take]);
+                }
             }
-            if let Some(end) = available.iter().position(|byte| *byte == b'\n') {
-                reader.consume(end + 1);
-                break;
+            reader.consume(take);
+            if end.is_some() || eof {
+                if std::mem::take(&mut self.oversized) {
+                    return Ok(FrameRead::TooLarge);
+                }
+                if eof && self.bytes.is_empty() {
+                    return Ok(FrameRead::Eof);
+                }
+                let mut bytes = std::mem::take(&mut self.bytes);
+                while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+                    bytes.pop();
+                }
+                return Ok(if bytes.len() > max_bytes {
+                    FrameRead::TooLarge
+                } else {
+                    FrameRead::Frame(bytes)
+                });
             }
-            let consumed = available.len();
-            reader.consume(consumed);
         }
     }
-    Ok(FrameRead::TooLarge)
+}
+
+#[cfg(test)]
+async fn read_bounded_frame<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<FrameRead> {
+    FrameBuffer::default().read(reader, max_bytes).await
+}
+
+/// A persistent advisory lock closes the stale-socket unlink/bind race.
+struct SocketLock(std::fs::File);
+impl SocketLock {
+    fn acquire(socket: &Path) -> Result<Self> {
+        use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(socket.with_extension("lock"))?;
+        // SAFETY: flock operates on this owned, live file descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(anyhow!("SCV daemon already owns this socket"));
+        }
+        Ok(Self(file))
+    }
+}
+impl Drop for SocketLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: the descriptor remains live until this drop returns.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 fn server_frame_limit(session: &Option<Session>) -> usize {
@@ -667,42 +818,89 @@ struct Session {
 }
 
 impl Session {
-    async fn enqueue(&self, prompt: String, submitter: String) -> std::result::Result<QueueEntry, &'static str> {
-        let entry = QueueEntry { queue_id: Uuid::new_v4().to_string(), revision: 1, prompt, submitter };
+    async fn enqueue(
+        &self,
+        prompt: String,
+        submitter: String,
+    ) -> std::result::Result<QueueEntry, &'static str> {
+        let entry = QueueEntry {
+            queue_id: Uuid::new_v4().to_string(),
+            revision: 1,
+            prompt,
+            submitter,
+        };
         let mut queue = self.queue.lock().await;
         let bytes: usize = queue.iter().map(|item| item.prompt.len()).sum();
-        if queue.len() >= MAX_QUEUE_ITEMS || bytes.saturating_add(entry.prompt.len()) > MAX_QUEUE_BYTES {
+        if queue.len() >= MAX_QUEUE_ITEMS
+            || bytes.saturating_add(entry.prompt.len()) > MAX_QUEUE_BYTES
+        {
             return Err("queue_limit");
         }
         queue.push_back(entry.clone());
         Ok(entry)
     }
 
-    async fn update_queue(&self, id: &str, revision: u64, prompt: String) -> std::result::Result<QueueEntry, &'static str> {
+    async fn update_queue(
+        &self,
+        id: &str,
+        revision: u64,
+        prompt: String,
+    ) -> std::result::Result<QueueEntry, &'static str> {
         let mut queue = self.queue.lock().await;
         let bytes: usize = queue.iter().map(|item| item.prompt.len()).sum();
-        let entry = queue.iter_mut().find(|entry| entry.queue_id == id).ok_or("queue_not_found")?;
-        if entry.revision != revision { return Err("queue_conflict"); }
-        if bytes.saturating_sub(entry.prompt.len()).saturating_add(prompt.len()) > MAX_QUEUE_BYTES { return Err("queue_limit"); }
+        let entry = queue
+            .iter_mut()
+            .find(|entry| entry.queue_id == id)
+            .ok_or("queue_not_found")?;
+        if entry.revision != revision {
+            return Err("queue_conflict");
+        }
+        if bytes
+            .saturating_sub(entry.prompt.len())
+            .saturating_add(prompt.len())
+            > MAX_QUEUE_BYTES
+        {
+            return Err("queue_limit");
+        }
         entry.prompt = prompt;
         entry.revision += 1;
         Ok(entry.clone())
     }
 
-    async fn move_queue(&self, session_id: &str, id: &str, revision: u64, before: Option<String>) -> std::result::Result<(String, u64, usize), &'static str> {
-        if self.id != session_id { return Err("session_not_found"); }
+    async fn move_queue(
+        &self,
+        session_id: &str,
+        id: &str,
+        revision: u64,
+        before: Option<String>,
+    ) -> std::result::Result<(String, u64, usize), &'static str> {
+        if self.id != session_id {
+            return Err("session_not_found");
+        }
         let mut queue = self.queue.lock().await;
-        let index = queue.iter().position(|entry| entry.queue_id == id).ok_or("queue_not_found")?;
-        if queue[index].revision != revision { return Err("queue_conflict"); }
+        let index = queue
+            .iter()
+            .position(|entry| entry.queue_id == id)
+            .ok_or("queue_not_found")?;
+        if queue[index].revision != revision {
+            return Err("queue_conflict");
+        }
         // Validate the destination while the source is still present. This keeps
         // the operation atomic and handles a self move as a no-op reorder.
         let target_index = match before.as_deref() {
             Some(target) if target == id => return Ok((id.to_string(), revision, index)),
-            Some(target) => Some(queue.iter().position(|item| item.queue_id == target).ok_or("queue_not_found")?),
+            Some(target) => Some(
+                queue
+                    .iter()
+                    .position(|item| item.queue_id == target)
+                    .ok_or("queue_not_found")?,
+            ),
             None => None,
         };
         let mut entry = queue.remove(index).expect("queue index exists");
-        let target = target_index.map_or(queue.len(), |target| target.saturating_sub(usize::from(target > index)));
+        let target = target_index.map_or(queue.len(), |target| {
+            target.saturating_sub(usize::from(target > index))
+        });
         let pos = target.min(queue.len());
         let id = entry.queue_id.clone();
         let rev = entry.revision + 1;
@@ -711,11 +909,23 @@ impl Session {
         Ok((id, rev, pos))
     }
 
-    async fn remove_queue(&self, session_id: &str, id: &str, revision: u64) -> std::result::Result<(String, u64), &'static str> {
-        if self.id != session_id { return Err("session_not_found"); }
+    async fn remove_queue(
+        &self,
+        session_id: &str,
+        id: &str,
+        revision: u64,
+    ) -> std::result::Result<(String, u64), &'static str> {
+        if self.id != session_id {
+            return Err("session_not_found");
+        }
         let mut queue = self.queue.lock().await;
-        let index = queue.iter().position(|entry| entry.queue_id == id).ok_or("queue_not_found")?;
-        if queue[index].revision != revision { return Err("queue_conflict"); }
+        let index = queue
+            .iter()
+            .position(|entry| entry.queue_id == id)
+            .ok_or("queue_not_found")?;
+        if queue[index].revision != revision {
+            return Err("queue_conflict");
+        }
         let entry = queue.remove(index).expect("queue index exists");
         Ok((entry.queue_id, entry.revision))
     }
@@ -727,13 +937,27 @@ struct ActiveTurn {
     task: JoinHandle<()>,
 }
 
+impl Drop for ActiveTurn {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        self.task.abort();
+    }
+}
+
+struct AbortGuard(tokio::task::AbortHandle);
+impl Drop for AbortGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn shutdown_active_turn(mut active: ActiveTurn, grace: Duration) -> bool {
     active.cancellation.cancel();
     if tokio::time::timeout(grace, &mut active.task).await.is_ok() {
         true
     } else {
         active.task.abort();
-        let _ = active.task.await;
+        let _ = (&mut active.task).await;
         false
     }
 }
@@ -1176,6 +1400,143 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
         }
+    }
+
+    #[tokio::test]
+    async fn nonreading_management_client_does_not_hold_component_lock() {
+        let (mut input, server_input) = tokio::io::duplex(65536);
+        let (server_output, _blocked_output) = tokio::io::duplex(1);
+        let tasks = TaskTracker::new();
+        let components = Arc::new(Mutex::new(components::Components::new(
+            PathBuf::from("/unused.sock"),
+            PathBuf::from("/"),
+        )));
+        let cancel = CancellationToken::new();
+        let handler = tokio::spawn(run_managed(
+            server_input,
+            server_output,
+            ConfigOverrides::default(),
+            Some(components.clone()),
+            cancel.clone(),
+            tasks.clone(),
+        ));
+        input.write_all(b"{\"type\":\"initialize\",\"request_id\":\"init\",\"protocol_version\":2,\"client\":{\"name\":\"test\",\"version\":\"0\"}}\n").await.unwrap();
+        for _ in 0..300 {
+            input.write_all(b"{\"type\":\"daemon.control\",\"request_id\":\"s\",\"command\":{\"action\":\"status\"}}\n").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status = tokio::time::timeout(Duration::from_millis(100), async {
+            components.lock().await.status()
+        })
+        .await
+        .unwrap();
+        assert_eq!(status.pid, std::process::id());
+        cancel.cancel();
+        handler.abort();
+        let _ = handler.await;
+        tasks.close();
+        tokio::time::timeout(Duration::from_secs(1), tasks.wait())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn forced_connection_abort_drops_and_joins_writer_descendants() {
+        let (mut input, server_input) = tokio::io::duplex(512);
+        let (server_output, _blocked_output) = tokio::io::duplex(1);
+        let tasks = TaskTracker::new();
+        let handler = tokio::spawn(run_managed(
+            server_input,
+            server_output,
+            ConfigOverrides::default(),
+            None,
+            CancellationToken::new(),
+            tasks.clone(),
+        ));
+        input.write_all(b"{\"type\":\"initialize\",\"request_id\":\"init\",\"protocol_version\":2,\"client\":{\"name\":\"test\",\"version\":\"0\"}}\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tasks.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        handler.abort();
+        let _ = handler.await;
+        tasks.close();
+        tokio::time::timeout(Duration::from_secs(1), tasks.wait())
+            .await
+            .unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forced_handler_abort_cancels_and_joins_active_turn() {
+        let tasks = TaskTracker::new();
+        let cancellation = CancellationToken::new();
+        let child_cancel = cancellation.child_token();
+        let observed_cancel = child_cancel.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let task = tasks.spawn({
+            let dropped = dropped.clone();
+            async move {
+                let _guard = DropSignal(dropped);
+                let _ = ready_tx.send(());
+                pending::<()>().await;
+            }
+        });
+        ready_rx.await.unwrap();
+        let (owned_tx, owned_rx) = oneshot::channel();
+        let handler = tokio::spawn(async move {
+            let _active = ActiveTurn {
+                turn_id: "test".into(),
+                cancellation: child_cancel,
+                task,
+            };
+            let _ = owned_tx.send(());
+            pending::<()>().await;
+        });
+        owned_rx.await.unwrap();
+        handler.abort();
+        let _ = handler.await;
+        tasks.close();
+        tokio::time::timeout(Duration::from_secs(1), tasks.wait())
+            .await
+            .unwrap();
+        assert!(observed_cancel.is_cancelled());
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn frame_buffer_preserves_partial_and_discard_state_across_cancellation() {
+        let (mut input, output) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(output);
+        let mut frames = FrameBuffer::default();
+        input.write_all(b"12").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), frames.read(&mut reader, 4))
+                .await
+                .is_err()
+        );
+        input.write_all(b"34\n").await.unwrap();
+        assert!(
+            matches!(frames.read(&mut reader, 4).await.unwrap(), FrameRead::Frame(value) if value == b"1234")
+        );
+        input.write_all(b"123456789").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), frames.read(&mut reader, 4))
+                .await
+                .is_err()
+        );
+        input.write_all(b"\n{}\n").await.unwrap();
+        assert!(matches!(
+            frames.read(&mut reader, 4).await.unwrap(),
+            FrameRead::TooLarge
+        ));
+        assert!(
+            matches!(frames.read(&mut reader, 4).await.unwrap(), FrameRead::Frame(value) if value == b"{}")
+        );
     }
 
     #[tokio::test]

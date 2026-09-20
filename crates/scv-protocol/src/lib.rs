@@ -6,6 +6,54 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentState {
+    Disabled,
+    Starting,
+    Connected,
+    Disconnected,
+    Backoff,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComponentHealth {
+    pub id: String,
+    pub account: String,
+    pub bot_id: Option<String>,
+    pub user_id: Option<String>,
+    pub enabled: bool,
+    pub state: ComponentState,
+    pub last_success_unix_seconds: Option<u64>,
+    pub error: Option<String>,
+    pub restarts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonStatus {
+    pub version: String,
+    pub pid: u32,
+    pub components: Vec<ComponentHealth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DaemonCommand {
+    Status,
+    Reload,
+    ClawbotSet {
+        account: String,
+        enabled: bool,
+        workspace: Option<String>,
+    },
+    ClawbotLogout {
+        account: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueueEntry {
     pub queue_id: String,
     pub revision: u64,
@@ -30,6 +78,11 @@ pub struct Usage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
+    #[serde(rename = "daemon.control")]
+    DaemonControl {
+        request_id: String,
+        command: DaemonCommand,
+    },
     #[serde(rename = "initialize")]
     Initialize {
         request_id: String,
@@ -50,7 +103,11 @@ pub enum ClientMessage {
         no_tools: Option<bool>,
     },
     #[serde(rename = "session.attach")]
-    SessionAttach { request_id: String, session_id: String, cwd: String },
+    SessionAttach {
+        request_id: String,
+        session_id: String,
+        cwd: String,
+    },
     #[serde(rename = "turn.start")]
     TurnStart {
         request_id: String,
@@ -58,13 +115,34 @@ pub enum ClientMessage {
         prompt: String,
     },
     #[serde(rename = "queue.update")]
-    QueueUpdate { request_id: String, session_id: String, queue_id: String, revision: u64, prompt: String },
+    QueueUpdate {
+        request_id: String,
+        session_id: String,
+        queue_id: String,
+        revision: u64,
+        prompt: String,
+    },
     #[serde(rename = "queue.move")]
-    QueueMove { request_id: String, session_id: String, queue_id: String, revision: u64, before_queue_id: Option<String> },
+    QueueMove {
+        request_id: String,
+        session_id: String,
+        queue_id: String,
+        revision: u64,
+        before_queue_id: Option<String>,
+    },
     #[serde(rename = "queue.remove")]
-    QueueRemove { request_id: String, session_id: String, queue_id: String, revision: u64 },
+    QueueRemove {
+        request_id: String,
+        session_id: String,
+        queue_id: String,
+        revision: u64,
+    },
     #[serde(rename = "session.pause")]
-    SessionPause { request_id: String, session_id: String, paused: bool },
+    SessionPause {
+        request_id: String,
+        session_id: String,
+        paused: bool,
+    },
     #[serde(rename = "turn.cancel")]
     TurnCancel {
         request_id: String,
@@ -89,6 +167,7 @@ impl ClientMessage {
     pub fn request_id(&self) -> &str {
         match self {
             Self::Initialize { request_id, .. }
+            | Self::DaemonControl { request_id, .. }
             | Self::SessionStart { request_id, .. }
             | Self::SessionAttach { request_id, .. }
             | Self::TurnStart { request_id, .. }
@@ -106,6 +185,11 @@ impl ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "daemon.status")]
+    DaemonStatus {
+        request_id: String,
+        status: DaemonStatus,
+    },
     #[serde(rename = "initialized")]
     Initialized {
         request_id: String,
@@ -126,19 +210,60 @@ pub enum ServerEvent {
         max_prompt_history_items: usize,
     },
     #[serde(rename = "queue.snapshot")]
-    QueueSnapshot { request_id: Option<String>, session_id: String, seq: u64, entries: Vec<QueueEntry>, paused: bool },
+    QueueSnapshot {
+        request_id: Option<String>,
+        session_id: String,
+        seq: u64,
+        entries: Vec<QueueEntry>,
+        paused: bool,
+    },
     #[serde(rename = "queue.enqueued")]
-    QueueEnqueued { request_id: String, session_id: String, seq: u64, entry: QueueEntry, position: usize },
+    QueueEnqueued {
+        request_id: String,
+        session_id: String,
+        seq: u64,
+        entry: QueueEntry,
+        position: usize,
+    },
     #[serde(rename = "queue.updated")]
-    QueueUpdated { request_id: String, session_id: String, seq: u64, entry: QueueEntry },
+    QueueUpdated {
+        request_id: String,
+        session_id: String,
+        seq: u64,
+        entry: QueueEntry,
+    },
     #[serde(rename = "queue.moved")]
-    QueueMoved { request_id: String, session_id: String, seq: u64, queue_id: String, position: usize, revision: u64 },
+    QueueMoved {
+        request_id: String,
+        session_id: String,
+        seq: u64,
+        queue_id: String,
+        position: usize,
+        revision: u64,
+    },
     #[serde(rename = "queue.removed")]
-    QueueRemoved { request_id: String, session_id: String, seq: u64, queue_id: String, revision: u64 },
+    QueueRemoved {
+        request_id: String,
+        session_id: String,
+        seq: u64,
+        queue_id: String,
+        revision: u64,
+    },
     #[serde(rename = "queue.dequeued")]
-    QueueDequeued { request_id: String, session_id: String, seq: u64, queue_id: String, turn_id: String },
+    QueueDequeued {
+        request_id: String,
+        session_id: String,
+        seq: u64,
+        queue_id: String,
+        turn_id: String,
+    },
     #[serde(rename = "session.paused")]
-    SessionPaused { request_id: String, session_id: String, seq: u64, paused: bool },
+    SessionPaused {
+        request_id: String,
+        session_id: String,
+        seq: u64,
+        paused: bool,
+    },
     #[serde(rename = "turn.started")]
     TurnStarted {
         request_id: String,
@@ -312,17 +437,33 @@ mod tests {
     #[test]
     fn queue_messages_and_events_round_trip() {
         let message = ClientMessage::QueueMove {
-            request_id: "q1".into(), session_id: "s".into(), queue_id: "q".into(),
-            revision: 2, before_queue_id: None,
+            request_id: "q1".into(),
+            session_id: "s".into(),
+            queue_id: "q".into(),
+            revision: 2,
+            before_queue_id: None,
         };
         let encoded = serde_json::to_string(&message).unwrap();
-        assert_eq!(serde_json::from_str::<ClientMessage>(&encoded).unwrap(), message);
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&encoded).unwrap(),
+            message
+        );
         let event = ServerEvent::QueueSnapshot {
-            request_id: None, session_id: "s".into(), seq: 4,
-            entries: vec![QueueEntry { queue_id: "q".into(), revision: 1, prompt: "hello".into(), submitter: "cli".into() }],
+            request_id: None,
+            session_id: "s".into(),
+            seq: 4,
+            entries: vec![QueueEntry {
+                queue_id: "q".into(),
+                revision: 1,
+                prompt: "hello".into(),
+                submitter: "cli".into(),
+            }],
             paused: false,
         };
         let encoded = serde_json::to_string(&event).unwrap();
-        assert_eq!(serde_json::from_str::<ServerEvent>(&encoded).unwrap(), event);
+        assert_eq!(
+            serde_json::from_str::<ServerEvent>(&encoded).unwrap(),
+            event
+        );
     }
 }

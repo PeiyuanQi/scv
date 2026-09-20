@@ -16,7 +16,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -42,25 +42,28 @@ sha2 = "0.10.9"
 tempfile = "3.21.0"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = "0.7.16"
+tokio-util = { version = "0.7.16", features = ["rt"] }
 toml = "0.9.5"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 which = "8.0.0"
 
-scv-core = { version = "0.1.0", path = "crates/scv-core" }
-scv-clawbot = { version = "0.1.0", path = "crates/scv-clawbot" }
-scv-protocol = { version = "0.1.0", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "0.1.0", path = "crates/scv-provider-openai" }
-scv-server = { version = "0.1.0", path = "crates/scv-server" }
-scv-tools = { version = "0.1.0", path = "crates/scv-tools" }
-scv-tui = { version = "0.1.0", path = "crates/scv-tui" }
+scv-core = { version = "=0.1.10", path = "crates/scv-core" }
+scv-client = { version = "=0.1.10", path = "crates/scv-client" }
+scv-clawbot = { version = "=0.1.10", path = "crates/scv-clawbot" }
+scv-protocol = { version = "=0.1.10", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.1.10", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.1.10", path = "crates/scv-server" }
+scv-tools = { version = "=0.1.10", path = "crates/scv-tools" }
+scv-tui = { version = "=0.1.10", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
 scv-server.workspace = true
+scv-client.workspace = true
+scv-protocol.workspace = true
 scv-clawbot.workspace = true
 scv-tui.workspace = true
 tokio.workspace = true

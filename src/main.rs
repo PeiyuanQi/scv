@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use scv_protocol::{DaemonCommand, DaemonStatus};
 use scv_server::{ApprovalPolicy, ConfigOverrides};
 use scv_tui::LaunchOptions;
 use std::io::{self, IsTerminal, Write};
@@ -23,7 +24,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Config { #[command(subcommand)] command: ConfigCommand },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Start the interactive terminal client (the default).
     Tui,
     /// Run one prompt without the terminal UI.
@@ -55,6 +59,8 @@ enum Command {
         allow_sudo: bool,
     },
     Status,
+    /// Re-read component settings and saved accounts without restarting sessions.
+    Reload,
     /// Run the authoritative server.
     Server {
         /// Speak newline-delimited JSON over stdin/stdout.
@@ -82,7 +88,9 @@ enum Command {
     },
 }
 #[derive(Subcommand)]
-enum ConfigCommand { Init }
+enum ConfigCommand {
+    Init,
+}
 
 #[derive(Subcommand)]
 enum ClawbotCommand {
@@ -97,6 +105,11 @@ enum ClawbotCommand {
         account: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
+    },
+    /// Persistently disable a supervised account (credentials are retained).
+    Stop {
+        #[arg(long, default_value = "default")]
+        account: String,
     },
     Status {
         #[arg(long, default_value = "default")]
@@ -138,7 +151,13 @@ async fn main() -> Result<()> {
             .map(|value| value.to_possible_value().unwrap().get_name().to_owned()),
     };
     match cli.command.unwrap_or(Command::Tui) {
-        Command::Config { command: ConfigCommand::Init } => { let path = scv_server::init_user_config()?; println!("Created configuration at {}", path.display()); Ok(()) },
+        Command::Config {
+            command: ConfigCommand::Init,
+        } => {
+            let path = scv_server::init_user_config()?;
+            println!("Created configuration at {}", path.display());
+            Ok(())
+        }
         Command::Tui => scv_tui::run_tui(&cwd, launch).await,
         Command::Exec { prompt, yes } => scv_tui::run_exec(&cwd, prompt, yes, launch).await,
         Command::Server { stdio } => {
@@ -155,25 +174,61 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Command::Run { workspace } => run_daemon(&workspace, ConfigOverrides {
-            provider: cli.provider,
-            model: cli.model,
-            base_url: cli.base_url,
-            approval_policy: cli.approval_policy.map(Into::into),
-            no_tools: false,
-        }).await,
-        Command::Start { workspace, allow_sudo } => daemon_control("start", Some(&workspace), cli.approval_policy, allow_sudo),
+        Command::Run { workspace } => {
+            run_daemon(
+                &workspace,
+                ConfigOverrides {
+                    provider: cli.provider,
+                    model: cli.model,
+                    base_url: cli.base_url,
+                    approval_policy: cli.approval_policy.map(Into::into),
+                    no_tools: false,
+                },
+            )
+            .await
+        }
+        Command::Start {
+            workspace,
+            allow_sudo,
+        } => daemon_control("start", Some(&workspace), cli.approval_policy, allow_sudo),
         Command::Stop => daemon_control("stop", None, cli.approval_policy, false),
-        Command::Restart { workspace, allow_sudo } => daemon_control("restart", Some(&workspace), cli.approval_policy, allow_sudo),
-        Command::Status => daemon_control("status", None, cli.approval_policy, false),
+        Command::Restart {
+            workspace,
+            allow_sudo,
+        } => daemon_control("restart", Some(&workspace), cli.approval_policy, allow_sudo),
+        Command::Status => show_status(None).await,
+        Command::Reload => {
+            control(DaemonCommand::Reload).await?;
+            println!("Component configuration reloaded.");
+            Ok(())
+        }
         Command::Update { index_url } => update_cli(&cwd, index_url),
-        Command::Clawbot { command, base_url } => match command.unwrap_or(ClawbotCommand::Login { account: "default".into(), login_url: base_url }) {
-            ClawbotCommand::Login { account, login_url } => scv_clawbot::login(&login_url, &account).await,
+        Command::Clawbot { command, base_url } => match command.unwrap_or(ClawbotCommand::Login {
+            account: "default".into(),
+            login_url: base_url,
+        }) {
+            ClawbotCommand::Login { account, login_url } => {
+                clawbot_login(&login_url, &account).await
+            }
             ClawbotCommand::Run { account, workspace } => clawbot_run(&account, &workspace).await,
-            ClawbotCommand::Status { account } => clawbot_status(&account),
-            ClawbotCommand::Logout { account } => { scv_clawbot::state::remove(&account)?; println!("Removed SCV ClawBot account {account:?}."); Ok(()) }
+            ClawbotCommand::Stop { account } => {
+                control(DaemonCommand::ClawbotSet {
+                    account,
+                    enabled: false,
+                    workspace: None,
+                })
+                .await?;
+                println!("ClawBot account disabled and stopped.");
+                Ok(())
+            }
+            ClawbotCommand::Status { account } => show_status(Some(&account)).await,
+            ClawbotCommand::Logout { account } => {
+                control(DaemonCommand::ClawbotLogout { account }).await?;
+                println!("ClawBot stopped; local credentials and delivery state removed.");
+                Ok(())
+            }
         },
-        Command::ClawbotLogin { login_url } => scv_clawbot::login(&login_url, "default").await,
+        Command::ClawbotLogin { login_url } => clawbot_login(&login_url, "default").await,
     }
 }
 
@@ -220,30 +275,59 @@ fn service_path() -> Result<PathBuf> {
     Ok(home.join(".config/systemd/user/scv.service"))
 }
 
-fn daemon_control(action: &str, workspace: Option<&Path>, approval_policy: Option<ApprovalArg>, allow_sudo: bool) -> Result<()> {
+fn daemon_control(
+    action: &str,
+    workspace: Option<&Path>,
+    approval_policy: Option<ApprovalArg>,
+    allow_sudo: bool,
+) -> Result<()> {
     if action == "start" || action == "restart" {
         ensure_sudo_expectation(allow_sudo)?;
     }
     if let Some(workspace) = workspace {
         let workspace = std::fs::canonicalize(workspace).context("resolve daemon workspace")?;
         let path = service_path()?;
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let binary = std::env::current_exe()?.display().to_string();
         let approval = approval_policy
-            .map(|policy| format!(" --approval-policy {}", policy.to_possible_value().expect("value enum").get_name()))
+            .map(|policy| {
+                format!(
+                    " --approval-policy {}",
+                    policy.to_possible_value().expect("value enum").get_name()
+                )
+            })
             .unwrap_or_default();
-        let unit = format!("[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={} run --workspace {}{}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=default.target\n", workspace.display(), binary, workspace.display(), approval);
+        let unit = format!(
+            "[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={} run --workspace {}{}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=default.target\n",
+            workspace.display(),
+            binary,
+            workspace.display(),
+            approval
+        );
         std::fs::write(path, unit).context("write SCV systemd unit")?;
     }
-    let status = ProcessCommand::new("systemctl").args(["--user", "daemon-reload"]).status().context("run systemctl")?;
-    if !status.success() { bail!("systemctl daemon-reload failed"); }
-    let (verb, extra) = if action == "start" { ("enable", vec!["--now"]) } else { (action, Vec::new()) };
+    let status = ProcessCommand::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()
+        .context("run systemctl")?;
+    if !status.success() {
+        bail!("systemctl daemon-reload failed");
+    }
+    let (verb, extra) = if action == "start" {
+        ("enable", vec!["--now"])
+    } else {
+        (action, Vec::new())
+    };
     let mut command = ProcessCommand::new("systemctl");
     command.args(["--user", verb]);
     command.args(extra);
     command.arg("scv.service");
     let status = command.status().context("run systemctl")?;
-    if !status.success() { bail!("systemctl {action} scv.service failed"); }
+    if !status.success() {
+        bail!("systemctl {action} scv.service failed");
+    }
     Ok(())
 }
 
@@ -260,14 +344,18 @@ fn sudo_available() -> bool {
 fn ensure_sudo_expectation(allow_sudo: bool) -> Result<()> {
     if allow_sudo {
         if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-            bail!("`scv start --allow-sudo` requires an interactive terminal so sudo can authenticate the current user");
+            bail!(
+                "`scv start --allow-sudo` requires an interactive terminal so sudo can authenticate the current user"
+            );
         }
         let status = ProcessCommand::new("sudo")
             .arg("-v")
             .status()
             .context("check sudo authorization")?;
         if !status.success() {
-            bail!("sudo authorization failed; SCV cannot grant sudo access. Ask an administrator to add your user to the system sudo policy.");
+            bail!(
+                "sudo authorization failed; SCV cannot grant sudo access. Ask an administrator to add your user to the system sudo policy."
+            );
         }
         return Ok(());
     }
@@ -276,12 +364,16 @@ fn ensure_sudo_expectation(allow_sudo: bool) -> Result<()> {
     }
     let warning = "SCV is starting without verified sudo authorization. The daemon will run as your user, and commands requiring sudo may fail. Continue? [Y/n] ";
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        bail!("SCV has no verified sudo authorization. Re-run interactively to confirm continuing, or use `scv start --allow-sudo` to authenticate the current user's existing sudo rights.");
+        bail!(
+            "SCV has no verified sudo authorization. Re-run interactively to confirm continuing, or use `scv start --allow-sudo` to authenticate the current user's existing sudo rights."
+        );
     }
     eprint!("{warning}");
     io::stderr().flush().context("flush sudo warning")?;
     let mut answer = String::new();
-    io::stdin().read_line(&mut answer).context("read sudo warning response")?;
+    io::stdin()
+        .read_line(&mut answer)
+        .context("read sudo warning response")?;
     if matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no") {
         bail!("SCV start cancelled because sudo authorization was not verified.");
     }
@@ -290,20 +382,66 @@ fn ensure_sudo_expectation(allow_sudo: bool) -> Result<()> {
 
 async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> {
     let socket = scv_server::default_socket_path()?;
-    std::env::set_current_dir(workspace).with_context(|| format!("change to daemon workspace {}", workspace.display()))?;
+    std::env::set_current_dir(workspace)
+        .with_context(|| format!("change to daemon workspace {}", workspace.display()))?;
     scv_server::run_socket(&socket, overrides).await
 }
 
 async fn clawbot_run(account: &str, workspace: &Path) -> Result<()> {
-    let credentials = scv_clawbot::state::account(account)?.ok_or_else(|| anyhow!("ClawBot account {account:?} is not logged in; run `scv clawbot login --account {account}`"))?;
     let workspace = std::fs::canonicalize(workspace).context("resolve ClawBot workspace")?;
-    scv_clawbot::run(&credentials.token, &credentials.base_url, account, &workspace).await
+    control(DaemonCommand::ClawbotSet {
+        account: account.into(),
+        enabled: true,
+        workspace: Some(workspace.display().to_string()),
+    })
+    .await?;
+    println!(
+        "ClawBot enabled under the SCV daemon; use `scv clawbot status` for live connection state."
+    );
+    Ok(())
 }
 
-fn clawbot_status(account: &str) -> Result<()> {
-    match scv_clawbot::state::account(account)? {
-        Some(value) => println!("ClawBot account {account:?} is logged in at {}.", value.base_url),
-        None => println!("ClawBot account {account:?} is not logged in."),
+async fn control(command: DaemonCommand) -> Result<DaemonStatus> {
+    scv_client::control(&scv_client::default_socket_path()?, command).await
+}
+
+async fn clawbot_login(login_url: &str, account: &str) -> Result<()> {
+    scv_clawbot::login(login_url, account).await?;
+    match control(DaemonCommand::Reload).await {
+        Ok(_) => println!("Daemon refreshed; enabled accounts start automatically."),
+        Err(_) => println!(
+            "Credentials saved. The daemon will load enabled accounts at startup or its next refresh."
+        ),
+    }
+    Ok(())
+}
+
+async fn show_status(account: Option<&str>) -> Result<()> {
+    let status = match control(DaemonCommand::Status).await {
+        Ok(status) => status,
+        Err(error) => {
+            println!("Daemon: unavailable; component connectivity is unknown.");
+            return Err(error);
+        }
+    };
+    println!(
+        "Daemon: running, version {}, pid {}",
+        status.version, status.pid
+    );
+    for health in status
+        .components
+        .iter()
+        .filter(|h| account.is_none_or(|name| h.account == name))
+    {
+        // JSON escaping makes account identity and other untrusted strings terminal-safe.
+        println!("{}", serde_json::to_string(health)?);
+    }
+    if status
+        .components
+        .iter()
+        .all(|h| account.is_some_and(|name| h.account != name))
+    {
+        println!("No matching supervised components.");
     }
     Ok(())
 }

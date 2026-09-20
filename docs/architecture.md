@@ -6,6 +6,34 @@ SCV is a small Rust agent runtime with a terminal client. Its core is useful for
 coding work, while its provider, context, tool, approval, and event interfaces
 are general enough to host other kinds of agents.
 
+## Dependency diagram
+
+Arrows show compile-time dependencies from a crate to the crate it uses.
+Runtime socket connections are described below and do not add a client-to-server
+crate dependency.
+
+```mermaid
+flowchart LR
+    cli["scv-cli"] --> server["scv-server"]
+    cli --> tui["scv-tui"]
+    cli --> clawbot["scv-clawbot"]
+    cli --> client["scv-client"]
+    cli --> protocol["scv-protocol"]
+    server --> clawbot
+    server --> client
+    server --> protocol
+    server --> core["scv-core"]
+    server --> tools["scv-tools"]
+    server --> provider["scv-provider-openai"]
+    clawbot --> client
+    clawbot --> protocol
+    tui --> client
+    tui --> protocol
+    client --> protocol
+    tools --> core
+    provider --> core
+```
+
 ## Product boundary
 
 SCV v0.1 provides:
@@ -34,63 +62,26 @@ The repository is one Cargo workspace with these packages:
 | Package | Responsibility |
 | --- | --- |
 | `scv-protocol` | Wire messages and the protocol version. It contains no runtime policy. |
+| `scv-client` | Default socket path and bounded daemon control helper; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
-| `scv-server` | Configuration, session lifecycle, protocol dispatch, cancellation, approval routing, and stdout event serialization. |
-| `scv-tui` | Terminal state, rendering, input editing, scrolling, approval prompts, and the stdio client. |
+| `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
+| `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-clawbot` | WeChat iLink authentication, polling, durable delivery state, and daemon-session adapter. |
-| root `scv` package | Installable `scv` and `scv-server` binaries. |
+| root `scv-cli` package | Installable `scv` and `scv-server` binaries. |
 
-Dependencies point inward: binaries and adapters depend on the server/client
-interfaces; the server depends on core, tools, provider, and protocol; tools and
-providers depend on core; core contains no concrete transport, provider, tool,
-server, or TUI dependency; and the protocol package stays dependency-light. No
-core package imports TUI or adapter code.
+The integration dependency chain is `server -> clawbot -> client -> protocol`.
+The TUI depends on client and protocol, never server. Tools and providers depend
+on core; core contains no concrete transport, provider, tool, server, or TUI
+dependency. Protocol remains dependency-light. All packages share version
+`0.1.10` and exact workspace dependency pins.
 
-`scv-clawbot` is an external-client adapter. It speaks the versioned protocol
-over the Unix-socket daemon, using one long-lived session per remote sender.
+`scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
+speaks the versioned protocol over the daemon socket, using one long-lived
+session per remote sender with tools disabled.
 Session policy, history, queueing, cancellation, and approvals remain
 authoritative in `scv-server`.
-
-## Dependency diagram
-
-The diagram shows compile-time crate dependencies and the runtime direction of
-client connections. Arrows point from a dependent crate or process toward the
-crate or service it uses.
-
-```mermaid
-flowchart LR
-    cli["scv CLI\nroot package"]
-    tui["scv-tui\nRatatui client"]
-    claw["scv-clawbot\nWeChat iLink adapter"]
-    daemon["scv-server\nUnix-socket daemon"]
-    stdio["scv-server\nstdio endpoint"]
-    protocol["scv-protocol\nJSONL wire types"]
-    core["scv-core\nagent loop + traits"]
-    tools["scv-tools\nworkspace tools"]
-    provider["scv-provider-openai\nResponses transport"]
-    model[("OpenAI-compatible API")]
-    wechat[("WeChat iLink API")]
-
-    cli --> tui
-    cli --> claw
-    cli --> daemon
-    tui --> daemon
-    claw --> daemon
-    claw --> wechat
-    cli --> stdio
-    daemon --> protocol
-    stdio --> protocol
-    tui --> protocol
-    claw --> protocol
-    daemon --> core
-    daemon --> tools
-    daemon --> provider
-    tools --> core
-    provider --> core
-    provider --> model
-```
 
 The daemon and stdio endpoint share the same server implementation. The
 Unix-socket daemon is the normal long-running backend; the stdio endpoint is a
@@ -121,8 +112,49 @@ available.
 `scv update` installs the latest CLI from the configured Cargo index and
 restarts an active user daemon through systemd. The socket closes as the old
 process exits; TUI clients retry the socket and establish a new session after
-the replacement daemon is ready. Session transcript and queued work are
-client-local and are not promised to survive an upgrade.
+the replacement daemon is ready. Canonical history and the queue belong to the
+old server session and are not restored. The TUI never automatically replays
+submitted work. A foreground `scv run` daemon requires an explicit restart
+after installing the published binary.
+
+## Component lifecycle
+
+`scv-server::components` owns `Component`, `HealthReporter`, and `Supervisor`.
+`Component::run(cancel, HealthReporter)` must observe cancellation and must not
+detach child tasks. The supervisor starts at most one instance per account,
+retries unexpected exits with exponential backoff from 1 to 60 seconds, and
+cancels, aborts if necessary, and joins work within bounded shutdown.
+All future long-running components must use this server-owned lifecycle.
+
+The daemon discovers saved ClawBot accounts on startup and reconciles every
+two seconds or immediately on `scv reload`. Login is explicit; saved accounts
+autostart unless their private settings disable them. Each account's optional
+workspace defaults to the daemon workspace. Credential or settings replacement
+stops and joins the old instance before starting its replacement. Logout
+requires a live daemon, disables and joins the component, then removes its
+credentials, delivery state, and settings.
+
+Reconciliation runs in a separate cancellation-aware task, leaving the listener
+free to accept connections. `state::account_snapshot` reads credentials and
+settings together under the account transaction lock. Delivery state is bound
+to identity and normalized API origin; same-identity token rotation preserves
+state, while changing the binding requires logout. Unknown legacy identity uses
+a conservative token-based fingerprint. The lifetime runner lock and short
+mutation lock are nonblocking, and no network I/O holds the mutation lock.
+A busy account snapshot defers reconciliation without stopping the running
+instance.
+
+SIGTERM and Ctrl+C stop acceptance, cancel components and tracked session tasks,
+and join them with bounded cleanup. A `TaskTracker` retains session writer and
+turn tasks through forced connection-handler aborts; abort guards and turn
+cancellation ensure descendants stop, and shutdown waits for their completion.
+The stdio endpoint does not host components.
+Management uses `daemon.control` and `daemon.status` on the daemon socket through
+`scv-client`; it does not require an agent session. Status reports the running
+server PID/version, account identity, component state, last successful contact,
+restart count, and sanitized errors. Credentials are not connection evidence.
+The component management lock is released before writing the response, so a
+nonreading management client cannot prevent reconciliation or shutdown.
 
 ## Agent loop
 
@@ -229,6 +261,9 @@ Every change must pass `cargo fmt --check`, `cargo clippy --workspace
 --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and
 `git diff --check`. Protocol and tool safety behavior require unit or
 integration coverage.
+
+Release delivery also requires `cargo build --release --locked` and the
+dependency checks documented in `quality.md`.
 
 The full correctness and performance plan is defined in
 [`quality.md`](quality.md). Tests use scripted providers and fake executables;

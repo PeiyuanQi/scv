@@ -7,7 +7,8 @@
 ## Project Context
 
 - This repository contains SCV, a Rust workspace for a small extensible agent
-  runtime with a separate stdio server and Ratatui client.
+  runtime with a Unix-socket daemon, supervised components, a Ratatui client,
+  and a stdio endpoint for headless clients.
 - Read `README.md` for the human development flow.
 - Treat `docs/architecture.md` as the dependency-boundary source of truth and
   the other files in `docs/` as the final-state contracts for their subjects.
@@ -47,10 +48,21 @@
 
 - Use stable Rust 1.88 or newer, Rust 2024 edition, `cargo fmt`, and Clippy with
   warnings denied.
-- Keep protocol types and framing in `scv-protocol`, loop and extension traits
+- Keep protocol types and framing in `scv-protocol`, default socket discovery
+  and daemon control helpers in `scv-client`, loop and extension traits
   in `scv-core`, provider transport in provider crates, tool implementations in
   `scv-tools`, policy and session authority in `scv-server`, and terminal
-  presentation in `scv-tui`.
+  presentation in `scv-tui`. Preserve `server -> clawbot -> client -> protocol`;
+  TUI and ClawBot must not depend on server.
+- All current and future long-running components must implement the server's
+  `Component::run(cancel, HealthReporter)` contract and run under its
+  `Supervisor`. Keep starts idempotent per account, retries bounded, and
+  cancellation/shutdown joined; join the old instance before starting a
+  replacement after credential or settings changes. Track daemon session tasks
+  through shutdown.
+- Keep all crate versions aligned and internal workspace dependency versions
+  exactly pinned. Publish in dependency order: core, protocol, client,
+  provider-openai, tools, clawbot, server, tui, cli.
 - Design cross-cutting changes to the agent loop, protocol, trust boundaries,
   or crate architecture in `docs/` as needed, and review the design while
   implementing it. A reasonable redesign, refactor, or cleanup is encouraged
@@ -74,7 +86,9 @@
 
 - Run `git diff --check` for every documentation or code change.
 - Setup/build: `cargo build --workspace --locked`.
-- Local TUI: set `OPENAI_API_KEY`, then run `cargo run --bin scv`.
+- Local daemon: set `OPENAI_API_KEY`, then run
+  `cargo run --bin scv -- run --workspace /absolute/path/to/workspace`.
+- Local TUI: run `cargo run --bin scv` in another terminal.
 - Tests: `cargo test --workspace --locked`.
 - Format: `cargo fmt --check`.
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`.

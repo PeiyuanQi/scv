@@ -48,7 +48,6 @@ pub struct UpdateConfig {
     pub index_url: Option<String>,
 }
 
-
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
@@ -67,17 +66,33 @@ impl Default for ProviderConfig {
 
 impl Config {
     pub fn init_user_config() -> Result<PathBuf> {
-        let path = user_config_path().ok_or_else(|| anyhow::anyhow!("cannot determine user config path"))?;
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).context("create config directory")?; }
+        let path = user_config_path()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine user config path"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("create config directory")?;
+        }
         if !path.exists() {
             std::fs::write(&path, "[provider]\nactive = \"openai\"\n\n[providers.openai]\nkind = \"openai-compatible\"\nmodel = \"gpt-4.1-mini\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n").context("write example configuration")?;
-            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).context("secure config file")?; }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .context("secure config file")?;
+            }
         }
         Ok(path)
     }
     pub fn active_provider(&self) -> Result<ProviderConfig> {
-        if let Some(name) = self.provider_active.as_deref().or(self.provider.active.as_deref()) {
-            return self.providers.get(name).cloned().ok_or_else(|| anyhow::anyhow!("active provider profile {name:?} was not found"));
+        if let Some(name) = self
+            .provider_active
+            .as_deref()
+            .or(self.provider.active.as_deref())
+        {
+            return self
+                .providers
+                .get(name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("active provider profile {name:?} was not found"));
         }
         Ok(self.provider.clone())
     }
@@ -321,7 +336,13 @@ impl Config {
         if let Some(user_path) = user_config_path()
             && user_path.is_file()
         {
-            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; if std::fs::metadata(&user_path)?.permissions().mode() & 0o077 != 0 { bail!("user configuration is readable by group or others; run chmod 600"); } }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&user_path)?.permissions().mode() & 0o077 != 0 {
+                    bail!("user configuration is readable by group or others; run chmod 600");
+                }
+            }
             merge(&mut value, read_layer(&user_path)?);
         }
         let user_baseline: Self = value
@@ -353,7 +374,9 @@ impl Config {
             merge(&mut value, read_layer(&path)?);
         }
         let mut config: Self = value.try_into().context("parse merged configuration")?;
-        if let Some(name) = overrides.provider.as_deref() { config.provider_active = Some(name.to_owned()); }
+        if let Some(name) = overrides.provider.as_deref() {
+            config.provider_active = Some(name.to_owned());
+        }
         let selected = config.active_provider()?;
         config.provider = selected;
         if let Ok(model) = std::env::var("SCV_MODEL") {
@@ -374,8 +397,10 @@ impl Config {
         if let Some(policy) = overrides.approval_policy {
             config.tools.approval_policy = policy;
         }
-        if config.skills.user_dir == PathBuf::from("~/.scv/skills") {
-            if let Some(home) = std::env::var_os("SCV_HOME") { config.skills.user_dir = PathBuf::from(home).join("skills"); }
+        if config.skills.user_dir == std::path::Path::new("~/.scv/skills")
+            && let Some(home) = std::env::var_os("SCV_HOME")
+        {
+            config.skills.user_dir = PathBuf::from(home).join("skills");
         }
         config.skills.user_dir = expand_home(&config.skills.user_dir);
         config.validate()?;
@@ -438,10 +463,24 @@ impl Config {
         }
         if self.provider.model.trim().is_empty()
             || self.provider.base_url.trim().is_empty()
-            || self.provider.api_key.as_deref().unwrap_or("").trim().is_empty()
-                && self.provider.api_key_env.as_deref().unwrap_or("").trim().is_empty()
+            || self
+                .provider
+                .api_key
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+                && self
+                    .provider
+                    .api_key_env
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
         {
-            bail!("provider model and base_url must be non-empty; configure api_key or api_key_env");
+            bail!(
+                "provider model and base_url must be non-empty; configure api_key or api_key_env"
+            );
         }
         for (name, adapter) in [
             ("agents.claude.command", &self.agents.claude),
@@ -588,7 +627,8 @@ impl Config {
 }
 
 fn user_config_path() -> Option<PathBuf> {
-    std::env::var_os("SCV_HOME").map(PathBuf::from)
+    std::env::var_os("SCV_HOME")
+        .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))
         .map(|path| path.join("config.toml"))
 }
@@ -625,7 +665,13 @@ fn validate_project_keys(value: &toml::Value) -> Result<()> {
     let Some(table) = value.as_table() else {
         bail!("project configuration must be a TOML table");
     };
-    for forbidden in ["provider", "providers", "provider_active", "agents", "update"] {
+    for forbidden in [
+        "provider",
+        "providers",
+        "provider_active",
+        "agents",
+        "update",
+    ] {
         if table.contains_key(forbidden) {
             bail!("project configuration cannot set [{forbidden}]");
         }

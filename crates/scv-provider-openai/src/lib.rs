@@ -4,11 +4,11 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use reqwest::Client;
 use scv_core::{
     AssistantResponse, Message, Provider, ProviderError, ProviderErrorKind, ProviderRequest,
     TextDeltaSink, ToolCall, Usage,
 };
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -51,7 +51,7 @@ impl OpenAiProvider {
         timeout: Duration,
         limits: ProviderLimits,
         headers: std::collections::HashMap<String, String>,
-        ) -> Result<Self, ProviderError> {
+    ) -> Result<Self, ProviderError> {
         if api_key.trim().is_empty() {
             return Err(ProviderError::new(
                 ProviderErrorKind::Provider,
@@ -73,10 +73,16 @@ impl OpenAiProvider {
     }
 
     fn request_body(&self, request: &ProviderRequest) -> Value {
-        let input: Vec<Value> = request.messages.iter().map(message_to_response_json).collect();
+        let input: Vec<Value> = request
+            .messages
+            .iter()
+            .map(message_to_response_json)
+            .collect();
         let tools: Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters})).collect();
         let mut body = json!({"model": self.model, "instructions": request.system_prompt, "input": input, "stream": true});
-        if !tools.is_empty() { body["tools"] = Value::Array(tools); }
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
+        }
         body
     }
 
@@ -179,7 +185,12 @@ impl Provider for OpenAiProvider {
                     if data.is_empty() {
                         continue;
                     }
-                    let event: ResponseEvent = serde_json::from_slice(data).map_err(|error| ProviderError::new(ProviderErrorKind::Provider, format!("invalid provider stream JSON: {error}")))?;
+                    let event: ResponseEvent = serde_json::from_slice(data).map_err(|error| {
+                        ProviderError::new(
+                            ProviderErrorKind::Provider,
+                            format!("invalid provider stream JSON: {error}"),
+                        )
+                    })?;
                     if event.event_type == "response.output_text.delta" {
                         if let Some(delta) = event.delta {
                             if content.len().saturating_add(delta.len())
@@ -191,10 +202,25 @@ impl Provider for OpenAiProvider {
                             deltas.push(&delta).await?;
                         }
                     } else if event.event_type == "response.function_call_arguments.delta" {
-                        if let Some(delta) = event.delta { let call = calls.entry(event.output_index.unwrap_or(0)).or_default(); call.arguments.push_str(&delta); }
+                        if let Some(delta) = event.delta {
+                            let call = calls.entry(event.output_index.unwrap_or(0)).or_default();
+                            call.arguments.push_str(&delta);
+                        }
                     } else if event.event_type == "response.output_item.done" {
-                        if let Some(item) = event.item { if item.kind.as_deref() == Some("function_call") { let call = calls.entry(event.output_index.unwrap_or(0)).or_default(); call.id = item.call_id.unwrap_or_default(); call.name = item.name.unwrap_or_default(); } }
-                    } else if event.event_type == "response.completed" { if let Some(summary) = event.response.and_then(|r| r.usage) { /* usage is reported by the server event */ let _ = summary; } done = true; }
+                        if let Some(item) = event.item
+                            && item.kind.as_deref() == Some("function_call")
+                        {
+                            let call = calls.entry(event.output_index.unwrap_or(0)).or_default();
+                            call.id = item.call_id.unwrap_or_default();
+                            call.name = item.name.unwrap_or_default();
+                        }
+                    } else if event.event_type == "response.completed" {
+                        if let Some(summary) = event.response.and_then(|r| r.usage) {
+                            /* usage is reported by the server event */
+                            let _ = summary;
+                        }
+                        done = true;
+                    }
                 }
             }
         }
@@ -215,7 +241,12 @@ impl Provider for OpenAiProvider {
                         "provider returned an incomplete tool call",
                     ));
                 }
-                let arguments = serde_json::from_str(if call.arguments.is_empty() { "{}" } else { &call.arguments }).map_err(|error| {
+                let arguments = serde_json::from_str(if call.arguments.is_empty() {
+                    "{}"
+                } else {
+                    &call.arguments
+                })
+                .map_err(|error| {
                     ProviderError::new(
                         ProviderErrorKind::Provider,
                         format!("provider returned invalid tool arguments: {error}"),
@@ -237,7 +268,16 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn message_to_response_json(message: &Message) -> Value { match message { Message::User{content} => json!({"role":"user","content":content}), Message::Assistant{content,..} => json!({"role":"assistant","content":content}), Message::Tool{call_id,content,..} => json!({"type":"function_call_output","call_id":call_id,"output":content}), Message::HistoryNote{content} => json!({"role":"user","content":content}) } }
+fn message_to_response_json(message: &Message) -> Value {
+    match message {
+        Message::User { content } => json!({"role":"user","content":content}),
+        Message::Assistant { content, .. } => json!({"role":"assistant","content":content}),
+        Message::Tool {
+            call_id, content, ..
+        } => json!({"type":"function_call_output","call_id":call_id,"output":content}),
+        Message::HistoryNote { content } => json!({"role":"user","content":content}),
+    }
+}
 
 fn find_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     buffer
@@ -268,11 +308,28 @@ struct PartialToolCall {
 }
 
 #[derive(Debug, Deserialize)]
-struct ResponseEvent { #[serde(rename="type")] event_type: String, delta: Option<String>, output_index: Option<usize>, item: Option<ResponseItem>, response: Option<ResponseSummary> }
+struct ResponseEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    delta: Option<String>,
+    output_index: Option<usize>,
+    item: Option<ResponseItem>,
+    response: Option<ResponseSummary>,
+}
 #[derive(Debug, Deserialize)]
-struct ResponseSummary { usage: Option<ResponseUsage> }
+struct ResponseSummary {
+    usage: Option<ResponseUsage>,
+}
 #[derive(Debug, Deserialize)]
-struct ResponseUsage { _input_tokens: Option<u64>, _output_tokens: Option<u64> }
+struct ResponseUsage {
+    _input_tokens: Option<u64>,
+    _output_tokens: Option<u64>,
+}
 #[derive(Debug, Deserialize)]
-struct ResponseItem { #[serde(rename="type")] kind: Option<String>, _id: Option<String>, call_id: Option<String>, name: Option<String> }
-
+struct ResponseItem {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    _id: Option<String>,
+    call_id: Option<String>,
+    name: Option<String>,
+}

@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    io::{Write as _, stdout},
+    io::{self, Write as _, stdout},
     path::Path,
     process::Stdio,
     time::{Duration, Instant},
@@ -18,7 +18,6 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -27,14 +26,20 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixStream, unix::{OwnedReadHalf, OwnedWriteHalf}},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{
+        UnixStream,
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+    },
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 use uuid::Uuid;
 
 const DEFAULT_SERVER_FRAME_LIMIT: usize = 8 * 1024 * 1024;
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(3);
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 // The server may spend three seconds stopping an active turn and three more
 // draining its writer after stdin EOF. Keep the client grace strictly longer.
 const SERVER_EXIT_GRACE: Duration = Duration::from_secs(7);
@@ -148,6 +153,7 @@ struct Client {
     stdin: ClientOutput,
     stdout: ClientInput,
     max_server_frame: usize,
+    frame: Vec<u8>,
 }
 
 enum ClientOutput {
@@ -162,20 +168,35 @@ enum ClientInput {
 
 impl Client {
     async fn connect(cwd: &Path, options: &LaunchOptions) -> Result<(Self, SessionInfo)> {
-        let path = scv_server::default_socket_path()?;
-        let stream = UnixStream::connect(&path).await.with_context(|| format!(
-            "SCV server not started or not found at {}. Start it with `scv start --workspace {}` or run `scv run` in another terminal",
-            path.display(),
-            cwd.display()
-        ))?;
-        let (reader, writer) = stream.into_split();
-        let client = Self {
-            child: None,
-            stdin: ClientOutput::Socket(writer),
-            stdout: ClientInput::Socket(BufReader::new(reader)),
-            max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
-        };
-        client.initialize(cwd, options).await
+        let path = scv_client::default_socket_path()?;
+        Self::connect_at(&path, cwd, options).await
+    }
+
+    async fn connect_at(
+        path: &Path,
+        cwd: &Path,
+        options: &LaunchOptions,
+    ) -> Result<(Self, SessionInfo)> {
+        tokio::time::timeout(SOCKET_TIMEOUT, async {
+            let stream = UnixStream::connect(path).await.with_context(|| {
+                format!(
+                    "SCV server not started or not found at {}. Start it with `scv start --workspace {}` or run `scv run` in another terminal",
+                    path.display(),
+                    cwd.display()
+                )
+            })?;
+            let (reader, writer) = stream.into_split();
+            let client = Self {
+                child: None,
+                stdin: ClientOutput::Socket(writer),
+                stdout: ClientInput::Socket(BufReader::new(reader)),
+                max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
+                frame: Vec::new(),
+            };
+            client.initialize(cwd, options).await
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "server connection timed out"))?
     }
 
     async fn spawn(cwd: &Path, options: &LaunchOptions) -> Result<(Self, SessionInfo)> {
@@ -184,7 +205,9 @@ impl Client {
         if let Some(model) = &options.model {
             command.args(["--model", model]);
         }
-        if let Some(provider) = &options.provider { command.args(["--provider", provider]); }
+        if let Some(provider) = &options.provider {
+            command.args(["--provider", provider]);
+        }
         if let Some(base_url) = &options.base_url {
             command.args(["--base-url", base_url]);
         }
@@ -205,21 +228,25 @@ impl Client {
             stdin: ClientOutput::Child(stdin),
             stdout: ClientInput::Child(BufReader::new(stdout)),
             max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
+            frame: Vec::new(),
         };
         client.initialize(cwd, options).await
     }
 
-    async fn initialize(mut self, cwd: &Path, options: &LaunchOptions) -> Result<(Self, SessionInfo)> {
-        self
-            .send(&ClientMessage::Initialize {
-                request_id: "initialize".into(),
-                protocol_version: PROTOCOL_VERSION,
-                client: PeerInfo {
-                    name: "scv-tui".into(),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                },
-            })
-            .await?;
+    async fn initialize(
+        mut self,
+        cwd: &Path,
+        options: &LaunchOptions,
+    ) -> Result<(Self, SessionInfo)> {
+        self.send(&ClientMessage::Initialize {
+            request_id: "initialize".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "scv-tui".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+        })
+        .await?;
         match self.read_event().await? {
             Some(ServerEvent::Initialized { .. }) => {}
             Some(ServerEvent::Error { code, message, .. }) => {
@@ -235,7 +262,7 @@ impl Client {
             base_url: options.base_url.clone(),
             no_tools: None,
         })
-            .await?;
+        .await?;
         let session = match self.read_event().await? {
             Some(ServerEvent::SessionStarted {
                 session_id,
@@ -277,9 +304,15 @@ impl Client {
                 writer.flush().await?;
             }
             ClientOutput::Socket(writer) => {
-                writer.write_all(&bytes).await?;
-                writer.write_all(b"\n").await?;
-                writer.flush().await?;
+                // A partial write has an unknown outcome. Drop the connection on
+                // timeout; retrying the message could execute a prompt twice.
+                tokio::time::timeout(SOCKET_TIMEOUT, async {
+                    writer.write_all(&bytes).await?;
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await
+                })
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "server write timed out"))??;
             }
         }
         Ok(())
@@ -287,8 +320,12 @@ impl Client {
 
     async fn read_event(&mut self) -> Result<Option<ServerEvent>> {
         let frame = match &mut self.stdout {
-            ClientInput::Child(reader) => read_bounded_frame(reader, self.max_server_frame).await?,
-            ClientInput::Socket(reader) => read_bounded_frame(reader, self.max_server_frame).await?,
+            ClientInput::Child(reader) => {
+                read_bounded_frame(reader, &mut self.frame, self.max_server_frame).await?
+            }
+            ClientInput::Socket(reader) => {
+                read_bounded_frame(reader, &mut self.frame, self.max_server_frame).await?
+            }
         };
         let Some(frame) = frame else {
             return Ok(None);
@@ -300,30 +337,82 @@ impl Client {
 
     async fn shutdown(&mut self) {
         match &mut self.stdin {
-            ClientOutput::Child(writer) => { let _ = writer.shutdown().await; }
-            ClientOutput::Socket(writer) => { let _ = writer.shutdown().await; }
-        }
-        if let Some(child) = &mut self.child {
-            if tokio::time::timeout(SERVER_EXIT_GRACE, child.wait()).await.is_err() {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+            ClientOutput::Child(writer) => {
+                let _ = writer.shutdown().await;
             }
+            ClientOutput::Socket(writer) => {
+                let _ = writer.shutdown().await;
+            }
+        }
+        if let Some(child) = &mut self.child
+            && tokio::time::timeout(SERVER_EXIT_GRACE, child.wait())
+                .await
+                .is_err()
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
         }
     }
 }
 
-async fn read_bounded_frame<R>(reader: &mut R, max_bytes: usize) -> Result<Option<Vec<u8>>>
+async fn reconnect_client(
+    path: &Path,
+    cwd: &Path,
+    options: &LaunchOptions,
+) -> (Client, SessionInfo) {
+    loop {
+        if let Ok(connection) = Client::connect_at(path, cwd, options).await {
+            return connection;
+        }
+        tokio::time::sleep(RECONNECT_DELAY).await;
+    }
+}
+
+fn is_transport_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<io::Error>().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::NotConnected
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::TimedOut
+        )
+    })
+}
+
+async fn read_bounded_frame<R>(
+    reader: &mut R,
+    frame: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>>
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut frame = Vec::with_capacity(max_bytes.min(8192));
-    let limit = u64::try_from(max_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(2);
-    let mut limited = reader.take(limit);
-    let read = limited.read_until(b'\n', &mut frame).await?;
-    if read == 0 {
-        return Ok(None);
+    // Keep partial frames on Client: select! cancels reads on every UI tick.
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if frame.is_empty() {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "server disconnected during a frame",
+            )
+            .into());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let count = newline.map_or(available.len(), |index| index + 1);
+        if frame.len().saturating_add(count) > max_bytes.saturating_add(2) {
+            bail!("server frame exceeded configured client limit");
+        }
+        frame.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if newline.is_some() {
+            break;
+        }
     }
     while matches!(frame.last(), Some(b'\n' | b'\r')) {
         frame.pop();
@@ -331,7 +420,7 @@ where
     if frame.len() > max_bytes {
         bail!("server frame exceeded configured client limit");
     }
-    Ok(Some(frame))
+    Ok(Some(std::mem::take(frame)))
 }
 
 struct TerminalGuard {
@@ -541,7 +630,68 @@ impl App {
         self.queue_selected = None;
         self.last_seq = 0;
         self.connected = true;
-        self.push_item(TranscriptItem::System("Reconnected to the SCV server after restart.".into()));
+        self.history_index = None;
+        while self.prompt_history.len() > self.max_prompt_history_items
+            || self.prompt_history_bytes > self.max_prompt_history_bytes
+        {
+            if let Some(removed) = self.prompt_history.pop_front() {
+                self.prompt_history_bytes = self.prompt_history_bytes.saturating_sub(removed.len());
+            } else {
+                break;
+            }
+        }
+        self.push_item(TranscriptItem::System(
+            "Reconnected with a fresh session. Prior transcript is display-only; server history was not restored. Interrupted prompts and queued work were not replayed.".into(),
+        ));
+        self.enforce_item_limits();
+    }
+
+    fn disconnect(&mut self) {
+        if !self.connected {
+            return;
+        }
+        self.connected = false;
+        self.running = false;
+        self.active_turn = None;
+        self.started_at = None;
+        self.pending_approval = None;
+        self.queue.clear();
+        self.queue_paused = false;
+        self.queue_selected = None;
+        if self.queue_editing.take().is_some() {
+            clear_input(self);
+        }
+        self.context_after_tokens = None;
+        self.history_bytes = None;
+        self.last_seq = 0;
+        self.history_index = None;
+        self.finish_pending_tools(ToolStatus::Failed);
+        for item in &mut self.items {
+            if let TranscriptItem::Assistant { streaming, .. } = item {
+                *streaming = false;
+            }
+        }
+        self.push_item(TranscriptItem::Error(
+            "Server disconnected; reconnecting. Pending work has an unknown outcome and will not be replayed. Press Ctrl+C to exit.".into(),
+        ));
+        self.enforce_item_limits();
+    }
+
+    fn handle_connection_error(&mut self, error: anyhow::Error) -> Result<()> {
+        if !is_transport_error(&error) {
+            return Err(error);
+        }
+        self.disconnect();
+        Ok(())
+    }
+
+    fn handle_server_result(&mut self, result: Result<Option<ServerEvent>>) -> Result<()> {
+        match result {
+            Ok(Some(event)) => self.handle_server_event(event),
+            Ok(None) => self.disconnect(),
+            Err(error) => self.handle_connection_error(error)?,
+        }
+        Ok(())
     }
 
     fn add_prompt_history(&mut self, prompt: String) {
@@ -574,12 +724,16 @@ impl App {
     fn handle_server_event(&mut self, event: ServerEvent) {
         self.update_seq(&event);
         match event {
-            ServerEvent::QueueSnapshot { entries, paused, .. } => {
+            ServerEvent::QueueSnapshot {
+                entries, paused, ..
+            } => {
                 self.queue = entries.into();
                 self.queue_paused = paused;
                 self.queue_selected = None;
             }
-            ServerEvent::QueueEnqueued { entry, position, .. } => {
+            ServerEvent::QueueEnqueued {
+                entry, position, ..
+            } => {
                 self.queue.insert(position.min(self.queue.len()), entry);
             }
             ServerEvent::QueueUpdated { entry, .. } => {
@@ -591,19 +745,36 @@ impl App {
                     *existing = entry;
                 }
             }
-            ServerEvent::QueueMoved { queue_id, position, revision, .. } => {
-                if let Some(index) = self.queue.iter().position(|entry| entry.queue_id == queue_id)
+            ServerEvent::QueueMoved {
+                queue_id,
+                position,
+                revision,
+                ..
+            } => {
+                if let Some(index) = self
+                    .queue
+                    .iter()
+                    .position(|entry| entry.queue_id == queue_id)
                     && let Some(mut entry) = self.queue.remove(index)
                 {
                     entry.revision = revision;
                     self.queue.insert(position.min(self.queue.len()), entry);
                 }
             }
-            ServerEvent::QueueRemoved { queue_id, .. } | ServerEvent::QueueDequeued { queue_id, .. } => {
-                if let Some(index) = self.queue.iter().position(|entry| entry.queue_id == queue_id) {
+            ServerEvent::QueueRemoved { queue_id, .. }
+            | ServerEvent::QueueDequeued { queue_id, .. } => {
+                if let Some(index) = self
+                    .queue
+                    .iter()
+                    .position(|entry| entry.queue_id == queue_id)
+                {
                     self.queue.remove(index);
                     self.queue_selected = self.queue_selected.and_then(|selected| {
-                        if self.queue.is_empty() { None } else { Some(selected.min(self.queue.len() - 1)) }
+                        if self.queue.is_empty() {
+                            None
+                        } else {
+                            Some(selected.min(self.queue.len() - 1))
+                        }
                     });
                 }
             }
@@ -761,7 +932,9 @@ impl App {
             ServerEvent::Error { code, message, .. } => {
                 self.push_item(TranscriptItem::Error(format!("{code}: {message}")));
             }
-            ServerEvent::Initialized { .. } | ServerEvent::SessionStarted { .. } => {}
+            ServerEvent::Initialized { .. }
+            | ServerEvent::SessionStarted { .. }
+            | ServerEvent::DaemonStatus { .. } => {}
         }
         self.enforce_item_limits();
     }
@@ -822,7 +995,8 @@ async fn run_event_loop(
 ) -> Result<()> {
     let mut terminal_events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    let mut reconnect_after = Instant::now();
+    let socket_path = scv_client::default_socket_path()?;
+    let mut reconnect = Box::pin(reconnect_client(&socket_path, cwd, options));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     loop {
@@ -831,26 +1005,20 @@ async fn run_event_loop(
             return Ok(());
         }
         tokio::select! {
-            _ = tick.tick() => {
-                if !app.connected && Instant::now() >= reconnect_after {
-                    reconnect_after = Instant::now() + Duration::from_secs(1);
-                    if let Ok((new_client, session)) = Client::connect(cwd, options).await {
-                        *client = new_client;
-                        app.reconnect(session);
-                    }
-                }
+            _ = tick.tick() => {}
+            (new_client, session) = &mut reconnect, if !app.connected => {
+                *client = new_client;
+                app.reconnect(session);
+                reconnect = Box::pin(reconnect_client(&socket_path, cwd, options));
             }
             _ = terminate.recv() => app.quit = true,
             _ = hangup.recv() => app.quit = true,
             terminal_event = terminal_events.next() => {
                 match terminal_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        if app.connected {
-                            handle_key(client, app, key).await?
-                        } else if key.modifiers.contains(KeyModifiers::CONTROL)
-                            && key.code == KeyCode::Char('c')
-                        {
-                            app.quit = true;
+                        handle_key(client, app, key).await?;
+                        if !app.connected {
+                            client.shutdown().await;
                         }
                     }
                     Some(Ok(Event::Resize(_, _))) => {},
@@ -860,16 +1028,9 @@ async fn run_event_loop(
                 }
             }
             server_event = client.read_event(), if app.connected => {
-                match server_event {
-                    Ok(Some(event)) => app.handle_server_event(event),
-                    Ok(None) | Err(_) => {
-                        app.push_item(TranscriptItem::Error("Server disconnected. Press Ctrl+C to exit.".into()));
-                        app.running = false;
-                        app.active_turn = None;
-                        app.pending_approval = None;
-                        app.connected = false;
-                        reconnect_after = Instant::now();
-                    }
+                app.handle_server_result(server_event)?;
+                if !app.connected {
+                    client.shutdown().await;
                 }
             }
         }
@@ -877,6 +1038,22 @@ async fn run_event_loop(
 }
 
 async fn handle_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result<()> {
+    if !app.connected {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            app.quit = true;
+        }
+        return Ok(());
+    }
+    if let Err(error) = handle_connected_key(client, app, key).await {
+        if is_transport_error(&error) {
+            clear_input(app);
+        }
+        app.handle_connection_error(error)?;
+    }
+    Ok(())
+}
+
+async fn handle_connected_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result<()> {
     if let Some(approval) = &app.pending_approval {
         let approved = match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
@@ -927,10 +1104,14 @@ async fn handle_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result
             KeyCode::Char('x') if app.running && app.queue_selected.is_some() => {
                 let index = app.queue_selected.unwrap();
                 if let Some(entry) = app.queue.get(index).cloned() {
-                    client.send(&ClientMessage::QueueRemove {
-                        request_id: new_id(), session_id: app.session_id.clone(),
-                        queue_id: entry.queue_id, revision: entry.revision,
-                    }).await?;
+                    client
+                        .send(&ClientMessage::QueueRemove {
+                            request_id: new_id(),
+                            session_id: app.session_id.clone(),
+                            queue_id: entry.queue_id,
+                            revision: entry.revision,
+                        })
+                        .await?;
                 }
                 return Ok(());
             }
@@ -941,7 +1122,9 @@ async fn handle_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result
     match key.code {
         KeyCode::Enter => submit_input(client, app).await?,
         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) && app.running => {
-            let index = app.queue_selected.unwrap_or_else(|| app.queue.len().saturating_sub(1));
+            let index = app
+                .queue_selected
+                .unwrap_or_else(|| app.queue.len().saturating_sub(1));
             if let Some(entry) = app.queue.get(index).cloned() {
                 app.input = entry.prompt.clone();
                 app.cursor = app.input.chars().count();
@@ -951,7 +1134,9 @@ async fn handle_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) && app.running => {
             if !app.queue.is_empty() {
-                let index = app.queue_selected.map_or(0, |index| (index + 1).min(app.queue.len() - 1));
+                let index = app
+                    .queue_selected
+                    .map_or(0, |index| (index + 1).min(app.queue.len() - 1));
                 app.queue_selected = Some(index);
                 if let Some(entry) = app.queue.get(index).cloned() {
                     app.input = entry.prompt.clone();
@@ -961,9 +1146,13 @@ async fn handle_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result
             }
         }
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) && app.running => {
-            client.send(&ClientMessage::SessionPause {
-                request_id: new_id(), session_id: app.session_id.clone(), paused: !app.queue_paused,
-            }).await?;
+            client
+                .send(&ClientMessage::SessionPause {
+                    request_id: new_id(),
+                    session_id: app.session_id.clone(),
+                    paused: !app.queue_paused,
+                })
+                .await?;
         }
         KeyCode::Char(character) => insert_char(app, character),
         KeyCode::Backspace => backspace(app),
@@ -1037,14 +1226,23 @@ async fn submit_input(client: &mut Client, app: &mut App) -> Result<()> {
         _ => {}
     }
     if let Some(entry) = app.queue_editing.take() {
-        client.send(&ClientMessage::QueueUpdate {
-            request_id: new_id(), session_id: app.session_id.clone(),
-            queue_id: entry.queue_id, revision: entry.revision, prompt,
-        }).await?;
+        client
+            .send(&ClientMessage::QueueUpdate {
+                request_id: new_id(),
+                session_id: app.session_id.clone(),
+                queue_id: entry.queue_id,
+                revision: entry.revision,
+                prompt,
+            })
+            .await?;
     } else {
-        client.send(&ClientMessage::TurnStart {
-            request_id: new_id(), session_id: app.session_id.clone(), prompt: prompt.clone(),
-        }).await?;
+        client
+            .send(&ClientMessage::TurnStart {
+                request_id: new_id(),
+                session_id: app.session_id.clone(),
+                prompt: prompt.clone(),
+            })
+            .await?;
         if !app.running {
             app.push_item(TranscriptItem::User(prompt.clone()));
             app.add_prompt_history(prompt);
@@ -1251,12 +1449,22 @@ fn transcript_text(app: &App) -> Text<'static> {
     }
     if !app.queue.is_empty() {
         lines.push(Line::styled(
-            format!("queue ({}{})", app.queue.len(), if app.queue_paused { ", paused" } else { "" }),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            format!(
+                "queue ({}{})",
+                app.queue.len(),
+                if app.queue_paused { ", paused" } else { "" }
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
         for (index, entry) in app.queue.iter().enumerate() {
             lines.push(Line::styled(
-                format!("  {}. {}", index + 1, bounded_text(&entry.prompt, 180).replace('\n', " ↵ ")),
+                format!(
+                    "  {}. {}",
+                    index + 1,
+                    bounded_text(&entry.prompt, 180).replace('\n', " ↵ ")
+                ),
                 Style::default().fg(Color::Yellow),
             ));
         }
@@ -1407,6 +1615,7 @@ fn event_seq(event: &ServerEvent) -> Option<u64> {
         | ServerEvent::SessionPaused { seq, .. } => Some(*seq),
         ServerEvent::Initialized { .. }
         | ServerEvent::SessionStarted { .. }
+        | ServerEvent::DaemonStatus { .. }
         | ServerEvent::Error { .. } => None,
     }
 }
@@ -1444,9 +1653,437 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     use super::*;
     use ratatui::backend::TestBackend;
+    use tokio::net::UnixListener;
+
+    struct SocketPath(PathBuf);
+
+    impl SocketPath {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!("scv-tui-{}.sock", new_id())))
+        }
+    }
+
+    impl Drop for SocketPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    async fn receive(peer: &mut BufReader<UnixStream>) -> ClientMessage {
+        let mut line = String::new();
+        let count = tokio::time::timeout(Duration::from_secs(2), peer.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(count, 0, "client closed before sending a message");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn emit(peer: &mut BufReader<UnixStream>, event: ServerEvent) {
+        let mut bytes = serde_json::to_vec(&event).unwrap();
+        bytes.push(b'\n');
+        peer.get_mut().write_all(&bytes).await.unwrap();
+    }
+
+    async fn accept_session(listener: &UnixListener, id: &str) -> BufReader<UnixStream> {
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(6), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut peer = BufReader::new(stream);
+        assert!(matches!(
+            receive(&mut peer).await,
+            ClientMessage::Initialize { .. }
+        ));
+        emit(
+            &mut peer,
+            ServerEvent::Initialized {
+                request_id: "initialize".into(),
+                protocol_version: PROTOCOL_VERSION,
+                server: PeerInfo {
+                    name: "test".into(),
+                    version: "0".into(),
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut peer).await,
+            ClientMessage::SessionStart { .. }
+        ));
+        emit(
+            &mut peer,
+            ServerEvent::SessionStarted {
+                request_id: "session-start".into(),
+                session_id: id.into(),
+                cwd: "/tmp".into(),
+                model: "test".into(),
+                context_max_tokens: 100,
+                max_server_frame_bytes: 65536,
+                max_transcript_bytes: 16384,
+                max_transcript_items: 100,
+                max_prompt_history_bytes: 1024,
+                max_prompt_history_items: 10,
+            },
+        )
+        .await;
+        peer
+    }
+
+    async fn connected(
+        path: &SocketPath,
+        listener: &UnixListener,
+    ) -> (Client, App, BufReader<UnixStream>) {
+        let options = LaunchOptions::default();
+        let (connection, peer) = tokio::join!(
+            Client::connect_at(&path.0, Path::new("/tmp"), &options),
+            accept_session(listener, "old-session"),
+        );
+        let (client, session) = connection.unwrap();
+        (client, App::new(session), peer)
+    }
+
+    fn pending_work(app: &mut App) {
+        app.running = true;
+        app.active_turn = Some("old-turn".into());
+        app.started_at = Some(Instant::now());
+        app.pending_approval = Some(PendingApproval {
+            id: "old-approval".into(),
+            name: "test".into(),
+            risk: "high".into(),
+            cwd: "/tmp".into(),
+            summary: "pending".into(),
+        });
+        app.queue.push_back(QueueEntry {
+            queue_id: "old-queue".into(),
+            revision: 1,
+            prompt: "queued work".into(),
+            submitter: "test".into(),
+        });
+        app.queue_paused = true;
+        app.queue_selected = Some(0);
+        app.queue_editing = app.queue.front().cloned();
+        app.input = "edited queue prompt".into();
+        app.cursor = app.input.len();
+        app.context_after_tokens = Some(42);
+        app.history_bytes = Some(100);
+        app.last_seq = 9;
+        app.push_item(TranscriptItem::Tool {
+            call_id: "old-tool".into(),
+            name: "test".into(),
+            status: ToolStatus::Running,
+            arguments: String::new(),
+            output: String::new(),
+            expanded: false,
+        });
+        app.push_item(TranscriptItem::Assistant {
+            content: "partial answer".into(),
+            streaming: true,
+        });
+    }
+
+    fn assert_disconnected(app: &App) {
+        assert!(!app.connected);
+        assert!(!app.running);
+        assert!(app.active_turn.is_none());
+        assert!(app.started_at.is_none());
+        assert!(app.pending_approval.is_none());
+        assert!(app.queue.is_empty());
+        assert!(!app.queue_paused);
+        assert!(app.queue_editing.is_none());
+        assert!(app.queue_selected.is_none());
+        assert!(app.context_after_tokens.is_none());
+        assert!(app.history_bytes.is_none());
+        assert_eq!(app.last_seq, 0);
+        assert!(!app.items.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Assistant {
+                streaming: true,
+                ..
+            } | TranscriptItem::Tool {
+                status: ToolStatus::Running | ToolStatus::Approval | ToolStatus::Proposed,
+                ..
+            }
+        )));
+    }
+
+    async fn assert_fresh_session_no_replay(
+        client: &mut Client,
+        app: &mut App,
+        peer: &mut BufReader<UnixStream>,
+    ) {
+        assert!(app.connected);
+        assert_eq!(app.session_id, "new-session");
+        assert!(app.items.iter().any(|item| matches!(item,
+            TranscriptItem::System(text) if text.contains("fresh session") && text.contains("history was not restored")
+        )));
+        handle_key(
+            client,
+            app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        app.input = "fresh prompt".into();
+        handle_key(
+            client,
+            app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(receive(peer).await, ClientMessage::TurnStart { session_id, prompt, .. }
+            if session_id == "new-session" && prompt == "fresh prompt")
+        );
+        let mut line = String::new();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), peer.read_line(&mut line))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_client_reconnects_after_daemon_restart_without_replaying_work() {
+        let path = SocketPath::new();
+        let listener = UnixListener::bind(&path.0).unwrap();
+        let (mut client, mut app, mut peer) = connected(&path, &listener).await;
+        app.input = "interrupted prompt".into();
+        handle_key(
+            &mut client,
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            receive(&mut peer).await,
+            ClientMessage::TurnStart { .. }
+        ));
+        pending_work(&mut app);
+        drop(peer);
+        drop(listener);
+        std::fs::remove_file(&path.0).unwrap();
+        app.handle_server_result(client.read_event().await).unwrap();
+        assert_disconnected(&app);
+        assert!(app.input.is_empty());
+        assert_eq!(app.prompt_history.front().unwrap(), "interrupted prompt");
+        handle_key(
+            &mut client,
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        let options = LaunchOptions::default();
+        let (connection, mut peer) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                reconnect_client(&path.0, Path::new("/tmp"), &options),
+                async {
+                    // The first retry sees a missing socket, as during a restart.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let listener = UnixListener::bind(&path.0).unwrap();
+                    accept_session(&listener, "new-session").await
+                }
+            )
+        })
+        .await
+        .unwrap();
+        let (new_client, session) = connection;
+        client = new_client;
+        app.reconnect(session);
+        assert_fresh_session_no_replay(&mut client, &mut app, &mut peer).await;
+    }
+
+    #[tokio::test]
+    async fn socket_write_failures_clear_pending_commands_and_never_replay_them() {
+        for action in ["prompt", "queue", "approval", "cancel", "clear"] {
+            let path = SocketPath::new();
+            let listener = UnixListener::bind(&path.0).unwrap();
+            let (mut client, mut app, peer) = connected(&path, &listener).await;
+            pending_work(&mut app);
+            let key = match action {
+                "approval" => KeyCode::Char('y'),
+                "cancel" => {
+                    app.pending_approval = None;
+                    KeyCode::Esc
+                }
+                _ => {
+                    app.pending_approval = None;
+                    if action != "queue" {
+                        app.queue_editing = None;
+                    }
+                    app.input = if action == "clear" {
+                        "/clear"
+                    } else {
+                        "interrupted prompt"
+                    }
+                    .into();
+                    KeyCode::Enter
+                }
+            };
+            drop(peer);
+            handle_key(
+                &mut client,
+                &mut app,
+                KeyEvent::new(key, KeyModifiers::NONE),
+            )
+            .await
+            .unwrap();
+            assert_disconnected(&app);
+            assert!(app.input.is_empty(), "{action}");
+            let options = LaunchOptions::default();
+            let ((new_client, session), mut peer) = tokio::join!(
+                reconnect_client(&path.0, Path::new("/tmp"), &options),
+                accept_session(&listener, "new-session"),
+            );
+            client = new_client;
+            app.reconnect(session);
+            assert_fresh_session_no_replay(&mut client, &mut app, &mut peer).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_socket_write_times_out_without_replaying_a_partial_prompt() {
+        let path = SocketPath::new();
+        let listener = UnixListener::bind(&path.0).unwrap();
+        let (mut client, mut app, peer) = connected(&path, &listener).await;
+        // The peer stays alive without draining its socket, forcing a partial write.
+        app.input = "x".repeat(8 * 1024 * 1024);
+        tokio::time::timeout(
+            SOCKET_TIMEOUT + Duration::from_secs(2),
+            handle_key(
+                &mut client,
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_disconnected(&app);
+        assert!(app.input.is_empty());
+        client.shutdown().await;
+        drop(peer);
+        let options = LaunchOptions::default();
+        let ((new_client, session), mut peer) = tokio::join!(
+            reconnect_client(&path.0, Path::new("/tmp"), &options),
+            accept_session(&listener, "new-session"),
+        );
+        client = new_client;
+        app.reconnect(session);
+        assert_fresh_session_no_replay(&mut client, &mut app, &mut peer).await;
+    }
+
+    #[tokio::test]
+    async fn partial_socket_eof_is_recoverable_and_preserves_unsent_draft() {
+        let path = SocketPath::new();
+        let listener = UnixListener::bind(&path.0).unwrap();
+        let (mut client, mut app, mut peer) = connected(&path, &listener).await;
+        app.input = "unsent draft".into();
+        peer.get_mut().write_all(b"{\"type\":").await.unwrap();
+        drop(peer);
+        let error = client.read_event().await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        app.handle_server_result(Err(error)).unwrap();
+        assert_disconnected(&app);
+        assert_eq!(app.input, "unsent draft");
+        handle_key(
+            &mut client,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        )
+        .await
+        .unwrap();
+        assert!(app.quit);
+    }
+
+    #[tokio::test]
+    async fn socket_frames_survive_cancelled_reads_and_protocol_errors_are_not_retried() {
+        let path = SocketPath::new();
+        let listener = UnixListener::bind(&path.0).unwrap();
+        let (mut client, mut app, mut peer) = connected(&path, &listener).await;
+        let event = ServerEvent::QueueSnapshot {
+            request_id: None,
+            session_id: app.session_id.clone(),
+            seq: 1,
+            entries: vec![],
+            paused: false,
+        };
+        let bytes = serde_json::to_vec(&event).unwrap();
+        let middle = bytes.len() / 2;
+        peer.get_mut().write_all(&bytes[..middle]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), client.read_event())
+                .await
+                .is_err()
+        );
+        peer.get_mut().write_all(&bytes[middle..]).await.unwrap();
+        peer.get_mut().write_all(b"\n").await.unwrap();
+        assert_eq!(client.read_event().await.unwrap(), Some(event));
+        peer.get_mut().write_all(b"not json\n").await.unwrap();
+        assert!(app.handle_server_result(client.read_event().await).is_err());
+        assert!(app.connected);
+    }
+
+    #[tokio::test]
+    async fn reconnect_retries_a_stalled_handshake_with_a_bounded_wait() {
+        let path = SocketPath::new();
+        let listener = UnixListener::bind(&path.0).unwrap();
+        let options = LaunchOptions::default();
+        let ((_, session), _peer) = tokio::time::timeout(
+            SOCKET_TIMEOUT + RECONNECT_DELAY + Duration::from_secs(2),
+            async {
+                tokio::join!(
+                    reconnect_client(&path.0, Path::new("/tmp"), &options),
+                    async {
+                        let (stalled, _) = listener.accept().await.unwrap();
+                        let mut stalled = BufReader::new(stalled);
+                        assert!(matches!(
+                            receive(&mut stalled).await,
+                            ClientMessage::Initialize { .. }
+                        ));
+                        let peer = accept_session(&listener, "new-session").await;
+                        let mut line = String::new();
+                        assert_eq!(stalled.read_line(&mut line).await.unwrap(), 0);
+                        peer
+                    }
+                )
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.id, "new-session");
+    }
+
+    #[test]
+    fn transient_io_errors_are_distinct_from_protocol_errors() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::TimedOut,
+        ] {
+            assert!(is_transport_error(
+                &anyhow::Error::new(io::Error::from(kind)).context("socket")
+            ));
+        }
+        assert!(!is_transport_error(&anyhow!("invalid protocol event")));
+        assert!(!is_transport_error(
+            &io::Error::from(io::ErrorKind::PermissionDenied).into()
+        ));
+    }
 
     fn app() -> App {
         App::new(SessionInfo {
@@ -1502,7 +2139,9 @@ mod tests {
     #[tokio::test]
     async fn client_reader_rejects_frames_before_unbounded_allocation() {
         let mut reader = BufReader::new(Cursor::new(format!("{}\n", "x".repeat(32))));
-        let error = read_bounded_frame(&mut reader, 8).await.unwrap_err();
+        let error = read_bounded_frame(&mut reader, &mut Vec::new(), 8)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("exceeded"));
     }
 

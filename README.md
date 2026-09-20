@@ -17,6 +17,7 @@ and provides a responsive Rust TUI for coding work.
 - Configurable, bounded context selection and deterministic compaction
 - Server-enforced approvals, timeouts, output caps, and cancellation
 - A Unix-socket daemon with a Ratatui client, plus a stdio server for one-shot clients
+- Daemon-supervised ClawBot accounts with persistent enablement and live health
 - Interactive TUI plus a headless `scv exec` mode
 - Linux and macOS support on ARM64 and x86-64
 
@@ -54,26 +55,32 @@ index_url = "https://mirrors.ustc.edu.cn/crates.io-index"
 
 `SCV_CARGO_INDEX_URL` or `scv update --index-url URL` can override that value.
 SCV passes the URL to Cargo and does not handle registry credentials itself.
-When the user-level daemon is active, the update command restarts it after the
-new binary is installed. Connected TUI clients automatically reconnect and
-create a fresh session.
+When the systemd user daemon is active, the update command restarts it after the
+published binary is installed. A foreground `scv run` daemon requires an
+explicit restart. Connected TUI clients automatically reconnect and create a
+fresh session, without restoring server history or replaying submitted work.
 
 To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
+All packages use version `0.1.10`, with exact `=0.1.10` pins for dependencies
+between workspace packages.
+
 ```bash
 cargo publish --locked -p scv-core
 cargo publish --locked -p scv-protocol
+cargo publish --locked -p scv-client
 cargo publish --locked -p scv-provider-openai
 cargo publish --locked -p scv-tools
+cargo publish --locked -p scv-clawbot
 cargo publish --locked -p scv-server
 cargo publish --locked -p scv-tui
 cargo publish --locked -p scv-cli
 ```
 
-The server is a JSONL backend for local clients. It is normally started by the
-TUI or by an embedding client and is not the user-facing daemon:
+The Unix-socket daemon is the normal JSONL backend for the TUI. Embedding
+clients and headless `scv exec` can use the separate stdio entry point:
 
 ```bash
 scv server --stdio
@@ -90,6 +97,7 @@ same process:
 ```bash
 scv start --workspace /path/to/workspace
 scv status
+scv reload
 scv restart --workspace /path/to/workspace
 scv stop
 ```
@@ -118,18 +126,39 @@ scv --provider local --model llama3.1 --base-url http://localhost:11434/v1
 
 Authenticate the WeChat ClawBot bridge once with `scv clawbot login`. The QR
 login stores the bearer token at `$SCV_HOME/clawbot/accounts/<account>.json`
-(normally under `~/.scv`) with mode `0600`; the token is never printed. Start
-the bridge explicitly with `scv clawbot run --workspace /path/to/workspace`.
-Remove an account with `scv clawbot logout`. See the [ClawBot design and API
-contract](docs/clawbot.md).
+(normally under `~/.scv`) with mode `0600`; the token is never printed. Saved
+accounts are enabled by default and start under the daemon automatically.
+Login remains explicit and honors an account's saved opt-out.
+
+Delivery state is bound to the account identity and API origin. Token rotation
+for the same known identity preserves state; changing identity or origin
+requires explicit logout first, including replacement of legacy credentials
+without known identity. Stop any old `0.1.9` standalone ClawBot process before
+enabling the supervised account; those processes do not honor the new locks.
+
+`scv clawbot run --account NAME --workspace /path/to/workspace` persistently
+enables the account in the running daemon and returns. `scv clawbot stop
+--account NAME` persistently disables it while retaining credentials.
+`scv clawbot status --account NAME` queries live daemon health, including
+identity and last successful contact; saved credentials alone do not mean
+connected. `scv clawbot logout --account NAME` requires a live daemon and joins
+the component before deleting credentials, delivery state, and settings.
+
+Account settings live at `$SCV_HOME/clawbot/settings/<account>.json`, with
+`enabled` defaulting to `true` and an optional workspace defaulting to the
+daemon workspace. The daemon reconciles accounts and settings every two seconds
+or immediately on `scv reload`. To opt out while offline, set `enabled` to
+`false` in the private settings file before daemon startup. See the
+[ClawBot contract](docs/clawbot.md) for permissions and recovery behavior.
 
 ## Quick start
 
-SCV's first provider speaks the OpenAI-compatible Chat Completions API.
+SCV's first provider speaks the OpenAI-compatible Responses API.
 
 ```bash
 export OPENAI_API_KEY="your-key"
 cd /path/to/your/project
+# In a separate terminal, start `scv run --workspace /path/to/your/project`.
 scv
 ```
 
@@ -205,13 +234,19 @@ SCV is a Cargo workspace with deliberately narrow packages:
 
 - `scv-core`: loop and extension traits;
 - `scv-protocol`: versioned wire types with no runtime policy;
+- `scv-client`: shared default socket path and daemon control helper;
 - `scv-provider-openai`: streaming provider transport;
 - `scv-tools`: filesystem, process, skill, and nested-agent tools;
-- `scv-server`: configuration, sessions, permissions, and protocol dispatch;
+- `scv-clawbot`: iLink login, polling, delivery state, and remote sessions;
+- `scv-server`: configuration, sessions, permissions, component supervision,
+  and protocol dispatch;
 - `scv-tui`: terminal client and headless protocol client.
 
 The TUI connects to the local Unix-socket daemon; `scv-server --stdio` exposes
-the same server library to one-shot local clients. Start with the final v0.1
+the same server library to one-shot local clients. Dependencies flow from
+server to ClawBot to client to protocol; the TUI depends on client, not server.
+All long-running components must be supervised by the server. Start with the
+final v0.1
 [`architecture`](docs/architecture.md), then see the
 [`protocol`](docs/protocol.md), [`context`](docs/context-management.md),
 [`tools`](docs/tools.md), [`TUI`](docs/tui.md), and

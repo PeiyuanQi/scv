@@ -1,9 +1,9 @@
 # Testing and Performance
 
-Status: final v0.1 record with proposed v0.2 TUI additions
+Status: current correctness and performance contract
 
 SCV correctness tests require no network, provider credential, or installed
-third-party agent. The checked-in v0.1 suite contains 46 tests covering:
+third-party agent. The correctness contract covers:
 
 - core completion, grouped context selection, repeatable history trimming,
   history-limit failure, multi-step tools, denials, maximum steps, usage
@@ -22,6 +22,46 @@ third-party agent. The checked-in v0.1 suite contains 46 tests covering:
 - TUI prompt history, Unicode editing, primary-region rendering, bounded frame
   reads, and authoritative session clearing.
 
+Daemon and component changes require focused coverage for:
+
+- daemon control handshake, action serialization, status responses, bounded
+  requests, and no mutation replay after ambiguous failures;
+- one component per account, recovery with 1-to-60-second backoff, sanitized
+  health, successful-contact timestamps, and credentials not implying connected;
+- default autostart, persistent stop, login honoring opt-out, periodic and
+  explicit reconciliation, and joining before credential/settings replacement;
+- logout joining before deletion, private settings/state, interrupted in-flight
+  claims preventing replay, and pending delivery retaining client IDs;
+- identity/origin binding, same-identity token rotation, conservative legacy
+  binding, replacement requiring logout, and stale-runner write rejection;
+- nonblocking transaction/lifetime locks, serialized login/removal, atomic
+  account snapshots, busy snapshots deferred without stopping the current
+  instance, and strict settings/discovery validation;
+- batches above 4096 messages rejected before execution or cursor advancement,
+  and encountered duplicate IDs retained through the batch checkpoint;
+- no-tools remote sessions, SIGTERM/Ctrl+C shutdown, and tracked session cleanup;
+- writer/turn descendants joined after forced handler abort, cancellation-aware
+  reconciliation, and management locks released before blocked response writes;
+- TUI reconnect creating a fresh session without history restoration or
+  automatic replay of submitted work.
+
+Use fake components, local protocol peers, and fake HTTP services for these
+checks. Correctness tests must not contact WeChat or a live model provider.
+
+## Required checks
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo deny check advisories bans licenses sources
+cargo build --release --locked
+git diff --check
+```
+
+Run `cargo-deny` locally when installed; CI requires it. This document defines
+required coverage and checks, not verification results for a particular change.
+
 CI runs formatting, strict Clippy, workspace tests/builds, and `cargo-deny`.
 Tests also run on macOS and under the declared Rust 1.88 MSRV. The tagged-release
 workflow builds release archives and smoke-tests them on their native Linux and
@@ -32,13 +72,13 @@ compatibility. Snapshot coverage for every TUI state, randomized protocol
 fuzzing, every malformed SSE variant, and sustained backpressure/load tests are
 release-expansion work.
 
-For the proposed TUI v0.2 release, stable render-buffer assertions cover idle,
+The TUI verification contract includes stable render-buffer assertions for idle,
 streaming, scrolled, tool-running, tool-inspector, approval, command-palette,
 help, error, and disconnected states across normal and constrained terminal
 sizes. Focused state tests cover multiline editing, Unicode boundaries,
 bracketed paste, queued prompts, command dispatch, Markdown and diff rendering,
 wrapped-row scrolling, overlay precedence, and terminal-content sanitization. A
-pseudo-terminal integration test covers paste, resize, interruption, and
+pseudo-terminal integration test should cover paste, resize, interruption, and
 terminal-mode restoration. These additions do not require a live provider.
 
 ## Performance harness
