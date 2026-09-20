@@ -347,7 +347,7 @@ fn daemon_control(
             .unwrap_or_default();
         let unit = format!(
             "[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n{}{}\n[Install]\nWantedBy=default.target\n",
-            systemd_quote(workspace.as_os_str()),
+            systemd_path(workspace.as_os_str()),
             command.join(" "),
             instance_environment,
             config_environment
@@ -459,6 +459,25 @@ fn systemd_quote(value: &std::ffi::OsStr) -> String {
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
     )
+}
+
+/// Encode a path for a scalar systemd setting such as WorkingDirectory=.
+/// Unlike ExecStart, scalar settings do not strip surrounding quotes.
+fn systemd_path(value: &std::ffi::OsStr) -> String {
+    let value = value.to_string_lossy();
+    let mut encoded = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '%' => encoded.push_str("%%"),
+            '\\' => encoded.push_str("\\\\"),
+            '"' => encoded.push_str("\\\""),
+            '\t' => encoded.push_str("\\x09"),
+            '\n' => encoded.push_str("\\x0a"),
+            ' ' => encoded.push_str("\\x20"),
+            _ => encoded.push(character),
+        }
+    }
+    encoded
 }
 
 fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
