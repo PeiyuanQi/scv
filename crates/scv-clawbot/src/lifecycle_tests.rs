@@ -266,16 +266,22 @@ async fn cancellation_drops_handshake_and_active_turn_with_durable_marker() {
         );
         let peer = async {
             let (mut stream, _, _) = request(&listener).await;
+            let numeric_message_id = 7_445_729_589_862_608_648_u64;
+            let mut message = inbound();
+            message["message_id"] = json!(numeric_message_id);
             respond(
                 &mut stream,
                 "200 OK",
-                &json!({"ret":0,"msgs":[inbound()]}).to_string(),
+                &json!({"ret":0,"msgs":[message]}).to_string(),
                 "",
             )
             .await;
             let (stream, _) = daemon.accept().await.unwrap();
             let saved = store.load_state("default").unwrap();
-            assert_eq!(saved.in_flight.unwrap().message_id, "incoming");
+            assert_eq!(
+                saved.in_flight.unwrap().message_id,
+                numeric_message_id.to_string()
+            );
             assert!(saved.pending.is_none());
             assert!(saved.seen.is_empty());
             let mut reader = BufReader::new(stream);
@@ -573,6 +579,37 @@ async fn redirects_are_not_followed() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn oversized_responses_are_rejected_before_parsing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = http_client().unwrap();
+    let fetch = async {
+        let response = client
+            .get(format!("http://{}", listener.local_addr().unwrap()))
+            .send()
+            .await
+            .unwrap();
+        assert!(response_json(response).await.is_err());
+    };
+    let peer = async {
+        let (mut stream, _, _) = request(&listener).await;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    MAX_RESPONSE_BYTES + 1
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+    };
+    tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(fetch, peer) })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

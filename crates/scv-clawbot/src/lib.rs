@@ -88,6 +88,8 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
 }
 
 const MAX_REPLY_BYTES: usize = 16 * 1024;
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MESSAGE_ID_BYTES: usize = 256;
 const MAX_BATCH_MESSAGES: usize = 4096;
 const FAILURE_REPLY: &str = "SCV could not complete that request.";
 
@@ -156,14 +158,24 @@ fn http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-async fn response_json(response: reqwest::Response) -> Result<Value> {
+async fn response_json(mut response: reqwest::Response) -> Result<Value> {
     if !response.status().is_success() {
         bail!("ClawBot HTTP request failed")
     }
-    response
-        .json()
-        .await
-        .map_err(|_| anyhow!("invalid ClawBot response"))
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        bail!("ClawBot response exceeds limit")
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            bail!("ClawBot response exceeds limit")
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| anyhow!("invalid ClawBot response"))
 }
 
 async fn run_loop(
@@ -221,23 +233,18 @@ async fn run_loop(
             .into_iter()
             .flatten()
         {
-            let id = msg
-                .get("message_id")
-                .or_else(|| msg.get("msg_id"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if id.is_empty() {
+            let Some(id) = message_id(msg) else {
                 continue;
-            }
-            if state.seen.iter().any(|x| x == id) {
+            };
+            if state.seen.iter().any(|seen| seen == &id) {
                 // Keep all IDs encountered in this bounded batch until its cursor
                 // commits, including IDs recovered from the preceding run.
-                mark_seen(&mut state, id);
+                mark_seen(&mut state, &id);
                 store.save_state(account, &state)?;
                 continue;
             }
             if msg.get("message_type").and_then(Value::as_i64) != Some(1) {
-                mark_seen(&mut state, id);
+                mark_seen(&mut state, &id);
                 store.save_state(account, &state)?;
                 continue;
             }
@@ -250,7 +257,7 @@ async fn run_loop(
                 })
                 .filter(|text| !text.trim().is_empty())
             else {
-                mark_seen(&mut state, id);
+                mark_seen(&mut state, &id);
                 store.save_state(account, &state)?;
                 continue;
             };
@@ -259,7 +266,7 @@ async fn run_loop(
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             else {
-                mark_seen(&mut state, id);
+                mark_seen(&mut state, &id);
                 store.save_state(account, &state)?;
                 continue;
             };
@@ -268,7 +275,7 @@ async fn run_loop(
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             else {
-                mark_seen(&mut state, id);
+                mark_seen(&mut state, &id);
                 store.save_state(account, &state)?;
                 continue;
             };
@@ -282,7 +289,7 @@ async fn run_loop(
                 sessions.remove(&oldest);
             }
             state.in_flight = Some(state::InFlight {
-                message_id: id.into(),
+                message_id: id.clone(),
                 to_user_id: sender.into(),
                 context_token: ctx.into(),
             });
@@ -309,7 +316,7 @@ async fn run_loop(
             } else {
                 reply
             };
-            state.pending = Some(new_pending(id, sender, ctx, &reply, MAX_REPLY_BYTES));
+            state.pending = Some(new_pending(&id, sender, ctx, &reply, MAX_REPLY_BYTES));
             state.in_flight = None;
             store.save_state(account, &state)?;
             delivery.deliver_pending(&mut state).await?;
@@ -320,6 +327,15 @@ async fn run_loop(
         store.save_state(account, &state)?;
         // Also yield for immediately-ready mocked transports and empty batches.
         tokio::task::yield_now().await;
+    }
+}
+
+fn message_id(msg: &Value) -> Option<String> {
+    let value = msg.get("message_id").or_else(|| msg.get("msg_id"))?;
+    match value {
+        Value::String(id) if !id.is_empty() && id.len() <= MAX_MESSAGE_ID_BYTES => Some(id.clone()),
+        Value::Number(id) if id.as_u64().is_some() => Some(id.to_string()),
+        _ => None,
     }
 }
 
@@ -546,6 +562,36 @@ mod tests {
                 "errmsg": "session timeout"
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn preserves_string_and_unsigned_numeric_message_ids() {
+        assert_eq!(
+            message_id(&serde_json::json!({"message_id": "string-id"})).as_deref(),
+            Some("string-id")
+        );
+        assert_eq!(
+            message_id(&serde_json::json!({"message_id": u64::MAX})).as_deref(),
+            Some("18446744073709551615")
+        );
+        assert_eq!(
+            message_id(&serde_json::json!({"msg_id": 42})).as_deref(),
+            Some("42")
+        );
+        assert!(message_id(&serde_json::json!({"message_id": null, "msg_id": 42})).is_none());
+        assert!(message_id(&serde_json::json!({"message_id": -1})).is_none());
+        assert!(message_id(&serde_json::json!({"message_id": 1.5})).is_none());
+        assert!(message_id(&serde_json::from_str(r#"{"message_id":1e3}"#).unwrap()).is_none());
+        assert!(
+            message_id(&serde_json::from_str(r#"{"message_id":18446744073709551616}"#).unwrap())
+                .is_none()
+        );
+        assert!(
+            message_id(&serde_json::json!({
+                "message_id": "x".repeat(MAX_MESSAGE_ID_BYTES + 1)
+            }))
+            .is_none()
         );
     }
 }

@@ -38,7 +38,9 @@ Daemon and component changes require focused coverage for:
   account snapshots, busy snapshots deferred without stopping the current
   instance, and strict settings/discovery validation;
 - batches above 4096 messages rejected before execution or cursor advancement,
-  and encountered duplicate IDs retained through the batch checkpoint;
+  responses and string IDs byte-bounded, unsigned 64-bit integer message IDs
+  preserved exactly, and encountered duplicate IDs retained through the batch
+  checkpoint;
 - no-tools remote sessions, SIGTERM/Ctrl+C shutdown, and tracked session cleanup;
 - writer/turn descendants joined after forced handler abort, cancellation-aware
   reconciliation, and management locks released before blocked response writes;

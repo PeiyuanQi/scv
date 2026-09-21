@@ -113,7 +113,9 @@ accepted only when they contain an array `msgs` field and a string
 
 `POST /ilink/bot/getupdates` long-polls with the opaque `get_updates_buf`
 cursor. Only inbound user text messages with sender ID, message ID, context
-token, and non-empty text are accepted. Ignored messages are durably marked.
+token, and non-empty text are accepted. iLink message IDs may be strings up to
+256 bytes or unsigned 64-bit JSON integers; SCV preserves either form as an
+exact string for durable deduplication. Ignored messages are durably marked.
 Before connecting a sender session or submitting accepted work, the bridge
 persists an in-flight claim with the message ID, recipient, and context token.
 Recovery never resubmits interrupted claimed work; it records a short failure

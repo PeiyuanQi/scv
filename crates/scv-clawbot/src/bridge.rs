@@ -170,6 +170,9 @@ pub fn validate_origin_pair(expected: &str, returned: &str) -> Result<()> {
 /// Parse and validate a fake or real iLink JSON response without exposing
 /// bearer tokens or server diagnostics to callers.
 pub fn parse_response(body: &[u8]) -> Result<Value> {
+    if body.len() > crate::MAX_RESPONSE_BYTES {
+        bail!("iLink response exceeds limit")
+    }
     let value: Value =
         serde_json::from_slice(body).map_err(|e| anyhow!("invalid iLink JSON: {e}"))?;
     crate::check_envelope(&value)?;
@@ -205,5 +208,10 @@ mod tests {
     fn fake_response_requires_success_ret() {
         assert!(parse_response(br#"{"ret":0,"msgs":[]}"#).is_ok());
         assert!(parse_response(br#"{"ret":-14,"errmsg":"expired"}"#).is_err());
+    }
+
+    #[test]
+    fn parse_response_rejects_oversized_body() {
+        assert!(parse_response(&vec![b' '; crate::MAX_RESPONSE_BYTES + 1]).is_err());
     }
 }

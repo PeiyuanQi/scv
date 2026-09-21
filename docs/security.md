@@ -131,8 +131,9 @@ across retries. This protects against duplicate execution without promising
 exactly-once delivery by the remote service.
 
 Poll batches above 4096 messages fail before execution or cursor advancement.
-The 4096-ID deduplication window refreshes IDs encountered again so the processed
-batch remains retained until its cursor checkpoint.
+Response bodies are capped at 4 MiB and durable string message IDs at 256 bytes.
+The 4096-ID deduplication window refreshes IDs encountered again so the
+processed batch remains retained until its cursor checkpoint.
 
 The server supervisor joins an old account instance before starting its
 replacement with updated credentials or settings. Logout requires a live daemon,
