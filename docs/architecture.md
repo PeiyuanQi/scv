@@ -83,7 +83,8 @@ session per remote sender (and per group and sender in group chats). Sessions
 are tool-free unless the account's `remote_tools = "owner"` setting grants the
 authenticated owner's direct chats full, auto-approved tools.
 Session policy, history, queueing, cancellation, and approvals remain
-authoritative in `scv-server`.
+authoritative in `scv-server`. See [`clawbot.md`](clawbot.md) for its API,
+storage, delivery, and safety contract.
 
 The daemon and stdio endpoint share the same server implementation. The
 Unix-socket daemon is the normal long-running backend; the stdio endpoint is a
