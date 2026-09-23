@@ -24,6 +24,11 @@ stage 0.
   your own `git`, `gh`, `cargo`, `scv`, and `systemctl` commands as
   `scripts/host.sh <command...>`, which restores the real home. Outside SCV it
   passes straight through.
+- **SCV delegating this flow:** call `agent_codex` or `agent_claude` with `cwd`
+  set to this repository (`scv` in a `~/projects` workspace) so the agent loads
+  this skill and `AGENTS.md`, and with `timeout_seconds` near the
+  `tools.max_timeout_seconds` ceiling (default 1800). Gates, CI, and publishing
+  take 10-20 minutes, well past the 600-second agent default.
 - **Secrets:** never print `~/.scv/config.toml`, `~/.scv/clawbot/accounts/`,
   `~/.scv/adapters/*/auth.json`, or `~/.cargo/credentials.toml`.
 

@@ -72,6 +72,8 @@ summary_max_chars = 6000
 [tools]
 approval_policy = "on-risk"
 command_timeout_seconds = 120
+agent_timeout_seconds = 600
+max_timeout_seconds = 1800
 output_limit_bytes = 65536
 max_read_bytes = 262144
 max_write_bytes = 1048576
@@ -96,6 +98,7 @@ max_tool_arguments_bytes = 262144
 [skills]
 user_dir = "~/.scv/skills"
 project_dir = ".scv/skills"
+scan_projects = true
 max_skills = 128
 max_skill_bytes = 262144
 
@@ -120,7 +123,7 @@ effort_args = []
 
 `agents.*.args` is an argument vector, not a shell string. SCV appends the
 delegated prompt as the final argument and runs the child in the session
-workspace. When a call selects a `model` or `effort`, SCV substitutes the value
+workspace, or in the directory inside it that the call names with `cwd`. When a call selects a `model` or `effort`, SCV substitutes the value
 for `{model}` or `{effort}` in `model_args` or `effort_args` and inserts those
 arguments between the fixed arguments and the prompt. An empty template means
 the adapter offers no such selection; a non-empty one must contain its
@@ -135,9 +138,51 @@ absolute executable, the complete fixed argument vector, the workspace, and
 the bounded prompt argument before launch.
 
 Project configuration may lower context, size, output, and timeout limits; make
-approval policy stricter; set `skills.project_dir` within the workspace; and
-append project instructions. Attempts to weaken a limit or set a user-only key
+approval policy stricter; set `skills.project_dir` within the workspace; turn
+`skills.scan_projects` off; and append project instructions. Attempts to weaken a limit or set a user-only key
 are startup errors rather than ignored fields.
+
+### Tool timeouts
+
+A tool call may choose its own `timeout_seconds`, so the model can grant long
+work more time when it starts it, for example when the owner asks from WeChat
+to land a change. Three keys bound this:
+
+- `command_timeout_seconds` (default 120) applies to `bash` calls that do not
+  choose a timeout;
+- `agent_timeout_seconds` (default 600) applies to `agent_*` calls that do not
+  choose one;
+- `max_timeout_seconds` (default 1800) is the ceiling any single call may
+  request, and is advertised in each tool's schema. A request above it is
+  refused with an error naming the ceiling rather than silently shortened.
+
+Both defaults must not exceed the ceiling, and the ceiling is at most 86400
+(one day). To allow longer delegated jobs, raise the ceiling in the user file:
+
+```toml
+[tools]
+max_timeout_seconds = 3600
+```
+
+A ClawBot owner turn may run for the ceiling plus five minutes of model time,
+and never less than 30 minutes; the component reads the ceiling from the
+workspace configuration each time it starts.
+
+### Project skills
+
+With `skills.scan_projects` (default `true`), tool-enabled sessions also list
+the agent skills of the workspace and of each immediate, non-hidden child
+directory: `SKILL.md` files under `.agents/skills/<name>/` (Codex) and
+`.claude/skills/<name>/` (Claude Code). A child project's skill is listed as
+`<project>:<name>`, a workspace-root skill as `<name>`, and names from
+`skills.project_dir` or `skills.user_dir` win collisions. The listing tells the
+model to delegate with `agent_*` and `cwd` set to the project: the nested agent
+then loads that project's instructions and skills natively, so a repository
+adds skills without any SCV registration. `read_skill` can load a listed skill
+for reference. At most 256 child projects and `skills.max_skills` skills in
+total are considered; entries that resolve outside the workspace, or that
+cannot be read, are skipped. Tool-free sessions, such as ClawBot senders
+without remote tools, never list project skills.
 
 Cross-field validation requires every specific content limit plus serialization
 overhead to fit its protocol frame limit, tool arguments to fit provider

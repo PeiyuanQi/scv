@@ -44,7 +44,9 @@ output or input according to configuration.
 workspace as its current directory. It inherits the SCV process environment,
 runs with the user's full permissions, and is not sandboxed. It requires
 approval under the default policy, has a wall-clock timeout, and bounds combined
-stdout/stderr. SCV starts it in a new process group; cancellation or timeout
+stdout/stderr. A call may choose its timeout only up to the configured
+`tools.max_timeout_seconds` ceiling, which project configuration can lower but
+not raise. SCV starts it in a new process group; cancellation or timeout
 sends a group-wide termination signal and ends with `KILL` if any member
 remains. Cancellation permits up to two seconds of graceful cleanup; reaching
 the execution deadline kills immediately. Descendants and retained output pipes
@@ -52,9 +54,15 @@ cannot extend the call without bound.
 
 Each `agent_*` tool launches only its configured adapter. It uses an executable
 and argument vector without shell interpolation, appends the model-provided
-prompt as one argument, uses the workspace as current directory, applies the
-same timeout/output bounds, kills the process group on cancellation, and
-requires approval. SCV supplies an instance-private `HOME`, `SCV_HOME`, XDG
+prompt as one argument, uses the workspace or a directory inside it as current
+directory, applies the same timeout/output bounds, kills the process group on
+cancellation, and requires approval. A per-call `cwd` is resolved with symlinks
+followed at launch and must remain an existing directory under the canonical
+workspace; `..`, absolute paths elsewhere, and links pointing outside are
+refused. The nested agent loads that directory's own instructions (such as
+`AGENTS.md` or `CLAUDE.md`) and project skills, which are untrusted repository
+content just like any file the agent reads there; choosing a directory never
+widens what the agent could already reach with the user's permissions. SCV supplies an instance-private `HOME`, `SCV_HOME`, XDG
 directories, and `CODEX_HOME` for Codex, while removing SCV selector variables,
 provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, and `CLAUDE_CONFIG_DIR`
 from the child environment. Agents sign in only through `scv agents login`,
@@ -65,6 +73,11 @@ refresh token. Delegated runs therefore never share the user's personal Claude
 Code or Codex session. The delegated CLI still has the user's operating
 system permissions and may implement its own tools and approvals, but it cannot
 silently reuse the user's normal Codex state.
+
+Project skill discovery reads only `SKILL.md` files that resolve inside the
+workspace, bounded in count and size, and only for tool-enabled sessions, so a
+tool-free remote sender never learns the workspace's project or skill names.
+Listed skills are untrusted instructions, like `.scv/skills`.
 
 ## Approval behavior
 

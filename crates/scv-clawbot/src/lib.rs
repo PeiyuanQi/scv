@@ -95,6 +95,26 @@ const FAILURE_REPLY: &str = "SCV could not complete that request.";
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Owner turns may run tools and delegated agents, which take longer.
 const OWNER_TURN_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Model time an owner turn keeps beyond its longest single tool call.
+const OWNER_TURN_MARGIN: Duration = Duration::from_secs(300);
+
+/// The account owner granted remote tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOwner {
+    /// The owner's authenticated iLink user ID.
+    pub user_id: String,
+    /// How long one owner turn may run; see [`owner_turn_timeout`].
+    pub turn_timeout: Duration,
+}
+
+/// An owner turn outlasts the longest tool call the session allows
+/// (`tools.max_timeout_seconds`) by a margin for the model's own work, and
+/// never runs shorter than 30 minutes.
+pub fn owner_turn_timeout(max_tool_timeout: Duration) -> Duration {
+    max_tool_timeout
+        .saturating_add(OWNER_TURN_MARGIN)
+        .max(OWNER_TURN_TIMEOUT)
+}
 
 /// Compatibility entry point. Connects to the existing daemon; launches no process.
 pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -> Result<()> {
@@ -115,8 +135,8 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
 /// response reports healthy. Cancellation drops all owned I/O and sessions;
 /// no adapter tasks are spawned. The caller supplies any external stop timeout.
 ///
-/// `tool_owner` is the authenticated owner's iLink user ID when the account
-/// grants its owner remote tools; every other sender stays tool-free.
+/// `tool_owner` is the authenticated owner when the account grants its owner
+/// remote tools; every other sender stays tool-free.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
     token: &str,
@@ -124,7 +144,7 @@ pub async fn run_supervised(
     account: &str,
     workspace: &Path,
     socket: &Path,
-    tool_owner: Option<&str>,
+    tool_owner: Option<&ToolOwner>,
     cancellation: CancellationToken,
     report: Arc<dyn Fn(bool) + Send + Sync>,
 ) -> Result<()> {
@@ -203,7 +223,7 @@ async fn run_loop(
     account: &str,
     workspace: &Path,
     socket: &Path,
-    tool_owner: Option<&str>,
+    tool_owner: Option<&ToolOwner>,
     store: &state::Store,
     report: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<()> {
@@ -326,11 +346,11 @@ async fn run_loop(
                 context_token: ctx.into(),
             });
             store.save_state(account, &state)?;
-            let owner = group.is_none() && tool_owner == Some(sender);
-            let limit = if owner {
-                OWNER_TURN_TIMEOUT
-            } else {
-                TURN_TIMEOUT
+            let owner = group.is_none()
+                && tool_owner.is_some_and(|tool_owner| tool_owner.user_id == sender);
+            let limit = match tool_owner {
+                Some(tool_owner) if owner => tool_owner.turn_timeout,
+                _ => TURN_TIMEOUT,
             };
             let result = tokio::time::timeout(limit, async {
                 let session = match sessions.entry(key.clone()) {
