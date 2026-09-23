@@ -1,5 +1,6 @@
 //! SCV's bounded, workspace-aware built-in tools.
 
+mod acp_agent;
 pub mod adapters;
 mod agent_output;
 mod agent_progress;
@@ -131,6 +132,24 @@ pub struct AgentAdapterConfig {
     pub home: Option<PathBuf>,
     /// How SCV talks to the agent.
     pub transport: Transport,
+    /// The agent's ACP server, when `[agents.<name>] transport` allows it and
+    /// the adapter table has one.
+    pub acp: Option<AcpAgentLaunch>,
+}
+
+/// An agent's Agent Client Protocol server, resolved from its adapter-table
+/// entry and `[agents.<name>] transport`.
+#[derive(Debug, Clone)]
+pub struct AcpAgentLaunch {
+    pub command: String,
+    /// Arguments with the `permissions = "full"` switches already applied.
+    pub args: Vec<String>,
+    /// The ACP session mode that grants full permissions, selected in every
+    /// new session when `permissions = "full"`.
+    pub full_mode: Option<String>,
+    /// `transport = "acp"`: never fall back to one CLI process per turn, so
+    /// the agent is not offered while its ACP server is missing.
+    pub required: bool,
 }
 
 pub type SkillMap = HashMap<String, PathBuf>;
@@ -199,6 +218,30 @@ pub fn builtin_registry(
                 }))?;
             }
             continue;
+        }
+        if let Some(launch) = adapter.acp.clone() {
+            let resolved =
+                adapters::resolve_agent_executable(&launch.command, &adapter.search_dirs);
+            if resolved.is_some() {
+                registry.register(Arc::new(acp_agent::AcpAgentTool::new(
+                    name,
+                    &adapter,
+                    launch,
+                    resolved,
+                    Timeouts {
+                        default: config.agent_timeout,
+                        max: config.max_timeout,
+                    },
+                    config.output_limit_bytes,
+                    config.delegation.clone(),
+                    Arc::clone(&conversations),
+                )))?;
+                continue;
+            }
+            if launch.required {
+                // `transport = "acp"` without its server: not offered.
+                continue;
+            }
         }
         let tool = NativeAgentTool::new(
             name,
@@ -1164,6 +1207,8 @@ pub(crate) fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
         "unauthorized",
         "authentication",
         "missing_credential",
+        "no api key",
+        "auth_required",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
@@ -1944,6 +1989,7 @@ mod tests {
                 resume: Resume::Unsupported,
                 home: None,
                 transport: Transport::Process,
+                acp: None,
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -2038,6 +2084,7 @@ mod tests {
                 resume: Resume::Unsupported,
                 home: None,
                 transport: Transport::Process,
+                acp: None,
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -2294,6 +2341,7 @@ mod tests {
             resume: Resume::Unsupported,
             home: None,
             transport: Transport::Process,
+            acp: None,
         };
         let registry = builtin_registry(
             ToolsConfig::default(),
@@ -2516,6 +2564,7 @@ mod tests {
                 resume,
                 home,
                 transport: Transport::Process,
+                acp: None,
             },
             Timeouts {
                 default: timeout,
@@ -2948,6 +2997,7 @@ exit 1
             resume: Resume::Unsupported,
             home: None,
             transport: Transport::Process,
+            acp: None,
         };
         let home = tempfile::tempdir().unwrap();
         for (max_depth, offered) in [(0, false), (1, true)] {

@@ -78,7 +78,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.32` and exact workspace dependency pins.
+`0.1.33` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
@@ -181,8 +181,12 @@ stdout into bounded lines, and shuts it down (stdin closed, a 2-second grace,
 then a group kill and a sweep of tagged processes). The conversation store
 keeps the child as the conversation's attachment, so forgetting, expiring, or
 ending the conversation's session is what shuts it down. `scv_tools::scv_agent`
-runs the SCV protocol client on top of it for `agent_scv`; an ACP adapter can
-run a JSON-RPC client on the same runtime. Tools reach the session's approval
+runs the SCV protocol client on top of it for `agent_scv`, and
+`scv_tools::acp_agent` runs an Agent Client Protocol (JSON-RPC 2.0) client on
+the same runtime for the agents whose adapter-table entry names an ACP server
+(`AcpLaunch`). The server resolves `[agents.<name>] transport` into an
+`AcpAgentLaunch`, and the registry registers the ACP tool when that server is
+installed, otherwise the per-turn CLI tool. Tools reach the session's approval
 gate through `ToolContext.approvals`, which carries the running call's ID, so a
 nested agent's approval requests are decided like the session's own.
 

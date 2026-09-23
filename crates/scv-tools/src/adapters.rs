@@ -83,6 +83,36 @@ impl Transport {
     }
 }
 
+/// How to start an agent's Agent Client Protocol (ACP) server: a long-running
+/// process speaking JSON-RPC 2.0 over stdio, one conversation per ACP session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcpLaunch {
+    /// The ACP server executable: the agent itself or its official adapter.
+    pub command: &'static str,
+    /// Its arguments; a `{full}` entry is replaced by `full_args` for
+    /// `permissions = "full"` and dropped otherwise.
+    pub args: &'static [&'static str],
+    pub full_args: &'static [&'static str],
+    /// The ACP session mode selected for `permissions = "full"`, for agents
+    /// whose permission level is a session mode.
+    pub full_mode: Option<&'static str>,
+}
+
+/// Expand `launch.args` for the configured permission level.
+pub fn acp_args(launch: &AcpLaunch, full: bool) -> Vec<String> {
+    let mut args = Vec::with_capacity(launch.args.len() + launch.full_args.len());
+    for arg in launch.args {
+        if *arg == "{full}" {
+            if full {
+                args.extend(launch.full_args.iter().map(|arg| (*arg).to_owned()));
+            }
+        } else {
+            args.push((*arg).to_owned());
+        }
+    }
+    args
+}
+
 /// How a CLI continues an earlier conversation. `{session}` in any argument
 /// is replaced by the conversation's vendor session ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +243,10 @@ pub struct AdapterDescriptor {
     pub conversation_files: Option<ConversationFiles>,
     /// How SCV talks to the agent.
     pub transport: Transport,
+    /// Its ACP server, when it has a verified one. With `[agents.<name>]
+    /// transport = "auto"` SCV prefers it over [`Transport::Process`] once the
+    /// command is installed.
+    pub acp: Option<AcpLaunch>,
 }
 
 /// Directories every adapter searches before `PATH`, relative to the user's home.
@@ -282,6 +316,14 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             extension: "jsonl",
         }),
         transport: Transport::Process,
+        // The official adapter from the ACP organisation (npm
+        // @agentclientprotocol/claude-agent-acp), on the Claude Agent SDK.
+        acp: Some(AcpLaunch {
+            command: "claude-agent-acp",
+            args: &[],
+            full_args: &[],
+            full_mode: Some("bypassPermissions"),
+        }),
     },
     AdapterDescriptor {
         name: "codex",
@@ -328,6 +370,15 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             extension: "jsonl",
         }),
         transport: Transport::Process,
+        // The official adapter from the ACP organisation (npm
+        // @agentclientprotocol/codex-acp). It reads `$CODEX_HOME/config.toml`
+        // but takes no `-c` overrides, so web search follows that file.
+        acp: Some(AcpLaunch {
+            command: "codex-acp",
+            args: &[],
+            full_args: &[],
+            full_mode: Some("agent-full-access"),
+        }),
     },
     AdapterDescriptor {
         name: "grok",
@@ -359,6 +410,13 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         resume: Resume::Unsupported,
         conversation_files: None,
         transport: Transport::Process,
+        // Native: `grok agent [options] stdio`; options precede the mode.
+        acp: Some(AcpLaunch {
+            command: "grok",
+            args: &["agent", "{full}", "stdio"],
+            full_args: &["--always-approve"],
+            full_mode: None,
+        }),
     },
     AdapterDescriptor {
         name: "dsh",
@@ -385,6 +443,14 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         resume: Resume::Unsupported,
         conversation_files: None,
         transport: Transport::Process,
+        // Native: the shipped `acp` profile. `permissions = "full"` is the
+        // `DSH_PERMISSION_MODE` variable above.
+        acp: Some(AcpLaunch {
+            command: "dsh",
+            args: &["--profile", "acp"],
+            full_args: &[],
+            full_mode: None,
+        }),
     },
     AdapterDescriptor {
         name: "pi",
@@ -422,6 +488,8 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             extension: "jsonl",
         }),
         transport: Transport::Process,
+        // Only a community ACP adapter exists.
+        acp: None,
     },
     AdapterDescriptor {
         name: "scv",
@@ -451,6 +519,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         resume: Resume::Unsupported,
         conversation_files: None,
         transport: Transport::ScvProtocol,
+        acp: None,
     },
 ];
 

@@ -134,6 +134,23 @@ of live conversations and anything written in the last hour.
 own status output, never the account email or key fragment that output
 contains.
 
+An agent reached over the Agent Client Protocol (`claude-agent-acp`,
+`codex-acp`, `grok agent stdio`, `dsh --profile acp`) is the same agent with
+the same private home, environment, and trust; ACP changes only how SCV talks
+to it. SCV declares no client file-system or terminal capabilities and refuses
+every `fs/*`, `terminal/*`, or other agent-to-client request, so the agent
+cannot use SCV to read, write, or run anything. The agent's own
+`session/request_permission` requests go through the calling session's
+approval gate (labelled `[claude-1 acp]`) with a risk derived from the ACP tool
+kind in the same way as SCV's own tools: reads are read-only unless they touch
+a secret-like path, edits are file-system work, commands are processes, and
+fetches are network. Under the default `on-risk` policy a relayed read is
+therefore approved without asking, like SCV's own `read`. A denial selects the
+agent's reject option, and a relay without a gate rejects. `permissions =
+"full"` still turns the agent's own prompts off, through its own session mode
+or flag, so nothing is relayed then. Progress lines carry tool titles, never
+tool output or the agent's thoughts, and are redacted.
+
 A nested SCV (`agent_scv`) is a delegated agent like the others and adds no
 new trust: it runs as the user, unsandboxed, in its private home, one
 delegation level deeper. Its tools are still gated by approval, and each of

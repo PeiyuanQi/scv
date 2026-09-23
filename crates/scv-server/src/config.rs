@@ -419,6 +419,21 @@ pub struct AdapterConfig {
     pub model_args: Vec<String>,
     /// Appended when a call selects an effort; `{effort}` is substituted.
     pub effort_args: Vec<String>,
+    /// How SCV talks to the agent: its ACP server or one process per turn.
+    pub transport: AgentTransport,
+}
+
+/// How SCV talks to a delegated agent that has an ACP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentTransport {
+    /// The agent's ACP server when it is installed, else one process per turn.
+    #[default]
+    Auto,
+    /// Only its ACP server; the agent is not offered while it is missing.
+    Acp,
+    /// One CLI process per turn, continued through the CLI's own resume.
+    Resume,
 }
 
 /// How much a delegated CLI may do without its own prompts.
@@ -454,6 +469,7 @@ impl Default for AgentsConfig {
                             prompt_args: strings(adapter.prompt_args),
                             model_args: strings(adapter.model_args),
                             effort_args: strings(adapter.effort_args),
+                            transport: AgentTransport::Auto,
                         },
                     )
                 })
@@ -748,6 +764,21 @@ impl Config {
                         resume: descriptor.resume,
                         home: Some(adapter_home),
                         transport: descriptor.transport,
+                        acp: descriptor
+                            .acp
+                            .filter(|_| match config.transport {
+                                AgentTransport::Acp => true,
+                                AgentTransport::Resume => false,
+                                // A custom `command` points SCV at a specific
+                                // CLI, which the ACP server would not run.
+                                AgentTransport::Auto => config.command == descriptor.command,
+                            })
+                            .map(|launch| scv_tools::AcpAgentLaunch {
+                                command: launch.command.to_owned(),
+                                args: scv_tools::adapters::acp_args(&launch, full),
+                                full_mode: launch.full_mode.filter(|_| full).map(str::to_owned),
+                                required: config.transport == AgentTransport::Acp,
+                            }),
                     },
                 ))
             })
@@ -808,6 +839,15 @@ impl Config {
             let name = format!("agents.{agent}.command");
             if adapter.command.trim().is_empty() {
                 bail!("{name} must be non-empty");
+            }
+            if adapter.transport == AgentTransport::Acp
+                && scv_tools::adapters::adapter(agent)
+                    .is_some_and(|descriptor| descriptor.acp.is_none())
+            {
+                bail!(
+                    "agents.{agent}.transport = \"acp\" but {agent} has no verified ACP server; \
+                     use \"auto\" or \"resume\""
+                );
             }
             for (field, template, placeholder) in [
                 ("model_args", &adapter.model_args, "{model}"),
@@ -1778,6 +1818,87 @@ args = ["-p", "--permission-mode", "acceptEdits"]
         )));
         assert_eq!(adapters["agent_grok"].prompt_args, ["-p"]);
         assert!(adapters["agent_pi"].model_hint.contains("provider scv"));
+    }
+
+    #[test]
+    fn agents_prefer_their_acp_server_unless_configured_otherwise() {
+        let defaults = Config::default().adapters();
+        let launch = |adapters: &HashMap<String, scv_tools::AgentAdapterConfig>, agent: &str| {
+            adapters[&format!("agent_{agent}")].acp.clone()
+        };
+        for agent in ["claude", "codex", "grok", "dsh"] {
+            let acp = launch(&defaults, agent).unwrap();
+            assert!(!acp.required, "{agent}: auto falls back to resume");
+            assert_eq!(acp.full_mode, None, "{agent}: no full mode by default");
+        }
+        assert_eq!(
+            launch(&defaults, "claude").unwrap().command,
+            "claude-agent-acp"
+        );
+        assert_eq!(launch(&defaults, "codex").unwrap().command, "codex-acp");
+        assert_eq!(launch(&defaults, "grok").unwrap().args, ["agent", "stdio"]);
+        assert_eq!(launch(&defaults, "dsh").unwrap().args, ["--profile", "acp"]);
+        assert!(launch(&defaults, "pi").is_none());
+        assert!(launch(&defaults, "scv").is_none());
+
+        let mut value: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut value,
+            toml::from_str(
+                "[agents.claude]\npermissions = \"full\"\ntransport = \"acp\"\n\n\
+                 [agents.codex]\ntransport = \"resume\"\n\n\
+                 [agents.grok]\npermissions = \"full\"\n",
+            )
+            .unwrap(),
+        );
+        let config: Config = value.try_into().unwrap();
+        config.validate().unwrap();
+        let adapters = config.adapters();
+        let claude = launch(&adapters, "claude").unwrap();
+        assert!(claude.required);
+        assert_eq!(claude.full_mode.as_deref(), Some("bypassPermissions"));
+        assert!(launch(&adapters, "codex").is_none(), "resume turns ACP off");
+
+        let mut custom: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut custom,
+            toml::from_str(
+                "[agents.claude]\ncommand = \"/opt/claude-wrapper\"\n\n\
+                 [agents.codex]\nargs = [\"exec\", \"--skip-git-repo-check\"]\n",
+            )
+            .unwrap(),
+        );
+        let custom: Config = custom.try_into().unwrap();
+        let custom = custom.adapters();
+        assert!(
+            launch(&custom, "claude").is_none(),
+            "a custom command keeps one process per turn"
+        );
+        assert!(launch(&custom, "codex").is_some(), "custom args keep ACP");
+        assert_eq!(
+            launch(&adapters, "grok").unwrap().args,
+            ["agent", "--always-approve", "stdio"]
+        );
+
+        let mut pi: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut pi,
+            toml::from_str("[agents.pi]\ntransport = \"acp\"\n").unwrap(),
+        );
+        let pi: Config = pi.try_into().unwrap();
+        let error = pi.validate().unwrap_err().to_string();
+        assert!(error.contains("no verified ACP server"), "{error}");
+
+        let mut invalid: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut invalid,
+            toml::from_str("[agents.claude]\ntransport = \"rpc\"\n").unwrap(),
+        );
+        assert!(invalid.try_into::<Config>().is_err());
     }
 
     #[test]

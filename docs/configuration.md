@@ -158,8 +158,9 @@ command = "scv"
 args = ["server", "--stdio"]
 ```
 
-Every table also accepts `prompt_args` (default `[]` except Grok) and
-`permissions` (default `"default"`; see [Agent permissions](#agent-permissions)). The agent
+Every table also accepts `prompt_args` (default `[]` except Grok),
+`permissions` (default `"default"`; see [Agent permissions](#agent-permissions)), and
+`transport` (default `"auto"`; see [Agent transport](#agent-transport)). The agent
 names are fixed; an unknown `[agents.<name>]` is a startup error that lists the
 known ones.
 
@@ -287,6 +288,35 @@ permissions = "full"
 
 Every approval summary for such an agent says `FULL PERMISSIONS`. Only the
 user layers can set `[agents]`; see [security](security.md).
+
+Over the Agent Client Protocol, `"full"` selects the agent's own equivalent
+instead: Claude's `bypassPermissions` and Codex's `agent-full-access` session
+modes, `grok agent --always-approve stdio`, and the same DeepSeek Harness
+variable. `codex-acp` takes no `-c` overrides, so there Codex's web search
+follows `web_search = "live"` in `$SCV_HOME/adapters/codex/config.toml`.
+
+### Agent transport
+
+`[agents.<name>] transport` chooses how SCV talks to Claude Code, Codex, Grok
+Build, or DeepSeek Harness, which also speak the Agent Client Protocol (ACP):
+
+- `"auto"` (default): the agent's ACP server when it resolves and `command` is
+  the built-in one, otherwise one CLI process per turn. A custom `command`
+  keeps one process per turn because the ACP server would not run it.
+- `"acp"`: only the ACP server; the agent is not offered while the server is
+  missing. A startup error for pi and `scv`, which have none.
+- `"resume"`: always one CLI process per turn, continued through the CLI's own
+  resume.
+
+The ACP servers are `claude-agent-acp` (npm
+`@agentclientprotocol/claude-agent-acp`), `codex-acp` (npm
+`@agentclientprotocol/codex-acp`), `grok agent stdio`, and `dsh --profile acp`;
+see [the ACP transport](tools.md#agent-client-protocol-transport).
+
+```toml
+[agents.codex]
+transport = "resume"
+```
 
 ### Project skills
 
