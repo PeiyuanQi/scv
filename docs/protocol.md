@@ -26,7 +26,7 @@ semantics.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":2,"client":{"name":"scv-tui","version":"0.1.25"}}
+{"type":"initialize","request_id":"1","protocol_version":2,"client":{"name":"scv-tui","version":"0.1.26"}}
 ```
 
 ### `daemon.control`
@@ -40,6 +40,9 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d3","command":{"action":"clawbot_set","account":"default","enabled":true,"workspace":"/workspace/project","remote_tools":"owner"}}
 {"type":"daemon.control","request_id":"d4","command":{"action":"clawbot_set","account":"default","enabled":false,"workspace":null}}
 {"type":"daemon.control","request_id":"d5","command":{"action":"clawbot_logout","account":"default"}}
+{"type":"daemon.control","request_id":"d6","command":{"action":"delegations","all":false}}
+{"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
+{"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 ```
 
 `status` reads live daemon health. `reload` reconciles saved accounts and
@@ -53,6 +56,13 @@ saved workspace, the account uses the daemon workspace. Replacements stop and
 join the old instance first. `clawbot_logout` persists disablement and joins
 before removing credentials, delivery state, and settings. Successful actions
 return `daemon.status`; enablement does not imply successful remote contact.
+
+`delegations` lists the instance's running delegated agent runs, from any SCV
+process; `all` adds orphans whose owning process died. `delegation_kill` stops
+one run by handle, every orphan with `orphans`, or both; naming neither, or an
+unknown handle, is a `delegation_error`. Both return `daemon.status` with
+`delegations.entries`, and `delegation_kill` also lists the handles it stopped
+in `delegations.killed`.
 
 Component management is unsupported on stdio. The client helper bounds its
 exchange and never automatically retries a mutation after an ambiguous failure;
@@ -139,14 +149,15 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":2,"server":{"name":"scv-server","version":"0.1.25"}}
+{"type":"initialized","request_id":"1","protocol_version":2,"server":{"name":"scv-server","version":"0.1.26"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.25","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}]}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.26","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.1.26","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false}]}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -158,8 +169,11 @@ connectivity. Errors are sanitized; credentials never appear in status.
 Loading credentials alone cannot produce `connected`. Management responses
 carry the request ID but no session or sequence number.
 
-`status` contains exactly `version`, `pid`, and `components` in the current
-implementation. Each component contains `id`, `account`, `bot_id`, `user_id`,
+`status` contains `version`, `pid`, `components`, and `delegations`; a status
+from a daemon older than 0.1.26 has no `delegations` and parses as zero.
+`delegations.active` counts running delegated runs of the instance and
+`reaped` the orphans this daemon has stopped since it started; `entries` and
+`killed` appear only in `delegations` and `delegation_kill` responses. Each component contains `id`, `account`, `bot_id`, `user_id`,
 `enabled`, `state`, `last_success_unix_seconds`, `error`, and `restarts`.
 For ClawBot, successful contact means an authenticated, validated `getupdates`
 response. The state fingerprint, bearer token, and delivery state are private
@@ -223,7 +237,7 @@ Usage fields are omitted when the provider does not report them.
 Stable request/server error codes are `invalid_json`, `not_initialized`,
 `version_mismatch`, `invalid_request`, `session_not_found`, `turn_active`,
 `turn_not_found`, `approval_not_found`, `queue_not_found`, `queue_conflict`,
-`unsupported`, `component_error`, and `internal_error`. Component failures use
+`unsupported`, `component_error`, `delegation_error`, and `internal_error`. Component failures use
 sanitized messages without credential or raw transport details. Stable
 `turn.failed` codes are `provider_error`, `context_limit`, `step_limit`,
 `history_limit`, `response_limit`, `tool_limit`, and `internal_error`. An error

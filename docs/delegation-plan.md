@@ -36,7 +36,7 @@ table and may be developed in parallel with others; landings stay sequential.
 |---|---|---|
 | 0a | Replay tool calls to the Responses API (done, 0.1.21) | — |
 | 0b | Adapter table, grok/dsh/pi, full-work defaults, `permissions` (done, 0.1.22; zcode deferred) | 0a |
-| 1 | Delegation foundation: structured results, registry, cleanup | 0b |
+| 1 | Delegation foundation: structured results, registry, cleanup (done, 0.1.26) | 0b |
 | 2 | ClawBot long-turn resilience (done, 0.1.23) | 0b landed |
 | 3 | Multi-turn conversations (resume) | 1 |
 | 4 | SCV web tools: `web_fetch`, `web_search` (done, 0.1.25) | 0b landed |
@@ -59,14 +59,19 @@ approval summary. The built-in default stays `default`.
   `{agent, status: completed|failed|timeout|cancelled, reply, usage,
   exit_code, stderr_tail, truncated}`. Claude uses
   `--output-format stream-json --verbose --session-id <uuid>`; Codex uses
-  `exec --json` with `-o <file>` as a fallback; others stay plain text. Full
-  logs never enter the parent history.
-- A daemon-wide delegation registry records handle, agent, parent session,
-  `cwd`, pid, pgid, `/proc` start time, owning process, and state.
-  `ToolContext` gains the session ID and registry.
+  `exec --json` with `-o <file>` as a fallback; pi uses `--mode json`; Grok
+  and DeepSeek Harness stay plain text. Full logs never enter the parent
+  history.
+- A delegation registry per SCV process records handle, agent, parent session,
+  `cwd`, pid, pgid, `/proc` start time, owning process, and state. As built,
+  the agent tools receive the registry and session ID through
+  `ToolsConfig.delegation` when the session's tools are built, rather than
+  through `ToolContext`, so the core crate stays unaware of delegation.
 - Every child gets `SCV_PARENT=<instance>/<session>/<handle>` and
-  `SCV_DELEGATION_DEPTH`. Delegation is refused at `agents.max_depth`
-  (default 2). `scv start/restart/update/clawbot` are refused at depth > 0.
+  `SCV_DELEGATION_DEPTH`. Delegation is refused at
+  `agent.max_delegation_depth` (default 2; `[agents]` holds only per-adapter
+  tables). `scv run/start/stop/restart/update/clawbot` are refused at
+  depth > 0.
 - `$SCV_HOME/run/delegations/<handle>.json` (0600, atomic) is written at spawn
   and removed at reap. The daemon reconciles at startup and every 60 seconds,
   killing groups whose owning process died.

@@ -1,5 +1,6 @@
 use std::{
     io::{BufRead, BufReader, Write},
+    os::unix::fs::PermissionsExt as _,
     process::{Command, Stdio},
 };
 
@@ -85,9 +86,22 @@ fn scv_home_inside_the_workspace_is_not_a_project_layer() {
 fn agent_sign_in_ignores_project_configuration() {
     let workspace = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
+    // A fake `claude` whose status names the account, as the real one does.
+    let fake = home.path().join("fake-claude");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$*\" = \"auth status\" ] || exit 2\n\
+         echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"owner@example.com\",\"subscriptionType\":\"max\",\"orgName\":\"owner@example.com Org\"}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     write_private(
         &home.path().join("config.toml"),
-        &format!("{}[agents.claude]\ncommand = \"echo\"\n", provider("model")),
+        &format!(
+            "{}[agents.claude]\ncommand = {:?}\n",
+            provider("model"),
+            fake.display().to_string()
+        ),
     );
     // A project layer that would be rejected must not block agent sign-in.
     std::fs::create_dir(workspace.path().join(".scv")).unwrap();
@@ -110,9 +124,10 @@ fn agent_sign_in_ignores_project_configuration() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Signed-in state and method only: never the account email.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "claude:\nauth status --text\n"
+        "claude:\n  signed in (Claude account, max)\n"
     );
     assert!(home.path().join("adapters/claude").is_dir());
 }
@@ -309,4 +324,31 @@ fn pi_imports_the_scv_provider_as_its_default_endpoint() {
         .status
         .success()
     );
+}
+
+#[test]
+fn a_delegated_run_may_not_manage_daemons() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        &["start"][..],
+        &["stop"],
+        &["restart"],
+        &["run"],
+        &["update"],
+        &["clawbot", "status"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+            .arg("--scv-home")
+            .arg(home.path())
+            .args(args)
+            .env("SCV_DELEGATION_DEPTH", "1")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("refused inside a delegated agent run"),
+            "{args:?}: {stderr}"
+        );
+    }
 }

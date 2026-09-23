@@ -33,6 +33,47 @@ pub enum Status {
     Stored(KeyStore),
 }
 
+/// What a CLI prints on stdout when SCV runs it, and so how SCV reads its
+/// reply, usage, and failure out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Plain text: stdout is the reply.
+    Text,
+    /// Claude Code `--output-format stream-json --verbose`: one JSON event per
+    /// line, ending with a `result` event.
+    ClaudeStreamJson,
+    /// `codex exec --json`: JSON events per line; SCV also passes `-o <file>`
+    /// so the final message survives an unparsable stream.
+    CodexJsonl,
+    /// pi `--mode json`: JSON events per line; the reply is the last
+    /// assistant `message_end`.
+    PiJson,
+}
+
+impl OutputFormat {
+    /// Arguments that select this format, placed after the fixed arguments.
+    pub fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Text => &[],
+            Self::ClaudeStreamJson => &["--output-format", "stream-json", "--verbose"],
+            Self::CodexJsonl => &["--json"],
+            Self::PiJson => &["--mode", "json"],
+        }
+    }
+}
+
+/// How SCV condenses a CLI's own status output. The raw output names the
+/// account (an email) or part of a key, so it is never printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusSummary {
+    /// `claude auth status` JSON: `loggedIn`, `authMethod`, `subscriptionType`.
+    ClaudeJson,
+    /// `codex login status` text: "Logged in using an API key" or "ChatGPT".
+    CodexText,
+    /// The exit status alone.
+    ExitStatus,
+}
+
 /// How SCV signs an agent out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Logout {
@@ -93,7 +134,11 @@ pub struct AdapterDescriptor {
     pub search_dirs: &'static [&'static str],
     pub login: Login,
     pub status: Status,
+    /// How a [`Status::Command`] result is summarized.
+    pub status_summary: StatusSummary,
     pub logout: Logout,
+    /// What the CLI prints when SCV delegates to it.
+    pub output: OutputFormat,
 }
 
 /// Directories every adapter searches before `PATH`, relative to the user's home.
@@ -144,8 +189,10 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         full_permission_environment: &[],
         search_dirs: &[],
         login: Login::Command(&["auth", "login"]),
-        status: Status::Command(&["auth", "status", "--text"]),
+        status: Status::Command(&["auth", "status"]),
+        status_summary: StatusSummary::ClaudeJson,
         logout: Logout::Command(&["auth", "logout"]),
+        output: OutputFormat::ClaudeStreamJson,
     },
     AdapterDescriptor {
         name: "codex",
@@ -176,7 +223,9 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         search_dirs: &[],
         login: Login::Command(&["login"]),
         status: Status::Command(&["login", "status"]),
+        status_summary: StatusSummary::CodexText,
         logout: Logout::Command(&["logout"]),
+        output: OutputFormat::CodexJsonl,
     },
     AdapterDescriptor {
         name: "grok",
@@ -196,7 +245,10 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         search_dirs: &[".grok/bin"],
         login: Login::Command(&["login"]),
         status: Status::Stored(KeyStore::JsonEntries(".grok/auth.json")),
+        status_summary: StatusSummary::ExitStatus,
         logout: Logout::Command(&["logout"]),
+        // `--output-format json` exists but its success shape is unverified here.
+        output: OutputFormat::Text,
     },
     AdapterDescriptor {
         name: "dsh",
@@ -216,7 +268,9 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         search_dirs: &[],
         login: Login::ApiKey(DSH_STORE),
         status: Status::Stored(DSH_STORE),
+        status_summary: StatusSummary::ExitStatus,
         logout: Logout::Stored(DSH_STORE),
+        output: OutputFormat::Text,
     },
     AdapterDescriptor {
         name: "pi",
@@ -239,7 +293,9 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             hint: "run /login and choose a provider, then /quit",
         },
         status: Status::Stored(PI_STORE),
+        status_summary: StatusSummary::ExitStatus,
         logout: Logout::Stored(PI_STORE),
+        output: OutputFormat::PiJson,
     },
 ];
 
@@ -264,6 +320,59 @@ pub fn is_removed_agent_variable(variable: &OsStr) -> bool {
                 Some(prefix) => variable.starts_with(prefix),
                 None => variable == *rule,
             })
+}
+
+/// One line describing a CLI's own status result without echoing it: the raw
+/// output names the signed-in account or part of a key.
+pub fn summarize_status(summary: StatusSummary, succeeded: bool, output: &str) -> String {
+    let signed_out = "not signed in".to_owned();
+    match summary {
+        StatusSummary::ClaudeJson => {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+                return if succeeded {
+                    "signed in".into()
+                } else {
+                    signed_out
+                };
+            };
+            if value.get("loggedIn").and_then(serde_json::Value::as_bool) != Some(true) {
+                return signed_out;
+            }
+            let method = match value.get("authMethod").and_then(serde_json::Value::as_str) {
+                Some("claude.ai") => "Claude account",
+                Some("api_key" | "apiKey" | "console") => "API key",
+                Some("oauth_token" | "oauthToken") => "OAuth token",
+                _ => "other method",
+            };
+            match value
+                .get("subscriptionType")
+                .and_then(serde_json::Value::as_str)
+                .filter(|plan| ["free", "pro", "max", "team", "enterprise"].contains(plan))
+            {
+                Some(plan) => format!("signed in ({method}, {plan})"),
+                None => format!("signed in ({method})"),
+            }
+        }
+        StatusSummary::CodexText => {
+            let lower = output.to_ascii_lowercase();
+            if !succeeded || lower.contains("not logged in") {
+                signed_out
+            } else if lower.contains("api key") {
+                "signed in (API key)".into()
+            } else if lower.contains("chatgpt") {
+                "signed in (ChatGPT account)".into()
+            } else {
+                "signed in".into()
+            }
+        }
+        StatusSummary::ExitStatus => {
+            if succeeded {
+                "signed in".into()
+            } else {
+                signed_out
+            }
+        }
+    }
 }
 
 /// Resolve `command` in the per-user `search_dirs`, then on `PATH`. A command
@@ -354,6 +463,53 @@ mod tests {
                         .iter()
                         .any(|(_, home)| !home.is_empty() && path.starts_with(home)),
                     "{}: {path}",
+                    adapter.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn status_summaries_never_echo_accounts_or_keys() {
+        let claude = r#"{"loggedIn":true,"authMethod":"claude.ai","email":"me@example.com","orgName":"me@example.com's Organization","subscriptionType":"max"}"#;
+        assert_eq!(
+            summarize_status(StatusSummary::ClaudeJson, true, claude),
+            "signed in (Claude account, max)"
+        );
+        assert_eq!(
+            summarize_status(
+                StatusSummary::ClaudeJson,
+                true,
+                r#"{"loggedIn":true,"authMethod":"api_key","subscriptionType":"me@example.com"}"#
+            ),
+            "signed in (API key)"
+        );
+        assert_eq!(
+            summarize_status(StatusSummary::ClaudeJson, false, r#"{"loggedIn":false}"#),
+            "not signed in"
+        );
+        assert_eq!(
+            summarize_status(
+                StatusSummary::CodexText,
+                true,
+                "Logged in using an API key - sk-proj-***abcd"
+            ),
+            "signed in (API key)"
+        );
+        assert_eq!(
+            summarize_status(StatusSummary::CodexText, true, "Logged in using ChatGPT"),
+            "signed in (ChatGPT account)"
+        );
+        assert_eq!(
+            summarize_status(StatusSummary::CodexText, false, "Not logged in"),
+            "not signed in"
+        );
+        for adapter in ADAPTERS {
+            if let Status::Command(_) = adapter.status {
+                assert_ne!(
+                    adapter.status_summary,
+                    StatusSummary::ExitStatus,
+                    "{}",
                     adapter.name
                 );
             }

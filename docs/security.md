@@ -105,6 +105,29 @@ workspace, bounded in count and size, and only for tool-enabled sessions, so a
 tool-free remote sender never learns the workspace's project or skill names.
 Listed skills are untrusted instructions, like `.scv/skills`.
 
+### Delegated runs
+
+SCV tags each delegated process through its environment (`SCV_PARENT`,
+`SCV_DELEGATION_DEPTH`), records it under `$SCV_HOME/run/delegations` while it
+runs, stops its process group and tagged descendants when it ends, and has the
+daemon stop orphans whose owning SCV process died. This cleanup is
+cooperative. Delegated agents run as the user, unsandboxed, so one that
+deliberately clears its environment, deletes its record, leaves its process
+group or cgroup, or asks another service (such as `systemd-run --user`, a tmux
+server, or cron) to start a process for it escapes the bookkeeping; the
+mechanism exists to clean up accidental leaks, not to contain a hostile agent.
+Records are private files, but a same-user process can still edit them. Before
+killing, SCV checks a recorded process's PID and start time so a reused PID is
+never signalled, and a process group only when its leader matches or has
+exited.
+
+Delegation depth is bounded by `agent.max_delegation_depth`, and at any depth
+above zero the `scv` CLI refuses to run, start, stop, restart, or update a
+daemon or manage ClawBot, so an SCV started by a delegated agent cannot manage
+its parent. `scv agents status` prints a summary of Claude Code's and Codex's
+own status output, never the account email or key fragment that output
+contains.
+
 ## Web access
 
 `web_fetch` sends a GET request to a URL the model chooses, so the URL can

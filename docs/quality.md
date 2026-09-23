@@ -81,6 +81,13 @@ Daemon and component changes require focused coverage for:
   session cleanup;
 - writer/turn descendants joined after forced handler abort, cancellation-aware
   reconciliation, and management locks released before blocked response writes;
+- delegated runs: each output format parsed from canned event streams
+  (unknown events, sign-out, oversized lines, the Codex `-o` file, bounded
+  replies), records private and removed at the end, `kill`, a timed-out run's
+  `setsid` descendant stopped, an orphan left by a SIGKILLed
+  `scv server --stdio` reaped by the next reconcile, the depth limit and
+  nested daemon-command refusal, and agent status never printing an email or
+  key;
 - TUI reconnect creating a fresh session without history restoration or
   automatic replay of submitted work.
 

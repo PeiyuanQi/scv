@@ -57,6 +57,7 @@ timeout_seconds = 600
 [agent]
 max_steps = 128
 system_prompt = "You are SCV, a concise and careful coding agent."
+max_delegation_depth = 2
 
 [session]
 max_history_bytes = 16777216
@@ -206,6 +207,12 @@ A ClawBot owner turn may run for the ceiling plus five minutes of model time,
 and never less than 30 minutes, so four hours and five minutes by default; the
 component reads the ceiling from the workspace configuration each time it
 starts. `agent.max_steps` (default 128) bounds model/tool rounds per turn.
+`agent.max_delegation_depth` (default 2) offers the `agent_*` tools only while
+the session's own delegation depth is below it: the top SCV (depth 0) and an
+SCV started by one of its agents (depth 1) may delegate, one more level down
+may not, and `0` turns delegation off. It lives under `[agent]` rather than
+`[agents]`, which holds one table per adapter and which project configuration
+cannot set.
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,
 including its streamed response, not just idle time, so it must cover the
 longest single response. Project configuration may lower all of these but not
@@ -402,6 +409,12 @@ or tool results.
 `scv status` queries the running server; `scv reload` immediately reconciles
 saved accounts and component settings without restarting unrelated sessions.
 The daemon also reconciles on startup and every two seconds.
+
+Delegated agent runs are recorded in `$SCV_HOME/run/delegations/<handle>.json`
+(mode `0600`) while they run. The daemon stops orphans, whose owning SCV
+process has died, at startup and every 60 seconds; `scv agents ps` and
+`scv agents kill` list and stop runs. See
+[Tracking and cleanup](tools.md#tracking-and-cleanup).
 
 ClawBot credentials live in `clawbot/accounts/<account>.json` and durable
 delivery state in `clawbot/state/<account>.json` under the same root. Per-account
