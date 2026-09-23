@@ -37,7 +37,7 @@ table and may be developed in parallel with others; landings stay sequential.
 | 0a | Replay tool calls to the Responses API (done, 0.1.21) | — |
 | 0b | Adapter table, grok/dsh/pi, full-work defaults, `permissions` (done, 0.1.22; zcode deferred) | 0a |
 | 1 | Delegation foundation: structured results, registry, cleanup | 0b |
-| 2 | ClawBot long-turn resilience | 0b landed |
+| 2 | ClawBot long-turn resilience (done, 0.1.23) | 0b landed |
 | 3 | Multi-turn conversations (resume) | 1 |
 | 4 | SCV web tools: `web_fetch`, `web_search` | 0b landed |
 | 5 | Progress events and protocol v3 | 3 |

@@ -48,6 +48,19 @@ pub struct PendingDelivery {
     pub client_ids: Vec<String>,
     #[serde(default)]
     pub next_chunk: usize,
+    /// Conversation that holds this reply if iLink refuses it. Empty in older
+    /// state, meaning the direct chat with `to_user_id`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    /// Earlier refused replies this delivery carries ahead of `own`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<HeldReply>,
+    /// The reply to `message_id` alone, when `reply` also carries `carried`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<String>,
+    /// A notice that is not worth holding when iLink refuses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transient: bool,
 }
 
 /// Written before connecting or submitting a turn. Recovery must never replay it.
@@ -56,6 +69,19 @@ pub struct InFlight {
     pub message_id: String,
     pub to_user_id: String,
     pub context_token: String,
+    /// The sender's conversation; empty in older state (direct chat).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+}
+
+/// A reply iLink refused. It is delivered with the conversation's next reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldReply {
+    pub key: String,
+    pub to_user_id: String,
+    pub reply: String,
+    /// Unix seconds when iLink refused it.
+    pub held_at: u64,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -64,10 +90,49 @@ pub struct BridgeState {
     pub credential_fingerprint: Option<String>,
     pub cursor: String,
     pub seen: Vec<String>,
-    #[serde(default)]
-    pub pending: Option<PendingDelivery>,
-    #[serde(default)]
-    pub in_flight: Option<InFlight>,
+    /// Completed replies awaiting delivery, oldest first.
+    #[serde(default, with = "one_or_many")]
+    pub pending: Vec<PendingDelivery>,
+    /// Claimed messages whose turns have not completed, oldest first.
+    #[serde(default, with = "one_or_many")]
+    pub in_flight: Vec<InFlight>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<HeldReply>,
+}
+
+/// Older bridges stored at most one pending reply and one claim as a single
+/// object or null. Lists keep that shape while they hold at most one entry,
+/// so older binaries still read state that has no concurrent work.
+mod one_or_many {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[allow(clippy::ptr_arg)]
+    pub fn serialize<T: Serialize, S: Serializer>(
+        items: &Vec<T>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match items.as_slice() {
+            [] => serializer.serialize_none(),
+            [one] => one.serialize(serializer),
+            many => many.serialize(serializer),
+        }
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<T>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany<T> {
+            Many(Vec<T>),
+            One(T),
+        }
+        Ok(match Option::<OneOrMany<T>>::deserialize(deserializer)? {
+            None => Vec::new(),
+            Some(OneOrMany::One(one)) => vec![one],
+            Some(OneOrMany::Many(many)) => many,
+        })
+    }
 }
 
 fn credential_fingerprint(account: &Account) -> Result<String> {
@@ -119,6 +184,14 @@ pub fn validate_name(name: &str) -> Result<()> {
         bail!("invalid ClawBot account name")
     }
     Ok(())
+}
+
+/// Whether an error is lock contention that clears once the holder's short
+/// transaction ends.
+pub(crate) fn is_busy(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
 }
 
 fn check_private(path: &Path, kind: &str) -> Result<()> {
@@ -279,8 +352,9 @@ impl Store {
             != Some(&fingerprint);
         if changed
             && (previous.is_some()
-                || state.pending.is_some()
-                || state.in_flight.is_some()
+                || !state.pending.is_empty()
+                || !state.in_flight.is_empty()
+                || !state.held.is_empty()
                 || !state.cursor.is_empty()
                 || !state.seen.is_empty())
         {
@@ -490,13 +564,13 @@ mod tests {
         let mut state = store
             .bind_state("default", &original.token, &original.base_url)
             .unwrap();
-        state.pending = Some(crate::new_pending(
+        state.pending = vec![crate::new_pending(
             "message",
             "sender",
             "context",
             "private reply",
             1024,
-        ));
+        )];
         store.save_state("default", &state).unwrap();
         let before = std::fs::read(store.path("state", "default").unwrap()).unwrap();
         for replacement in [
@@ -533,7 +607,7 @@ mod tests {
         };
         store.save_account("default", &replacement).unwrap();
         assert!(store.save_state("default", &state).is_err());
-        assert!(store.load_state("default").unwrap().pending.is_none());
+        assert!(store.load_state("default").unwrap().pending.is_empty());
     }
 
     #[test]
@@ -545,13 +619,13 @@ mod tests {
         let mut state = store
             .bind_state("default", &original.token, &original.base_url)
             .unwrap();
-        state.pending = Some(crate::new_pending(
+        state.pending = vec![crate::new_pending(
             "message",
             "sender",
             "context",
             "private reply",
             1024,
-        ));
+        )];
         store.save_state("default", &state).unwrap();
         let replacement = Account {
             bot_id: Some("replacement".into()),
@@ -587,9 +661,9 @@ mod tests {
             .bind_state("default", &original.token, &original.base_url)
             .unwrap();
         state.cursor = "cursor".into();
-        state.pending = Some(crate::new_pending(
+        state.pending = vec![crate::new_pending(
             "message", "sender", "context", "reply", 1024,
-        ));
+        )];
         store.save_state("default", &state).unwrap();
         let before = serde_json::to_value(&state).unwrap();
         let rotated = Account {
@@ -630,11 +704,12 @@ mod tests {
         )
         .unwrap();
         let unbound = BridgeState {
-            in_flight: Some(InFlight {
+            in_flight: vec![InFlight {
                 message_id: "m".into(),
                 to_user_id: "sender".into(),
                 context_token: "ctx".into(),
-            }),
+                key: String::new(),
+            }],
             ..Default::default()
         };
         store.save_state("default", &unbound).unwrap();
@@ -664,7 +739,7 @@ mod tests {
             bound.credential_fingerprint,
             Some(credential_fingerprint(&legacy).unwrap())
         );
-        assert_eq!(bound.in_flight.unwrap().message_id, "m");
+        assert_eq!(bound.in_flight[0].message_id, "m");
         assert!(
             store
                 .save_account(
@@ -751,10 +826,46 @@ mod tests {
         let state: BridgeState = serde_json::from_str(
             r#"{"cursor":"c","seen":["m"],"pending":{"to_user_id":"u","context_token":"x","reply":"hello"}}"#,
         ).unwrap();
-        assert!(state.in_flight.is_none());
-        let pending = state.pending.unwrap();
+        assert!(state.in_flight.is_empty());
+        let [pending] = state.pending.as_slice() else {
+            panic!("one legacy pending reply")
+        };
         assert!(pending.client_ids.is_empty());
         assert_eq!(pending.next_chunk, 0);
+        assert!(pending.key.is_empty() && pending.carried.is_empty() && !pending.transient);
+        let claim: BridgeState = serde_json::from_str(
+            r#"{"cursor":"c","seen":[],"pending":null,"in_flight":{"message_id":"m","to_user_id":"u","context_token":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(claim.in_flight.len(), 1);
+        assert!(claim.pending.is_empty());
+    }
+
+    #[test]
+    fn single_entries_keep_the_legacy_shape_and_many_become_lists() {
+        let claim = |id: &str| InFlight {
+            message_id: id.into(),
+            to_user_id: "u".into(),
+            context_token: "x".into(),
+            key: String::new(),
+        };
+        let mut state = BridgeState::default();
+        let value = serde_json::to_value(&state).unwrap();
+        assert!(value["pending"].is_null() && value["in_flight"].is_null());
+        assert!(value.get("held").is_none());
+        state.in_flight.push(claim("a"));
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(value["in_flight"]["message_id"], "a");
+        assert!(value["in_flight"].get("key").is_none());
+        state.in_flight.push(claim("b"));
+        let restored: BridgeState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let ids: Vec<_> = restored
+            .in_flight
+            .iter()
+            .map(|c| c.message_id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"]);
     }
 
     #[test]

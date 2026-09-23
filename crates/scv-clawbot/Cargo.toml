@@ -23,7 +23,9 @@ toml.workspace = true
 libc.workspace = true
 sha2.workspace = true
 tracing.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

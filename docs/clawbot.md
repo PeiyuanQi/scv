@@ -124,12 +124,14 @@ cursor. Only inbound user text messages with sender ID, message ID, context
 token, and non-empty text are accepted. iLink message IDs may be strings up to
 256 bytes or unsigned 64-bit JSON integers; SCV preserves either form as an
 exact string for durable deduplication. Ignored messages are durably marked.
-Before connecting a sender session or submitting accepted work, the bridge
-persists an in-flight claim with the message ID, recipient, and context token.
-Recovery never resubmits interrupted claimed work; it records a short failure
-reply instead. Completed work becomes a durable pending reply before its claim
-is cleared. This prevents a crash between execution and reply storage from
-replaying the turn.
+Before queueing accepted work, the bridge persists an in-flight claim with the
+message ID, recipient, context token, and conversation, and it saves the
+batch's cursor only after every claim in the batch is durable. Recovery never
+resubmits interrupted claimed work; it records a short failure reply for each
+claim instead. Completed work becomes a durable pending reply in the same state
+write that clears its claim. This prevents a crash between execution and reply
+storage from replaying the turn. A message that is already claimed or awaiting
+delivery never starts a second turn.
 
 Poll batches above 4096 messages are rejected before executing any message or
 advancing the cursor. Deduplication retains the newest 4096 IDs; previously
@@ -143,20 +145,42 @@ failures, 5xx responses, and HTTP 401, 408, or 429. A rejection is final: an
 explicit `sendmessage` refusal (non-zero `ret` or `errcode` in a 2xx body) or
 any other 4xx status. Live iLink keeps refusing the same reply, including after
 it already accepted an earlier copy, so the bridge logs the sanitized status or
-integer `ret`/`errcode` and bounded `errmsg`, drops the rest of that reply,
-marks the message handled, and resumes polling. Finality applies to every
-refusal code, so a rate-limited or expired-context reply is dropped without
-notice to the sender; the daemon log records it. Text replies are split at Unicode boundaries
-under the configured size limit. Media, typing, and uploads are deferred.
+integer `ret`/`errcode` and bounded `errmsg`, stops sending that reply, marks
+the message handled, and resumes polling.
+
+A refused reply is not lost. The bridge holds it, never logging its content,
+and delivers it with the next reply to the same conversation (direct chat, or
+group and sender), marked `[Earlier reply that could not be delivered at the
+time]` and followed by `[Reply to your latest message]`. iLink accepts one reply
+per inbound context token, so held replies ride inside that single message:
+the oldest that fit beside the new reply go first, and the rest wait for the
+following one. A held reply is cut to half the message limit, and the store
+keeps at most 4 replies and 32 KiB per conversation, 128 in total, for 7 days,
+discarding the oldest first and logging only how many it discarded. If the
+carrying reply is refused too, the carried replies return to the store ahead
+of it. The busy notice described below is never held. Text replies are split at
+Unicode boundaries under the configured size limit. Media, typing, and uploads
+are deferred.
 
 ## Sessions and safety
 
 Each direct-chat sender has one long-lived SCV protocol-v2 socket session. A
 message carrying a non-empty `group_id` uses a separate session per group and
 sender, so group members never see the sender's direct-chat history. Sessions
-idle for 30 minutes after their last turn ends are dropped. Turns run one at a
-time per account: a long owner turn delays polling and every other sender until
-it completes or reaches its limit. Completed assistant output is
+idle for 30 minutes after their last turn ends are dropped, and at most 32
+sessions are live; a new conversation closes the least recently used idle one.
+
+Polling continues while turns run. Each conversation runs its own messages in
+order, one turn at a time, so a sender's later messages wait behind its current
+turn while other senders are answered. At most four conversations run turns at
+once; the rest wait for a slot, and a turn's time limit starts when its slot
+does. A conversation may have 8 claimed messages and the account 64; a message
+beyond either limit is answered at once with a busy notice asking the sender
+to retry, without starting a turn. Each reply goes out with its own message's
+context token. A failed or timed-out turn resets only its own conversation's
+session. Replies are delivered in the order turns complete, and a delivery
+that keeps failing is retried with backoff without stopping polling or other
+turns. Completed assistant output is
 sent only after `turn.completed`; failures become short non-sensitive replies.
 Network failures use bounded exponential backoff. Retained duplicate message
 IDs and interrupted claims do not start another turn. Pending sends retain
@@ -191,8 +215,11 @@ their CLIs signed in for SCV first; see `scv agents login` in the
 The bridge never invokes `scv exec --yes`.
 
 Credentials are stored at `$SCV_HOME/clawbot/accounts/<account>.json`; cursor
-and message IDs, in-flight claims, and pending replies are stored at
-`$SCV_HOME/clawbot/state/<account>.json`. Credentials, settings, and delivery
+and message IDs, in-flight claims, pending replies, and held replies are stored
+at `$SCV_HOME/clawbot/state/<account>.json`. Claims and pending replies keep the
+single-object form older bridges wrote while at most one of each exists, and
+become lists when several do; a bridge older than `0.1.23` cannot read state
+that holds several. Credentials, settings, and delivery
 state use atomic writes and mode `0600` on Unix; parent directories are mode
 `0700`. Account names contain only ASCII letters, digits, `_`, and `-`.
 Project configuration cannot select accounts, workspaces, or remote authority.

@@ -188,10 +188,15 @@ I/O holds the transaction lock. Lock files remain after logout to preserve lock
 identity. Old `0.1.9` standalone bridges do not honor these locks and must be
 stopped before enabling supervised accounts.
 
-An inbound message is durably claimed before submitting a turn. Recovery does
-not replay interrupted claimed work; pending replies retain their client IDs
+An inbound message is durably claimed before its turn is queued, and the poll
+cursor moves past a batch only after its claims are durable. Recovery does not
+replay interrupted claimed work; pending replies retain their client IDs
 across retries. This protects against duplicate execution without promising
-exactly-once delivery by the remote service.
+exactly-once delivery by the remote service. Conversations run concurrently,
+at most four turns at a time and each conversation in order, and their
+sessions never share history. A reply iLink refuses is held in the private
+state file, bounded and for at most 7 days, and delivered only with the next
+reply to the same conversation; its content never enters logs.
 
 Poll batches above 4096 messages fail before execution or cursor advancement.
 Response bodies are capped at 4 MiB and durable string message IDs at 256 bytes.
