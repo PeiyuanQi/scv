@@ -10,6 +10,8 @@ readme = "README.md"
 keywords = ["agent", "coding-agent", "terminal", "tui", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 homepage = "https://github.com/PeiyuanQi/scv"
+# Agent skills are repository tooling, not part of the published crate.
+exclude = [".agents/", ".claude/"]
 
 [workspace]
 members = ["crates/*"]
