@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.25`, with exact `=0.1.25` pins for dependencies
+All packages use version `0.1.26`, with exact `=0.1.26` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -270,7 +270,10 @@ reuses or modifies the user's normal `~/.claude`, `~/.codex`, `~/.grok`,
 `scv agents import codex`, point pi at SCV's own provider with
 `scv agents import pi --from-scv-provider` (or any OpenAI-compatible endpoint
 with `scv agents login pi --openai-compatible`), and check with
-`scv agents status`.
+`scv agents status`. A delegated run returns only its final reply, usage, and
+status, not the agent's event log. SCV records each run while it lasts: list
+them with `scv agents ps`, stop one with `scv agents kill <handle>`, and the
+daemon stops runs left behind by a killed SCV process within a minute.
 
 ## Architecture
 

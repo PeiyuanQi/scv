@@ -30,7 +30,7 @@ pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<St
 }
 
 pub use agents::{Endpoint, PI_PROVIDER, WireApi, read_secret};
-pub use scv_tools::adapters;
+pub use scv_tools::{adapters, delegation};
 
 /// Build a command for a native agent's CLI with the same private home and
 /// cleaned environment the daemon's `agent_<name>` tool uses, so the agent's
@@ -185,9 +185,15 @@ use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
     EventSink, Message, ToolRegistry, ToolRisk,
 };
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, Usage};
+use scv_protocol::{
+    ClientMessage, DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary,
+    PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, Usage,
+};
 use scv_provider_openai::OpenAiProvider;
-use scv_tools::{SkillMap, builtin_registry};
+use scv_tools::{
+    DelegationContext, SkillMap, builtin_registry,
+    delegation::{self as delegations, DelegationRegistry},
+};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -209,11 +215,16 @@ pub async fn run_stdio(overrides: ConfigOverrides) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let tasks = TaskTracker::new();
+    let registry = instance_delegations()?;
+    // Without a daemon, a later `scv exec` is what cleans up after an earlier
+    // one that was killed; this runs alongside the session.
+    tokio::spawn(reconcile_delegations(Arc::clone(&registry)));
     let result = run_managed(
         stdin,
         stdout,
         overrides,
         None,
+        registry,
         CancellationToken::new(),
         tasks.clone(),
     )
@@ -265,7 +276,32 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         path.to_owned(),
         std::env::current_dir()?,
     )));
+    let registry = instance_delegations()?;
+    // Descendants a delegated agent leaves behind reparent to the daemon, not init.
+    if !delegations::become_child_subreaper() {
+        tracing::debug!("SCV daemon is not a child subreaper on this platform");
+    }
     let cancellation = CancellationToken::new();
+    let delegation_registry = Arc::clone(&registry);
+    let delegation_cancel = cancellation.clone();
+    let mut delegation_task = tokio::spawn(async move {
+        // The first tick is immediate: orphans from before a restart go first.
+        let mut interval = tokio::time::interval(DELEGATION_RECONCILE_INTERVAL);
+        loop {
+            tokio::select! {
+                biased;
+                _ = delegation_cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    reconcile_delegations(Arc::clone(&delegation_registry)).await;
+                    let zombies = delegations::reap_orphaned_zombies();
+                    if zombies > 0 {
+                        tracing::debug!("Reaped {zombies} exited orphan processes");
+                    }
+                }
+            }
+        }
+    });
+    let _delegation_abort = AbortGuard(delegation_task.abort_handle());
     let tasks = TaskTracker::new();
     let mut clients = tokio::task::JoinSet::new();
     let refresh_components = components.clone();
@@ -296,11 +332,12 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
                 let (stream, _) = match accepted { Ok(value) => value, Err(error) => break Err(error.into()) };
                 let child_overrides = overrides.clone();
                 let components = components.clone();
+                let registry = Arc::clone(&registry);
                 let cancellation = cancellation.clone();
                 let tasks = tasks.clone();
                 clients.spawn(async move {
                     let (reader, writer) = stream.into_split();
-                    if run_managed(reader, writer, child_overrides, Some(components), cancellation, tasks).await.is_err() {
+                    if run_managed(reader, writer, child_overrides, Some(components), registry, cancellation, tasks).await.is_err() {
                         tracing::warn!("SCV socket client stopped");
                     }
                 });
@@ -313,6 +350,7 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
     drop(listener);
     cancellation.cancel();
     let _ = (&mut refresh_task).await;
+    let _ = (&mut delegation_task).await;
     components.lock().await.shutdown().await;
     if tokio::time::timeout(Duration::from_secs(8), async {
         while clients.join_next().await.is_some() {}
@@ -329,11 +367,110 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
     result
 }
 
+const DELEGATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The delegation registry for this process's SCV instance.
+fn instance_delegations() -> Result<Arc<DelegationRegistry>> {
+    let home =
+        config::user_home_path().ok_or_else(|| anyhow!("cannot determine SCV instance home"))?;
+    Ok(Arc::new(DelegationRegistry::new(&home)))
+}
+
+/// Stop orphaned delegations of this instance and log what was stopped.
+async fn reconcile_delegations(registry: Arc<DelegationRegistry>) {
+    let report = registry.reconcile().await;
+    if !report.reaped.is_empty() {
+        tracing::info!(
+            "Reaped {} orphaned delegations: {}",
+            report.reaped.len(),
+            report.reaped.join(", ")
+        );
+    }
+    if report.removed > 0 {
+        tracing::debug!(
+            "Removed {} delegation records whose processes had exited",
+            report.removed
+        );
+    }
+}
+
+/// Why a daemon control request failed.
+enum ControlFailure {
+    /// A delegation request the client can correct; the message is safe to show.
+    Delegation(String),
+    Component,
+}
+
+/// Apply a daemon control command, adding the instance's delegations.
+async fn daemon_control(
+    components: &Arc<Mutex<components::Components>>,
+    registry: &DelegationRegistry,
+    command: DaemonCommand,
+) -> std::result::Result<DaemonStatus, ControlFailure> {
+    let mut killed = Vec::new();
+    let listing = match &command {
+        DaemonCommand::Delegations { all } => Some(*all),
+        DaemonCommand::DelegationKill { handle, orphans } => {
+            if handle.is_none() && !orphans {
+                return Err(ControlFailure::Delegation(
+                    "name a delegation handle or ask for orphans".into(),
+                ));
+            }
+            if *orphans {
+                let report = registry.reconcile().await;
+                killed.extend(report.reaped);
+            }
+            if let Some(handle) = handle {
+                registry
+                    .kill(handle)
+                    .await
+                    .map_err(ControlFailure::Delegation)?;
+                killed.push(handle.clone());
+            }
+            Some(true)
+        }
+        _ => None,
+    };
+    let mut status = components
+        .lock()
+        .await
+        .control(command)
+        .await
+        .map_err(|_| ControlFailure::Component)?;
+    let running = registry.list(false);
+    status.delegations = DelegationSummary {
+        active: running.len() as u64,
+        reaped: registry.reaped_total(),
+        entries: match listing {
+            Some(true) => registry.list(true),
+            Some(false) => running,
+            None => Vec::new(),
+        }
+        .into_iter()
+        .map(|entry| DelegationInfo {
+            handle: entry.record.handle,
+            agent: entry.record.agent,
+            session: entry.record.session,
+            depth: entry.record.depth,
+            pid: entry.record.process.pid,
+            owner_pid: entry.record.owner.pid,
+            processes: u32::try_from(entry.processes).unwrap_or(u32::MAX),
+            cwd: entry.record.cwd.display().to_string(),
+            started_unix_seconds: entry.record.started_unix,
+            orphaned: entry.orphaned,
+        })
+        .collect(),
+        killed,
+    };
+    Ok(status)
+}
+
 async fn run_managed<R, W>(
     reader: R,
     writer: W,
     overrides: ConfigOverrides,
     components: Option<Arc<Mutex<components::Components>>>,
+    registry: Arc<DelegationRegistry>,
     cancellation: CancellationToken,
     tasks: TaskTracker,
 ) -> Result<()>
@@ -421,11 +558,12 @@ where
                             let result = tokio::select! {
                                 biased;
                                 _ = cancellation.cancelled() => break,
-                                result = async { components.lock().await.control(command).await } => result,
+                                result = daemon_control(components, &registry, command) => result,
                             };
                             match result {
                                 Ok(status) => send_event(&output_tx, ServerEvent::DaemonStatus { request_id, status }, server_frame_limit(&session)).await?,
-                                Err(_) => send_error(&output_tx, &request_id, "component_error", "Component operation failed; check account credentials, private file permissions and absolute workspace", false, server_frame_limit(&session)).await?,
+                                Err(ControlFailure::Delegation(message)) => send_error(&output_tx, &request_id, "delegation_error", &message, false, server_frame_limit(&session)).await?,
+                                Err(ControlFailure::Component) => send_error(&output_tx, &request_id, "component_error", "Component operation failed; check account credentials, private file permissions and absolute workspace", false, server_frame_limit(&session)).await?,
                             }
                         } else {
                             send_error(&output_tx, &request_id, "unsupported", "Component management requires the daemon socket", false, server_frame_limit(&session)).await?;
@@ -443,7 +581,7 @@ where
                             approval_policy: overrides.approval_policy,
                             no_tools: no_tools.unwrap_or(overrides.no_tools),
                         };
-                        match build_session(&cwd, session_overrides).await {
+                        match build_session(&cwd, session_overrides, &registry).await {
                             Ok(new_session) => {
                                 output_tx.ensure_capacity(output_queue_bytes(
                                     new_session.config.protocol.max_server_frame_bytes,
@@ -1154,7 +1292,12 @@ fn next_seq(sequence: &AtomicU64) -> u64 {
     sequence.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session> {
+async fn build_session(
+    cwd: &str,
+    overrides: ConfigOverrides,
+    registry: &Arc<DelegationRegistry>,
+) -> Result<Session> {
+    let id = Uuid::new_v4().to_string();
     let workspace = std::fs::canonicalize(cwd).with_context(|| format!("resolve cwd {cwd}"))?;
     if !workspace.is_dir() {
         return Err(anyhow!("cwd is not a directory"));
@@ -1185,8 +1328,13 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
     let tools = if no_tools {
         Arc::new(ToolRegistry::default())
     } else {
+        let mut tools = config.tools();
+        tools.delegation = Some(DelegationContext {
+            registry: Arc::clone(registry),
+            session: id.clone(),
+        });
         let mut registry = builtin_registry(
-            config.tools(),
+            tools,
             skills.map,
             skills.roots,
             config.skills.max_skill_bytes,
@@ -1206,7 +1354,7 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
         workspace.clone(),
     ));
     Ok(Session {
-        id: Uuid::new_v4().to_string(),
+        id,
         workspace,
         config,
         runtime,
@@ -1706,6 +1854,12 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    /// A delegation registry in a private temporary instance home.
+    fn test_registry() -> Arc<DelegationRegistry> {
+        let home = tempfile::tempdir().unwrap().keep();
+        Arc::new(DelegationRegistry::new(&home))
+    }
+
     use super::*;
 
     struct DropSignal(Arc<AtomicBool>);
@@ -1731,6 +1885,7 @@ mod tests {
             server_output,
             ConfigOverrides::default(),
             Some(components.clone()),
+            test_registry(),
             cancel.clone(),
             tasks.clone(),
         ));
@@ -1764,6 +1919,7 @@ mod tests {
             server_output,
             ConfigOverrides::default(),
             None,
+            test_registry(),
             CancellationToken::new(),
             tasks.clone(),
         ));
@@ -2060,5 +2216,105 @@ mod tests {
         assert_eq!(capped.map.len(), 3);
         assert!(capped.map.contains_key("scv:feature-flow"));
         assert!(!capped.map.contains_key("web:deploy"));
+    }
+
+    #[tokio::test]
+    async fn daemon_control_lists_and_stops_delegations() {
+        use std::os::unix::process::CommandExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let registry = DelegationRegistry::new(home.path());
+        let components = Arc::new(Mutex::new(components::Components::new(
+            PathBuf::from("/unused.sock"),
+            PathBuf::from("/"),
+        )));
+        // A run owned by another live SCV process of the same instance.
+        let mut owner = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut agent = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let identity = |pid| delegations::ProcessIdentity::of(pid).unwrap();
+        let record = delegations::DelegationRecord {
+            handle: "codex-a1b2c3".into(),
+            agent: "codex".into(),
+            instance: registry.instance().into(),
+            session: "session".into(),
+            owner: identity(owner.id()),
+            process: identity(agent.id()),
+            pgid: agent.id(),
+            cwd: "/work/project\u{7}".into(),
+            started_unix: 1,
+            depth: 1,
+        };
+        std::fs::create_dir_all(registry.record_dir()).unwrap();
+        std::fs::write(
+            registry.record_dir().join("codex-a1b2c3.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let control = |command| daemon_control(&components, &registry, command);
+        let Ok(status) = control(DaemonCommand::Status).await else {
+            panic!("status failed");
+        };
+        assert_eq!(status.delegations.active, 1);
+        assert!(status.delegations.entries.is_empty());
+        let Ok(status) = control(DaemonCommand::Delegations { all: false }).await else {
+            panic!("listing failed");
+        };
+        let [entry] = status.delegations.entries.as_slice() else {
+            panic!("{:?}", status.delegations);
+        };
+        assert_eq!(entry.handle, "codex-a1b2c3");
+        assert_eq!(entry.pid, agent.id());
+        assert_eq!(entry.owner_pid, owner.id());
+        assert!(!entry.orphaned);
+        assert_eq!(entry.processes, 1);
+        for command in [
+            DaemonCommand::DelegationKill {
+                handle: Some("codex-nosuch".into()),
+                orphans: false,
+            },
+            DaemonCommand::DelegationKill {
+                handle: None,
+                orphans: false,
+            },
+        ] {
+            assert!(matches!(
+                control(command).await,
+                Err(ControlFailure::Delegation(_))
+            ));
+        }
+        let Ok(status) = control(DaemonCommand::DelegationKill {
+            handle: Some("codex-a1b2c3".into()),
+            orphans: false,
+        })
+        .await
+        else {
+            panic!("kill failed");
+        };
+        assert_eq!(status.delegations.killed, ["codex-a1b2c3"]);
+        assert!(agent.wait().unwrap().code().is_none());
+        // Its live owner removes the record itself; once the owner is gone
+        // the record is an orphan that an orphan sweep removes.
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        let Ok(status) = control(DaemonCommand::Delegations { all: true }).await else {
+            panic!("listing failed");
+        };
+        assert!(status.delegations.entries[0].orphaned);
+        assert_eq!(status.delegations.active, 0);
+        let Ok(_) = control(DaemonCommand::DelegationKill {
+            handle: None,
+            orphans: true,
+        })
+        .await
+        else {
+            panic!("orphan sweep failed");
+        };
+        assert!(registry.list(true).is_empty());
     }
 }

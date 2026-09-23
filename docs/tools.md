@@ -181,23 +181,90 @@ credential, endpoint, and state variables (`ANTHROPIC_*` keys and tokens,
 so no nested agent reuses the parent's configuration or another agent's
 credentials from outside its private home. The `bash` tool retains the normal
 inherited environment for compatibility.
-The model cannot supply other flags or a different executable. Output, timeout,
-cancellation, and process-group behavior match `bash`. Adapter execution has
-delegate risk because the child agent may independently read, write, run
-commands, access inherited credentials, or ask its own model provider.
+The model cannot supply other flags or a different executable. Timeout,
+cancellation, and process-group behavior match `bash`; the output is the
+structured result described below. Adapter execution has delegate risk because
+the child agent may independently read, write, run commands, access inherited
+credentials, or ask its own model provider.
 
 The default invocation contracts are:
 
 | Tool | Invocation |
 | --- | --- |
-| `agent_claude` | `claude -p [--model <model>] [--effort <effort>] <prompt>` |
-| `agent_codex` | `codex exec [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
+| `agent_claude` | `claude -p --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
+| `agent_codex` | `codex exec --json -o <file> [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
 | `agent_grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
 | `agent_dsh` | `dsh --profile headless <prompt>` |
-| `agent_pi` | `pi -p [--model <model>] [--thinking <effort>] <prompt>` |
+| `agent_pi` | `pi -p --mode json [--model <model>] [--thinking <effort>] <prompt>` |
 
 Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness takes its
 model from its profile, so `agent_dsh` offers no `model` or `effort`.
+`permissions = "full"` switches follow the fixed arguments, before the output
+format arguments.
+
+### Results
+
+Each adapter declares its output format, and SCV reads the CLI's stdout as it
+arrives, keeping only the reply, token usage, and error, so a long run's event
+log never reaches the parent model:
+
+- Claude Code's `stream-json` events end with a `result` event carrying the
+  reply, `is_error`, and usage; SCV picks the `--session-id` itself.
+- Codex's `--json` events give the last `agent_message` item as the reply,
+  `turn.completed` usage, and `turn.failed` or `error` messages. `-o` names a
+  file in a private `tmp` directory of Codex's adapter home holding the final
+  message, used if the stream carried none and deleted afterwards.
+- pi's `--mode json` gives the last assistant `message_end` text and usage.
+- Grok and DeepSeek Harness stay plain text: stdout is the reply. Grok's JSON
+  output exists but its success shape could not be verified signed out.
+
+Unknown events and fields are ignored, lines over 4 MiB are skipped, and a
+structured stream with no JSON at all falls back to its text. The tool result
+is one object:
+
+```json
+{"agent":"codex","status":"completed","reply":"…","usage":{"input_tokens":11257,"output_tokens":5},"exit_code":0,"stderr_tail":"…","truncated":false}
+```
+
+`status` is `completed`, `failed` (non-zero exit or a reported error),
+`timeout`, or `cancelled` (stopped by `scv agents kill`). `reply` is bounded by
+`tools.output_limit_bytes` on a character boundary, `stderr_tail` holds the
+last 2 KiB of stderr, and `truncated` says whether anything was cut. A failure
+that reads like a missing sign-in gains a `hint` (see below).
+
+### Tracking and cleanup
+
+Every delegated process gets `SCV_PARENT=<instance>/<session>/<handle>`
+(appended to an inherited chain when SCV itself runs delegated) and
+`SCV_DELEGATION_DEPTH`, one more than the caller's. Its descendants inherit
+both. While it runs, SCV records it in `$SCV_HOME/run/delegations/<handle>.json`
+(mode `0600`, directories `0700`, written atomically): handle, agent, parent
+session, `cwd`, depth, and the PID plus start time of both the agent and the
+SCV process that owns it, so a reused PID never matches.
+
+When a run ends, SCV stops its process group and then any process still tagged
+with its handle (TERM, then KILL after 2 seconds), including descendants that
+left the group with `setsid`, and removes the record. A run abandoned
+mid-flight is killed the same way. The daemon reconciles at startup and every
+60 seconds: a record whose owning SCV process is gone (for example an
+`scv exec` server that was SIGKILLed) is an orphan, and its group and tagged
+processes are stopped and the record removed. A `scv server --stdio` also
+reconciles once when it starts. On Linux the daemon is a child subreaper, so
+descendants a delegated agent leaves behind reparent to it rather than to
+init, and it collects those that exit.
+
+```sh
+scv agents ps          # running delegations of this instance, from any SCV process
+scv agents ps --all    # also orphans awaiting cleanup
+scv agents kill codex-3f9a2c
+scv agents kill --orphans
+```
+
+`scv status` shows the running count and how many orphans the daemon has
+stopped. Agent tools are offered only while the session's own depth is below
+`agent.max_delegation_depth` (default 2), and a delegated run may not start,
+stop, restart, update, or run a daemon, or manage ClawBot. This is cooperative:
+see [Delegated runs](security.md#delegated-runs).
 
 By default SCV adds nothing to an agent's own permission settings, and in
 print mode Claude Code, for example, refuses Bash, Edit, and Write without a
@@ -248,9 +315,12 @@ They work from any directory. For Claude Code, Codex, and Grok, `login` and
 `logout` run the agent's own command with exactly the private home and cleaned
 environment that the daemon's `agent_*` tool uses, with the terminal attached
 for browser or device-code flows, and the agent CLI itself writes those
-credentials under `$SCV_HOME/adapters/<name>` (mode `0700`). Claude Code and
-Codex report their own `status`; for the others SCV reads the credential file
-and reports only whether one is stored, never its value.
+credentials under `$SCV_HOME/adapters/<name>` (mode `0700`). For Claude Code
+and Codex, `status` runs the CLI's own status command but prints only a
+summary, such as `signed in (Claude account, max)` or `signed in (API key)`,
+because their output names the account email or part of the key; for the
+others SCV reads the credential file and reports only whether one is stored,
+never its value.
 
 DeepSeek Harness signs in with an API key only. `scv agents login dsh` reads
 it without echo, or from stdin when stdin is not a terminal, and writes it as
@@ -307,7 +377,10 @@ written file, verifies native-agent argument boundaries, model/effort argument
 mapping and validation, workspace and `cwd` selection including symlink
 escapes, prompt-flag placement, the timeout ceiling, per-adapter environment
 removal, and that uninstalled agents are not offered, without requiring these
-CLIs in CI. Fake SCV homes cover the DeepSeek Harness key file, pi's endpoint
+CLIs in CI. Canned event streams cover each output format, sign-out, oversized
+lines, the Codex `-o` file, and bounded replies; real processes cover records,
+kill, a timed-out run's `setsid` descendant, and an orphan left by a
+SIGKILLed `scv server --stdio`. Fake SCV homes cover the DeepSeek Harness key file, pi's endpoint
 files and import, and that no sign-in output contains a key. Shared process-runner tests cover
 output limits, timeout, cancellation, and background-descendant cleanup.
 

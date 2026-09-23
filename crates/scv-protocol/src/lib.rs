@@ -50,6 +50,40 @@ pub struct DaemonStatus {
     pub version: String,
     pub pid: u32,
     pub components: Vec<ComponentHealth>,
+    #[serde(default)]
+    pub delegations: DelegationSummary,
+}
+
+/// Delegated agent runs of the daemon's SCV instance.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationSummary {
+    /// Running delegations, whichever SCV process of the instance started them.
+    pub active: u64,
+    /// Orphaned delegations the daemon has stopped since it started.
+    pub reaped: u64,
+    /// Listed delegations, for `delegations` and `delegation_kill`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<DelegationInfo>,
+    /// Handles this request stopped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub killed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationInfo {
+    pub handle: String,
+    pub agent: String,
+    pub session: String,
+    pub depth: u32,
+    pub pid: u32,
+    /// The SCV process that started it.
+    pub owner_pid: u32,
+    /// Live processes in its group plus tagged processes outside it.
+    pub processes: u32,
+    pub cwd: String,
+    pub started_unix_seconds: u64,
+    /// The owning SCV process is gone; the daemon will stop it.
+    pub orphaned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,6 +101,18 @@ pub enum DaemonCommand {
     },
     ClawbotLogout {
         account: String,
+    },
+    /// List running delegations; `all` includes orphans awaiting cleanup.
+    Delegations {
+        #[serde(default)]
+        all: bool,
+    },
+    /// Stop one delegation by handle, or every orphaned one.
+    DelegationKill {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(default)]
+        orphans: bool,
     },
 }
 
@@ -514,5 +560,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(health.remote_tools, RemoteTools::None);
+    }
+
+    #[test]
+    fn delegation_control_round_trips_and_older_status_still_parses() {
+        for (command, wire) in [
+            (
+                DaemonCommand::Delegations { all: true },
+                r#"{"action":"delegations","all":true}"#,
+            ),
+            (
+                DaemonCommand::DelegationKill {
+                    handle: Some("codex-3f9a2c".into()),
+                    orphans: false,
+                },
+                r#"{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&command).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<DaemonCommand>(wire).unwrap(),
+                command
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<DaemonCommand>(r#"{"action":"delegation_kill","orphans":true}"#)
+                .unwrap(),
+            DaemonCommand::DelegationKill {
+                handle: None,
+                orphans: true
+            }
+        );
+        // A status from a daemon without delegation tracking.
+        let status: DaemonStatus =
+            serde_json::from_str(r#"{"version":"0.1.23","pid":7,"components":[]}"#).unwrap();
+        assert_eq!(status.delegations, DelegationSummary::default());
     }
 }

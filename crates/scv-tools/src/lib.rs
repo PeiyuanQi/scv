@@ -1,6 +1,8 @@
 //! SCV's bounded, workspace-aware built-in tools.
 
 pub mod adapters;
+mod agent_output;
+pub mod delegation;
 pub mod web;
 
 use std::{
@@ -22,6 +24,12 @@ use cap_std::{
     fs::{Dir, OpenOptions},
 };
 use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRisk, ToolSpec};
+
+use crate::{
+    adapters::OutputFormat,
+    agent_output::{AgentStream, RunExit, STDERR_TAIL_BYTES, TailBuffer},
+    delegation::{DelegationGuard, DelegationRegistry},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -44,6 +52,10 @@ pub struct ToolsConfig {
     pub output_limit_bytes: usize,
     pub max_read_bytes: usize,
     pub max_write_bytes: usize,
+    /// Agent tools are offered only below this delegation depth.
+    pub max_delegation_depth: u32,
+    /// Records delegated runs for listing and cleanup; `None` runs them untracked.
+    pub delegation: Option<DelegationContext>,
 }
 
 impl Default for ToolsConfig {
@@ -55,8 +67,17 @@ impl Default for ToolsConfig {
             output_limit_bytes: 64 * 1024,
             max_read_bytes: 256 * 1024,
             max_write_bytes: 1024 * 1024,
+            max_delegation_depth: 2,
+            delegation: None,
         }
     }
+}
+
+/// The registry and parent session that delegated runs are recorded under.
+#[derive(Debug, Clone)]
+pub struct DelegationContext {
+    pub registry: Arc<DelegationRegistry>,
+    pub session: String,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +102,10 @@ pub struct AgentAdapterConfig {
     pub environment: Vec<(OsString, OsString)>,
     /// Per-user install directories searched when `command` is not on `PATH`.
     pub search_dirs: Vec<PathBuf>,
+    /// What the CLI prints, and so how its reply is read.
+    pub output: OutputFormat,
+    /// SCV's private home for this agent, for files SCV hands the CLI.
+    pub home: Option<PathBuf>,
 }
 
 pub type SkillMap = HashMap<String, PathBuf>;
@@ -109,6 +134,18 @@ pub fn builtin_registry(
         max_timeout: config.max_timeout,
         output_limit: config.output_limit_bytes,
     }))?;
+    // A delegated SCV at the depth limit may not delegate further.
+    let depth = config
+        .delegation
+        .as_ref()
+        .map_or_else(delegation::current_depth, |context| {
+            context.registry.depth()
+        });
+    let adapters = if depth < config.max_delegation_depth {
+        adapters
+    } else {
+        HashMap::new()
+    };
     for (name, adapter) in adapters {
         let tool = NativeAgentTool::new(
             name,
@@ -118,6 +155,7 @@ pub fn builtin_registry(
                 max: config.max_timeout,
             },
             config.output_limit_bytes,
+            config.delegation.clone(),
         );
         // An agent that is not installed is not offered to the model.
         if tool.resolved.is_some() {
@@ -595,6 +633,9 @@ struct NativeAgentTool {
     environment: Vec<(OsString, OsString)>,
     timeouts: Timeouts,
     output_limit: usize,
+    output: OutputFormat,
+    home: Option<PathBuf>,
+    delegation: Option<DelegationContext>,
 }
 
 /// Effort levels accepted by the built-in adapters' CLIs.
@@ -616,6 +657,7 @@ impl NativeAgentTool {
         }
         let mut command = self.args.clone();
         command.extend(self.full_permission_args.iter().flatten().cloned());
+        command.extend(self.output.args().iter().map(|arg| (*arg).to_owned()));
         for (field, value, template, placeholder) in [
             ("model", &args.model, &self.model_args, "{model}"),
             ("effort", &args.effort, &self.effort_args, "{effort}"),
@@ -647,6 +689,7 @@ impl NativeAgentTool {
         config: AgentAdapterConfig,
         timeouts: Timeouts,
         output_limit: usize,
+        delegation: Option<DelegationContext>,
     ) -> Self {
         let resolved = adapters::resolve_agent_executable(&config.command, &config.search_dirs);
         Self {
@@ -662,8 +705,55 @@ impl NativeAgentTool {
             environment: config.environment,
             timeouts,
             output_limit,
+            output: config.output,
+            home: config.home,
+            delegation,
         }
     }
+
+    /// Arguments that name per-run files or IDs, placed after the fixed and
+    /// format arguments. Returns the Codex last-message file to read and
+    /// remove afterwards.
+    fn run_args(&self, id: &str) -> (Vec<OsString>, Option<PathBuf>) {
+        match self.output {
+            OutputFormat::ClaudeStreamJson => (
+                vec![
+                    "--session-id".into(),
+                    uuid::Uuid::new_v4().to_string().into(),
+                ],
+                None,
+            ),
+            OutputFormat::CodexJsonl => {
+                let Some(dir) = self.home.as_ref().map(|home| home.join("tmp")) else {
+                    return (Vec::new(), None);
+                };
+                if private_dir(&dir).is_err() {
+                    return (Vec::new(), None);
+                }
+                let file = dir.join(format!("scv-{id}.last-message"));
+                (vec!["-o".into(), file.clone().into()], Some(file))
+            }
+            OutputFormat::Text | OutputFormat::PiJson => (Vec::new(), None),
+        }
+    }
+}
+
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Read and delete a file the CLI wrote for SCV, bounded to `limit` bytes.
+fn take_file(path: &Path, limit: usize) -> Option<String> {
+    let file = std::fs::File::open(path).ok();
+    let _ = std::fs::remove_file(path);
+    let mut bytes = Vec::new();
+    std::io::Read::take(file?, u64::try_from(limit).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes).trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 #[derive(Deserialize)]
@@ -828,25 +918,68 @@ impl Tool for NativeAgentTool {
                 self.name, self.command
             ))
         })?;
-        let mut command_args: Vec<OsString> =
-            command_args.into_iter().map(OsString::from).collect();
-        command_args.push(OsString::from(args.prompt));
+        let agent = self.name.trim_start_matches("agent_");
+        let pending = self
+            .delegation
+            .as_ref()
+            .map(|delegation| delegation.registry.begin(agent, &delegation.session, &cwd));
+        let run_id = pending.as_ref().map_or_else(
+            || uuid::Uuid::new_v4().simple().to_string(),
+            |pending| pending.handle.clone(),
+        );
+        let (fixed, selections) = command_args.split_at(
+            self.args.len()
+                + self.full_permission_args.as_ref().map_or(0, Vec::len)
+                + self.output.args().len(),
+        );
+        let (run_args, last_message) = self.run_args(&run_id);
+        let mut process_args: Vec<OsString> = fixed.iter().map(OsString::from).collect();
+        process_args.extend(run_args);
+        process_args.extend(selections.iter().map(OsString::from));
+        process_args.push(OsString::from(args.prompt));
+        let mut environment = self.environment.clone();
+        match &pending {
+            Some(pending) => environment.extend(pending.environment.iter().cloned()),
+            None => environment.push((
+                delegation::DEPTH_VARIABLE.into(),
+                (delegation::current_depth() + 1).to_string().into(),
+            )),
+        }
         let requested = self.timeouts.resolve(args.timeout_seconds)?;
-        let mut output = execute_process(
+        let registration = self
+            .delegation
+            .as_ref()
+            .map(|delegation| Arc::clone(&delegation.registry))
+            .zip(pending);
+        let run = execute_agent_process(
             ProcessSpec {
                 executable: executable.as_os_str().to_owned(),
-                args: command_args,
+                args: process_args,
                 cwd,
-                environment: self.environment.clone(),
+                environment,
                 sanitize_scv_environment: true,
                 timeout: requested,
                 output_limit: self.output_limit,
             },
+            AgentStream::new(self.output, self.output_limit),
+            registration,
             context.cancellation,
         )
-        .await?;
+        .await;
+        let fallback = last_message
+            .as_deref()
+            .and_then(|path| take_file(path, self.output_limit));
+        let run = run?;
+        let result = run.stream.finish(run.exit, fallback);
+        let (content, truncated) =
+            result.to_json(agent, run.exit_code, &run.stderr_tail, self.output_limit);
+        let mut output = ToolOutput {
+            content,
+            is_error: result.status != agent_output::RunStatus::Completed,
+            truncated,
+        };
         if output.is_error {
-            add_sign_in_hint(&mut output, self.name.trim_start_matches("agent_"));
+            add_sign_in_hint(&mut output, agent);
         }
         Ok(output)
     }
@@ -927,11 +1060,120 @@ async fn execute_process(
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<ToolOutput, ToolError> {
     let deadline = Instant::now() + spec.timeout;
+    let mut child = spawn_process(&spec)?;
+    let pid = child_pid(&child)?;
+    let output = Arc::new(Mutex::new(BoundedOutput::new(spec.output_limit)));
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|stdout| tokio::spawn(drain_output(stdout, Arc::clone(&output))));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(drain_output(stderr, Arc::clone(&output))));
+    let finished = supervise(
+        &mut child,
+        pid,
+        deadline,
+        cancellation,
+        stdout_task,
+        stderr_task,
+    )
+    .await;
+    delegation::untrack_spawned(pid as u32);
+    let finished = finished?;
+    let collected = output.lock().await;
+    let text = String::from_utf8_lossy(&collected.bytes).into_owned();
+    let content = json!({
+        "exit_code": finished.status.code(),
+        "timed_out": finished.timed_out,
+        "output": text,
+        "truncated": collected.truncated
+    })
+    .to_string();
+    Ok(ToolOutput {
+        content,
+        is_error: finished.timed_out || !finished.status.success(),
+        truncated: collected.truncated,
+    })
+}
+
+/// A delegated run's stdout reader, stderr tail, and how it ended.
+struct AgentRun {
+    stream: AgentStream,
+    exit: RunExit,
+    exit_code: Option<i32>,
+    stderr_tail: String,
+}
+
+/// Run a native agent: stdout is parsed as it arrives rather than buffered,
+/// stderr keeps only its tail, and the run is recorded in the delegation
+/// registry while it lasts.
+async fn execute_agent_process(
+    spec: ProcessSpec,
+    stream: AgentStream,
+    registration: Option<(Arc<DelegationRegistry>, delegation::PendingDelegation)>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<AgentRun, ToolError> {
+    let deadline = Instant::now() + spec.timeout;
+    let mut child = spawn_process(&spec)?;
+    let pid = child_pid(&child)?;
+    // Bookkeeping must not fail the delegation: an unrecorded run is still
+    // tagged, so a later sweep can find what it leaves behind.
+    let guard: Option<DelegationGuard> =
+        registration.and_then(|(registry, pending)| registry.register(pending, pid as u32).ok());
+    let stdout = Arc::new(Mutex::new(stream));
+    let stderr = Arc::new(Mutex::new(TailBuffer::new(STDERR_TAIL_BYTES)));
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|reader| tokio::spawn(drain_output(reader, Arc::clone(&stdout))));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|reader| tokio::spawn(drain_output(reader, Arc::clone(&stderr))));
+    let finished = supervise(
+        &mut child,
+        pid,
+        deadline,
+        cancellation,
+        stdout_task,
+        stderr_task,
+    )
+    .await;
+    delegation::untrack_spawned(pid as u32);
+    let killed = guard.as_ref().is_some_and(DelegationGuard::was_killed);
+    if let Some(guard) = guard {
+        guard.finish().await;
+    }
+    let finished = finished?;
+    let exit = if finished.timed_out {
+        RunExit::TimedOut
+    } else if killed {
+        RunExit::Killed
+    } else {
+        RunExit::Exited {
+            success: finished.status.success(),
+        }
+    };
+    let stderr_tail = stderr.lock().await.text();
+    let stream = Arc::try_unwrap(stdout)
+        .map_err(|_| ToolError("agent output reader is still running".into()))?
+        .into_inner();
+    Ok(AgentRun {
+        stream,
+        exit,
+        exit_code: finished.status.code(),
+        stderr_tail,
+    })
+}
+
+fn spawn_process(spec: &ProcessSpec) -> Result<tokio::process::Child, ToolError> {
     let mut command = Command::new(&spec.executable);
     if spec.sanitize_scv_environment {
         apply_agent_environment(command.as_std_mut(), &spec.environment);
     } else {
-        command.envs(spec.environment);
+        command.envs(spec.environment.iter().map(|(key, value)| (key, value)));
     }
     command
         .args(&spec.args)
@@ -941,22 +1183,37 @@ async fn execute_process(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| ToolError(format!("launch {:?}: {error}", spec.executable)))?;
-    let pid = child
-        .id()
-        .ok_or_else(|| ToolError("child process has no pid".into()))? as i32;
-    let output = Arc::new(Mutex::new(BoundedOutput::new(spec.output_limit)));
-    let stdout_task = child.stdout.take().map(|stdout| {
-        let output = Arc::clone(&output);
-        tokio::spawn(drain_output(stdout, output))
-    });
-    let stderr_task = child.stderr.take().map(|stderr| {
-        let output = Arc::clone(&output);
-        tokio::spawn(drain_output(stderr, output))
-    });
+    if let Some(pid) = child.id() {
+        delegation::track_spawned(pid);
+    }
+    Ok(child)
+}
 
+fn child_pid(child: &tokio::process::Child) -> Result<i32, ToolError> {
+    child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .ok_or_else(|| ToolError("child process has no pid".into()))
+}
+
+struct Finished {
+    status: std::process::ExitStatus,
+    timed_out: bool,
+}
+
+/// Wait for a spawned process group until it exits, times out, or is
+/// cancelled, always finishing the whole group and draining its output.
+async fn supervise(
+    child: &mut tokio::process::Child,
+    pid: i32,
+    deadline: Instant,
+    cancellation: tokio_util::sync::CancellationToken,
+    stdout_task: Option<JoinHandle<()>>,
+    stderr_task: Option<JoinHandle<()>>,
+) -> Result<Finished, ToolError> {
     enum Completion {
         Exited(std::process::ExitStatus),
         TimedOut,
@@ -973,8 +1230,7 @@ async fn execute_process(
     let (status, timed_out, drain_deadline) = match completion {
         Completion::Exited(status) => {
             let cleanup_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
-            let status =
-                terminate_group(pid, &mut child, Some(status), cleanup_deadline, true).await?;
+            let status = terminate_group(pid, child, Some(status), cleanup_deadline, true).await?;
             (
                 status,
                 false,
@@ -982,12 +1238,12 @@ async fn execute_process(
             )
         }
         Completion::TimedOut => {
-            let status = terminate_group(pid, &mut child, None, Instant::now(), false).await?;
+            let status = terminate_group(pid, child, None, Instant::now(), false).await?;
             (status, true, Instant::now() + Duration::from_millis(250))
         }
         Completion::Cancelled => {
             let cleanup_deadline = Instant::now() + Duration::from_secs(2);
-            let _ = terminate_group(pid, &mut child, None, cleanup_deadline, true).await;
+            let _ = terminate_group(pid, child, None, cleanup_deadline, true).await;
             finish_drain(stdout_task, Instant::now() + Duration::from_millis(250)).await;
             finish_drain(stderr_task, Instant::now() + Duration::from_millis(250)).await;
             return Err(ToolError("process cancelled".into()));
@@ -995,20 +1251,7 @@ async fn execute_process(
     };
     finish_drain(stdout_task, drain_deadline).await;
     finish_drain(stderr_task, drain_deadline).await;
-    let collected = output.lock().await;
-    let text = String::from_utf8_lossy(&collected.bytes).into_owned();
-    let content = json!({
-        "exit_code": status.code(),
-        "timed_out": timed_out,
-        "output": text,
-        "truncated": collected.truncated
-    })
-    .to_string();
-    Ok(ToolOutput {
-        content,
-        is_error: timed_out || !status.success(),
-        truncated: collected.truncated,
-    })
+    Ok(Finished { status, timed_out })
 }
 
 async fn terminate_group(
@@ -1070,9 +1313,33 @@ async fn finish_drain(task: Option<JoinHandle<()>>, deadline: Instant) {
     }
 }
 
-async fn drain_output<R>(mut reader: R, output: Arc<Mutex<BoundedOutput>>)
+/// Where a child's output goes as it is read.
+trait OutputSink: Send + 'static {
+    fn push(&mut self, bytes: &[u8]);
+}
+
+impl OutputSink for BoundedOutput {
+    fn push(&mut self, bytes: &[u8]) {
+        BoundedOutput::push(self, bytes);
+    }
+}
+
+impl OutputSink for AgentStream {
+    fn push(&mut self, bytes: &[u8]) {
+        AgentStream::push(self, bytes);
+    }
+}
+
+impl OutputSink for TailBuffer {
+    fn push(&mut self, bytes: &[u8]) {
+        TailBuffer::push(self, bytes);
+    }
+}
+
+async fn drain_output<R, S>(mut reader: R, output: Arc<Mutex<S>>)
 where
     R: tokio::io::AsyncRead + Unpin,
+    S: OutputSink,
 {
     let mut chunk = [0u8; 8192];
     loop {
@@ -1519,12 +1786,15 @@ mod tests {
                     .into(),
                 environment,
                 search_dirs: Vec::new(),
+                output: OutputFormat::Text,
+                home: None,
             },
             Timeouts {
                 default: Duration::from_secs(2),
                 max: Duration::from_secs(5),
             },
             1024,
+            None,
         )
     }
 
@@ -1585,10 +1855,7 @@ mod tests {
             .await
             .unwrap();
         let output: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(
-            output["output"],
-            "-p\n--model\nsonnet\n--effort\nmedium\nhi\n"
-        );
+        assert_eq!(output["reply"], "-p\n--model\nsonnet\n--effort\nmedium\nhi");
         for invalid in [
             json!({"prompt":"hi","model":"--dangerously-skip-permissions"}),
             json!({"prompt":"hi","model":"sonnet medium"}),
@@ -1610,12 +1877,15 @@ mod tests {
                 model_hint: String::new(),
                 environment: Vec::new(),
                 search_dirs: Vec::new(),
+                output: OutputFormat::Text,
+                home: None,
             },
             Timeouts {
                 default: Duration::from_secs(2),
                 max: Duration::from_secs(2),
             },
             1024,
+            None,
         );
         assert!(
             fixed_only.spec().parameters["properties"]
@@ -1751,10 +2021,7 @@ mod tests {
             .await
             .unwrap();
         let output: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(
-            output["output"],
-            "--model\ngrok-4\n--effort\nhigh\n-p\nhi\n"
-        );
+        assert_eq!(output["reply"], "--model\ngrok-4\n--effort\nhigh\n-p\nhi");
     }
 
     #[tokio::test]
@@ -1783,8 +2050,8 @@ mod tests {
             .unwrap();
         let output: Value = serde_json::from_str(&output.content).unwrap();
         assert_eq!(
-            output["output"],
-            "-p\n--permission-mode\nbypassPermissions\n--model\nopus\nhi\n"
+            output["reply"],
+            "-p\n--permission-mode\nbypassPermissions\n--model\nopus\nhi"
         );
     }
 
@@ -1837,6 +2104,8 @@ mod tests {
             model_hint: String::new(),
             environment: Vec::new(),
             search_dirs: Vec::new(),
+            output: OutputFormat::Text,
+            home: None,
         };
         let registry = builtin_registry(
             ToolsConfig::default(),
@@ -1875,11 +2144,7 @@ mod tests {
         ] {
             let output = run(arguments.clone()).await.unwrap();
             let output: Value = serde_json::from_str(&output.content).unwrap();
-            assert_eq!(
-                output["output"],
-                format!("{}\n", root.display()),
-                "{arguments}"
-            );
+            assert_eq!(output["reply"], root.display().to_string(), "{arguments}");
         }
         for cwd in [
             "project".to_owned(),
@@ -1890,8 +2155,8 @@ mod tests {
             let output = run(json!({"prompt":"hi","cwd":cwd})).await.unwrap();
             let output: Value = serde_json::from_str(&output.content).unwrap();
             assert_eq!(
-                output["output"],
-                format!("{}\n", root.join("project").display()),
+                output["reply"],
+                root.join("project").display().to_string(),
                 "{cwd}"
             );
         }
@@ -2005,5 +2270,280 @@ mod tests {
                 .to_string()
                 .contains("tools.max_timeout_seconds")
         );
+    }
+
+    /// A fake agent CLI in `format`, run through `bash script`, optionally
+    /// recorded in `delegation`.
+    fn structured_agent(
+        workspace: &Path,
+        name: &str,
+        format: OutputFormat,
+        script: &str,
+        home: Option<PathBuf>,
+        delegation: Option<DelegationContext>,
+        timeout: Duration,
+    ) -> NativeAgentTool {
+        let script_path = workspace.join(format!("fake-{name}.sh"));
+        std::fs::write(&script_path, script).unwrap();
+        NativeAgentTool::new(
+            name.into(),
+            AgentAdapterConfig {
+                command: "bash".into(),
+                args: vec![script_path.display().to_string()],
+                prompt_args: Vec::new(),
+                full_permission_args: None,
+                model_args: Vec::new(),
+                effort_args: Vec::new(),
+                model_hint: String::new(),
+                environment: Vec::new(),
+                search_dirs: Vec::new(),
+                output: format,
+                home,
+            },
+            Timeouts {
+                default: timeout,
+                max: Duration::from_secs(30),
+            },
+            64 * 1024,
+            delegation,
+        )
+    }
+
+    fn delegation_context(home: &Path) -> DelegationContext {
+        DelegationContext {
+            registry: Arc::new(DelegationRegistry::new(home)),
+            session: "session-1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_stream_json_becomes_a_structured_result() {
+        let workspace = tempfile::tempdir().unwrap();
+        let args_file = workspace.path().join("args.txt");
+        let script = format!(
+            r#"printf '%s\n' "$@" > {args}
+printf '%s\n' "$SCV_PARENT" "$SCV_DELEGATION_DEPTH" >> {args}
+echo '{{"type":"system","subtype":"init","session_id":"x","unknown":[1,2]}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"thinking"}}]}}}}'
+echo 'stray diagnostic' >&2
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"all done","usage":{{"input_tokens":12,"output_tokens":3}}}}'
+"#,
+            args = args_file.display()
+        );
+        let home = tempfile::tempdir().unwrap();
+        let context_home = delegation_context(home.path());
+        let tool = structured_agent(
+            workspace.path(),
+            "agent_claude",
+            OutputFormat::ClaudeStreamJson,
+            &script,
+            None,
+            Some(context_home.clone()),
+            Duration::from_secs(10),
+        );
+        let output = tool
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        assert!(!output.is_error, "{}", output.content);
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(value["agent"], "claude");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["reply"], "all done");
+        assert_eq!(value["usage"]["input_tokens"], 12);
+        assert_eq!(value["exit_code"], 0);
+        assert_eq!(value["stderr_tail"], "stray diagnostic");
+        assert_eq!(value["truncated"], false);
+        // No event log reaches the parent.
+        assert!(!output.content.contains("thinking"));
+        let recorded = std::fs::read_to_string(&args_file).unwrap();
+        let lines: Vec<&str> = recorded.lines().collect();
+        assert_eq!(
+            &lines[..4],
+            [
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--session-id"
+            ]
+        );
+        assert!(uuid::Uuid::parse_str(lines[4]).is_ok());
+        assert_eq!(lines[5], "hi");
+        let chain = lines[6];
+        assert!(chain.contains("/session-1/claude-"), "{chain}");
+        assert_eq!(lines[7], "1");
+        // The run's record is gone once it ends.
+        assert!(context_home.registry.list(true).is_empty());
+    }
+
+    #[tokio::test]
+    async fn codex_json_reads_the_last_message_file_and_removes_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let script = r#"while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then printf 'final from file\n' > "$2"; echo "$2" > last-path.txt; fi
+  shift
+done
+echo '{"type":"thread.started","thread_id":"t"}'
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+"#;
+        let tool = structured_agent(
+            workspace.path(),
+            "agent_codex",
+            OutputFormat::CodexJsonl,
+            script,
+            Some(home.path().to_owned()),
+            None,
+            Duration::from_secs(10),
+        );
+        let output = tool
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(value["status"], "completed", "{value}");
+        assert_eq!(value["reply"], "final from file");
+        let path = std::fs::read_to_string(workspace.path().join("last-path.txt")).unwrap();
+        let path = PathBuf::from(path.trim());
+        assert!(path.starts_with(home.path().join("tmp")));
+        assert!(!path.exists(), "the last-message file is removed");
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(home.path().join("tmp"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[tokio::test]
+    async fn pi_json_and_signed_out_claude_results() {
+        let workspace = tempfile::tempdir().unwrap();
+        let pi = structured_agent(
+            workspace.path(),
+            "agent_pi",
+            OutputFormat::PiJson,
+            r#"echo '{"type":"session","id":"p"}'
+echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"pi ok"}],"usage":{"input":7,"output":2}}}'
+"#,
+            None,
+            None,
+            Duration::from_secs(10),
+        );
+        let output = pi
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(value["reply"], "pi ok");
+        assert_eq!(value["usage"]["output_tokens"], 2);
+
+        let claude = structured_agent(
+            workspace.path(),
+            "agent_claude",
+            OutputFormat::ClaudeStreamJson,
+            r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}'
+exit 1
+"#,
+            None,
+            None,
+            Duration::from_secs(10),
+        );
+        let output = claude
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["exit_code"], 1);
+        assert!(
+            value["hint"]
+                .as_str()
+                .unwrap()
+                .contains("scv agents login claude")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_timed_out_run_and_its_detached_descendants_are_stopped() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let delegation = delegation_context(home.path());
+        let tool = structured_agent(
+            workspace.path(),
+            "agent_codex",
+            OutputFormat::CodexJsonl,
+            // The detached sleep leaves the agent's process group and session.
+            "setsid sleep 60 &\necho \"$SCV_PARENT\" > chain.txt\nexec sleep 60\n",
+            None,
+            Some(delegation.clone()),
+            Duration::from_secs(1),
+        );
+        let output = tool
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(value["status"], "timeout");
+        let chain = std::fs::read_to_string(workspace.path().join("chain.txt")).unwrap();
+        let handle = chain.trim().rsplit('/').next().unwrap().to_owned();
+        let tagged = || {
+            std::fs::read_dir("/proc")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    std::fs::read(entry.path().join("environ")).is_ok_and(|environ| {
+                        environ
+                            .split(|byte| *byte == 0)
+                            .any(|entry| entry == format!("SCV_PARENT={}", chain.trim()).as_bytes())
+                    })
+                })
+                .count()
+        };
+        let mut remaining = tagged();
+        for _ in 0..100 {
+            if remaining == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            remaining = tagged();
+        }
+        assert_eq!(remaining, 0, "tagged processes of {handle} survived");
+        assert!(delegation.registry.list(true).is_empty());
+    }
+
+    #[test]
+    fn agents_are_not_offered_at_the_delegation_depth_limit() {
+        let adapter = AgentAdapterConfig {
+            command: "bash".into(),
+            args: Vec::new(),
+            prompt_args: Vec::new(),
+            full_permission_args: None,
+            model_args: Vec::new(),
+            effort_args: Vec::new(),
+            model_hint: String::new(),
+            environment: Vec::new(),
+            search_dirs: Vec::new(),
+            output: OutputFormat::Text,
+            home: None,
+        };
+        let home = tempfile::tempdir().unwrap();
+        for (max_depth, offered) in [(0, false), (1, true)] {
+            let registry = builtin_registry(
+                ToolsConfig {
+                    max_delegation_depth: max_depth,
+                    delegation: Some(delegation_context(home.path())),
+                    ..ToolsConfig::default()
+                },
+                SkillMap::new(),
+                Vec::new(),
+                1024,
+                HashMap::from([("agent_claude".to_owned(), adapter.clone())]),
+            )
+            .unwrap();
+            assert_eq!(registry.get("agent_claude").is_some(), offered);
+            assert!(registry.get("bash").is_some());
+        }
     }
 }

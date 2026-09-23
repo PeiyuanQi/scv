@@ -176,6 +176,21 @@ enum AgentsCommand {
         #[arg(value_parser = agent_names())]
         agent: String,
     },
+    /// List delegated agent runs of this SCV instance, from any SCV process.
+    Ps {
+        /// Include orphaned runs whose SCV process died, awaiting cleanup.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Stop a delegated run (its process group and tagged descendants).
+    Kill {
+        /// Handle from `scv agents ps`, such as codex-3f9a2c.
+        #[arg(required_unless_present = "orphans", conflicts_with = "orphans")]
+        handle: Option<String>,
+        /// Stop every orphaned run now instead of at the daemon's next check.
+        #[arg(long)]
+        orphans: bool,
+    },
     /// Copy a setup into SCV's adapter home. `codex`: your own config.toml
     /// and an API-key auth.json (never a ChatGPT sign-in). `pi
     /// --from-scv-provider`: SCV's own OpenAI-compatible provider as pi's default.
@@ -263,7 +278,9 @@ async fn main() -> Result<()> {
             .approval_policy
             .map(|value| value.to_possible_value().unwrap().get_name().to_owned()),
     };
-    match cli.command.unwrap_or(Command::Tui) {
+    let command = cli.command.unwrap_or(Command::Tui);
+    refuse_nested_daemon_control(&command)?;
+    match command {
         Command::Config {
             command: ConfigCommand::Init,
         } => {
@@ -365,9 +382,34 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Agents { command } => agents(command),
+        Command::Agents { command } => agents(command).await,
         Command::ClawbotLogin { login_url } => clawbot_login(&login_url, "default").await,
     }
+}
+
+/// A delegated agent (or an SCV it started) must not start, stop, replace, or
+/// reconfigure daemons: that is the host's decision, and an SCV run from
+/// inside a delegation would otherwise manage its parent.
+fn refuse_nested_daemon_control(command: &Command) -> Result<()> {
+    let depth = scv_server::delegation::current_depth();
+    let lifecycle = match command {
+        Command::Run { .. } => Some("run"),
+        Command::Start { .. } => Some("start"),
+        Command::Stop => Some("stop"),
+        Command::Restart { .. } => Some("restart"),
+        Command::Update { .. } => Some("update"),
+        Command::Clawbot { .. } | Command::ClawbotLogin { .. } => Some("clawbot"),
+        _ => None,
+    };
+    if depth > 0
+        && let Some(action) = lifecycle
+    {
+        bail!(
+            "`scv {action}` is refused inside a delegated agent run (delegation depth {depth}); \
+             the host owner manages the daemon"
+        );
+    }
+    Ok(())
 }
 
 fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<()> {
@@ -657,7 +699,7 @@ async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> 
     scv_server::run_socket(&socket, overrides).await
 }
 
-fn agents(command: AgentsCommand) -> Result<()> {
+async fn agents(command: AgentsCommand) -> Result<()> {
     use scv_server::adapters::{Login, Logout, Status};
     match command {
         AgentsCommand::Login {
@@ -747,12 +789,26 @@ fn agents(command: AgentsCommand) -> Result<()> {
                     );
                 }
                 match adapter.status {
-                    // The agent prints its own status; a signed-out agent exits
-                    // non-zero, and its own advice would sign in the wrong home.
+                    // The agent's own status names the account (an email) or
+                    // part of a key, so only a summary is printed; its own
+                    // advice would also sign in the wrong home.
                     Status::Command(args) if installed.is_some() => {
-                        match scv_server::agent_command(name)?.args(args).status() {
-                            Ok(status) if status.success() => {}
-                            Ok(_) => println!("  Sign in for SCV with: scv agents login {name}"),
+                        match scv_server::agent_command(name)?
+                            .args(args)
+                            .stdin(std::process::Stdio::null())
+                            .output()
+                        {
+                            Ok(output) => {
+                                let summary = scv_server::adapters::summarize_status(
+                                    adapter.status_summary,
+                                    output.status.success(),
+                                    &String::from_utf8_lossy(&output.stdout),
+                                );
+                                println!("  {summary}");
+                                if summary == "not signed in" {
+                                    println!("  Sign in for SCV with: scv agents login {name}");
+                                }
+                            }
                             Err(error) => println!("  unavailable: {error}"),
                         }
                     }
@@ -767,6 +823,20 @@ fn agents(command: AgentsCommand) -> Result<()> {
                         }
                     }
                 }
+            }
+            Ok(())
+        }
+        AgentsCommand::Ps { all } => {
+            let status = control(DaemonCommand::Delegations { all }).await?;
+            print_delegations(&status.delegations.entries);
+            Ok(())
+        }
+        AgentsCommand::Kill { handle, orphans } => {
+            let status = control(DaemonCommand::DelegationKill { handle, orphans }).await?;
+            if status.delegations.killed.is_empty() {
+                println!("Nothing to stop.");
+            } else {
+                println!("Stopped: {}", status.delegations.killed.join(", "));
             }
             Ok(())
         }
@@ -889,6 +959,39 @@ async fn clawbot_run(
     Ok(())
 }
 
+fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
+    if entries.is_empty() {
+        println!("No delegated agent runs.");
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    println!(
+        "{:<16} {:<7} {:<9} {:>8} {:>5} {:>7} {:>5}  CWD",
+        "HANDLE", "AGENT", "STATE", "PID", "PROCS", "AGE", "DEPTH"
+    );
+    for entry in entries {
+        let age = now.saturating_sub(entry.started_unix_seconds);
+        // Debug formatting escapes control characters in the untrusted path.
+        println!(
+            "{:<16} {:<7} {:<9} {:>8} {:>5} {:>7} {:>5}  {:?}",
+            entry.handle,
+            entry.agent,
+            if entry.orphaned {
+                "orphaned"
+            } else {
+                "running"
+            },
+            entry.pid,
+            entry.processes,
+            format!("{}m{:02}s", age / 60, age % 60),
+            entry.depth,
+            entry.cwd,
+        );
+    }
+}
+
 async fn control(command: DaemonCommand) -> Result<DaemonStatus> {
     scv_client::control(&scv_client::default_socket_path()?, command).await
 }
@@ -915,6 +1018,10 @@ async fn show_status(account: Option<&str>) -> Result<()> {
     println!(
         "Daemon: running, version {}, pid {}",
         status.version, status.pid
+    );
+    println!(
+        "Delegations: {} running, {} orphaned runs stopped since the daemon started",
+        status.delegations.active, status.delegations.reaped
     );
     for health in status
         .components

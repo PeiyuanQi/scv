@@ -18,7 +18,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.25"
+version = "0.1.26"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -51,14 +51,14 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 which = "8.0.0"
 
-scv-core = { version = "=0.1.25", path = "crates/scv-core" }
-scv-client = { version = "=0.1.25", path = "crates/scv-client" }
-scv-clawbot = { version = "=0.1.25", path = "crates/scv-clawbot" }
-scv-protocol = { version = "=0.1.25", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "=0.1.25", path = "crates/scv-provider-openai" }
-scv-server = { version = "=0.1.25", path = "crates/scv-server" }
-scv-tools = { version = "=0.1.25", path = "crates/scv-tools" }
-scv-tui = { version = "=0.1.25", path = "crates/scv-tui" }
+scv-core = { version = "=0.1.26", path = "crates/scv-core" }
+scv-client = { version = "=0.1.26", path = "crates/scv-client" }
+scv-clawbot = { version = "=0.1.26", path = "crates/scv-clawbot" }
+scv-protocol = { version = "=0.1.26", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.1.26", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.1.26", path = "crates/scv-server" }
+scv-tools = { version = "=0.1.26", path = "crates/scv-tools" }
+scv-tui = { version = "=0.1.26", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true

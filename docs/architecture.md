@@ -76,7 +76,7 @@ The integration dependency chain is `server -> clawbot -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
 on core; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.25` and exact workspace dependency pins.
+`0.1.26` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
@@ -159,6 +159,16 @@ server PID/version, account identity, component state, last successful contact,
 restart count, and sanitized errors. Credentials are not connection evidence.
 The component management lock is released before writing the response, so a
 nonreading management client cannot prevent reconciliation or shutdown.
+
+Delegated agent runs are tracked by `scv_tools::delegation`. Each SCV process
+(the daemon or a `scv server --stdio`) holds one `DelegationRegistry` for its
+instance, and every session's agent tools record their runs in it through
+`ToolsConfig.delegation`, which carries the registry and the session ID.
+Records live in `$SCV_HOME/run/delegations`, so the daemon also sees runs that
+`scv exec` servers started. A separate daemon task reconciles them at startup
+and every 60 seconds, stopping orphans, and collects exited orphan processes;
+on Linux the daemon is a child subreaper. `delegations` and `delegation_kill`
+control actions serve `scv agents ps` and `scv agents kill`.
 
 ## Agent loop
 

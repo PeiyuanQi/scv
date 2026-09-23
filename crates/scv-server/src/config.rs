@@ -141,12 +141,16 @@ impl Config {
 pub struct AgentConfig {
     pub max_steps: usize,
     pub system_prompt: String,
+    /// `agent_*` tools are offered only while this SCV's own delegation depth
+    /// is below this, so delegation chains stay bounded. 0 disables them.
+    pub max_delegation_depth: u32,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_steps: 128,
+            max_delegation_depth: 2,
             system_prompt: "You are SCV, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
         }
     }
@@ -592,6 +596,8 @@ impl Config {
             output_limit_bytes: self.tools.output_limit_bytes,
             max_read_bytes: self.tools.max_read_bytes,
             max_write_bytes: self.tools.max_write_bytes,
+            max_delegation_depth: self.agent.max_delegation_depth,
+            delegation: None,
         }
     }
 
@@ -726,6 +732,8 @@ impl Config {
                             .as_deref()
                             .map(|home| scv_tools::adapters::adapter_search_dirs(descriptor, home))
                             .unwrap_or_default(),
+                        output: descriptor.output,
+                        home: Some(adapter_home),
                     },
                 ))
             })
@@ -1154,6 +1162,13 @@ fn validate_project_not_weaker(user: &Config, project: &Config) -> Result<()> {
     no_larger!(
         (user.agent.max_steps, project.agent.max_steps),
         "agent.max_steps"
+    );
+    no_larger!(
+        (
+            user.agent.max_delegation_depth,
+            project.agent.max_delegation_depth
+        ),
+        "agent.max_delegation_depth"
     );
     no_larger!(
         (

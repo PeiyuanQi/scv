@@ -240,6 +240,7 @@ impl Components {
             version: env!("CARGO_PKG_VERSION").into(),
             pid: std::process::id(),
             components,
+            delegations: Default::default(),
         }
     }
 
@@ -347,7 +348,10 @@ impl Components {
 
     pub async fn control(&mut self, command: DaemonCommand) -> Result<DaemonStatus> {
         match command {
-            DaemonCommand::Status => return Ok(self.status()),
+            // Delegations belong to the connection handler, which adds them.
+            DaemonCommand::Status
+            | DaemonCommand::Delegations { .. }
+            | DaemonCommand::DelegationKill { .. } => return Ok(self.status()),
             DaemonCommand::Reload => {}
             DaemonCommand::ClawbotSet {
                 account,
