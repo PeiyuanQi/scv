@@ -92,8 +92,13 @@ delegated). Otherwise use plain git.
 git push -u origin HEAD
 gh pr create --base main --fill
 gh pr checks --watch --fail-fast
-gh pr merge --rebase --delete-branch
+gh pr merge --rebase
+git push origin --delete <type>/<topic>
 ```
+
+Do not use `--delete-branch` here. After merging, gh tries to check out `main`
+locally, which fails because the main checkout already holds `main`, and the
+remote branch is then left behind.
 
 - If checks fail, read `gh run view <run-id> --log-failed`.
   - A known flake (stage 3): run `gh run rerun <run-id> --failed` once, then
@@ -156,7 +161,8 @@ scripts/deploy.sh <version>
 
 - Run `git worktree remove ../scv-<topic>`.
 - Delete the local branch with `git branch -D <branch>` once its change is on
-  `origin/main`. With `gh`, the remote branch is already gone.
+  `origin/main`. Also make sure the remote task branch is gone:
+  `git ls-remote --heads origin <branch>` should print nothing.
 - Report:
   - the commit(s) now on `main`;
   - the version published and the version installed;
