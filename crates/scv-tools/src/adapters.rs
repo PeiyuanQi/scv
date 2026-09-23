@@ -96,6 +96,9 @@ pub struct AcpLaunch {
     /// The ACP session mode selected for `permissions = "full"`, for agents
     /// whose permission level is a session mode.
     pub full_mode: Option<&'static str>,
+    /// Environment for the ACP server under `permissions = "full"`, for
+    /// settings the server reads only from its environment.
+    pub full_environment: &'static [(&'static str, &'static str)],
 }
 
 /// Expand `launch.args` for the configured permission level.
@@ -323,6 +326,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             args: &[],
             full_args: &[],
             full_mode: Some("bypassPermissions"),
+            full_environment: &[],
         }),
     },
     AdapterDescriptor {
@@ -343,6 +347,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             "OPENAI_PROJECT_ID",
             "CODEX_API_KEY",
             "CODEX_BASE_URL",
+            "CODEX_CONFIG",
         ],
         // `codex exec` has no `--search`; `web_search = "live"` is its config form.
         full_permission_args: &[
@@ -372,12 +377,15 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         transport: Transport::Process,
         // The official adapter from the ACP organisation (npm
         // @agentclientprotocol/codex-acp). It reads `$CODEX_HOME/config.toml`
-        // but takes no `-c` overrides, so web search follows that file.
+        // and takes no `-c` overrides; `CODEX_CONFIG` is its JSON form of
+        // them, merged into every session, so full permissions keep live web
+        // search without rewriting the imported config.
         acp: Some(AcpLaunch {
             command: "codex-acp",
             args: &[],
             full_args: &[],
             full_mode: Some("agent-full-access"),
+            full_environment: &[("CODEX_CONFIG", r#"{"web_search":"live"}"#)],
         }),
     },
     AdapterDescriptor {
@@ -416,6 +424,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             args: &["agent", "{full}", "stdio"],
             full_args: &["--always-approve"],
             full_mode: None,
+            full_environment: &[],
         }),
     },
     AdapterDescriptor {
@@ -450,6 +459,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             args: &["--profile", "acp"],
             full_args: &[],
             full_mode: None,
+            full_environment: &[],
         }),
     },
     AdapterDescriptor {

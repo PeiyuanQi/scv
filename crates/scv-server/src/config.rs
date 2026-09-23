@@ -777,6 +777,14 @@ impl Config {
                                 command: launch.command.to_owned(),
                                 args: scv_tools::adapters::acp_args(&launch, full),
                                 full_mode: launch.full_mode.filter(|_| full).map(str::to_owned),
+                                environment: launch
+                                    .full_environment
+                                    .iter()
+                                    .filter(|_| full)
+                                    .map(|(variable, value)| {
+                                        (OsString::from(variable), OsString::from(value))
+                                    })
+                                    .collect(),
                                 required: config.transport == AgentTransport::Acp,
                             }),
                     },
@@ -1818,6 +1826,40 @@ args = ["-p", "--permission-mode", "acceptEdits"]
         )));
         assert_eq!(adapters["agent_grok"].prompt_args, ["-p"]);
         assert!(adapters["agent_pi"].model_hint.contains("provider scv"));
+    }
+
+    #[test]
+    fn full_codex_over_acp_keeps_live_web_search() {
+        let codex_acp = |permissions: &str| {
+            let mut value: toml::Value =
+                toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+            merge(
+                &mut value,
+                toml::from_str(&format!(
+                    "[agents.codex]\npermissions = \"{permissions}\"\n"
+                ))
+                .unwrap(),
+            );
+            let config: Config = value.try_into().unwrap();
+            config.validate().unwrap();
+            config.adapters()["agent_codex"].acp.clone().unwrap()
+        };
+        let full = codex_acp("full");
+        assert_eq!(full.full_mode.as_deref(), Some("agent-full-access"));
+        let [(variable, value)] = full.environment.as_slice() else {
+            panic!("expected one ACP variable: {:?}", full.environment);
+        };
+        assert_eq!(variable, "CODEX_CONFIG");
+        let overrides: serde_json::Value = serde_json::from_str(value.to_str().unwrap()).unwrap();
+        assert_eq!(overrides, serde_json::json!({"web_search": "live"}));
+        assert!(
+            codex_acp("default").environment.is_empty(),
+            "default permissions leave web search to the Codex config"
+        );
+        assert!(
+            scv_tools::adapters::is_removed_agent_variable(std::ffi::OsStr::new("CODEX_CONFIG")),
+            "an inherited CODEX_CONFIG never reaches a delegated Codex"
+        );
     }
 
     #[test]
