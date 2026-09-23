@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.24`, with exact `=0.1.24` pins for dependencies
+All packages use version `0.1.25`, with exact `=0.1.25` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -244,6 +244,13 @@ the initial prompt; the model loads full instructions through the contained
 Claude Code skills (`.agents/skills`, `.claude/skills`) of the workspace and its
 child projects as `<project>:<name>`, so SCV knows to delegate that work to an
 agent running in the project.
+
+`web_fetch` reads public web pages and APIs as text, without approval for
+HTTPS documentation hosts in `web.auto_approve_domains` and with approval for
+anything else, and never reaches loopback or private addresses by default.
+Web search comes from the provider's hosted Responses tool (`web.search =
+"provider"`) or a SearXNG or Brave Search backend; see
+[configuration](docs/configuration.md#web-tools).
 
 The built-in `agent_claude`, `agent_codex`, `agent_grok`, `agent_dsh`, and
 `agent_pi` tools launch Claude Code, Codex, Grok Build, DeepSeek Harness, and pi

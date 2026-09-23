@@ -86,6 +86,9 @@ pub struct OpenAiProvider {
     api_key: String,
     limits: ProviderLimits,
     headers: std::collections::HashMap<String, String>,
+    /// Provider-executed tools, such as hosted web search, sent alongside the
+    /// function tools.
+    hosted_tools: Vec<Value>,
 }
 
 impl OpenAiProvider {
@@ -114,14 +117,23 @@ impl OpenAiProvider {
             api_key,
             limits,
             headers,
+            hosted_tools: Vec::new(),
         })
+    }
+
+    /// Offers the endpoint's hosted Responses `web_search` tool. The provider
+    /// runs the searches itself; only the answer and its citations return.
+    pub fn with_web_search(mut self) -> Self {
+        self.hosted_tools.push(json!({"type":"web_search"}));
+        self
     }
 
     fn request_body(&self, request: &ProviderRequest) -> Value {
         let input = response_input(&request.messages);
         // Tool schemas leave optional fields out of `required`. Strict mode,
         // the Responses default, would make the model fill every field anyway.
-        let tools: Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
+        let mut tools: Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
+        tools.extend(self.hosted_tools.iter().cloned());
         let mut body = json!({"model": self.model, "instructions": request.system_prompt, "input": input, "stream": true});
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
@@ -235,6 +247,7 @@ impl OpenAiProvider {
         let mut content = String::new();
         let mut calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
         let mut usage = Usage::default();
+        let mut citations: Vec<Citation> = Vec::new();
         let mut done = false;
 
         while !done {
@@ -336,15 +349,34 @@ impl OpenAiProvider {
                                 call.arguments.push_str(&delta);
                             }
                         }
+                        "response.output_text.annotation.added" => {
+                            if let Some(annotation) = &event.annotation {
+                                add_citation(&mut citations, annotation);
+                            }
+                        }
                         "response.output_item.done" => {
-                            if let Some(item) = event.item
-                                && item.kind.as_deref() == Some("function_call")
-                            {
-                                *emitted = true;
-                                let call =
-                                    calls.entry(event.output_index.unwrap_or(0)).or_default();
-                                call.id = item.call_id.unwrap_or_default();
-                                call.name = item.name.unwrap_or_default();
+                            if let Some(item) = event.item {
+                                if item.kind.as_deref() == Some("function_call") {
+                                    *emitted = true;
+                                    let call =
+                                        calls.entry(event.output_index.unwrap_or(0)).or_default();
+                                    call.id = item.call_id.unwrap_or_default();
+                                    call.name = item.name.unwrap_or_default();
+                                } else if item.kind.as_deref() == Some("message") {
+                                    // Some endpoints report citations only on
+                                    // the finished message.
+                                    for annotation in item
+                                        .content
+                                        .iter()
+                                        .flat_map(|content| {
+                                            content.as_array().into_iter().flatten()
+                                        })
+                                        .filter_map(|part| part.get("annotations")?.as_array())
+                                        .flatten()
+                                    {
+                                        add_citation(&mut citations, annotation);
+                                    }
+                                }
                             }
                         }
                         "response.completed" => {
@@ -407,6 +439,14 @@ impl OpenAiProvider {
             return Err(AttemptFailure::transient(
                 "provider stream ended before the response completed",
             ));
+        }
+
+        if let Some(sources) = sources_appendix(&content, &citations) {
+            if content.len().saturating_add(sources.len()) > self.limits.max_assistant_bytes {
+                return Err(limit_error("assistant response exceeded byte limit").into());
+            }
+            content.push_str(&sources);
+            deltas.push(&sources).await?;
         }
 
         let tool_calls = calls
@@ -590,6 +630,56 @@ fn function_call_output(call_id: &str, output: &str) -> Value {
     json!({"type":"function_call_output","call_id":call_id,"output":output})
 }
 
+/// A web source the provider cited for the answer.
+#[derive(Debug, Clone, PartialEq)]
+struct Citation {
+    title: String,
+    url: String,
+}
+
+fn add_citation(citations: &mut Vec<Citation>, annotation: &Value) {
+    if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
+        return;
+    }
+    let Some(url) = annotation.get("url").and_then(Value::as_str) else {
+        return;
+    };
+    if url.is_empty() || citations.iter().any(|citation| citation.url == url) {
+        return;
+    }
+    citations.push(Citation {
+        title: annotation
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        url: url.to_owned(),
+    });
+}
+
+/// Lists cited sources that the answer text does not already link, so the
+/// reader can always see where a searched answer came from.
+fn sources_appendix(content: &str, citations: &[Citation]) -> Option<String> {
+    let missing: Vec<&Citation> = citations
+        .iter()
+        .filter(|citation| !content.contains(&citation.url))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let mut appendix = String::from("\n\nSources:");
+    for citation in missing {
+        let title = citation.title.replace(['[', ']', '\n'], " ");
+        let title = title.trim();
+        if title.is_empty() {
+            appendix.push_str(&format!("\n- <{}>", citation.url));
+        } else {
+            appendix.push_str(&format!("\n- [{title}]({})", citation.url));
+        }
+    }
+    Some(appendix)
+}
+
 fn find_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     buffer
         .windows(2)
@@ -631,6 +721,7 @@ struct ResponseEvent {
     error: Option<Value>,
     code: Option<Value>,
     message: Option<Value>,
+    annotation: Option<Value>,
 }
 #[derive(Debug, Deserialize)]
 struct ResponseSummary {
@@ -742,6 +833,7 @@ struct ResponseItem {
     _id: Option<String>,
     call_id: Option<String>,
     name: Option<String>,
+    content: Option<Value>,
 }
 
 #[cfg(test)]
@@ -1303,5 +1395,152 @@ mod tests {
                 assert!(delay >= nominal / 2 && delay < nominal * 3 / 2, "{delay:?}");
             }
         }
+    }
+
+    #[test]
+    fn hosted_web_search_is_offered_beside_function_tools() {
+        let provider = OpenAiProvider::new(
+            "model".into(),
+            "http://127.0.0.1:9/v1".into(),
+            "key".into(),
+            Duration::from_secs(1),
+            ProviderLimits::default(),
+            Default::default(),
+        )
+        .unwrap()
+        .with_web_search();
+        let request = |tools| ProviderRequest {
+            system_prompt: String::new(),
+            messages: vec![user("latest serde?")],
+            tools,
+        };
+        let body = provider.request_body(&request(vec![scv_core::ToolSpec {
+            name: "read".into(),
+            description: "Read".into(),
+            parameters: json!({"type":"object"}),
+        }]));
+        assert_eq!(body["tools"][0]["name"], "read");
+        assert_eq!(body["tools"][1], json!({"type":"web_search"}));
+        let body = provider.request_body(&request(Vec::new()));
+        assert_eq!(body["tools"], json!([{"type":"web_search"}]));
+    }
+
+    #[test]
+    fn sources_are_appended_only_when_the_text_does_not_link_them() {
+        let citations = vec![
+            Citation {
+                title: "tokio 1.53.1 - Docs.rs".into(),
+                url: "https://docs.rs/tokio".into(),
+            },
+            Citation {
+                title: String::new(),
+                url: "https://crates.io/crates/tokio".into(),
+            },
+        ];
+        assert_eq!(
+            sources_appendix("See [docs.rs](https://docs.rs/tokio).", &citations).unwrap(),
+            "\n\nSources:\n- <https://crates.io/crates/tokio>"
+        );
+        assert_eq!(
+            sources_appendix("Latest is 1.53.1.", &citations[..1]).unwrap(),
+            "\n\nSources:\n- [tokio 1.53.1 - Docs.rs](https://docs.rs/tokio)"
+        );
+        assert!(
+            sources_appendix(
+                "https://docs.rs/tokio https://crates.io/crates/tokio",
+                &citations
+            )
+            .is_none()
+        );
+        let mut collected = Vec::new();
+        for annotation in [
+            json!({"type":"url_citation","url":"https://a.test","title":"A"}),
+            json!({"type":"url_citation","url":"https://a.test","title":"again"}),
+            json!({"type":"file_citation","file_id":"f"}),
+        ] {
+            add_citation(&mut collected, &annotation);
+        }
+        assert_eq!(collected.len(), 1);
+    }
+
+    struct Collect(std::sync::Mutex<String>);
+
+    #[async_trait]
+    impl TextDeltaSink for Collect {
+        async fn push(&self, delta: &str) -> Result<(), ProviderError> {
+            self.0.lock().unwrap().push_str(delta);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_searched_answer_streams_with_its_cited_sources() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let head = String::from_utf8(request).unwrap();
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).unwrap();
+            let events = concat!(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\"}}\n\n",
+                "data: {\"type\":\"response.web_search_call.completed\",\"output_index\":0,\"item_id\":\"ws_1\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"tokio\"}}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Tokio is at 1.53.1.\"}\n\n",
+                "data: {\"type\":\"response.output_text.annotation.added\",\"output_index\":1,\"annotation\":{\"type\":\"url_citation\",\"url\":\"https://docs.rs/tokio\",\"title\":\"tokio - Docs.rs\",\"start_index\":0,\"end_index\":5}}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Tokio is at 1.53.1.\",\"annotations\":[{\"type\":\"url_citation\",\"url\":\"https://crates.io/crates/tokio\",\"title\":\"crates.io\"}]}]}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+                events.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()
+        });
+        let provider = OpenAiProvider::new(
+            "model".into(),
+            format!("http://{address}/v1"),
+            "key".into(),
+            Duration::from_secs(5),
+            ProviderLimits::default(),
+            Default::default(),
+        )
+        .unwrap()
+        .with_web_search();
+        let deltas = Arc::new(Collect(std::sync::Mutex::new(String::new())));
+        let response = provider
+            .complete(
+                ProviderRequest {
+                    system_prompt: String::new(),
+                    messages: vec![user("latest tokio?")],
+                    tools: Vec::new(),
+                },
+                deltas.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let expected = "Tokio is at 1.53.1.\n\nSources:\n- [tokio - Docs.rs](https://docs.rs/tokio)\n- [crates.io](https://crates.io/crates/tokio)";
+        assert_eq!(response.content, expected);
+        assert_eq!(*deltas.0.lock().unwrap(), expected);
+        assert!(response.tool_calls.is_empty());
+        let body = server.join().unwrap();
+        assert_eq!(body["tools"], json!([{"type":"web_search"}]));
     }
 }

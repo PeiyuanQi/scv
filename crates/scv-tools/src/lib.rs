@@ -1,6 +1,7 @@
 //! SCV's bounded, workspace-aware built-in tools.
 
 pub mod adapters;
+pub mod web;
 
 use std::{
     collections::HashMap,

@@ -41,13 +41,14 @@ SCV v0.1 provides:
 - a provider-independent agent loop with bounded tool iterations;
 - an OpenAI-compatible Responses API provider;
 - configurable, deterministic context budgeting and compaction;
-- built-in `read`, `read_skill`, `write`, `bash`, `agent_claude`,
-  `agent_codex`, `agent_grok`, `agent_dsh`, and `agent_pi` tools;
+- built-in `read`, `read_skill`, `write`, `bash`, `web_fetch`, `web_search`,
+  `agent_claude`, `agent_codex`, `agent_grok`, `agent_dsh`, and `agent_pi`
+  tools, plus the provider's hosted web search when configured;
 - a versioned newline-delimited JSON protocol;
 - one Unix-socket daemon that owns agent state and per-connection sessions;
 - a TUI and ClawBot bridge that attach to the daemon through the same protocol;
-- interactive approval for tools with filesystem, shell, or subprocess side
-  effects;
+- interactive approval for tools with filesystem, shell, subprocess, or
+  network side effects;
 - Linux and macOS source builds and release archives.
 
 The current release does not include dynamic library loading, OS-level
@@ -75,7 +76,7 @@ The integration dependency chain is `server -> clawbot -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
 on core; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.24` and exact workspace dependency pins.
+`0.1.25` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
