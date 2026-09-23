@@ -26,7 +26,11 @@ SCV merges configuration in this order, from lowest to highest precedence:
 
 Unknown keys and invalid values are startup errors. Project configuration is
 treated as untrusted input: it cannot contain credentials or disable an
-interactive approval required by user-level policy.
+interactive approval required by user-level policy. When the workspace's
+`.scv/config.toml` is the user configuration itself, as when SCV runs from `~`
+with the default home, it is applied once as the user layer and there is no
+project layer. `scv agents` reads no project layer at all, since project
+configuration cannot set `[agents]`.
 
 ## Schema
 

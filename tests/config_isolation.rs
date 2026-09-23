@@ -55,6 +55,68 @@ fn session_model(home: &std::path::Path, workspace: &std::path::Path) -> String 
     model
 }
 
+fn write_private(path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn provider(model: &str) -> String {
+    format!(
+        "[provider]\nmodel = \"{model}\"\nbase_url = \"https://provider.invalid/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n"
+    )
+}
+
+#[test]
+fn scv_home_inside_the_workspace_is_not_a_project_layer() {
+    // Running from `~` makes `~/.scv/config.toml` both the user configuration
+    // and the workspace's `.scv/config.toml`; it must load once, as the user's.
+    let workspace = tempfile::tempdir().unwrap();
+    let home = workspace.path().join(".scv");
+    std::fs::create_dir(&home).unwrap();
+    write_private(&home.join("config.toml"), &provider("model-home"));
+    assert_eq!(session_model(&home, workspace.path()), "model-home");
+}
+
+#[test]
+fn agent_sign_in_ignores_project_configuration() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    write_private(
+        &home.path().join("config.toml"),
+        &format!("{}[agents.claude]\ncommand = \"echo\"\n", provider("model")),
+    );
+    // A project layer that would be rejected must not block agent sign-in.
+    std::fs::create_dir(workspace.path().join(".scv")).unwrap();
+    std::fs::write(
+        workspace.path().join(".scv/config.toml"),
+        "[provider]\nmodel = \"project\"\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .args(["--scv-home"])
+        .arg(home.path())
+        .args(["agents", "status", "claude"])
+        .env("OPENAI_API_KEY", "test-only")
+        .env_remove("SCV_CONFIG")
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "claude:\nauth status --text\n"
+    );
+    assert!(home.path().join("adapters/claude").is_dir());
+}
+
 #[test]
 fn isolated_instances_select_independent_provider_models() {
     let workspace = tempfile::tempdir().unwrap();
@@ -64,22 +126,7 @@ fn isolated_instances_select_independent_provider_models() {
         (first.path(), "model-first"),
         (second.path(), "model-second"),
     ] {
-        std::fs::write(
-            home.join("config.toml"),
-            format!(
-                "[provider]\nmodel = \"{model}\"\nbase_url = \"https://provider.invalid/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n"
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                home.join("config.toml"),
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
-        }
+        write_private(&home.join("config.toml"), &provider(model));
     }
     assert_eq!(session_model(first.path(), workspace.path()), "model-first");
     assert_eq!(

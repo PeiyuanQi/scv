@@ -112,9 +112,10 @@ scv agents status                       # both agents' sign-in state
 scv agents logout claude
 ```
 
-These run the agent's own login, status, or logout command with exactly the
-private home and cleaned environment that the daemon's `agent_*` tool uses, with
-the terminal attached for browser or device-code flows. Credentials are written
+They work from any directory and run the agent's own login, status, or logout
+command with exactly the private home and cleaned environment that the daemon's
+`agent_*` tool uses, with the terminal attached for browser or device-code
+flows. Credentials are written
 by the agent CLI itself under `$SCV_HOME/adapters/<name>` (mode `0700`); SCV
 never reads or copies them. The daemon needs no restart: the next delegated call
 uses the new sign-in. When a delegated run fails with output that reads like a

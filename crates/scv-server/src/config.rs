@@ -362,6 +362,19 @@ pub struct ConfigOverrides {
 
 impl Config {
     pub fn load(workspace: &std::path::Path, overrides: ConfigOverrides) -> Result<Self> {
+        Self::load_layers(Some(workspace), overrides)
+    }
+
+    /// Load without a project layer, for settings that project configuration
+    /// can never set (such as `[agents]`), so the caller's directory is irrelevant.
+    pub fn load_user(overrides: ConfigOverrides) -> Result<Self> {
+        Self::load_layers(None, overrides)
+    }
+
+    fn load_layers(
+        workspace: Option<&std::path::Path>,
+        overrides: ConfigOverrides,
+    ) -> Result<Self> {
         let instance_home = user_home_path()
             .ok_or_else(|| anyhow::anyhow!("cannot determine SCV instance home"))?;
         std::fs::create_dir_all(&instance_home).context("create SCV instance home")?;
@@ -387,23 +400,31 @@ impl Config {
             .try_into()
             .context("parse user configuration")?;
 
-        let project_path = workspace.join(".scv/config.toml");
-        if project_path.is_file() {
-            let canonical_project = std::fs::canonicalize(&project_path)
-                .with_context(|| format!("resolve configuration {}", project_path.display()))?;
-            if !canonical_project.starts_with(workspace) {
-                bail!("project configuration escaped workspace");
+        if let Some(workspace) = workspace {
+            let project_path = workspace.join(".scv/config.toml");
+            // A workspace whose `.scv` is the SCV home (such as running from
+            // `~`) has no project layer: that file is the user configuration,
+            // already applied above at full trust.
+            let user_file = user_config_path().and_then(|path| std::fs::canonicalize(path).ok());
+            if project_path.is_file() {
+                let canonical_project = std::fs::canonicalize(&project_path)
+                    .with_context(|| format!("resolve configuration {}", project_path.display()))?;
+                if user_file.as_ref() != Some(&canonical_project) {
+                    if !canonical_project.starts_with(workspace) {
+                        bail!("project configuration escaped workspace");
+                    }
+                    let project = read_layer(&canonical_project)?;
+                    validate_project_keys(&project)?;
+                    let mut candidate_value = value.clone();
+                    merge(&mut candidate_value, project);
+                    let candidate: Self = candidate_value
+                        .clone()
+                        .try_into()
+                        .context("parse project configuration")?;
+                    validate_project_not_weaker(&user_baseline, &candidate)?;
+                    value = candidate_value;
+                }
             }
-            let project = read_layer(&canonical_project)?;
-            validate_project_keys(&project)?;
-            let mut candidate_value = value.clone();
-            merge(&mut candidate_value, project);
-            let candidate: Self = candidate_value
-                .clone()
-                .try_into()
-                .context("parse project configuration")?;
-            validate_project_not_weaker(&user_baseline, &candidate)?;
-            value = candidate_value;
         }
 
         if let Some(explicit) = std::env::var_os("SCV_CONFIG") {

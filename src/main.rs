@@ -341,7 +341,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Agents { command } => agents(&cwd, command),
+        Command::Agents { command } => agents(command),
         Command::ClawbotLogin { login_url } => clawbot_login(&login_url, "default").await,
     }
 }
@@ -633,14 +633,14 @@ async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> 
     scv_server::run_socket(&socket, overrides).await
 }
 
-fn agents(cwd: &Path, command: AgentsCommand) -> Result<()> {
+fn agents(command: AgentsCommand) -> Result<()> {
     match command {
         AgentsCommand::Login { agent, extra } => {
             let name = agent.name();
             println!(
                 "Signing {name} in for SCV's agent_{name} tool (separate from your own {name} login)."
             );
-            let status = scv_server::agent_command(cwd, name)?
+            let status = scv_server::agent_command(name)?
                 .args(agent.login_args())
                 .args(&extra)
                 .status()
@@ -660,7 +660,7 @@ fn agents(cwd: &Path, command: AgentsCommand) -> Result<()> {
                 println!("{name}:");
                 // The agent prints its own status; a signed-out agent exits
                 // non-zero, and its own advice would sign in the wrong home.
-                match scv_server::agent_command(cwd, name)?
+                match scv_server::agent_command(name)?
                     .args(agent.status_args())
                     .status()
                 {
@@ -673,7 +673,7 @@ fn agents(cwd: &Path, command: AgentsCommand) -> Result<()> {
         }
         AgentsCommand::Logout { agent } => {
             let name = agent.name();
-            let status = scv_server::agent_command(cwd, name)?
+            let status = scv_server::agent_command(name)?
                 .args(agent.logout_args())
                 .status()
                 .with_context(|| format!("run {name} sign-out"))?;

@@ -31,8 +31,9 @@ pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<St
 /// Build a command for a native agent's CLI with the same private home and
 /// cleaned environment the daemon's `agent_<name>` tool uses, so the agent's
 /// own sign-in stores credentials where delegated runs will find them.
-pub fn agent_command(workspace: &Path, agent: &str) -> Result<std::process::Command> {
-    let config = Config::load(workspace, ConfigOverrides::default())?;
+/// Project configuration cannot set `[agents]`, so none is read.
+pub fn agent_command(agent: &str) -> Result<std::process::Command> {
+    let config = Config::load_user(ConfigOverrides::default())?;
     config.prepare_adapter_homes()?;
     let adapter = config
         .adapters()
