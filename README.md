@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.27`, with exact `=0.1.27` pins for dependencies
+All packages use version `0.1.28`, with exact `=0.1.28` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -274,6 +274,9 @@ with `scv agents login pi --openai-compatible`), and check with
 status, not the agent's event log. SCV records each run while it lasts: list
 them with `scv agents ps`, stop one with `scv agents kill <handle>`, and the
 daemon stops runs left behind by a killed SCV process within a minute.
+Claude Code, Codex, and pi keep multi-turn conversations: a result's `session`
+handle continues the same conversation, and `scv agents gc` clears old
+transcripts.
 
 ## Architecture
 

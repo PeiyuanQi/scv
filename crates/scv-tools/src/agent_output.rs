@@ -59,6 +59,8 @@ pub(crate) struct AgentStream {
     failed: bool,
     completed: bool,
     usage: Option<AgentUsage>,
+    /// The CLI's own session ID, for continuing the conversation.
+    session: Option<String>,
 }
 
 impl AgentStream {
@@ -80,6 +82,7 @@ impl AgentStream {
             failed: false,
             completed: false,
             usage: None,
+            session: None,
         }
     }
 
@@ -137,6 +140,18 @@ impl AgentStream {
 
     fn event(&mut self, event: &Value) {
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let session = match (self.format, kind) {
+            (OutputFormat::ClaudeStreamJson, "system" | "result") => event.get("session_id"),
+            (OutputFormat::CodexJsonl, "thread.started") => event.get("thread_id"),
+            (OutputFormat::PiJson, "session") => event.get("id"),
+            _ => None,
+        };
+        if let Some(session) = session
+            .and_then(Value::as_str)
+            .filter(|id| valid_session_id(id))
+        {
+            self.session = Some(session.to_owned());
+        }
         match self.format {
             OutputFormat::Text => {}
             OutputFormat::ClaudeStreamJson => match kind {
@@ -255,6 +270,7 @@ impl AgentStream {
             reply,
             usage: self.usage,
             truncated: self.text_truncated && !structured,
+            session: self.session,
         }
     }
 }
@@ -276,6 +292,8 @@ pub(crate) struct AgentResult {
     pub reply: String,
     pub usage: Option<AgentUsage>,
     pub truncated: bool,
+    /// The session ID the CLI reported, if any.
+    pub session: Option<String>,
 }
 
 impl AgentResult {
@@ -283,13 +301,14 @@ impl AgentResult {
     pub(crate) fn to_json(
         &self,
         agent: &str,
+        conversation: Option<(&str, u32)>,
         exit_code: Option<i32>,
         stderr_tail: &str,
         limit: usize,
     ) -> (String, bool) {
         let (reply, cut) = truncate_utf8(&self.reply, limit);
         let truncated = self.truncated || cut;
-        let value = json!({
+        let mut value = json!({
             "agent": agent,
             "status": self.status.as_str(),
             "reply": reply,
@@ -301,8 +320,23 @@ impl AgentResult {
             "stderr_tail": stderr_tail,
             "truncated": truncated,
         });
+        if let Some((handle, turn)) = conversation {
+            value["session"] = handle.into();
+            value["turn"] = turn.into();
+        }
         (value.to_string(), truncated)
     }
+}
+
+/// Whether a CLI-reported session ID is safe to pass back as one argument:
+/// it must not read as a flag or carry path or shell syntax.
+pub(crate) fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The last bytes written to a stream.
@@ -410,6 +444,7 @@ mod tests {
         let result = run(OutputFormat::ClaudeStreamJson, stdout, OK);
         assert_eq!(result.status, RunStatus::Completed);
         assert_eq!(result.reply, "done: 42");
+        assert_eq!(result.session.as_deref(), Some("s"));
         assert_eq!(
             result.usage,
             Some(AgentUsage {
@@ -456,6 +491,7 @@ mod tests {
         assert_eq!(result.status, RunStatus::Completed);
         assert_eq!(result.reply, "ok");
         assert_eq!(result.usage.unwrap().input_tokens, 11257);
+        assert_eq!(result.session.as_deref(), Some("t"));
     }
 
     #[test]
@@ -541,14 +577,42 @@ mod tests {
     }
 
     #[test]
+    fn session_ids_are_captured_only_when_safe_to_pass_back() {
+        let pi = run(
+            OutputFormat::PiJson,
+            r#"{"type":"session","id":"01a0cd6c-a3a9-77b3","cwd":"/w"}"#,
+            RunExit::Exited { success: true },
+        );
+        assert_eq!(pi.session.as_deref(), Some("01a0cd6c-a3a9-77b3"));
+        for unsafe_id in ["--help", "../x", "a b", "", "x;rm"] {
+            let line =
+                serde_json::json!({"type":"thread.started","thread_id":unsafe_id}).to_string();
+            let codex = run(
+                OutputFormat::CodexJsonl,
+                &line,
+                RunExit::Exited { success: true },
+            );
+            assert_eq!(codex.session, None, "{unsafe_id:?}");
+        }
+        // Text output never reports a session.
+        let text = run(
+            OutputFormat::Text,
+            r#"{"type":"thread.started","thread_id":"t"}"#,
+            RunExit::Exited { success: true },
+        );
+        assert_eq!(text.session, None);
+    }
+
+    #[test]
     fn replies_are_bounded_on_character_boundaries() {
         let result = AgentResult {
             status: RunStatus::Completed,
             reply: "ééé".into(),
             usage: None,
             truncated: false,
+            session: None,
         };
-        let (json, truncated) = result.to_json("claude", Some(0), "", 3);
+        let (json, truncated) = result.to_json("claude", None, Some(0), "", 3);
         assert!(truncated);
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["reply"], "é");

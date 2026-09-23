@@ -91,6 +91,11 @@ pub struct DelegationRecord {
     pub started_unix: u64,
     /// Depth of the delegated process (the owner's depth plus one).
     pub depth: u32,
+    /// The conversation this run is a turn of, and which turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u32>,
 }
 
 /// A record plus what SCV currently observes about it.
@@ -136,6 +141,7 @@ pub(crate) struct PendingDelegation {
     agent: String,
     session: String,
     cwd: PathBuf,
+    conversation: Option<(String, u32)>,
 }
 
 impl DelegationRegistry {
@@ -177,7 +183,21 @@ impl DelegationRegistry {
         self.inner.lock().expect("registry lock").reaped
     }
 
-    pub(crate) fn begin(&self, agent: &str, session: &str, cwd: &Path) -> PendingDelegation {
+    /// Where live conversations leave markers for `scv agents gc`.
+    pub fn conversation_dir(&self) -> PathBuf {
+        self.record_dir.parent().map_or_else(
+            || self.record_dir.join("conversations"),
+            |run| run.join("conversations"),
+        )
+    }
+
+    pub(crate) fn begin(
+        &self,
+        agent: &str,
+        session: &str,
+        cwd: &Path,
+        conversation: Option<(&str, u32)>,
+    ) -> PendingDelegation {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let handle = format!("{agent}-{}", &suffix[..6]);
         let entry = format!("{}/{session}/{handle}", self.instance);
@@ -194,6 +214,7 @@ impl DelegationRegistry {
             agent: agent.to_owned(),
             session: session.to_owned(),
             cwd: cwd.to_owned(),
+            conversation: conversation.map(|(handle, turn)| (handle.to_owned(), turn)),
         }
     }
 
@@ -221,6 +242,11 @@ impl DelegationRegistry {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_secs()),
             depth: self.depth + 1,
+            conversation: pending
+                .conversation
+                .as_ref()
+                .map(|(handle, _)| handle.clone()),
+            turn: pending.conversation.as_ref().map(|(_, turn)| *turn),
         };
         self.inner
             .lock()
@@ -507,14 +533,24 @@ fn group_exists(pgid: u32) -> bool {
 }
 
 fn write_record(dir: &Path, record: &DelegationRecord) -> std::io::Result<()> {
+    write_private_json(dir, &format!("{}.json", record.handle), record)
+}
+
+/// Atomically write `value` as `dir/name` with mode 0600, creating `dir` and
+/// keeping it and its parent (`run/`) private.
+pub(crate) fn write_private_json(
+    dir: &Path,
+    name: &str,
+    value: &impl Serialize,
+) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     std::fs::create_dir_all(dir)?;
     if let Some(run) = dir.parent() {
         std::fs::set_permissions(run, std::fs::Permissions::from_mode(0o700))?;
     }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    let bytes = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
-    let temporary = dir.join(format!(".{}.json.tmp", record.handle));
+    let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+    let temporary = dir.join(format!(".{name}.tmp"));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -524,7 +560,7 @@ fn write_record(dir: &Path, record: &DelegationRecord) -> std::io::Result<()> {
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(&temporary, dir.join(format!("{}.json", record.handle)))
+    std::fs::rename(&temporary, dir.join(name))
 }
 
 fn read_record(path: &Path) -> Option<DelegationRecord> {
@@ -827,7 +863,7 @@ mod tests {
         let mut registry = DelegationRegistry::new(home.path());
         registry.chain = Some("aaaa/s0/codex-111111".into());
         registry.depth = 1;
-        let pending = registry.begin("claude", "s1", home.path());
+        let pending = registry.begin("claude", "s1", home.path(), Some(("claude-1", 2)));
         let value = |name: &str| {
             pending
                 .environment
@@ -851,7 +887,7 @@ mod tests {
     async fn records_are_private_and_removed_when_the_run_finishes() {
         let home = tempfile::tempdir().unwrap();
         let registry = registry(home.path());
-        let pending = registry.begin("codex", "session", home.path());
+        let pending = registry.begin("codex", "session", home.path(), None);
         let environment = pending.environment.clone();
         let mut child = spawn_tagged("sleep 30", &environment);
         let guard = registry.register(pending, child.id()).unwrap();
@@ -880,7 +916,7 @@ mod tests {
     async fn kill_stops_a_local_run_and_marks_it_killed() {
         let home = tempfile::tempdir().unwrap();
         let registry = registry(home.path());
-        let pending = registry.begin("claude", "session", home.path());
+        let pending = registry.begin("claude", "session", home.path(), None);
         let environment = pending.environment.clone();
         let mut child = spawn_tagged("trap '' TERM; sleep 30", &environment);
         let guard = registry.register(pending, child.id()).unwrap();
@@ -896,7 +932,7 @@ mod tests {
     async fn reconcile_reaps_an_orphan_and_its_detached_descendants() {
         let home = tempfile::tempdir().unwrap();
         let owner = registry(home.path());
-        let pending = owner.begin("codex", "session", home.path());
+        let pending = owner.begin("codex", "session", home.path(), None);
         let environment = pending.environment.clone();
         // The agent starts a detached descendant in a new session, outside its group.
         let mut child = spawn_tagged("setsid sleep 60 & exec sleep 60", &environment);
@@ -936,7 +972,7 @@ mod tests {
     async fn an_abandoned_run_is_cleaned_up_when_its_guard_drops() {
         let home = tempfile::tempdir().unwrap();
         let registry = registry(home.path());
-        let pending = registry.begin("pi", "session", home.path());
+        let pending = registry.begin("pi", "session", home.path(), None);
         let environment = pending.environment.clone();
         let mut child = spawn_tagged("sleep 30", &environment);
         let guard = registry.register(pending, child.id()).unwrap();
@@ -970,6 +1006,8 @@ mod tests {
             cwd: "/".into(),
             started_unix: 0,
             depth: 1,
+            conversation: None,
+            turn: None,
         };
         write_record(&dir, &record).unwrap();
         std::fs::copy(

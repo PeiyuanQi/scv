@@ -1682,7 +1682,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scv-clawbot"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "base64",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "scv-cli"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "clap",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "scv-client"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "scv-core"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "async-trait",
  "serde",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "scv-protocol"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "serde",
  "serde_json",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "scv-provider-openai"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1777,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "scv-server"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "scv-tools"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "async-trait",
  "cap-std",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "scv-tui"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "crossterm",

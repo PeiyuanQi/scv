@@ -182,6 +182,20 @@ enum AgentsCommand {
         #[arg(long)]
         all: bool,
     },
+    /// Remove old delegated-conversation transcripts from SCV's adapter
+    /// homes, keeping those a live conversation still uses.
+    Gc {
+        /// Only this agent's transcripts.
+        #[arg(value_parser = agent_names())]
+        agent: Option<String>,
+        /// Remove transcripts last written at least this long ago: 30d, 12h,
+        /// 90m, or seconds. Never less than an hour.
+        #[arg(long, default_value = "30d", value_parser = scv_server::conversation_age)]
+        older_than: std::time::Duration,
+        /// Show what would be removed without removing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Stop a delegated run (its process group and tagged descendants).
     Kill {
         /// Handle from `scv agents ps`, such as codex-3f9a2c.
@@ -835,6 +849,31 @@ async fn agents(command: AgentsCommand) -> Result<()> {
             print_delegations(&status.delegations.entries);
             Ok(())
         }
+        AgentsCommand::Gc {
+            agent,
+            older_than,
+            dry_run,
+        } => {
+            let reports = scv_server::collect_agent_garbage(agent.as_deref(), older_than, dry_run)?;
+            if reports.is_empty() {
+                println!("No agent keeps conversation transcripts yet.");
+            }
+            for (agent, report) in reports {
+                let verb = if dry_run { "would remove" } else { "removed" };
+                println!(
+                    "{agent}: {verb} {} transcript(s), {:.1} MiB; kept {} in use",
+                    report.removed.len(),
+                    report.bytes as f64 / (1024.0 * 1024.0),
+                    report.kept_live
+                );
+                if dry_run {
+                    for path in &report.removed {
+                        println!("  {}", path.display());
+                    }
+                }
+            }
+            Ok(())
+        }
         AgentsCommand::Kill { handle, orphans } => {
             let status = control(DaemonCommand::DelegationKill { handle, orphans }).await?;
             if status.delegations.killed.is_empty() {
@@ -972,16 +1011,22 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     println!(
-        "{:<16} {:<7} {:<9} {:>8} {:>5} {:>7} {:>5}  CWD",
-        "HANDLE", "AGENT", "STATE", "PID", "PROCS", "AGE", "DEPTH"
+        "{:<16} {:<7} {:<13} {:<9} {:>8} {:>5} {:>7} {:>5}  CWD",
+        "HANDLE", "AGENT", "CONVERSATION", "STATE", "PID", "PROCS", "AGE", "DEPTH"
     );
     for entry in entries {
         let age = now.saturating_sub(entry.started_unix_seconds);
+        let conversation = match (&entry.conversation, entry.turn) {
+            (Some(handle), Some(turn)) => format!("{handle} #{turn}"),
+            (Some(handle), None) => handle.clone(),
+            _ => "-".into(),
+        };
         // Debug formatting escapes control characters in the untrusted path.
         println!(
-            "{:<16} {:<7} {:<9} {:>8} {:>5} {:>7} {:>5}  {:?}",
+            "{:<16} {:<7} {:<13} {:<9} {:>8} {:>5} {:>7} {:>5}  {:?}",
             entry.handle,
             entry.agent,
+            conversation,
             if entry.orphaned {
                 "orphaned"
             } else {

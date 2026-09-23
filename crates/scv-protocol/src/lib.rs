@@ -84,6 +84,11 @@ pub struct DelegationInfo {
     pub started_unix_seconds: u64,
     /// The owning SCV process is gone; the daemon will stop it.
     pub orphaned: bool,
+    /// The conversation this run is a turn of, and which turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
