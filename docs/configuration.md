@@ -187,7 +187,9 @@ SCV v0.1 reads:
 - `SCV_API_KEY_ENV` (the name of the credential variable, not its value);
 - `SCV_CARGO_INDEX_URL` for the update registry;
 - the credential variable named by `provider.api_key_env`;
-- `RUST_LOG` for diagnostics.
+- `RUST_LOG` for diagnostics. The daemon (`scv run`) and `scv server` log to
+  stderr, default level `warn`; the generated user service sets `info` and
+  its log is read with `journalctl --user -u scv.service`.
 
 For example, two independent daemons can use different models without sharing
 their sockets or settings:

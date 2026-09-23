@@ -264,6 +264,9 @@ async fn main() -> Result<()> {
             .await
         }
         Command::Run { workspace } => {
+            // Daemon diagnostics (ClawBot poll and delivery failures) go to
+            // stderr, which the user service sends to the journal.
+            init_tracing();
             run_daemon(
                 &workspace,
                 ConfigOverrides {
