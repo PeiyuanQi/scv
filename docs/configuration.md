@@ -213,7 +213,8 @@ inherit `SCV_CONFIG`, `SCV_MODEL`, `SCV_PROVIDER`, `SCV_BASE_URL`, or
 `SCV_API_KEY_ENV`, provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, or
 `CLAUDE_CONFIG_DIR`, and therefore cannot silently reuse or alter the user's
 normal Claude Code or Codex configuration. Sign the agents in for SCV with
-`scv agents login claude` or `scv agents login codex`; see
+`scv agents login claude` or `scv agents login codex`, or copy your Codex
+provider setup with `scv agents import codex`; see
 [Signing in delegated agents](tools.md#signing-in-delegated-agents).
 
 Secrets are never included in diagnostics, protocol events, approval summaries,

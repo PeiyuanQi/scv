@@ -108,16 +108,38 @@ Sign the agents in once on the SCV host:
 scv agents login claude                 # claude auth login
 scv agents login codex                  # codex login
 scv agents login codex -- --device-auth # extra arguments after --
+scv agents import codex                 # or copy your own Codex setup
 scv agents status                       # both agents' sign-in state
 scv agents logout claude
 ```
 
-They work from any directory and run the agent's own login, status, or logout
-command with exactly the private home and cleaned environment that the daemon's
-`agent_*` tool uses, with the terminal attached for browser or device-code
-flows. Credentials are written
-by the agent CLI itself under `$SCV_HOME/adapters/<name>` (mode `0700`); SCV
-never reads or copies them. The daemon needs no restart: the next delegated call
+They work from any directory. `login`, `status`, and `logout` run the agent's
+own command with exactly the private home and cleaned environment that the
+daemon's `agent_*` tool uses, with the terminal attached for browser or
+device-code flows. The agent CLI itself writes those credentials under
+`$SCV_HOME/adapters/<name>` (mode `0700`).
+
+`scv agents import codex [--from DIR]` instead copies an existing Codex setup,
+by default from `$CODEX_HOME` or `~/.codex`. It is for custom providers such as
+an OpenAI-compatible relay (`model_providers` with `base_url`, `wire_api`,
+`requires_openai_auth`, or `experimental_bearer_token`), which `codex login`
+cannot set up:
+
+- `config.toml` is copied whole, so the model, provider, reasoning effort,
+  `sandbox_mode`, `approval_policy`, project trust, and features match the
+  user's own Codex. SCV reports the model, provider, and policies it copied.
+- `auth.json` is copied only when it holds an API key. A ChatGPT sign-in is
+  never copied, because its rotating refresh token must stay in one home; use
+  `scv agents login codex` for that.
+- A provider that reads its key through `env_key` is flagged: SCV removes
+  provider key variables such as `OPENAI_API_KEY` from delegated agents, and
+  the user service does not load the shell profile.
+
+Both files are validated before either is written. Copies are atomic, mode
+`0600`, and never printed. The import is a snapshot rather than a link, so
+delegated Codex runs cannot modify the user's own configuration; re-run it
+after changing that configuration. Skills and other Codex state are not
+copied. The daemon needs no restart: the next delegated call
 uses the new sign-in. When a delegated run fails with output that reads like a
 missing sign-in, its tool result gains a `hint` naming
 `scv agents login <name>`, since the agent's own advice (`/login`) cannot be

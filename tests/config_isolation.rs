@@ -134,3 +134,44 @@ fn isolated_instances_select_independent_provider_models() {
         "model-second"
     );
 }
+
+#[test]
+fn codex_import_copies_into_the_instance_adapter_home() {
+    let home = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    write_private(&home.path().join("config.toml"), &provider("model"));
+    std::fs::write(
+        codex.path().join("config.toml"),
+        "model_provider = \"relay\"\n[model_providers.relay]\nbase_url = \"https://relay.invalid\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        codex.path().join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test-secret"}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .args(["--scv-home"])
+        .arg(home.path())
+        .args(["agents", "import", "codex", "--from"])
+        .arg(codex.path())
+        .env("OPENAI_API_KEY", "test-only")
+        .env_remove("SCV_CONFIG")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(r#"model_provider "relay""#));
+    assert!(!stdout.contains("sk-test-secret"));
+    let adapter = home.path().join("adapters/codex");
+    assert!(
+        std::fs::read_to_string(adapter.join("auth.json"))
+            .unwrap()
+            .contains("sk-test-secret")
+    );
+    assert!(adapter.join("config.toml").is_file());
+}

@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.18`, with exact `=0.1.18` pins for dependencies
+All packages use version `0.1.19`, with exact `=0.1.19` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -249,8 +249,8 @@ timeout limits as other process tools. Each adapter receives an instance-private
 `HOME`, `SCV_HOME`, XDG directories, and (for Codex) `CODEX_HOME` under
 `$SCV_HOME/adapters/<name>`. SCV never reuses or modifies the user's normal
 `~/.claude` or `~/.codex` configuration. Sign the agents in for SCV once with
-`scv agents login claude` or `scv agents login codex`, and check with
-`scv agents status`.
+`scv agents login claude` or `scv agents login codex`, or copy a custom-provider
+Codex setup with `scv agents import codex`, and check with `scv agents status`.
 
 ## Architecture
 

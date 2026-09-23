@@ -42,6 +42,10 @@ Daemon and component changes require focused coverage for:
 - delegated agents rejecting prompts that start with `-` and models that start
   with `-` or `@`, and signed-out agent failures gaining a
   `scv agents login <name>` hint while other failures do not;
+- Codex import copying `config.toml` and API-key `auth.json` atomically with
+  mode `0600` into the instance adapter home, never copying a ChatGPT session,
+  flagging `env_key` providers, printing no secrets, and writing nothing when
+  either input is invalid;
 - identity/origin binding, same-identity token rotation, conservative legacy
   binding, replacement requiring logout, and stale-runner write rejection;
 - nonblocking transaction/lifetime locks, serialized login/removal, atomic

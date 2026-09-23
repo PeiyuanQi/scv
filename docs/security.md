@@ -58,8 +58,11 @@ requires approval. SCV supplies an instance-private `HOME`, `SCV_HOME`, XDG
 directories, and `CODEX_HOME` for Codex, while removing SCV selector variables,
 provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, and `CLAUDE_CONFIG_DIR`
 from the child environment. Agents sign in only through `scv agents login`,
-which stores the agent's own credentials in that private home, so delegated
-runs never reuse the user's personal Claude Code or Codex session. The delegated CLI still has the user's operating
+which stores the agent's own credentials in that private home, or through
+`scv agents import codex`. The import copies the user's Codex `config.toml`,
+plus `auth.json` only when it holds a static API key; it never copies a ChatGPT
+refresh token. Delegated runs therefore never share the user's personal Claude
+Code or Codex session. The delegated CLI still has the user's operating
 system permissions and may implement its own tools and approvals, but it cannot
 silently reuse the user's normal Codex state.
 

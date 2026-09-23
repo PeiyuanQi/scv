@@ -1,5 +1,6 @@
 //! SCV's authoritative stdio server.
 
+mod agents;
 pub mod components;
 mod config;
 
@@ -47,6 +48,15 @@ pub fn agent_command(agent: &str) -> Result<std::process::Command> {
         command.env_remove(variable);
     }
     Ok(command)
+}
+
+/// Copy the user's own Codex setup from `source` into SCV's private Codex
+/// adapter home: `config.toml`, and `auth.json` only when it holds an API key.
+/// Returns display lines that never contain secret values.
+pub fn import_codex(source: &Path) -> Result<Vec<String>> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    config.prepare_adapter_homes()?;
+    agents::import_codex(source, &config.instance_home.join("adapters").join("codex"))
 }
 
 /// Return the user service name for the selected SCV instance.

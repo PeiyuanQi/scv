@@ -154,6 +154,15 @@ enum AgentsCommand {
     Status { agent: Option<AgentArg> },
     /// Remove an agent's SCV-private sign-in; your own login is untouched.
     Logout { agent: AgentArg },
+    /// Copy your own Codex setup into SCV's adapter home: config.toml (custom
+    /// providers, model, policies) and auth.json when it holds an API key.
+    /// A ChatGPT sign-in is never copied; use `login` for that.
+    Import {
+        agent: AgentArg,
+        /// Codex home to copy from [default: $CODEX_HOME or ~/.codex].
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -669,6 +678,23 @@ fn agents(command: AgentsCommand) -> Result<()> {
                     Err(error) => println!("  unavailable: {error}"),
                 }
             }
+            Ok(())
+        }
+        AgentsCommand::Import { agent, from } => {
+            if !matches!(agent, AgentArg::Codex) {
+                bail!("only codex can be imported; sign Claude in with `scv agents login claude`");
+            }
+            let source = from
+                .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+                .context("cannot determine your Codex home; pass --from")?;
+            println!("Importing Codex setup from {}", source.display());
+            for line in scv_server::import_codex(&source)? {
+                println!("  {line}");
+            }
+            println!(
+                "This is a copy: re-run after changing your own Codex config. Check with `scv agents status codex`."
+            );
             Ok(())
         }
         AgentsCommand::Logout { agent } => {
