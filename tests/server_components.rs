@@ -56,6 +56,23 @@ async fn terminate(child: &mut Child) {
     );
 }
 
+/// Takes an account's transaction lock, as a bridge state commit does, and
+/// releases it from another thread after `duration`.
+fn hold_transaction(home: &Path, account: &str, duration: Duration) -> std::thread::JoinHandle<()> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(home.join(format!("clawbot/transactions/{account}.json")))
+        .unwrap();
+    // SAFETY: the descriptor stays valid until the thread drops `file`.
+    assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
+    std::thread::spawn(move || {
+        std::thread::sleep(duration);
+        drop(file);
+    })
+}
+
 async fn session(
     home: &Path,
     workspace: &Path,
@@ -128,6 +145,9 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
             .unwrap()
             .contains("test-secret")
     );
+    // A running bridge holds the transaction lock while it commits state.
+    // Operator commands wait for the commit instead of failing.
+    let commit = hold_transaction(home.path(), "test", Duration::from_millis(300));
     for _ in 0..2 {
         let running = scv_client::control(
             &socket,
@@ -143,6 +163,7 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
         assert_eq!(running.components.len(), 1);
         assert_eq!(running.components[0].remote_tools, RemoteTools::Owner);
     }
+    commit.join().unwrap();
     let mut duplicate = start(home.path(), workspace.path());
     assert!(
         !tokio::time::timeout(Duration::from_secs(3), duplicate.wait())

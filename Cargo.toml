@@ -79,6 +79,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+libc.workspace = true
 scv-core.workspace = true
 scv-protocol.workspace = true
 serde_json.workspace = true

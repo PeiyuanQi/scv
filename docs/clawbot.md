@@ -94,8 +94,11 @@ account concurrently. A separate transaction file lock serializes login
 credential writes, settings/state writes, binding, migration, and removal.
 State writes recheck the binding, preventing a stale runner from overwriting
 another identity's state. These locks are nonblocking: contention returns a
-retry error, and network I/O never holds the transaction lock. Lock files remain
-in place after logout so open descriptors cannot refer to different lock inodes.
+retry error, and network I/O never holds the transaction lock. The daemon's
+account commands (enable, disable, settings, logout) retry that error for up to
+five seconds, so they wait out a running bridge's state commit instead of
+failing. Lock files remain in place after logout so open descriptors cannot
+refer to different lock inodes.
 
 ## iLink contract
 
