@@ -62,6 +62,46 @@ impl OutputFormat {
     }
 }
 
+/// How a CLI continues an earlier conversation. `{session}` in any argument
+/// is replaced by the conversation's vendor session ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resume {
+    /// Every call starts a fresh conversation.
+    Unsupported,
+    Supported {
+        /// Starts a conversation under an ID SCV chooses. Empty when the CLI
+        /// picks its own ID and reports it in its output (Codex).
+        start: &'static [&'static str],
+        /// Placed right after the fixed arguments when continuing: a
+        /// subcommand such as Codex's `exec resume`.
+        subcommand: &'static [&'static str],
+        /// Options that continue the conversation.
+        options: &'static [&'static str],
+        /// Placed immediately before the prompt when continuing, for a CLI
+        /// that takes the session ID as a positional argument.
+        positional: &'static [&'static str],
+    },
+}
+
+impl Resume {
+    pub fn is_supported(self) -> bool {
+        matches!(self, Self::Supported { .. })
+    }
+
+    /// Whether SCV chooses the vendor session ID when a conversation starts.
+    pub fn assigns_id(self) -> bool {
+        matches!(self, Self::Supported { start, .. } if !start.is_empty())
+    }
+}
+
+/// Where a CLI keeps conversation transcripts inside its adapter home:
+/// files with `extension` anywhere below `dir`, named after their session ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConversationFiles {
+    pub dir: &'static str,
+    pub extension: &'static str,
+}
+
 /// How SCV condenses a CLI's own status output. The raw output names the
 /// account (an email) or part of a key, so it is never printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +179,10 @@ pub struct AdapterDescriptor {
     pub logout: Logout,
     /// What the CLI prints when SCV delegates to it.
     pub output: OutputFormat,
+    /// How SCV continues a conversation with it, when it can.
+    pub resume: Resume,
+    /// Transcripts `scv agents gc` may remove; `None` when unknown.
+    pub conversation_files: Option<ConversationFiles>,
 }
 
 /// Directories every adapter searches before `PATH`, relative to the user's home.
@@ -193,6 +237,17 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         status_summary: StatusSummary::ClaudeJson,
         logout: Logout::Command(&["auth", "logout"]),
         output: OutputFormat::ClaudeStreamJson,
+        // `--resume` in print mode keeps the original session ID.
+        resume: Resume::Supported {
+            start: &["--session-id", "{session}"],
+            subcommand: &[],
+            options: &["--resume", "{session}"],
+            positional: &[],
+        },
+        conversation_files: Some(ConversationFiles {
+            dir: ".claude/projects",
+            extension: "jsonl",
+        }),
     },
     AdapterDescriptor {
         name: "codex",
@@ -226,6 +281,18 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         status_summary: StatusSummary::CodexText,
         logout: Logout::Command(&["logout"]),
         output: OutputFormat::CodexJsonl,
+        // The thread ID arrives in `thread.started`; `exec resume` takes it
+        // as a positional argument before the prompt.
+        resume: Resume::Supported {
+            start: &[],
+            subcommand: &["resume"],
+            options: &[],
+            positional: &["{session}"],
+        },
+        conversation_files: Some(ConversationFiles {
+            dir: "sessions",
+            extension: "jsonl",
+        }),
     },
     AdapterDescriptor {
         name: "grok",
@@ -249,6 +316,10 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         logout: Logout::Command(&["logout"]),
         // `--output-format json` exists but its success shape is unverified here.
         output: OutputFormat::Text,
+        // Grok documents `--session-id` and `--resume`, but they cannot be
+        // verified while it is signed out here.
+        resume: Resume::Unsupported,
+        conversation_files: None,
     },
     AdapterDescriptor {
         name: "dsh",
@@ -271,6 +342,9 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         status_summary: StatusSummary::ExitStatus,
         logout: Logout::Stored(DSH_STORE),
         output: OutputFormat::Text,
+        // Only its interactive profile documents `--resume`.
+        resume: Resume::Unsupported,
+        conversation_files: None,
     },
     AdapterDescriptor {
         name: "pi",
@@ -296,6 +370,17 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         status_summary: StatusSummary::ExitStatus,
         logout: Logout::Stored(PI_STORE),
         output: OutputFormat::PiJson,
+        // `--session-id` uses the exact project session, creating it if missing.
+        resume: Resume::Supported {
+            start: &["--session-id", "{session}"],
+            subcommand: &[],
+            options: &["--session-id", "{session}"],
+            positional: &[],
+        },
+        conversation_files: Some(ConversationFiles {
+            dir: ".pi/agent/sessions",
+            extension: "jsonl",
+        }),
     },
 ];
 
@@ -431,6 +516,24 @@ mod tests {
                 "{}",
                 adapter.name
             );
+            if let Resume::Supported {
+                start,
+                subcommand,
+                options,
+                positional,
+            } = adapter.resume
+            {
+                let names_session =
+                    |args: &[&str]| args.iter().any(|arg| arg.contains("{session}"));
+                assert!(start.is_empty() || names_session(start), "{}", adapter.name);
+                assert!(
+                    names_session(options) || names_session(positional),
+                    "{}",
+                    adapter.name
+                );
+                assert!(!names_session(subcommand), "{}", adapter.name);
+                assert!(adapter.conversation_files.is_some(), "{}", adapter.name);
+            }
             // Anything SCV sets must survive the removal pass.
             for (variable, _) in adapter
                 .home_environment

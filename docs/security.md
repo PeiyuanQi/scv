@@ -124,7 +124,13 @@ exited.
 Delegation depth is bounded by `agent.max_delegation_depth`, and at any depth
 above zero the `scv` CLI refuses to run, start, stop, restart, or update a
 daemon or manage ClawBot, so an SCV started by a delegated agent cannot manage
-its parent. `scv agents status` prints a summary of Claude Code's and Codex's
+its parent. Conversation handles belong to one SCV session and are checked
+against it, so the model cannot reach another session's conversation or pass a
+CLI session ID of its choosing; a continued conversation keeps its original
+`cwd`. `scv agents gc` removes only regular transcript files below each
+adapter home's transcript directory, never follows symlinks, and keeps those
+of live conversations and anything written in the last hour.
+`scv agents status` prints a summary of Claude Code's and Codex's
 own status output, never the account email or key fragment that output
 contains.
 

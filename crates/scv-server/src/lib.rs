@@ -81,6 +81,41 @@ pub fn agent_home(agent: &str) -> Result<PathBuf> {
     Ok(home)
 }
 
+/// Remove delegated-conversation transcripts older than `older_than` from
+/// the adapter homes (`agent`, or every agent that keeps them), keeping any a
+/// live conversation still uses. Returns each agent's report.
+pub fn collect_agent_garbage(
+    agent: Option<&str>,
+    older_than: std::time::Duration,
+    dry_run: bool,
+) -> Result<Vec<(&'static str, scv_tools::conversation::GcReport)>> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    let markers = config.instance_home.join("run").join("conversations");
+    let mut reports = Vec::new();
+    for adapter in adapters::ADAPTERS {
+        if agent.is_some_and(|agent| agent != adapter.name) {
+            continue;
+        }
+        let Some(files) = adapter.conversation_files else {
+            continue;
+        };
+        let home = config.instance_home.join("adapters").join(adapter.name);
+        if !home.is_dir() {
+            continue;
+        }
+        let report =
+            scv_tools::conversation::collect_garbage(&home, files, &markers, older_than, dry_run)
+                .with_context(|| format!("clean {} transcripts", adapter.name))?;
+        reports.push((adapter.name, report));
+    }
+    Ok(reports)
+}
+
+/// Parse a `scv agents gc --older-than` age such as `30d`.
+pub fn conversation_age(value: &str) -> std::result::Result<std::time::Duration, String> {
+    scv_tools::conversation::parse_age(value)
+}
+
 fn key_store_home(agent: &str) -> Result<PathBuf> {
     scv_tools::adapters::adapter(agent).ok_or_else(|| anyhow!("unknown agent {agent}"))?;
     agent_home(agent)
@@ -458,6 +493,8 @@ async fn daemon_control(
             cwd: entry.record.cwd.display().to_string(),
             started_unix_seconds: entry.record.started_unix,
             orphaned: entry.orphaned,
+            conversation: entry.record.conversation,
+            turn: entry.record.turn,
         })
         .collect(),
         killed,
@@ -2249,6 +2286,8 @@ mod tests {
             cwd: "/work/project\u{7}".into(),
             started_unix: 1,
             depth: 1,
+            conversation: Some("codex-2".into()),
+            turn: Some(3),
         };
         std::fs::create_dir_all(registry.record_dir()).unwrap();
         std::fs::write(
@@ -2269,6 +2308,8 @@ mod tests {
             panic!("{:?}", status.delegations);
         };
         assert_eq!(entry.handle, "codex-a1b2c3");
+        assert_eq!(entry.conversation.as_deref(), Some("codex-2"));
+        assert_eq!(entry.turn, Some(3));
         assert_eq!(entry.pid, agent.id());
         assert_eq!(entry.owner_pid, owner.id());
         assert!(!entry.orphaned);

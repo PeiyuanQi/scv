@@ -11,6 +11,7 @@ use scv_core::{AgentConfig as CoreAgentConfig, ContextConfig, HistoryLimits};
 use scv_provider_openai::ProviderLimits;
 use scv_tools::{
     AgentAdapterConfig, ToolsConfig,
+    conversation::ConversationLimits,
     web::{SearchBackend, WebToolsConfig},
 };
 use serde::{Deserialize, Serialize};
@@ -144,6 +145,11 @@ pub struct AgentConfig {
     /// `agent_*` tools are offered only while this SCV's own delegation depth
     /// is below this, so delegation chains stay bounded. 0 disables them.
     pub max_delegation_depth: u32,
+    /// Delegated conversations a session remembers; starting another forgets
+    /// the least recently used idle one.
+    pub max_conversations: usize,
+    /// A delegated conversation unused this long is forgotten.
+    pub conversation_idle_seconds: u64,
 }
 
 impl Default for AgentConfig {
@@ -151,6 +157,8 @@ impl Default for AgentConfig {
         Self {
             max_steps: 128,
             max_delegation_depth: 2,
+            max_conversations: 8,
+            conversation_idle_seconds: 86400,
             system_prompt: "You are SCV, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
         }
     }
@@ -597,6 +605,10 @@ impl Config {
             max_read_bytes: self.tools.max_read_bytes,
             max_write_bytes: self.tools.max_write_bytes,
             max_delegation_depth: self.agent.max_delegation_depth,
+            conversations: ConversationLimits {
+                max: self.agent.max_conversations,
+                idle: Duration::from_secs(self.agent.conversation_idle_seconds),
+            },
             delegation: None,
         }
     }
@@ -733,6 +745,7 @@ impl Config {
                             .map(|home| scv_tools::adapters::adapter_search_dirs(descriptor, home))
                             .unwrap_or_default(),
                         output: descriptor.output,
+                        resume: descriptor.resume,
                         home: Some(adapter_home),
                     },
                 ))
@@ -825,6 +838,11 @@ impl Config {
                 usize::try_from(self.provider.timeout_seconds).unwrap_or(usize::MAX),
             ),
             ("agent.max_steps", self.agent.max_steps),
+            ("agent.max_conversations", self.agent.max_conversations),
+            (
+                "agent.conversation_idle_seconds",
+                usize::try_from(self.agent.conversation_idle_seconds).unwrap_or(usize::MAX),
+            ),
             ("session.max_history_bytes", self.session.max_history_bytes),
             ("session.max_messages", self.session.max_messages),
             ("context.max_tokens", self.context.max_tokens),
@@ -1172,6 +1190,20 @@ fn validate_project_not_weaker(user: &Config, project: &Config) -> Result<()> {
     );
     no_larger!(
         (
+            user.agent.max_conversations,
+            project.agent.max_conversations
+        ),
+        "agent.max_conversations"
+    );
+    no_larger!(
+        (
+            user.agent.conversation_idle_seconds,
+            project.agent.conversation_idle_seconds
+        ),
+        "agent.conversation_idle_seconds"
+    );
+    no_larger!(
+        (
             user.session.max_history_bytes,
             project.session.max_history_bytes
         ),
@@ -1464,6 +1496,40 @@ command = "/tmp/fake"
         for raise in [
             |config: &mut Config| config.tools.max_timeout_seconds += 1,
             |config: &mut Config| config.tools.agent_timeout_seconds += 1,
+        ] {
+            let mut higher = user.clone();
+            raise(&mut higher);
+            assert!(validate_project_not_weaker(&user, &higher).is_err());
+        }
+    }
+
+    #[test]
+    fn conversation_limits_are_positive_and_projects_may_only_lower_them() {
+        let user = Config::default();
+        assert_eq!(
+            (
+                user.agent.max_conversations,
+                user.agent.conversation_idle_seconds
+            ),
+            (8, 86400)
+        );
+        let limits = user.tools().conversations;
+        assert_eq!((limits.max, limits.idle), (8, Duration::from_secs(86400)));
+        for zero in [
+            |config: &mut Config| config.agent.max_conversations = 0,
+            |config: &mut Config| config.agent.conversation_idle_seconds = 0,
+        ] {
+            let mut config = Config::default();
+            zero(&mut config);
+            assert!(config.validate().is_err());
+        }
+        let mut lower = user.clone();
+        lower.agent.max_conversations = 2;
+        lower.agent.conversation_idle_seconds = 600;
+        assert!(validate_project_not_weaker(&user, &lower).is_ok());
+        for raise in [
+            |config: &mut Config| config.agent.max_conversations += 1,
+            |config: &mut Config| config.agent.conversation_idle_seconds += 1,
         ] {
             let mut higher = user.clone();
             raise(&mut higher);

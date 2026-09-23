@@ -58,6 +58,8 @@ timeout_seconds = 600
 max_steps = 128
 system_prompt = "You are SCV, a concise and careful coding agent."
 max_delegation_depth = 2
+max_conversations = 8
+conversation_idle_seconds = 86400
 
 [session]
 max_history_bytes = 16777216
@@ -212,7 +214,11 @@ the session's own delegation depth is below it: the top SCV (depth 0) and an
 SCV started by one of its agents (depth 1) may delegate, one more level down
 may not, and `0` turns delegation off. It lives under `[agent]` rather than
 `[agents]`, which holds one table per adapter and which project configuration
-cannot set.
+cannot set. `agent.max_conversations` (default 8) and
+`agent.conversation_idle_seconds` (default 86400) bound how many delegated
+conversations a session remembers and for how long; see
+[Conversations](tools.md#conversations). Both must be positive, and project
+configuration may only lower them.
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,
 including its streamed response, not just idle time, so it must cover the
 longest single response. Project configuration may lower all of these but not

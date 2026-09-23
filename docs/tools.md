@@ -209,7 +209,8 @@ arrives, keeping only the reply, token usage, and error, so a long run's event
 log never reaches the parent model:
 
 - Claude Code's `stream-json` events end with a `result` event carrying the
-  reply, `is_error`, and usage; SCV picks the `--session-id` itself.
+  reply, `is_error`, and usage; SCV picks the `--session-id` itself when a
+  conversation starts.
 - Codex's `--json` events give the last `agent_message` item as the reply,
   `turn.completed` usage, and `turn.failed` or `error` messages. `-o` names a
   file in a private `tmp` directory of Codex's adapter home holding the final
@@ -230,7 +231,54 @@ is one object:
 `timeout`, or `cancelled` (stopped by `scv agents kill`). `reply` is bounded by
 `tools.output_limit_bytes` on a character boundary, `stderr_tail` holds the
 last 2 KiB of stderr, and `truncated` says whether anything was cut. A failure
-that reads like a missing sign-in gains a `hint` (see below).
+that reads like a missing sign-in gains a `hint` (see below). A turn of a
+conversation (next section) also carries `"session"` and `"turn"`.
+
+### Conversations
+
+An agent whose CLI can resume a session takes an optional `session` argument.
+Omitting it starts a conversation; the result's `session` is an SCV-issued
+handle such as `codex-2`, and passing it back continues that conversation with
+the agent's own context:
+
+| Tool | Starts with | Continues with |
+| --- | --- | --- |
+| `agent_claude` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
+| `agent_codex` | nothing; the thread ID comes from `thread.started` | `codex exec resume … <thread-id> <prompt>` |
+| `agent_pi` | `--session-id <uuid>` (chosen by SCV) | `--session-id <uuid>` |
+
+Grok and DeepSeek Harness start a fresh conversation on every call: their
+resume options could not be verified headless here, so their tools offer no
+`session` argument and refuse one.
+
+The model only ever sees handles. The CLI's own session IDs stay inside SCV,
+and a value that is not one of this session's handles, such as a raw vendor
+ID, is refused. A conversation keeps its agent and `cwd`: continuing it
+elsewhere is an error, so start a new one there instead. One turn runs at a
+time; a second call while a turn runs returns `session busy`. A turn that
+times out stays resumable once the CLI has reported its session, so the next
+turn can ask the agent to continue where it stopped. A first turn that fails
+before the CLI reports a session is forgotten.
+
+Each session remembers at most `agent.max_conversations` conversations
+(default 8; starting another forgets the least recently used idle one) and
+forgets one left unused for `agent.conversation_idle_seconds` (default 86400).
+Handles end with the SCV session. `scv agents ps` shows a running turn's
+conversation and turn number.
+
+The CLIs keep transcripts in their private adapter homes (Claude Code under
+`.claude/projects`, Codex under `sessions`, pi under `.pi/agent/sessions`).
+`scv agents gc` removes old ones:
+
+```sh
+scv agents gc --dry-run                 # what would go, per agent
+scv agents gc --older-than 7d codex     # default 30d, never less than an hour
+```
+
+A live conversation leaves a marker in `$SCV_HOME/run/conversations`, named
+after its CLI session ID, and `gc` keeps any transcript a marker whose SCV
+process still runs names. Transcripts written in the last hour are always
+kept, and symlinks are never followed.
 
 ### Tracking and cleanup
 

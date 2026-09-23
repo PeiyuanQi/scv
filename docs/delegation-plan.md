@@ -38,7 +38,7 @@ table and may be developed in parallel with others; landings stay sequential.
 | 0b | Adapter table, grok/dsh/pi, full-work defaults, `permissions` (done, 0.1.22; zcode deferred) | 0a |
 | 1 | Delegation foundation: structured results, registry, cleanup (done, 0.1.26) | 0b |
 | 2 | ClawBot long-turn resilience (done, 0.1.23) | 0b landed |
-| 3 | Multi-turn conversations (resume) | 1 |
+| 3 | Multi-turn conversations (resume) (done, 0.1.28) | 1 |
 | 4 | SCV web tools: `web_fetch`, `web_search` (done, 0.1.25) | 0b landed |
 | 5 | Progress events and protocol v3 | 3 |
 | 6 | Live mode: SCV to SCV, then ACP | 5 |
@@ -95,11 +95,14 @@ approval summary. The built-in default stays `default`.
   continues the conversation and returns `turn`.
 - A conversation keeps its agent and `cwd`. One turn at a time; a busy
   conversation returns `session busy`. A timed-out turn stays resumable.
-- `agents.max_conversations` (default 8 per session) and
-  `agents.conversation_idle_seconds` (default 86400). Handles end with the
-  parent session.
+- `agent.max_conversations` (default 8 per session) and
+  `agent.conversation_idle_seconds` (default 86400), under `[agent]` like
+  `agent.max_delegation_depth`. Handles end with the parent session.
+- Claude Code, Codex, and pi resume; Grok and DeepSeek Harness start fresh on
+  every call until their resume options can be verified headless.
 - `scv agents gc --older-than 30d` removes conversation files in the private
-  agent homes, skipping live ones.
+  agent homes, skipping live ones (marked in `$SCV_HOME/run/conversations`)
+  and anything written in the last hour.
 
 ### 4. SCV web tools
 

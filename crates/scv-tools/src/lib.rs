@@ -2,6 +2,7 @@
 
 pub mod adapters;
 mod agent_output;
+pub mod conversation;
 pub mod delegation;
 pub mod web;
 
@@ -26,8 +27,9 @@ use cap_std::{
 use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRisk, ToolSpec};
 
 use crate::{
-    adapters::OutputFormat,
+    adapters::{OutputFormat, Resume},
     agent_output::{AgentStream, RunExit, STDERR_TAIL_BYTES, TailBuffer},
+    conversation::{ConversationLimits, ConversationStore},
     delegation::{DelegationGuard, DelegationRegistry},
 };
 use serde::Deserialize;
@@ -54,6 +56,8 @@ pub struct ToolsConfig {
     pub max_write_bytes: usize,
     /// Agent tools are offered only below this delegation depth.
     pub max_delegation_depth: u32,
+    /// How many delegated conversations a session remembers, and for how long.
+    pub conversations: ConversationLimits,
     /// Records delegated runs for listing and cleanup; `None` runs them untracked.
     pub delegation: Option<DelegationContext>,
 }
@@ -68,6 +72,10 @@ impl Default for ToolsConfig {
             max_read_bytes: 256 * 1024,
             max_write_bytes: 1024 * 1024,
             max_delegation_depth: 2,
+            conversations: ConversationLimits {
+                max: 8,
+                idle: Duration::from_secs(86400),
+            },
             delegation: None,
         }
     }
@@ -104,6 +112,8 @@ pub struct AgentAdapterConfig {
     pub search_dirs: Vec<PathBuf>,
     /// What the CLI prints, and so how its reply is read.
     pub output: OutputFormat,
+    /// How a conversation with the CLI is continued, if it can be.
+    pub resume: Resume,
     /// SCV's private home for this agent, for files SCV hands the CLI.
     pub home: Option<PathBuf>,
 }
@@ -146,6 +156,14 @@ pub fn builtin_registry(
     } else {
         HashMap::new()
     };
+    // One store per session, shared by its agent tools and dropped with it.
+    let conversations = Arc::new(ConversationStore::new(
+        config.conversations,
+        config
+            .delegation
+            .as_ref()
+            .map(|context| context.registry.conversation_dir()),
+    ));
     for (name, adapter) in adapters {
         let tool = NativeAgentTool::new(
             name,
@@ -156,6 +174,7 @@ pub fn builtin_registry(
             },
             config.output_limit_bytes,
             config.delegation.clone(),
+            Arc::clone(&conversations),
         );
         // An agent that is not installed is not offered to the model.
         if tool.resolved.is_some() {
@@ -634,8 +653,10 @@ struct NativeAgentTool {
     timeouts: Timeouts,
     output_limit: usize,
     output: OutputFormat,
+    resume: Resume,
     home: Option<PathBuf>,
     delegation: Option<DelegationContext>,
+    conversations: Arc<ConversationStore>,
 }
 
 /// Effort levels accepted by the built-in adapters' CLIs.
@@ -649,6 +670,22 @@ impl NativeAgentTool {
         self.timeouts.resolve(args.timeout_seconds)?;
         if let Some(cwd) = &args.cwd {
             validate_agent_cwd(cwd)?;
+        }
+        if let Some(session) = &args.session {
+            if !self.resume.is_supported() {
+                return Err(ToolError(format!(
+                    "{} cannot continue a conversation; omit session to start a new one",
+                    self.name
+                )));
+            }
+            if !conversation::is_handle(session) {
+                return Err(ToolError(format!(
+                    "session {:?} is not a conversation handle; pass the `session` value an \
+                     earlier {} call returned, or omit it to start a new conversation",
+                    bounded(session, 80),
+                    self.name
+                )));
+            }
         }
         // The prompt follows the flags as a positional argument, so it must
         // not be readable as one.
@@ -690,6 +727,7 @@ impl NativeAgentTool {
         timeouts: Timeouts,
         output_limit: usize,
         delegation: Option<DelegationContext>,
+        conversations: Arc<ConversationStore>,
     ) -> Self {
         let resolved = adapters::resolve_agent_executable(&config.command, &config.search_dirs);
         Self {
@@ -706,8 +744,10 @@ impl NativeAgentTool {
             timeouts,
             output_limit,
             output: config.output,
+            resume: config.resume,
             home: config.home,
             delegation,
+            conversations,
         }
     }
 
@@ -716,13 +756,6 @@ impl NativeAgentTool {
     /// remove afterwards.
     fn run_args(&self, id: &str) -> (Vec<OsString>, Option<PathBuf>) {
         match self.output {
-            OutputFormat::ClaudeStreamJson => (
-                vec![
-                    "--session-id".into(),
-                    uuid::Uuid::new_v4().to_string().into(),
-                ],
-                None,
-            ),
             OutputFormat::CodexJsonl => {
                 let Some(dir) = self.home.as_ref().map(|home| home.join("tmp")) else {
                     return (Vec::new(), None);
@@ -733,9 +766,19 @@ impl NativeAgentTool {
                 let file = dir.join(format!("scv-{id}.last-message"));
                 (vec!["-o".into(), file.clone().into()], Some(file))
             }
-            OutputFormat::Text | OutputFormat::PiJson => (Vec::new(), None),
+            OutputFormat::Text | OutputFormat::ClaudeStreamJson | OutputFormat::PiJson => {
+                (Vec::new(), None)
+            }
         }
     }
+}
+
+/// `template` with `{session}` replaced by `session`.
+fn session_args(template: &[&str], session: &str) -> Vec<OsString> {
+    template
+        .iter()
+        .map(|part| OsString::from(part.replace("{session}", session)))
+        .collect()
 }
 
 fn private_dir(dir: &Path) -> std::io::Result<()> {
@@ -761,6 +804,8 @@ fn take_file(path: &Path, limit: usize) -> Option<String> {
 struct AgentArgs {
     prompt: String,
     timeout_seconds: Option<u64>,
+    #[serde(default, deserialize_with = "blank_as_none")]
+    session: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
     cwd: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
@@ -835,6 +880,14 @@ impl Tool for NativeAgentTool {
             },
             "timeout_seconds":timeout_schema(self.timeouts)
         });
+        if self.resume.is_supported() {
+            properties["session"] = json!({
+                "type":"string",
+                "description":"The `session` handle an earlier call to this tool returned, such as \"codex-1\". \
+                    Pass it to continue that conversation: the agent keeps its context, in the same cwd. \
+                    Omit it to start a new conversation for unrelated work."
+            });
+        }
         if !self.model_args.is_empty() {
             properties["model"] = json!({
                 "type":"string",
@@ -860,8 +913,14 @@ impl Tool for NativeAgentTool {
                  Delegate substantial work here rather than doing it step by step with \
                  bash: research and web lookups, multi-file coding, and running tools, \
                  builds, and tests. Set cwd to the project the work is in so the agent \
-                 follows that project's instructions and skills.",
-                self.name
+                 follows that project's instructions and skills.{}",
+                self.name,
+                if self.resume.is_supported() {
+                    " Each result carries a `session` handle: pass it back to follow up on the \
+                     same work (answers, fixes, next steps) instead of repeating the context."
+                } else {
+                    " Each call starts a fresh conversation."
+                }
             ),
             parameters: json!({
                 "type":"object",
@@ -889,6 +948,10 @@ impl Tool for NativeAgentTool {
             || "the workspace root".to_owned(),
             |cwd| format!("{:?} (inside the workspace)", bounded(cwd, 200)),
         );
+        let conversation = args.session.as_deref().map_or_else(
+            || " in a new conversation".to_owned(),
+            |session| format!(", continuing conversation {session},"),
+        );
         let timeout = self.timeouts.resolve(args.timeout_seconds)?;
         let permissions = if self.full_permission_args.is_some() {
             " FULL PERMISSIONS (permissions = \"full\"): the agent's own approval prompts \
@@ -898,7 +961,7 @@ impl Tool for NativeAgentTool {
             ""
         };
         Ok(format!(
-            "Launch {executable} with args {command_args:?} and prompt {:?} in {directory} for up to {} seconds. The nested agent has your user permissions.{permissions}",
+            "Launch {executable} with args {command_args:?} and prompt {:?}{conversation} in {directory} for up to {} seconds. The nested agent has your user permissions.{permissions}",
             bounded(&args.prompt, 2000),
             timeout.as_secs()
         ))
@@ -919,23 +982,74 @@ impl Tool for NativeAgentTool {
             ))
         })?;
         let agent = self.name.trim_start_matches("agent_");
-        let pending = self
-            .delegation
-            .as_ref()
-            .map(|delegation| delegation.registry.begin(agent, &delegation.session, &cwd));
+        let turn = if self.resume.is_supported() {
+            Some(self.conversations.begin(
+                agent,
+                args.session.as_deref(),
+                &cwd,
+                self.resume.assigns_id(),
+            )?)
+        } else {
+            None
+        };
+        let pending = self.delegation.as_ref().map(|delegation| {
+            delegation.registry.begin(
+                agent,
+                &delegation.session,
+                &cwd,
+                turn.as_ref().map(|turn| (turn.handle.as_str(), turn.turn)),
+            )
+        });
         let run_id = pending.as_ref().map_or_else(
             || uuid::Uuid::new_v4().simple().to_string(),
             |pending| pending.handle.clone(),
         );
-        let (fixed, selections) = command_args.split_at(
-            self.args.len()
-                + self.full_permission_args.as_ref().map_or(0, Vec::len)
-                + self.output.args().len(),
-        );
+        let fixed_len = self.args.len()
+            + self.full_permission_args.as_ref().map_or(0, Vec::len)
+            + self.output.args().len();
+        let (fixed, rest) = command_args.split_at(fixed_len);
+        let (selections, prompt_args) = rest.split_at(rest.len() - self.prompt_args.len());
+        let (base, modes) = fixed.split_at(self.args.len());
+        let continuing = args.session.is_some();
         let (run_args, last_message) = self.run_args(&run_id);
-        let mut process_args: Vec<OsString> = fixed.iter().map(OsString::from).collect();
+        let resume = match (self.resume, &turn) {
+            (
+                Resume::Supported {
+                    start,
+                    subcommand,
+                    options,
+                    positional,
+                },
+                Some(turn),
+            ) => {
+                let vendor = turn.vendor.as_deref().unwrap_or_default();
+                if continuing {
+                    (
+                        subcommand.iter().map(OsString::from).collect(),
+                        session_args(options, vendor),
+                        session_args(positional, vendor),
+                    )
+                } else if turn.vendor.is_some() {
+                    (Vec::new(), session_args(start, vendor), Vec::new())
+                } else {
+                    Default::default()
+                }
+            }
+            _ => Default::default(),
+        };
+        let (subcommand, session_options, positional): (
+            Vec<OsString>,
+            Vec<OsString>,
+            Vec<OsString>,
+        ) = resume;
+        let mut process_args: Vec<OsString> = base.iter().map(OsString::from).collect();
+        process_args.extend(subcommand);
+        process_args.extend(modes.iter().map(OsString::from));
         process_args.extend(run_args);
+        process_args.extend(session_options);
         process_args.extend(selections.iter().map(OsString::from));
+        process_args.extend(positional);
+        process_args.extend(prompt_args.iter().map(OsString::from));
         process_args.push(OsString::from(args.prompt));
         let mut environment = self.environment.clone();
         match &pending {
@@ -971,8 +1085,23 @@ impl Tool for NativeAgentTool {
             .and_then(|path| take_file(path, self.output_limit));
         let run = run?;
         let result = run.stream.finish(run.exit, fallback);
-        let (content, truncated) =
-            result.to_json(agent, run.exit_code, &run.stderr_tail, self.output_limit);
+        let conversation = turn.and_then(|turn| {
+            let number = turn.turn;
+            turn.finish(
+                result.session.clone(),
+                result.status == agent_output::RunStatus::Completed,
+            )
+            .map(|handle| (handle, number))
+        });
+        let (content, truncated) = result.to_json(
+            agent,
+            conversation
+                .as_ref()
+                .map(|(handle, turn)| (handle.as_str(), *turn)),
+            run.exit_code,
+            &run.stderr_tail,
+            self.output_limit,
+        );
         let mut output = ToolOutput {
             content,
             is_error: result.status != agent_output::RunStatus::Completed,
@@ -1453,6 +1582,13 @@ mod tests {
 
     use super::*;
 
+    fn test_conversations() -> Arc<ConversationStore> {
+        Arc::new(ConversationStore::new(
+            ToolsConfig::default().conversations,
+            None,
+        ))
+    }
+
     /// `bash -l` sources the host's login profile before it runs a command,
     /// and CI images can spend seconds there under parallel test load. Waits
     /// that include shell startup use this ceiling; they end as soon as their
@@ -1787,6 +1923,7 @@ mod tests {
                 environment,
                 search_dirs: Vec::new(),
                 output: OutputFormat::Text,
+                resume: Resume::Unsupported,
                 home: None,
             },
             Timeouts {
@@ -1795,6 +1932,7 @@ mod tests {
             },
             1024,
             None,
+            test_conversations(),
         )
     }
 
@@ -1878,6 +2016,7 @@ mod tests {
                 environment: Vec::new(),
                 search_dirs: Vec::new(),
                 output: OutputFormat::Text,
+                resume: Resume::Unsupported,
                 home: None,
             },
             Timeouts {
@@ -1886,6 +2025,7 @@ mod tests {
             },
             1024,
             None,
+            test_conversations(),
         );
         assert!(
             fixed_only.spec().parameters["properties"]
@@ -2105,6 +2245,7 @@ mod tests {
             environment: Vec::new(),
             search_dirs: Vec::new(),
             output: OutputFormat::Text,
+            resume: Resume::Unsupported,
             home: None,
         };
         let registry = builtin_registry(
@@ -2283,6 +2424,33 @@ mod tests {
         delegation: Option<DelegationContext>,
         timeout: Duration,
     ) -> NativeAgentTool {
+        conversing_agent(
+            workspace,
+            name,
+            format,
+            Resume::Unsupported,
+            script,
+            home,
+            delegation,
+            timeout,
+            test_conversations(),
+        )
+    }
+
+    /// Like [`structured_agent`], continuing conversations as `resume` says,
+    /// in `conversations` (shared by one session's tools).
+    #[allow(clippy::too_many_arguments)]
+    fn conversing_agent(
+        workspace: &Path,
+        name: &str,
+        format: OutputFormat,
+        resume: Resume,
+        script: &str,
+        home: Option<PathBuf>,
+        delegation: Option<DelegationContext>,
+        timeout: Duration,
+        conversations: Arc<ConversationStore>,
+    ) -> NativeAgentTool {
         let script_path = workspace.join(format!("fake-{name}.sh"));
         std::fs::write(&script_path, script).unwrap();
         NativeAgentTool::new(
@@ -2298,6 +2466,7 @@ mod tests {
                 environment: Vec::new(),
                 search_dirs: Vec::new(),
                 output: format,
+                resume,
                 home,
             },
             Timeouts {
@@ -2306,6 +2475,7 @@ mod tests {
             },
             64 * 1024,
             delegation,
+            conversations,
         )
     }
 
@@ -2332,14 +2502,16 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"all done"
         );
         let home = tempfile::tempdir().unwrap();
         let context_home = delegation_context(home.path());
-        let tool = structured_agent(
+        let tool = conversing_agent(
             workspace.path(),
             "agent_claude",
             OutputFormat::ClaudeStreamJson,
+            adapters::adapter("claude").unwrap().resume,
             &script,
             None,
             Some(context_home.clone()),
             Duration::from_secs(10),
+            test_conversations(),
         );
         let output = tool
             .execute(json!({"prompt":"hi"}), context(workspace.path()))
@@ -2348,6 +2520,10 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"all done"
         assert!(!output.is_error, "{}", output.content);
         let value: Value = serde_json::from_str(&output.content).unwrap();
         assert_eq!(value["agent"], "claude");
+        assert_eq!(
+            (value["session"].as_str(), value["turn"].as_u64()),
+            (Some("claude-1"), Some(1))
+        );
         assert_eq!(value["status"], "completed");
         assert_eq!(value["reply"], "all done");
         assert_eq!(value["usage"]["input_tokens"], 12);
@@ -2374,6 +2550,200 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"all done"
         assert_eq!(lines[7], "1");
         // The run's record is gone once it ends.
         assert!(context_home.registry.list(true).is_empty());
+    }
+
+    /// A fake Codex that records each call's arguments, reports thread
+    /// `th-1`, and answers with the prompt it was given. With `slow_start`,
+    /// a first (non-resume) turn hangs after reporting its thread.
+    fn fake_codex(workspace: &Path, slow_start: bool) -> String {
+        let log = workspace.join("calls.txt");
+        format!(
+            r#"printf '%s\n' "$@" '--' >> {log}
+case " $* " in *" resume "*) ;; *) echo '{{"type":"thread.started","thread_id":"th-1"}}'; {hang} ;; esac
+for last; do :; done
+echo "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"echo: $last\"}}}}"
+echo '{{"type":"turn.completed","usage":{{"input_tokens":1,"output_tokens":1}}}}'
+"#,
+            log = log.display(),
+            hang = if slow_start { "sleep 30" } else { ":" }
+        )
+    }
+
+    fn calls(workspace: &Path) -> Vec<Vec<String>> {
+        std::fs::read_to_string(workspace.join("calls.txt"))
+            .unwrap()
+            .split("--\n")
+            .filter(|call| !call.is_empty())
+            .map(|call| call.lines().map(str::to_owned).collect())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn conversations_continue_the_cli_session_in_the_same_cwd() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("sub")).unwrap();
+        let codex_resume = adapters::adapter("codex").unwrap().resume;
+        let store = test_conversations();
+        let tool = conversing_agent(
+            workspace.path(),
+            "agent_codex",
+            OutputFormat::CodexJsonl,
+            codex_resume,
+            &fake_codex(workspace.path(), false),
+            None,
+            None,
+            Duration::from_secs(10),
+            Arc::clone(&store),
+        );
+        let first = tool
+            .execute(
+                json!({"prompt":"remember heron"}),
+                context(workspace.path()),
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&first.content).unwrap();
+        assert_eq!(value["status"], "completed", "{value}");
+        assert_eq!(
+            (value["session"].as_str(), value["turn"].as_u64()),
+            (Some("codex-1"), Some(1))
+        );
+        let second = tool
+            .execute(
+                json!({"prompt":"what word?","session":"codex-1"}),
+                context(workspace.path()),
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&second.content).unwrap();
+        assert_eq!(value["reply"], "echo: what word?");
+        assert_eq!(
+            (value["session"].as_str(), value["turn"].as_u64()),
+            (Some("codex-1"), Some(2))
+        );
+        // The script path is the only fixed argument, so `$@` starts after it:
+        // `resume` comes right after the fixed arguments, and the CLI's thread
+        // ID sits just before the prompt.
+        let recorded = calls(workspace.path());
+        assert_eq!(recorded[0], ["--json", "remember heron"]);
+        assert_eq!(recorded[1], ["resume", "--json", "th-1", "what word?"]);
+
+        // A conversation stays in its cwd.
+        let moved = tool
+            .execute(
+                json!({"prompt":"x","session":"codex-1","cwd":"sub"}),
+                context(workspace.path()),
+            )
+            .await
+            .unwrap_err();
+        assert!(moved.0.contains("runs in"), "{}", moved.0);
+        // Another session's tools do not know this session's handles.
+        let other_session = conversing_agent(
+            workspace.path(),
+            "agent_codex",
+            OutputFormat::CodexJsonl,
+            codex_resume,
+            &fake_codex(workspace.path(), false),
+            None,
+            None,
+            Duration::from_secs(10),
+            test_conversations(),
+        );
+        let unknown = other_session
+            .execute(
+                json!({"prompt":"x","session":"codex-1"}),
+                context(workspace.path()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            unknown.0.contains("unknown in this session"),
+            "{}",
+            unknown.0
+        );
+        assert_eq!(
+            calls(workspace.path()).len(),
+            2,
+            "rejected turns never launch the CLI"
+        );
+        // The CLI's own ID is never accepted in place of a handle.
+        let vendor = json!({"prompt":"x","session":"01a0cd5a-7195-7b31-a503-e235d5da7b45"});
+        assert!(
+            tool.risk(&vendor)
+                .unwrap_err()
+                .0
+                .contains("not a conversation handle")
+        );
+        assert!(
+            tool.spec().parameters["properties"]
+                .get("session")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_turn_stays_resumable_and_unsupported_agents_refuse_sessions() {
+        let workspace = tempfile::tempdir().unwrap();
+        let tool = conversing_agent(
+            workspace.path(),
+            "agent_codex",
+            OutputFormat::CodexJsonl,
+            adapters::adapter("codex").unwrap().resume,
+            &fake_codex(workspace.path(), true),
+            None,
+            None,
+            Duration::from_secs(1),
+            test_conversations(),
+        );
+        let first = tool
+            .execute(json!({"prompt":"start"}), context(workspace.path()))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&first.content).unwrap();
+        assert_eq!(value["status"], "timeout", "{value}");
+        assert_eq!(value["session"], "codex-1");
+        let resumed = tool
+            .execute(
+                json!({"prompt":"continue where you left off","session":"codex-1"}),
+                context(workspace.path()),
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&resumed.content).unwrap();
+        assert_eq!(value["status"], "completed", "{value}");
+        assert_eq!(value["turn"], 2);
+
+        let plain = structured_agent(
+            workspace.path(),
+            "agent_grok",
+            OutputFormat::Text,
+            "echo hi\n",
+            None,
+            None,
+            Duration::from_secs(5),
+        );
+        let refused = plain
+            .risk(&json!({"prompt":"x","session":"grok-1"}))
+            .unwrap_err();
+        assert!(
+            refused.0.contains("cannot continue a conversation"),
+            "{}",
+            refused.0
+        );
+        assert!(
+            plain.spec().parameters["properties"]
+                .get("session")
+                .is_none()
+        );
+        let output = plain
+            .execute(json!({"prompt":"x"}), context(workspace.path()))
+            .await
+            .unwrap();
+        assert!(
+            !output.content.contains("\"session\""),
+            "{}",
+            output.content
+        );
     }
 
     #[tokio::test]
@@ -2526,6 +2896,7 @@ exit 1
             environment: Vec::new(),
             search_dirs: Vec::new(),
             output: OutputFormat::Text,
+            resume: Resume::Unsupported,
             home: None,
         };
         let home = tempfile::tempdir().unwrap();
