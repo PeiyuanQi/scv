@@ -799,10 +799,14 @@ async fn agents(command: AgentsCommand) -> Result<()> {
                             .output()
                         {
                             Ok(output) => {
+                                // Codex reports on stderr, Claude Code on stdout.
+                                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                                text.push('\n');
+                                text.push_str(&String::from_utf8_lossy(&output.stderr));
                                 let summary = scv_server::adapters::summarize_status(
                                     adapter.status_summary,
                                     output.status.success(),
-                                    &String::from_utf8_lossy(&output.stdout),
+                                    &text,
                                 );
                                 println!("  {summary}");
                                 if summary == "not signed in" {
