@@ -290,10 +290,19 @@ Every approval summary for such an agent says `FULL PERMISSIONS`. Only the
 user layers can set `[agents]`; see [security](security.md).
 
 Over the Agent Client Protocol, `"full"` selects the agent's own equivalent
-instead: Claude's `bypassPermissions` and Codex's `agent-full-access` session
-modes, `grok agent --always-approve stdio`, and the same DeepSeek Harness
-variable. `codex-acp` takes no `-c` overrides, so there Codex's web search
-follows `web_search = "live"` in `$SCV_HOME/adapters/codex/config.toml`.
+instead:
+
+| Agent | `"full"` over ACP | Web search |
+| --- | --- | --- |
+| `claude` | `bypassPermissions` session mode | WebSearch and WebFetch, unprompted |
+| `codex` | `agent-full-access` session mode and `CODEX_CONFIG={"web_search":"live"}` | native `web_search` tool (if the provider supports it) |
+| `grok` | `grok agent --always-approve stdio` | on by default |
+| `dsh` | the same `DSH_PERMISSION_MODE` variable | its own web tool |
+
+`codex-acp` takes no `-c` overrides; `CODEX_CONFIG` is its JSON form of them,
+merged into every session, so SCV sets it on the ACP server rather than
+rewriting the imported `$SCV_HOME/adapters/codex/config.toml`. An inherited
+`CODEX_CONFIG` is removed from every delegated agent's environment.
 
 ### Agent transport
 

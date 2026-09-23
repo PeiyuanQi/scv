@@ -478,8 +478,10 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   with `session/set_mode` in every new session), `grok agent --always-approve
   stdio`, and DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`. A
   permission request that still arrives is relayed as usual. `codex-acp` takes
-  no `-c` overrides, so Codex's web search follows `web_search` in its private
-  `config.toml`.
+  no `-c` overrides, so for Codex `"full"` also sets
+  `CODEX_CONFIG={"web_search":"live"}` on the ACP server, its JSON form of
+  them, keeping live web search as in resume mode without rewriting the
+  private `config.toml`.
 - The result has the CLI adapters' shape. `stopReason` `end_turn` completes
   the call; `cancelled` ends it as cancelled; `refusal` fails it; any other
   reason completes it with an `(stopped early: …)` note. A JSON-RPC error

@@ -147,6 +147,9 @@ pub struct AcpAgentLaunch {
     /// The ACP session mode that grants full permissions, selected in every
     /// new session when `permissions = "full"`.
     pub full_mode: Option<String>,
+    /// Extra environment for the ACP server, such as permission settings the
+    /// server reads only from its environment.
+    pub environment: Vec<(OsString, OsString)>,
     /// `transport = "acp"`: never fall back to one CLI process per turn, so
     /// the agent is not offered while its ACP server is missing.
     pub required: bool,

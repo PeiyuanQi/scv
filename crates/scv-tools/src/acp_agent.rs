@@ -377,6 +377,7 @@ impl AcpAgentTool {
             )
         });
         let mut environment = self.environment.clone();
+        environment.extend(self.launch.environment.iter().cloned());
         match &pending {
             Some(pending) => environment.extend(pending.environment.iter().cloned()),
             None => environment.push((
@@ -1358,6 +1359,9 @@ for line in sys.stdin:
                   "data": {"message": "Unauthorized (401): Bearer sk-live-abcdef123456 expired"}}})
         elif text == "refuse":
             send({"id": rid, "result": {"stopReason": "refusal"}})
+        elif text == "env":
+            chunk(session, "CODEX_CONFIG=" + os.environ.get("CODEX_CONFIG", "unset"))
+            send({"id": rid, "result": {"stopReason": "end_turn"}})
         else:
             chunk(session, "echo " + text)
             send({"id": rid, "result": {"stopReason": "end_turn"}})
@@ -1422,6 +1426,7 @@ for line in sys.stdin:
                 command: script.display().to_string(),
                 args: Vec::new(),
                 full_mode: full_mode.map(str::to_owned),
+                environment: Vec::new(),
                 required: false,
             },
             Some(script.to_owned()),
@@ -1837,6 +1842,49 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn the_launch_environment_reaches_the_acp_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_agent(dir.path(), "normal");
+        let tool = |environment: Vec<(OsString, OsString)>| {
+            AcpAgentTool::new(
+                "agent_codex".into(),
+                &adapter(true),
+                AcpAgentLaunch {
+                    command: script.display().to_string(),
+                    args: Vec::new(),
+                    full_mode: None,
+                    environment,
+                    required: false,
+                },
+                Some(script.clone()),
+                Timeouts {
+                    default: Duration::from_secs(20),
+                    max: Duration::from_secs(30),
+                },
+                64 * 1024,
+                None,
+                store(Duration::from_secs(60)),
+            )
+        };
+        let workspace = dir.path().to_owned();
+        let reply = |tool: AcpAgentTool| {
+            let workspace = workspace.clone();
+            async move {
+                let output = tool
+                    .execute(json!({"prompt":"env"}), context(&workspace, None))
+                    .await
+                    .unwrap();
+                json(&output)["reply"].as_str().unwrap().to_owned()
+            }
+        };
+        let live = r#"{"web_search":"live"}"#;
+        let with = reply(tool(vec![("CODEX_CONFIG".into(), live.into())])).await;
+        assert!(with.contains(&format!("CODEX_CONFIG={live}")), "{with}");
+        let without = reply(tool(Vec::new())).await;
+        assert!(without.contains("CODEX_CONFIG=unset"), "{without}");
+    }
+
+    #[tokio::test]
     async fn idle_conversations_shut_their_agent_down() {
         let dir = tempfile::tempdir().unwrap();
         let script = fake_agent(dir.path(), "normal");
@@ -1895,6 +1943,7 @@ for line in sys.stdin:
                 command: command.into(),
                 args: Vec::new(),
                 full_mode: None,
+                environment: Vec::new(),
                 required,
             });
             adapter
