@@ -234,6 +234,27 @@ last 2 KiB of stderr, and `truncated` says whether anything was cut. A failure
 that reads like a missing sign-in gains a `hint` (see below). A turn of a
 conversation (next section) also carries `"session"` and `"turn"`.
 
+### Progress
+
+While a structured run lasts, its events also become short status lines that
+clients see as `tool.progress` (see [protocol](protocol.md#tool-lifecycle-and-approval)):
+
+- Codex: `$ <command>` when a command starts, `exit <code>: <command>` when one
+  fails, `<kind> <file>` for each file change, and `search: <query>`.
+- Claude Code: `$ <command>` for Bash, `<tool> <file>` for file tools,
+  `search:`/`fetch` for web tools, the tool name otherwise, and the first line of
+  its interim text.
+- pi: `$ <command>` for bash, `<tool> <file>` for file tools, the tool name
+  otherwise, and `<tool> failed` for a failed call.
+- Grok and DeepSeek Harness: none, since their output is plain text.
+
+Lines never include command output. Paths show their last two components,
+URLs lose their query, and values that look like credentials (`Bearer` tokens,
+`NAME=value` or `--name value` where the name mentions a key, token, secret, or
+password, and well-known token prefixes) become `…`. The redaction is a display
+heuristic, not a guarantee. The runtime forwards pending lines at most twice a
+second per call and never adds them to the model's history or the tool result.
+
 ### Conversations
 
 An agent whose CLI can resume a session takes an optional `session` argument.

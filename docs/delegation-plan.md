@@ -40,7 +40,7 @@ table and may be developed in parallel with others; landings stay sequential.
 | 2 | ClawBot long-turn resilience (done, 0.1.23) | 0b landed |
 | 3 | Multi-turn conversations (resume) (done, 0.1.28) | 1 |
 | 4 | SCV web tools: `web_fetch`, `web_search` (done, 0.1.25) | 0b landed |
-| 5 | Progress events and protocol v3 | 3 |
+| 5 | Progress events and protocol v3 (done, 0.1.30) | 3 |
 | 6 | Live mode: SCV to SCV, then ACP | 5 |
 | 7 | Background delegations | 6, iLink check |
 
@@ -123,6 +123,10 @@ approval summary. The built-in default stays `default`.
   each) and an optional `session.start.delegation_depth`.
 - Adapter parsers report commands run, files changed, and tool use. The TUI
   shows the latest line under the running tool; ClawBot ignores progress.
+- As built: the core loop paces events (one per 500 ms per call, dropping lines
+  reported within 500 ms of completion) so every server gets the same limit,
+  and the server bounds the text again. Parsers redact credential-like values.
+  A session's declared `delegation_depth` raises the depth its runs count from.
 
 ### 6. Live mode
 

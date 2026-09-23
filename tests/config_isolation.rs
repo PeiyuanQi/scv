@@ -40,6 +40,7 @@ fn session_model(home: &std::path::Path, workspace: &std::path::Path) -> String 
             model: None,
             base_url: None,
             no_tools: Some(true),
+            delegation_depth: None,
         },
     ] {
         writeln!(input, "{}", serde_json::to_string(&message).unwrap()).unwrap();

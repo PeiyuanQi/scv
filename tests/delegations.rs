@@ -128,6 +128,7 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
         model: None,
         base_url: None,
         no_tools: None,
+        delegation_depth: None,
     })
     .await;
     let mut session_id = None;

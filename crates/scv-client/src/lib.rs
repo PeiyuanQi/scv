@@ -13,6 +13,23 @@ use tokio::{
     net::UnixStream,
 };
 
+/// Environment variable carrying a delegated process's depth; SCV sets it on
+/// every agent it starts.
+pub const DELEGATION_DEPTH_VARIABLE: &str = "SCV_DELEGATION_DEPTH";
+
+/// The delegation depth to declare in `session.start`: this process's own,
+/// when an SCV started it, so a delegated client cannot reset the count by
+/// connecting to a daemon.
+pub fn inherited_delegation_depth() -> Option<u32> {
+    parse_delegation_depth(std::env::var(DELEGATION_DEPTH_VARIABLE).ok().as_deref())
+}
+
+fn parse_delegation_depth(value: Option<&str>) -> Option<u32> {
+    value
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|depth| *depth > 0)
+}
+
 pub fn default_socket_path() -> Result<PathBuf> {
     let root = std::env::var_os("SCV_HOME")
         .map(PathBuf::from)
@@ -79,4 +96,18 @@ pub async fn control(path: &Path, command: DaemonCommand) -> Result<DaemonStatus
     })
     .await
     .context("SCV management request timed out; query status before retrying")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_positive_inherited_depth_is_declared() {
+        assert_eq!(parse_delegation_depth(Some("2")), Some(2));
+        assert_eq!(parse_delegation_depth(Some(" 1\n")), Some(1));
+        assert_eq!(parse_delegation_depth(Some("0")), None);
+        assert_eq!(parse_delegation_depth(Some("deep")), None);
+        assert_eq!(parse_delegation_depth(None), None);
+    }
 }

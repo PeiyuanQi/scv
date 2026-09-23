@@ -46,7 +46,9 @@ content; control characters are replaced with visible, inert text.
 
 Each tool call is one compact row with state, tool name, a bounded summary, and
 locally measured elapsed time. Running rows visibly animate without changing
-layout width. Completed output is collapsed by default. `Ctrl+O` opens a tool
+layout width. While a tool runs, the newest line of its `tool.progress` (such
+as a delegated agent's current command) appears under its row and disappears
+when the tool completes. Headless `scv exec` prints progress lines to stderr. Completed output is collapsed by default. `Ctrl+O` opens a tool
 inspector for the most recent tool; `Up` and `Down` select adjacent calls,
 `Enter` toggles full arguments or output, and `Esc` closes the inspector. The
 inspector preserves server-provided truncation and applies an additional
@@ -156,7 +158,7 @@ unavailable.
 
 ## Compatibility boundary
 
-The v0.2 TUI uses SCV protocol version 2 over the existing authenticated stdio
+The v0.2 TUI uses SCV protocol version 3 over the existing authenticated stdio
 child server. It supports multiple queued prompts in one client session, but
 does not yet share a queue between separate server processes. It still permits
 only one active turn per session. It does not add durable sessions, remote
