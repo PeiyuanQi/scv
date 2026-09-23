@@ -183,6 +183,159 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
     );
 }
 
+#[tokio::test]
+async fn tool_results_are_replayed_after_their_calls() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let responses = [
+            concat!(
+                "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"path\\\":\\\"README.md\\\"}\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+            ),
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"read it\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+            ),
+        ];
+        let mut bodies = Vec::new();
+        for body in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            bodies.push(read_json_body(&mut stream));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        bodies
+    });
+
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("README.md"), "fixture text").unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .args([
+            "--stdio",
+            "--model",
+            "fake-model",
+            "--base-url",
+            &format!("http://{address}/v1"),
+        ])
+        .env("OPENAI_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    send(
+        &mut input,
+        &ClientMessage::Initialize {
+            request_id: "init".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "integration-test".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .await;
+    send(
+        &mut input,
+        &ClientMessage::SessionStart {
+            request_id: "session".into(),
+            cwd: workspace.path().display().to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+            no_tools: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_event(&mut lines).await,
+        ServerEvent::Initialized { .. }
+    ));
+    let session_id = match next_event(&mut lines).await {
+        ServerEvent::SessionStarted { session_id, .. } => session_id,
+        event => panic!("expected session.started, received {event:?}"),
+    };
+    send(
+        &mut input,
+        &ClientMessage::TurnStart {
+            request_id: "turn".into(),
+            session_id,
+            prompt: "read the README".into(),
+        },
+    )
+    .await;
+    loop {
+        match next_event(&mut lines).await {
+            ServerEvent::TurnCompleted { .. } => break,
+            ServerEvent::TurnFailed { code, message, .. } => {
+                panic!("turn failed with {code}: {message}")
+            }
+            _ => {}
+        }
+    }
+
+    input.shutdown().await.unwrap();
+    drop(input);
+    let bodies = provider.join().unwrap();
+    let replayed = bodies[1]["input"].as_array().unwrap();
+    assert_eq!(replayed.len(), 3, "{replayed:?}");
+    assert_eq!(
+        replayed[1],
+        serde_json::json!({
+            "type":"function_call",
+            "call_id":"call_1",
+            "name":"read",
+            "arguments":"{\"path\":\"README.md\"}"
+        })
+    );
+    assert_eq!(replayed[2]["type"], "function_call_output");
+    assert_eq!(replayed[2]["call_id"], "call_1");
+    assert!(
+        replayed[2]["output"]
+            .as_str()
+            .unwrap()
+            .contains("fixture text")
+    );
+    assert!(
+        timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+/// Reads one HTTP request and returns its JSON body.
+fn read_json_body(stream: &mut std::net::TcpStream) -> serde_json::Value {
+    let mut request = Vec::new();
+    let mut byte = [0u8; 1];
+    while !request.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        request.push(byte[0]);
+    }
+    let head = String::from_utf8(request).unwrap();
+    let length: usize = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .expect("request has a Content-Length");
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
 async fn send(input: &mut tokio::process::ChildStdin, message: &ClientMessage) {
     input
         .write_all(format!("{}\n", serde_json::to_string(message).unwrap()).as_bytes())
