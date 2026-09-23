@@ -29,6 +29,9 @@ pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<St
         .index_url)
 }
 
+pub use agents::{Endpoint, PI_PROVIDER, WireApi, read_secret};
+pub use scv_tools::adapters;
+
 /// Build a command for a native agent's CLI with the same private home and
 /// cleaned environment the daemon's `agent_<name>` tool uses, so the agent's
 /// own sign-in stores credentials where delegated runs will find them.
@@ -40,14 +43,114 @@ pub fn agent_command(agent: &str) -> Result<std::process::Command> {
         .adapters()
         .remove(&format!("agent_{agent}"))
         .ok_or_else(|| anyhow!("unknown agent {agent}"))?;
-    let mut command = std::process::Command::new(&adapter.command);
-    command
-        .current_dir(config.instance_home.join("adapters").join(agent))
-        .envs(adapter.environment);
-    for variable in scv_tools::AGENT_REMOVED_ENVIRONMENT {
-        command.env_remove(variable);
-    }
+    let executable =
+        scv_tools::adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs)
+            .ok_or_else(|| {
+                anyhow!(
+                    "{agent} is not installed: {:?} was not found on PATH or in ~/.local/bin",
+                    adapter.command
+                )
+            })?;
+    let mut command = std::process::Command::new(executable);
+    command.current_dir(config.instance_home.join("adapters").join(agent));
+    scv_tools::apply_agent_environment(&mut command, &adapter.environment);
     Ok(command)
+}
+
+/// Where `agent`'s executable resolves, as the daemon would find it.
+pub fn agent_executable(agent: &str) -> Result<Option<PathBuf>> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    let adapter = config
+        .adapters()
+        .remove(&format!("agent_{agent}"))
+        .ok_or_else(|| anyhow!("unknown agent {agent}"))?;
+    Ok(scv_tools::adapters::resolve_agent_executable(
+        &adapter.command,
+        &adapter.search_dirs,
+    ))
+}
+
+/// The prepared private adapter home for `agent`.
+pub fn agent_home(agent: &str) -> Result<PathBuf> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    config.prepare_adapter_homes()?;
+    let home = config.instance_home.join("adapters").join(agent);
+    if !home.is_dir() {
+        return Err(anyhow!("unknown agent {agent}"));
+    }
+    Ok(home)
+}
+
+fn key_store_home(agent: &str) -> Result<PathBuf> {
+    scv_tools::adapters::adapter(agent).ok_or_else(|| anyhow!("unknown agent {agent}"))?;
+    agent_home(agent)
+}
+
+/// Store `key` in the agent's native credential file inside its adapter home.
+pub fn store_agent_key(agent: &str, store: adapters::KeyStore, key: &str) -> Result<Vec<String>> {
+    agents::store_key(store, &key_store_home(agent)?, key)
+}
+
+/// Whether the agent's stored credentials exist, with display lines that
+/// never contain secrets.
+pub fn agent_stored_status(agent: &str, store: adapters::KeyStore) -> Result<(bool, Vec<String>)> {
+    agents::stored_status(store, &key_store_home(agent)?)
+}
+
+/// Remove the agent's stored credentials from its adapter home.
+pub fn remove_agent_credentials(agent: &str, store: adapters::KeyStore) -> Result<Vec<String>> {
+    agents::remove_stored(store, &key_store_home(agent)?)
+}
+
+/// Point SCV's pi at an OpenAI-compatible endpoint.
+pub fn configure_pi_endpoint(endpoint: &Endpoint, key: &str) -> Result<Vec<String>> {
+    agents::configure_pi_endpoint(&pi_agent_dir()?, endpoint, key)
+}
+
+/// Point SCV's pi at SCV's own active provider: its base URL, model, and key
+/// (read from `api_key`, or from the `api_key_env` variable now, since
+/// delegated agents never inherit key variables).
+pub fn import_pi_from_scv_provider() -> Result<Vec<String>> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    let provider = &config.provider;
+    if provider.kind != "openai-compatible" {
+        return Err(anyhow!("SCV's provider is not openai-compatible"));
+    }
+    let key = match (&provider.api_key, &provider.api_key_env) {
+        (Some(key), _) if !key.trim().is_empty() => key.trim().to_owned(),
+        (_, Some(variable)) => std::env::var(variable)
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!("SCV's provider reads its key from ${variable}, which is not set here")
+            })?,
+        _ => return Err(anyhow!("SCV's provider has no API key configured")),
+    };
+    let endpoint = Endpoint {
+        base_url: provider.base_url.clone(),
+        api: WireApi::Responses,
+        model: provider.model.clone(),
+    };
+    let mut notes = agents::configure_pi_endpoint(&pi_agent_dir()?, &endpoint, &key)?;
+    if !provider.headers.is_empty() {
+        notes.push(
+            "Note: SCV's provider sends extra headers, which were not copied; add them to \
+             pi's models.json if the endpoint needs them"
+                .into(),
+        );
+    }
+    Ok(notes)
+}
+
+fn pi_agent_dir() -> Result<PathBuf> {
+    let descriptor =
+        scv_tools::adapters::adapter("pi").ok_or_else(|| anyhow!("unknown agent pi"))?;
+    let scv_tools::adapters::Status::Stored(scv_tools::adapters::KeyStore::Pi { dir }) =
+        descriptor.status
+    else {
+        return Err(anyhow!("pi has no SCV-managed store"));
+    };
+    Ok(agent_home("pi")?.join(dir))
 }
 
 /// Copy the user's own Codex setup from `source` into SCV's private Codex

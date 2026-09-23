@@ -46,6 +46,15 @@ Daemon and component changes require focused coverage for:
   mode `0600` into the instance adapter home, never copying a ChatGPT session,
   flagging `env_key` providers, printing no secrets, and writing nothing when
   either input is invalid;
+- every agent descriptor self-consistent (templates carry their placeholder,
+  stored credentials live under the relocated state directory), prompt flags
+  placed just before the prompt, per-adapter and `*_API_KEY` removal keeping
+  the adapter's own state variables, per-user install directories winning over
+  `PATH`, and uninstalled agents not offered;
+- DeepSeek Harness keys and pi endpoints written in the agent's native files
+  with mode `0600` from a piped key, merged without disturbing other entries,
+  validated before any write, reported and removed without printing a key, and
+  pi importing SCV's own provider;
 - identity/origin binding, same-identity token rotation, conservative legacy
   binding, replacement requiring logout, and stale-runner write rejection;
 - nonblocking transaction/lifetime locks, serialized login/removal, atomic
