@@ -1558,3 +1558,44 @@ fn owner_turns_outlast_the_longest_tool_call() {
     );
     assert_eq!(owner_turn_timeout(Duration::MAX), Duration::MAX);
 }
+
+#[tokio::test]
+async fn a_failed_turn_replies_with_the_generic_failure_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            None,
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message("m1", "sender", "hello")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        assert_eq!(next_turn(&mut side).await, "hello");
+        // The provider's own error text stays on the host.
+        send_frame(&mut side, json!({"type":"turn.failed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"code":"provider_error","message":"provider stream error: Our servers are currently overloaded (gave up after 3 attempts)"})).await;
+        let body = ilink.sent().await;
+        assert_eq!(body["msg"]["context_token"], "ctx-m1");
+        assert_eq!(sent_text(&body), FAILURE_REPLY);
+        wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}

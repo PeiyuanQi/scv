@@ -184,6 +184,110 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
 }
 
 #[tokio::test]
+async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_json_body(&mut stream);
+        let body = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"model is not available\"}}\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let workspace = tempfile::tempdir().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .args([
+            "--stdio",
+            "--model",
+            "fake-model",
+            "--base-url",
+            &format!("http://{address}/v1"),
+        ])
+        .env("OPENAI_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    send(
+        &mut input,
+        &ClientMessage::Initialize {
+            request_id: "init".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "integration-test".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .await;
+    send(
+        &mut input,
+        &ClientMessage::SessionStart {
+            request_id: "session".into(),
+            cwd: workspace.path().display().to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+            no_tools: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_event(&mut lines).await,
+        ServerEvent::Initialized { .. }
+    ));
+    let session_id = match next_event(&mut lines).await {
+        ServerEvent::SessionStarted { session_id, .. } => session_id,
+        event => panic!("expected session.started, received {event:?}"),
+    };
+    send(
+        &mut input,
+        &ClientMessage::TurnStart {
+            request_id: "turn".into(),
+            session_id,
+            prompt: "say hello".into(),
+        },
+    )
+    .await;
+
+    let (code, message) = loop {
+        match next_event(&mut lines).await {
+            ServerEvent::TurnFailed { code, message, .. } => break (code, message),
+            ServerEvent::TurnCompleted { .. } => panic!("a provider error completed the turn"),
+            ServerEvent::AssistantCompleted { content, .. } => {
+                panic!("a provider error produced an assistant message {content:?}")
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(code, "provider_error");
+    assert!(message.contains("model is not available"), "{message}");
+
+    input.shutdown().await.unwrap();
+    drop(input);
+    provider.join().unwrap();
+    assert!(
+        timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
 async fn tool_results_are_replayed_after_their_calls() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

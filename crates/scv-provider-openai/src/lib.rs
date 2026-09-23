@@ -20,6 +20,11 @@ pub struct ProviderLimits {
     pub max_assistant_bytes: usize,
     pub max_tool_calls: usize,
     pub max_tool_arguments_bytes: usize,
+    /// Extra attempts after a transient failure (429, 5xx, overload, a
+    /// dropped stream), made only while nothing has streamed yet.
+    pub max_retries: usize,
+    /// First backoff delay; each retry doubles it, with jitter.
+    pub retry_base_delay: Duration,
 }
 
 impl Default for ProviderLimits {
@@ -30,7 +35,47 @@ impl Default for ProviderLimits {
             max_assistant_bytes: 1024 * 1024,
             max_tool_calls: 32,
             max_tool_arguments_bytes: 256 * 1024,
+            max_retries: 2,
+            retry_base_delay: Duration::from_secs(1),
         }
+    }
+}
+
+/// The longest `Retry-After` SCV waits for; a provider asking for more is
+/// reported instead of retried.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Provider-supplied error text is bounded before it reaches clients.
+const MAX_ERROR_CHARS: usize = 300;
+
+/// Why one request attempt failed, and whether another attempt may help.
+struct AttemptFailure {
+    error: ProviderError,
+    transient: bool,
+    retry_after: Option<Duration>,
+}
+
+impl AttemptFailure {
+    fn fatal(error: ProviderError) -> Self {
+        Self {
+            error,
+            transient: false,
+            retry_after: None,
+        }
+    }
+
+    fn transient(message: impl Into<String>) -> Self {
+        Self {
+            error: ProviderError::new(ProviderErrorKind::Provider, message),
+            transient: true,
+            retry_after: None,
+        }
+    }
+}
+
+impl From<ProviderError> for AttemptFailure {
+    fn from(error: ProviderError) -> Self {
+        Self::fatal(error)
     }
 }
 
@@ -88,14 +133,20 @@ impl OpenAiProvider {
         &self,
         response: reqwest::Response,
         cancellation: &CancellationToken,
-    ) -> ProviderError {
+    ) -> AttemptFailure {
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::with_capacity(4096);
         while bytes.len() < 4096 {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = cancellation.cancelled() => return cancelled(),
+                _ = cancellation.cancelled() => return AttemptFailure::fatal(cancelled()),
             };
             let Some(chunk) = chunk else {
                 break;
@@ -104,37 +155,78 @@ impl OpenAiProvider {
             let remaining = 4096 - bytes.len();
             bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         }
-        let body = String::from_utf8_lossy(&bytes).replace(&self.api_key, "[REDACTED]");
-        ProviderError::new(
-            ProviderErrorKind::Provider,
-            format!("provider returned HTTP {status}: {body}"),
-        )
+        let detail = match error_details(&bytes) {
+            Some(details) => details.describe(),
+            None => String::from_utf8_lossy(&bytes).into_owned(),
+        };
+        AttemptFailure {
+            error: ProviderError::new(
+                ProviderErrorKind::Provider,
+                format!(
+                    "provider returned HTTP {status}: {}",
+                    self.sanitize(&detail)
+                ),
+            ),
+            transient: status.as_u16() == 429 || status.is_server_error(),
+            retry_after,
+        }
     }
-}
 
-#[async_trait]
-impl Provider for OpenAiProvider {
-    fn model(&self) -> &str {
-        &self.model
+    /// Redacts the credential, flattens control characters, and bounds text
+    /// the provider chose to send before it reaches clients and logs.
+    fn sanitize(&self, text: &str) -> String {
+        let text = text.replace(&self.api_key, "[REDACTED]");
+        let mut cleaned: String = text
+            .trim()
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(MAX_ERROR_CHARS)
+            .collect();
+        if text.trim().chars().count() > MAX_ERROR_CHARS {
+            cleaned.push('…');
+        }
+        cleaned
     }
 
-    async fn complete(
+    fn provider_failure(&self, details: &ErrorDetails, context: &str) -> AttemptFailure {
+        AttemptFailure {
+            error: ProviderError::new(
+                ProviderErrorKind::Provider,
+                format!("{context}: {}", self.sanitize(&details.describe())),
+            ),
+            transient: details.is_transient(),
+            retry_after: None,
+        }
+    }
+
+    /// Sends one request and reads its whole stream. `emitted` records
+    /// whether any output arrived, after which a retry could duplicate it.
+    async fn attempt(
         &self,
-        request: ProviderRequest,
-        deltas: Arc<dyn TextDeltaSink>,
-        cancellation: CancellationToken,
-    ) -> Result<AssistantResponse, ProviderError> {
+        body: &Value,
+        deltas: &Arc<dyn TextDeltaSink>,
+        cancellation: &CancellationToken,
+        emitted: &mut bool,
+    ) -> Result<AssistantResponse, AttemptFailure> {
         let response = tokio::select! {
             result = self.client
                 .post(format!("{}/responses", self.base_url))
                 .bearer_auth(&self.api_key)
                 .headers(self.headers.clone().into_iter().filter_map(|(k,v)| Some((k.parse().ok()?, v.parse().ok()?))).collect())
-                .json(&self.request_body(&request))
-                .send() => result.map_err(|error| ProviderError::new(ProviderErrorKind::Provider, error.to_string()))?,
-            _ = cancellation.cancelled() => return Err(cancelled()),
+                .json(body)
+                .send() => result.map_err(|error| {
+                    // Nothing reached the provider when the connection failed.
+                    let transient = error.is_connect();
+                    AttemptFailure {
+                        error: ProviderError::new(ProviderErrorKind::Provider, self.sanitize(&error.to_string())),
+                        transient,
+                        retry_after: None,
+                    }
+                })?,
+            _ = cancellation.cancelled() => return Err(cancelled().into()),
         };
         if !response.status().is_success() {
-            return Err(self.response_error(response, &cancellation).await);
+            return Err(self.response_error(response, cancellation).await);
         }
 
         let mut stream = response.bytes_stream();
@@ -142,36 +234,51 @@ impl Provider for OpenAiProvider {
         let mut response_bytes = 0usize;
         let mut content = String::new();
         let mut calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
-        let usage = Usage::default();
+        let mut usage = Usage::default();
         let mut done = false;
 
         while !done {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = cancellation.cancelled() => return Err(cancelled()),
+                _ = cancellation.cancelled() => return Err(cancelled().into()),
             };
             let Some(chunk) = chunk else { break };
-            let chunk = chunk.map_err(|error| {
-                ProviderError::new(ProviderErrorKind::Provider, error.to_string())
+            let chunk = chunk.map_err(|error| AttemptFailure {
+                error: ProviderError::new(
+                    ProviderErrorKind::Provider,
+                    format!(
+                        "provider stream failed: {}",
+                        self.sanitize(&error.to_string())
+                    ),
+                ),
+                // The request timeout bounds a whole response; repeating a
+                // response that ran out of time would only multiply the wait.
+                transient: !error.is_timeout(),
+                retry_after: None,
             })?;
             response_bytes = response_bytes.saturating_add(chunk.len());
             if response_bytes > self.limits.max_response_bytes {
-                return Err(limit_error("provider response exceeded byte limit"));
+                return Err(limit_error("provider response exceeded byte limit").into());
             }
             buffer.extend_from_slice(&chunk);
             if buffer.len() > self.limits.max_sse_event_bytes
                 && find_event_boundary(&buffer).is_none()
             {
-                return Err(limit_error("provider SSE event exceeded byte limit"));
+                return Err(limit_error("provider SSE event exceeded byte limit").into());
             }
             while let Some((end, separator_len)) = find_event_boundary(&buffer) {
                 let event = buffer.drain(..end).collect::<Vec<_>>();
                 buffer.drain(..separator_len);
                 if event.len() > self.limits.max_sse_event_bytes {
-                    return Err(limit_error("provider SSE event exceeded byte limit"));
+                    return Err(limit_error("provider SSE event exceeded byte limit").into());
                 }
+                let mut event_name: &[u8] = b"";
                 for line in event.split(|byte| *byte == b'\n') {
                     let line = line.strip_suffix(b"\r").unwrap_or(line);
+                    if let Some(name) = line.strip_prefix(b"event:") {
+                        event_name = name.strip_prefix(b" ").unwrap_or(name);
+                        continue;
+                    }
                     let Some(data) = line.strip_prefix(b"data:") else {
                         continue;
                     };
@@ -183,50 +290,122 @@ impl Provider for OpenAiProvider {
                     if data.is_empty() {
                         continue;
                     }
-                    let event: ResponseEvent = serde_json::from_slice(data).map_err(|error| {
-                        ProviderError::new(
-                            ProviderErrorKind::Provider,
-                            format!("invalid provider stream JSON: {error}"),
-                        )
-                    })?;
-                    if event.event_type == "response.output_text.delta" {
-                        if let Some(delta) = event.delta {
-                            if content.len().saturating_add(delta.len())
-                                > self.limits.max_assistant_bytes
-                            {
-                                return Err(limit_error("assistant response exceeded byte limit"));
+                    let mut event: ResponseEvent = match serde_json::from_slice(data) {
+                        Ok(event) => event,
+                        // An `error` event whose data is not JSON still
+                        // carries the provider's reason.
+                        Err(_) if event_name == b"error" => {
+                            let details = ErrorDetails {
+                                message: Some(String::from_utf8_lossy(data).into_owned()),
+                                ..Default::default()
+                            };
+                            return Err(self.provider_failure(&details, "provider stream error"));
+                        }
+                        Err(error) => {
+                            return Err(ProviderError::new(
+                                ProviderErrorKind::Provider,
+                                format!("invalid provider stream JSON: {error}"),
+                            )
+                            .into());
+                        }
+                    };
+                    if event.event_type.is_empty() {
+                        event.event_type = String::from_utf8_lossy(event_name).into_owned();
+                    }
+                    match event.event_type.as_str() {
+                        "response.output_text.delta" => {
+                            if let Some(delta) = event.delta {
+                                if content.len().saturating_add(delta.len())
+                                    > self.limits.max_assistant_bytes
+                                {
+                                    return Err(limit_error(
+                                        "assistant response exceeded byte limit",
+                                    )
+                                    .into());
+                                }
+                                *emitted = true;
+                                content.push_str(&delta);
+                                deltas.push(&delta).await?;
                             }
-                            content.push_str(&delta);
-                            deltas.push(&delta).await?;
                         }
-                    } else if event.event_type == "response.function_call_arguments.delta" {
-                        if let Some(delta) = event.delta {
-                            let call = calls.entry(event.output_index.unwrap_or(0)).or_default();
-                            call.arguments.push_str(&delta);
+                        "response.function_call_arguments.delta" => {
+                            if let Some(delta) = event.delta {
+                                *emitted = true;
+                                let call =
+                                    calls.entry(event.output_index.unwrap_or(0)).or_default();
+                                call.arguments.push_str(&delta);
+                            }
                         }
-                    } else if event.event_type == "response.output_item.done" {
-                        if let Some(item) = event.item
-                            && item.kind.as_deref() == Some("function_call")
-                        {
-                            let call = calls.entry(event.output_index.unwrap_or(0)).or_default();
-                            call.id = item.call_id.unwrap_or_default();
-                            call.name = item.name.unwrap_or_default();
+                        "response.output_item.done" => {
+                            if let Some(item) = event.item
+                                && item.kind.as_deref() == Some("function_call")
+                            {
+                                *emitted = true;
+                                let call =
+                                    calls.entry(event.output_index.unwrap_or(0)).or_default();
+                                call.id = item.call_id.unwrap_or_default();
+                                call.name = item.name.unwrap_or_default();
+                            }
                         }
-                    } else if event.event_type == "response.completed" {
-                        if let Some(summary) = event.response.and_then(|r| r.usage) {
-                            /* usage is reported by the server event */
-                            let _ = summary;
+                        "response.completed" => {
+                            if let Some(reported) =
+                                event.response.and_then(|response| response.usage)
+                            {
+                                usage = Usage {
+                                    input_tokens: reported.input_tokens,
+                                    output_tokens: reported.output_tokens,
+                                };
+                            }
+                            done = true;
                         }
-                        done = true;
+                        "error" => {
+                            let details = match event.error {
+                                Some(error) => ErrorDetails::from_value(&error),
+                                None => ErrorDetails::from_value(
+                                    &json!({"code": event.code, "message": event.message}),
+                                ),
+                            };
+                            return Err(self.provider_failure(&details, "provider stream error"));
+                        }
+                        "response.failed" => {
+                            let details = event
+                                .response
+                                .and_then(|response| response.error)
+                                .map(|error| ErrorDetails::from_value(&error))
+                                .unwrap_or_default();
+                            return Err(self.provider_failure(&details, "provider response failed"));
+                        }
+                        "response.incomplete" => {
+                            let reason = event
+                                .response
+                                .and_then(|response| response.incomplete_details)
+                                .and_then(|details| details.reason)
+                                .unwrap_or_else(|| "unknown reason".into());
+                            return Err(ProviderError::new(
+                                ProviderErrorKind::Provider,
+                                format!("provider response incomplete: {}", self.sanitize(&reason)),
+                            )
+                            .into());
+                        }
+                        _ => {}
                     }
                 }
             }
         }
 
         if !buffer.iter().all(u8::is_ascii_whitespace) {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Provider,
+            // Some providers answer an accepted request with a bare JSON
+            // error body instead of an event stream.
+            if let Some(details) = error_details(&buffer) {
+                return Err(self.provider_failure(&details, "provider error"));
+            }
+            return Err(AttemptFailure::transient(
                 "provider stream ended with an incomplete SSE event",
+            ));
+        }
+        if !done {
+            return Err(AttemptFailure::transient(
+                "provider stream ended before the response completed",
             ));
         }
 
@@ -264,6 +443,82 @@ impl Provider for OpenAiProvider {
             usage,
         })
     }
+}
+
+/// The delay before retry number `retry` (0-based): the base doubled per
+/// retry, scaled by a random factor in [0.5, 1.5) so clients spread out.
+fn backoff(base: Duration, retry: usize) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let exponential = base.saturating_mul(1u32 << retry.min(16));
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let factor = 0.5 + (random % 1000) as f64 / 1000.0;
+    exponential.mul_f64(factor)
+}
+
+#[async_trait]
+impl Provider for OpenAiProvider {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    async fn complete(
+        &self,
+        request: ProviderRequest,
+        deltas: Arc<dyn TextDeltaSink>,
+        cancellation: CancellationToken,
+    ) -> Result<AssistantResponse, ProviderError> {
+        let body = self.request_body(&request);
+        let mut retry = 0;
+        loop {
+            let mut emitted = false;
+            let failure = match self
+                .attempt(&body, &deltas, &cancellation, &mut emitted)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(failure) => failure,
+            };
+            let attempts = retry + 1;
+            // A retry after streamed output would repeat it, so only a
+            // failure before any output is retried.
+            if !failure.transient || emitted {
+                return Err(failure.error);
+            }
+            if retry >= self.limits.max_retries {
+                return Err(gave_up(failure.error, attempts));
+            }
+            let delay = failure
+                .retry_after
+                .unwrap_or_else(|| backoff(self.limits.retry_base_delay, retry));
+            if delay > MAX_RETRY_DELAY {
+                return Err(gave_up(failure.error, attempts));
+            }
+            tracing::warn!(
+                "provider request failed ({}); retrying in {} ms (retry {} of {})",
+                failure.error.message,
+                delay.as_millis(),
+                retry + 1,
+                self.limits.max_retries
+            );
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                _ = cancellation.cancelled() => return Err(cancelled()),
+            }
+            retry += 1;
+        }
+    }
+}
+
+fn gave_up(error: ProviderError, attempts: usize) -> ProviderError {
+    if attempts == 1 {
+        return error;
+    }
+    ProviderError::new(
+        error.kind,
+        format!("{} (gave up after {attempts} attempts)", error.message),
+    )
 }
 
 /// Replays the conversation as Responses input items.
@@ -365,21 +620,120 @@ struct PartialToolCall {
 
 #[derive(Debug, Deserialize)]
 struct ResponseEvent {
-    #[serde(rename = "type")]
+    /// Empty when the provider names the event only on its `event:` line.
+    #[serde(rename = "type", default)]
     event_type: String,
     delta: Option<String>,
     output_index: Option<usize>,
     item: Option<ResponseItem>,
     response: Option<ResponseSummary>,
+    /// An `error` event carries its details either nested or at top level.
+    error: Option<Value>,
+    code: Option<Value>,
+    message: Option<Value>,
 }
 #[derive(Debug, Deserialize)]
 struct ResponseSummary {
     usage: Option<ResponseUsage>,
+    error: Option<Value>,
+    incomplete_details: Option<IncompleteDetails>,
+}
+#[derive(Debug, Deserialize)]
+struct IncompleteDetails {
+    reason: Option<String>,
+}
+
+/// A provider error as OpenAI-compatible endpoints report it.
+#[derive(Debug, Default)]
+struct ErrorDetails {
+    kind: Option<Value>,
+    code: Option<Value>,
+    message: Option<String>,
+}
+
+impl ErrorDetails {
+    /// Accepts an error object or a bare string; other fields are ignored.
+    fn from_value(value: &Value) -> Self {
+        match value {
+            Value::String(message) => Self {
+                message: Some(message.clone()),
+                ..Default::default()
+            },
+            Value::Object(object) => Self {
+                kind: object.get("type").cloned(),
+                code: object.get("code").cloned(),
+                message: object.get("message").map(|message| match message {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                }),
+            },
+            _ => Self::default(),
+        }
+    }
+
+    fn labels(&self) -> impl Iterator<Item = String> + '_ {
+        [&self.code, &self.kind]
+            .into_iter()
+            .flatten()
+            .filter_map(|value| match value {
+                Value::String(text) => Some(text.clone()),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            })
+            .filter(|label| !label.is_empty())
+    }
+
+    fn describe(&self) -> String {
+        let mut labels: Vec<String> = self.labels().collect();
+        labels.dedup();
+        let message = self
+            .message
+            .as_deref()
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or("no details");
+        if labels.is_empty() {
+            message.to_owned()
+        } else {
+            format!("{message} ({})", labels.join(", "))
+        }
+    }
+
+    /// Overload, rate-limit, and server-side errors may clear on retry;
+    /// request and policy errors will not.
+    fn is_transient(&self) -> bool {
+        const TRANSIENT: [&str; 5] = [
+            "overload",
+            "unavailable",
+            "rate_limit",
+            "server_error",
+            "timeout",
+        ];
+        self.labels().any(|label| {
+            let label = label.to_ascii_lowercase();
+            TRANSIENT.iter().any(|needle| label.contains(needle))
+        }) || self
+            .message
+            .as_deref()
+            .is_some_and(|message| message.to_ascii_lowercase().contains("overloaded"))
+    }
+}
+
+/// Reads a JSON error body such as `{"error":{"message":…}}`, optionally
+/// behind a `data:` prefix, from bytes that are not a complete event stream.
+fn error_details(bytes: &[u8]) -> Option<ErrorDetails> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    let text = text
+        .strip_prefix("data:")
+        .map(str::trim_start)
+        .unwrap_or(text);
+    let value: Value = serde_json::from_str(text).ok()?;
+    let details = ErrorDetails::from_value(value.get("error").unwrap_or(&value));
+    (details.message.is_some() || details.code.is_some()).then_some(details)
 }
 #[derive(Debug, Deserialize)]
 struct ResponseUsage {
-    _input_tokens: Option<u64>,
-    _output_tokens: Option<u64>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
 }
 #[derive(Debug, Deserialize)]
 struct ResponseItem {
@@ -593,5 +947,361 @@ mod tests {
                 "strict":false
             }])
         );
+    }
+
+    mod stream_errors {
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        use super::*;
+
+        const KEY: &str = "sk-test-secret";
+        const OVERLOADED: &str = r#"{"type":"error","error":{"type":"service_unavailable_error","code":"service_unavailable_error","message":"Our servers are currently overloaded"}}"#;
+
+        fn sse(body: &str) -> String {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        }
+
+        fn status(line: &str, headers: &str, body: &str) -> String {
+            format!(
+                "HTTP/1.1 {line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+                body.len()
+            )
+        }
+
+        fn event(data: &str) -> String {
+            format!("data: {data}\n\n")
+        }
+
+        fn hello() -> String {
+            sse(&[
+                event(r#"{"type":"response.output_text.delta","delta":"hello"}"#),
+                event(r#"{"type":"response.completed","response":{"usage":{"input_tokens":5,"output_tokens":1}}}"#),
+            ]
+            .concat())
+        }
+
+        /// Answers each request with the next canned response and counts
+        /// the requests it received.
+        async fn serve(responses: Vec<String>) -> (String, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            let count = Arc::new(AtomicUsize::new(0));
+            let served = Arc::clone(&count);
+            tokio::spawn(async move {
+                for response in responses {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    served.fetch_add(1, Ordering::SeqCst);
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 8192];
+                    loop {
+                        let read = stream.read(&mut buffer).await.unwrap();
+                        request.extend_from_slice(&buffer[..read]);
+                        let text = String::from_utf8_lossy(&request);
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length: usize = text[..end]
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse().unwrap())
+                                })
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                        if read == 0 {
+                            break;
+                        }
+                    }
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    let _ = stream.shutdown().await;
+                }
+            });
+            (base, count)
+        }
+
+        fn provider(
+            base: String,
+            max_retries: usize,
+            retry_base_delay: Duration,
+        ) -> OpenAiProvider {
+            OpenAiProvider::new(
+                "model".into(),
+                base,
+                KEY.into(),
+                Duration::from_secs(10),
+                ProviderLimits {
+                    max_retries,
+                    retry_base_delay,
+                    ..ProviderLimits::default()
+                },
+                Default::default(),
+            )
+            .unwrap()
+        }
+
+        #[derive(Default)]
+        struct Recorder(Mutex<String>);
+
+        #[async_trait]
+        impl TextDeltaSink for Recorder {
+            async fn push(&self, delta: &str) -> Result<(), ProviderError> {
+                self.0.lock().unwrap().push_str(delta);
+                Ok(())
+            }
+        }
+
+        async fn run(
+            provider: &OpenAiProvider,
+            cancellation: CancellationToken,
+        ) -> (Result<AssistantResponse, ProviderError>, String) {
+            let recorder = Arc::new(Recorder::default());
+            let result = provider
+                .complete(
+                    ProviderRequest {
+                        system_prompt: String::new(),
+                        messages: vec![user("hi")],
+                        tools: Vec::new(),
+                    },
+                    Arc::clone(&recorder) as Arc<dyn TextDeltaSink>,
+                    cancellation,
+                )
+                .await;
+            let text = recorder.0.lock().unwrap().clone();
+            (result, text)
+        }
+
+        const FAST: Duration = Duration::from_millis(10);
+
+        #[tokio::test]
+        async fn an_overload_is_retried_and_the_second_attempt_succeeds() {
+            let (base, count) = serve(vec![sse(&event(OVERLOADED)), hello()]).await;
+            let (result, streamed) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            let response = result.unwrap();
+            assert_eq!(response.content, "hello");
+            assert_eq!(streamed, "hello");
+            assert_eq!(response.usage.input_tokens, Some(5));
+            assert_eq!(response.usage.output_tokens, Some(1));
+            assert_eq!(count.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn an_error_event_after_output_fails_without_a_retry() {
+            let body = [
+                event(r#"{"type":"response.output_text.delta","delta":"partial"}"#),
+                event(OVERLOADED),
+            ]
+            .concat();
+            let (base, count) = serve(vec![sse(&body), hello()]).await;
+            let (result, streamed) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            let error = result.unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::Provider);
+            assert!(
+                error
+                    .message
+                    .contains("Our servers are currently overloaded"),
+                "{}",
+                error.message
+            );
+            assert_eq!(streamed, "partial");
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn a_request_error_event_is_reported_without_a_retry() {
+            let body = format!(
+                "event: error\n{}",
+                event(r#"{"code":"invalid_prompt","message":"prompt rejected"}"#)
+            );
+            let (base, count) = serve(vec![sse(&body), hello()]).await;
+            let (result, _) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            let message = result.unwrap_err().message;
+            assert_eq!(
+                message,
+                "provider stream error: prompt rejected (invalid_prompt)"
+            );
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn response_failed_and_incomplete_are_errors() {
+            let failed = event(
+                r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"invalid_image","message":"cannot read image"}}}"#,
+            );
+            let incomplete = event(
+                r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#,
+            );
+            let transient = event(
+                r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"try later"}}}"#,
+            );
+            let (base, count) = serve(vec![
+                sse(&failed),
+                sse(&incomplete),
+                sse(&transient),
+                hello(),
+            ])
+            .await;
+            let provider = provider(base, 2, FAST);
+            let (result, _) = run(&provider, CancellationToken::new()).await;
+            assert_eq!(
+                result.unwrap_err().message,
+                "provider response failed: cannot read image (invalid_image)"
+            );
+            let (result, _) = run(&provider, CancellationToken::new()).await;
+            assert_eq!(
+                result.unwrap_err().message,
+                "provider response incomplete: max_output_tokens"
+            );
+            // A server-side failure is transient and the retry succeeds.
+            let (result, _) = run(&provider, CancellationToken::new()).await;
+            assert_eq!(result.unwrap().content, "hello");
+            assert_eq!(count.load(Ordering::SeqCst), 4);
+        }
+
+        #[tokio::test]
+        async fn a_stream_that_ends_early_is_retried_and_then_reported() {
+            let early = sse(": keep-alive\n\n");
+            let (base, count) = serve(vec![early.clone(), early.clone(), early]).await;
+            let (result, streamed) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            assert_eq!(
+                result.unwrap_err().message,
+                "provider stream ended before the response completed (gave up after 3 attempts)"
+            );
+            assert!(streamed.is_empty());
+            assert_eq!(count.load(Ordering::SeqCst), 3);
+        }
+
+        #[tokio::test]
+        async fn a_plain_json_error_body_is_reported() {
+            let body = r#":
+
+{"error":{"message":"Our servers are currently overloaded","type":"service_unavailable_error"}}"#;
+            let (base, count) = serve(vec![sse(body), sse(body)]).await;
+            let (result, _) = run(&provider(base, 1, FAST), CancellationToken::new()).await;
+            assert_eq!(
+                result.unwrap_err().message,
+                "provider error: Our servers are currently overloaded (service_unavailable_error) (gave up after 2 attempts)"
+            );
+            assert_eq!(count.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn http_statuses_retry_only_when_transient() {
+            let bad_request = status(
+                "400 Bad Request",
+                "",
+                r#"{"error":{"message":"unknown model","type":"invalid_request_error"}}"#,
+            );
+            let unavailable = status("503 Service Unavailable", "", "upstream down");
+            let (base, count) = serve(vec![bad_request, unavailable, hello()]).await;
+            let provider = provider(base, 2, FAST);
+            let (result, _) = run(&provider, CancellationToken::new()).await;
+            assert_eq!(
+                result.unwrap_err().message,
+                "provider returned HTTP 400 Bad Request: unknown model (invalid_request_error)"
+            );
+            let (result, _) = run(&provider, CancellationToken::new()).await;
+            assert_eq!(result.unwrap().content, "hello");
+            assert_eq!(count.load(Ordering::SeqCst), 3);
+        }
+
+        #[tokio::test]
+        async fn retry_after_is_honoured_up_to_a_minute() {
+            let limited = status("429 Too Many Requests", "Retry-After: 1\r\n", "{}");
+            let (base, count) = serve(vec![limited, hello()]).await;
+            let started = std::time::Instant::now();
+            let (result, _) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            assert_eq!(result.unwrap().content, "hello");
+            assert!(started.elapsed() >= Duration::from_secs(1));
+            assert_eq!(count.load(Ordering::SeqCst), 2);
+
+            let too_long = status("429 Too Many Requests", "Retry-After: 3600\r\n", "{}");
+            let (base, count) = serve(vec![too_long, hello()]).await;
+            let (result, _) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            assert!(
+                result
+                    .unwrap_err()
+                    .message
+                    .starts_with("provider returned HTTP 429")
+            );
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn cancellation_interrupts_the_backoff() {
+            let (base, count) =
+                serve(vec![status("503 Service Unavailable", "", "{}"), hello()]).await;
+            let provider = provider(base, 2, Duration::from_secs(30));
+            let cancellation = CancellationToken::new();
+            let cancel = cancellation.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                cancel.cancel();
+            });
+            let started = std::time::Instant::now();
+            let (result, _) = run(&provider, cancellation).await;
+            assert_eq!(result.unwrap_err().kind, ProviderErrorKind::Cancelled);
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn provider_error_text_is_redacted_flattened_and_bounded() {
+            let message = format!("key {KEY} leaked\nline two {}", "x".repeat(400));
+            let body =
+                event(&json!({"type":"error","message":message,"code":"invalid"}).to_string());
+            let (base, _) = serve(vec![sse(&body)]).await;
+            let (result, _) = run(&provider(base, 0, FAST), CancellationToken::new()).await;
+            let message = result.unwrap_err().message;
+            assert!(!message.contains(KEY));
+            assert!(message.contains("[REDACTED] leaked line two"));
+            assert!(!message.contains('\n'));
+            assert!(message.ends_with('…'));
+            assert!(
+                message.chars().count() <= "provider stream error: ".len() + MAX_ERROR_CHARS + 1
+            );
+        }
+
+        #[test]
+        fn error_bodies_are_read_in_their_common_shapes() {
+            let nested =
+                error_details(br#"{"error":{"message":"m","code":"c","type":"t"}}"#).unwrap();
+            assert_eq!(nested.describe(), "m (c, t)");
+            let flat = error_details(br#"data: {"message":"m","code":429}"#).unwrap();
+            assert_eq!(flat.describe(), "m (429)");
+            let text = error_details(br#"{"error":"overloaded, retry"}"#).unwrap();
+            assert_eq!(text.describe(), "overloaded, retry");
+            assert!(error_details(b"not json").is_none());
+            assert!(error_details(br#"{"ok":true}"#).is_none());
+            assert!(
+                ErrorDetails::from_value(&json!({"type":"rate_limit_exceeded"})).is_transient()
+            );
+            assert!(ErrorDetails::from_value(&json!("The engine is overloaded")).is_transient());
+            assert!(
+                !ErrorDetails::from_value(&json!({"code":"invalid_request_error","message":"no"}))
+                    .is_transient()
+            );
+        }
+
+        #[test]
+        fn backoff_doubles_with_jitter() {
+            for retry in 0..4 {
+                let delay = backoff(Duration::from_secs(1), retry);
+                let nominal = Duration::from_secs(1 << retry);
+                assert!(delay >= nominal / 2 && delay < nominal * 3 / 2, "{delay:?}");
+            }
+        }
     }
 }
