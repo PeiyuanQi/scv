@@ -86,7 +86,8 @@ enum Command {
         #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
         base_url: String,
     },
-    /// Sign in the Claude Code and Codex CLIs that SCV delegates to.
+    /// Sign in the agent CLIs SCV delegates to (Claude Code, Codex, Grok
+    /// Build, DeepSeek Harness, pi).
     ///
     /// Each agent keeps its own credentials in SCV's private adapter home
     /// (`<SCV home>/adapters/<agent>`), separate from your personal login.
@@ -142,63 +143,77 @@ enum ClawbotCommand {
 
 #[derive(Subcommand)]
 enum AgentsCommand {
-    /// Run the agent's own interactive sign-in inside SCV's adapter home.
+    /// Sign an agent in inside SCV's adapter home: the agent's own login, or
+    /// a key prompt for agents that use an API key.
     Login {
-        agent: AgentArg,
+        #[arg(value_parser = agent_names())]
+        agent: String,
+        /// pi only: configure an OpenAI-compatible endpoint as pi's default,
+        /// prompting for anything not given; the key is never an argument.
+        #[arg(long)]
+        openai_compatible: bool,
+        /// With --openai-compatible: the endpoint's base URL (e.g. https://host/v1).
+        #[arg(long, requires = "openai_compatible")]
+        base_url: Option<String>,
+        /// With --openai-compatible: the endpoint's wire protocol.
+        #[arg(long, value_enum, requires = "openai_compatible")]
+        wire_api: Option<WireApiArg>,
+        /// With --openai-compatible: the default model id.
+        #[arg(long, requires = "openai_compatible")]
+        model: Option<String>,
         /// Extra arguments for the agent's login, after `--`
         /// (e.g. `scv agents login codex -- --device-auth`).
         #[arg(last = true)]
         extra: Vec<String>,
     },
     /// Show whether the delegated agents are signed in for SCV.
-    Status { agent: Option<AgentArg> },
+    Status {
+        #[arg(value_parser = agent_names())]
+        agent: Option<String>,
+    },
     /// Remove an agent's SCV-private sign-in; your own login is untouched.
-    Logout { agent: AgentArg },
-    /// Copy your own Codex setup into SCV's adapter home: config.toml (custom
-    /// providers, model, policies) and auth.json when it holds an API key.
-    /// A ChatGPT sign-in is never copied; use `login` for that.
+    Logout {
+        #[arg(value_parser = agent_names())]
+        agent: String,
+    },
+    /// Copy a setup into SCV's adapter home. `codex`: your own config.toml
+    /// and an API-key auth.json (never a ChatGPT sign-in). `pi
+    /// --from-scv-provider`: SCV's own OpenAI-compatible provider as pi's default.
     Import {
-        agent: AgentArg,
+        #[arg(value_parser = agent_names())]
+        agent: String,
         /// Codex home to copy from [default: $CODEX_HOME or ~/.codex].
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
+        /// pi: use SCV's active provider (base URL, model, and key).
+        #[arg(long)]
+        from_scv_provider: bool,
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum AgentArg {
-    Claude,
-    Codex,
+fn agent_names() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
+        scv_server::adapters::ADAPTERS
+            .iter()
+            .map(|adapter| adapter.name),
+    )
 }
 
-impl AgentArg {
-    const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+fn agent_descriptor(name: &str) -> Result<&'static scv_server::adapters::AdapterDescriptor> {
+    scv_server::adapters::adapter(name).with_context(|| format!("unknown agent {name}"))
+}
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-        }
-    }
+#[derive(Clone, Copy, ValueEnum)]
+enum WireApiArg {
+    Responses,
+    Chat,
+}
 
-    fn login_args(self) -> &'static [&'static str] {
-        match self {
-            Self::Claude => &["auth", "login"],
-            Self::Codex => &["login"],
-        }
-    }
-
-    fn status_args(self) -> &'static [&'static str] {
-        match self {
-            Self::Claude => &["auth", "status", "--text"],
-            Self::Codex => &["login", "status"],
-        }
-    }
-
-    fn logout_args(self) -> &'static [&'static str] {
-        match self {
-            Self::Claude => &["auth", "logout"],
-            Self::Codex => &["logout"],
+impl From<WireApiArg> for scv_server::WireApi {
+    fn from(value: WireApiArg) -> Self {
+        match value {
+            WireApiArg::Responses => Self::Responses,
+            WireApiArg::Chat => Self::ChatCompletions,
         }
     }
 }
@@ -643,19 +658,73 @@ async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> 
 }
 
 fn agents(command: AgentsCommand) -> Result<()> {
+    use scv_server::adapters::{Login, Logout, Status};
     match command {
-        AgentsCommand::Login { agent, extra } => {
-            let name = agent.name();
+        AgentsCommand::Login {
+            agent,
+            openai_compatible,
+            base_url,
+            wire_api,
+            model,
+            extra,
+        } => {
+            let adapter = agent_descriptor(&agent)?;
+            let name = adapter.name;
+            if openai_compatible {
+                if name != "pi" {
+                    bail!(
+                        "--openai-compatible configures pi; {name} signs in with `scv agents login {name}`"
+                    );
+                }
+                let endpoint = scv_server::Endpoint {
+                    base_url: match base_url {
+                        Some(url) => url,
+                        None => prompt_line("Base URL (e.g. https://host/v1)")?,
+                    },
+                    api: match wire_api {
+                        Some(api) => api.into(),
+                        None => match prompt_line("Wire API [responses/chat] (default responses)")?
+                            .as_str()
+                        {
+                            "" | "responses" => scv_server::WireApi::Responses,
+                            "chat" => scv_server::WireApi::ChatCompletions,
+                            other => bail!("unknown wire API {other:?}; use responses or chat"),
+                        },
+                    },
+                    model: match model {
+                        Some(model) => model,
+                        None => prompt_line("Default model id")?,
+                    },
+                };
+                let key = scv_server::read_secret("API key (input hidden)")?;
+                for line in scv_server::configure_pi_endpoint(&endpoint, &key)? {
+                    println!("{line}");
+                }
+                println!("Check with `scv agents status pi`.");
+                return Ok(());
+            }
             println!(
-                "Signing {name} in for SCV's agent_{name} tool (separate from your own {name} login)."
+                "Signing {name} in for SCV's agent_{name} tool (separate from your own {} login).",
+                adapter.product
             );
-            let status = scv_server::agent_command(name)?
-                .args(agent.login_args())
-                .args(&extra)
-                .status()
-                .with_context(|| format!("run {name} sign-in"))?;
-            if !status.success() {
-                bail!("{name} sign-in did not complete");
+            match adapter.login {
+                Login::Command(args) => run_agent(name, args, &extra, "sign-in")?,
+                Login::Interactive { args, hint } => {
+                    println!("Opening {} in SCV's adapter home: {hint}.", adapter.product);
+                    run_agent(name, args, &extra, "sign-in")?;
+                }
+                Login::ApiKey(store) => {
+                    if !extra.is_empty() {
+                        bail!("{name} takes its API key from a prompt or stdin, not arguments");
+                    }
+                    let key = scv_server::read_secret(&format!(
+                        "{} API key (input hidden)",
+                        adapter.product
+                    ))?;
+                    for line in scv_server::store_agent_key(name, store, &key)? {
+                        println!("{line}");
+                    }
+                }
             }
             println!(
                 "Done. `scv agents status` shows the result; the daemon picks it up on the next call."
@@ -663,52 +732,125 @@ fn agents(command: AgentsCommand) -> Result<()> {
             Ok(())
         }
         AgentsCommand::Status { agent } => {
-            let selected = agent.map_or_else(|| AgentArg::ALL.to_vec(), |agent| vec![agent]);
-            for agent in selected {
-                let name = agent.name();
+            let selected: Vec<_> = match agent {
+                Some(name) => vec![agent_descriptor(&name)?],
+                None => scv_server::adapters::ADAPTERS.iter().collect(),
+            };
+            for adapter in selected {
+                let name = adapter.name;
                 println!("{name}:");
-                // The agent prints its own status; a signed-out agent exits
-                // non-zero, and its own advice would sign in the wrong home.
-                match scv_server::agent_command(name)?
-                    .args(agent.status_args())
-                    .status()
-                {
-                    Ok(status) if status.success() => {}
-                    Ok(_) => println!("  Sign in for SCV with: scv agents login {name}"),
-                    Err(error) => println!("  unavailable: {error}"),
+                let installed = scv_server::agent_executable(name)?;
+                if installed.is_none() {
+                    println!(
+                        "  not installed ({:?} is not on PATH or in ~/.local/bin)",
+                        adapter.command
+                    );
+                }
+                match adapter.status {
+                    // The agent prints its own status; a signed-out agent exits
+                    // non-zero, and its own advice would sign in the wrong home.
+                    Status::Command(args) if installed.is_some() => {
+                        match scv_server::agent_command(name)?.args(args).status() {
+                            Ok(status) if status.success() => {}
+                            Ok(_) => println!("  Sign in for SCV with: scv agents login {name}"),
+                            Err(error) => println!("  unavailable: {error}"),
+                        }
+                    }
+                    Status::Command(_) => {}
+                    Status::Stored(store) => {
+                        let (ready, lines) = scv_server::agent_stored_status(name, store)?;
+                        for line in lines {
+                            println!("  {line}");
+                        }
+                        if !ready {
+                            println!("  Sign in for SCV with: scv agents login {name}");
+                        }
+                    }
                 }
             }
             Ok(())
         }
-        AgentsCommand::Import { agent, from } => {
-            if !matches!(agent, AgentArg::Codex) {
-                bail!("only codex can be imported; sign Claude in with `scv agents login claude`");
+        AgentsCommand::Import {
+            agent,
+            from,
+            from_scv_provider,
+        } => match agent.as_str() {
+            "codex" => {
+                if from_scv_provider {
+                    bail!("--from-scv-provider applies to pi; codex imports your own Codex home");
+                }
+                let source = from
+                    .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
+                    })
+                    .context("cannot determine your Codex home; pass --from")?;
+                println!("Importing Codex setup from {}", source.display());
+                for line in scv_server::import_codex(&source)? {
+                    println!("  {line}");
+                }
+                println!(
+                    "This is a copy: re-run after changing your own Codex config. Check with `scv agents status codex`."
+                );
+                Ok(())
             }
-            let source = from
-                .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-                .context("cannot determine your Codex home; pass --from")?;
-            println!("Importing Codex setup from {}", source.display());
-            for line in scv_server::import_codex(&source)? {
-                println!("  {line}");
+            "pi" => {
+                if !from_scv_provider || from.is_some() {
+                    bail!(
+                        "pi imports SCV's own provider: `scv agents import pi --from-scv-provider`"
+                    );
+                }
+                println!("Pointing SCV's pi at SCV's own provider");
+                for line in scv_server::import_pi_from_scv_provider()? {
+                    println!("  {line}");
+                }
+                println!(
+                    "This is a copy: re-run after changing SCV's provider. Check with `scv agents status pi`."
+                );
+                Ok(())
             }
-            println!(
-                "This is a copy: re-run after changing your own Codex config. Check with `scv agents status codex`."
-            );
-            Ok(())
-        }
+            other => {
+                bail!("{other} has nothing to import; sign it in with `scv agents login {other}`")
+            }
+        },
         AgentsCommand::Logout { agent } => {
-            let name = agent.name();
-            let status = scv_server::agent_command(name)?
-                .args(agent.logout_args())
-                .status()
-                .with_context(|| format!("run {name} sign-out"))?;
-            if !status.success() {
-                bail!("{name} sign-out failed");
+            let adapter = agent_descriptor(&agent)?;
+            match adapter.logout {
+                Logout::Command(args) => run_agent(adapter.name, args, &[], "sign-out"),
+                Logout::Stored(store) => {
+                    for line in scv_server::remove_agent_credentials(adapter.name, store)? {
+                        println!("{line}");
+                    }
+                    Ok(())
+                }
             }
-            Ok(())
         }
     }
+}
+
+/// Run an agent's own command inside its SCV adapter home.
+fn run_agent(name: &str, args: &[&str], extra: &[String], action: &str) -> Result<()> {
+    let status = scv_server::agent_command(name)?
+        .args(args)
+        .args(extra)
+        .status()
+        .with_context(|| format!("run {name} {action}"))?;
+    if !status.success() {
+        bail!("{name} {action} did not complete");
+    }
+    Ok(())
+}
+
+/// Read one non-secret line, from the terminal or piped stdin.
+fn prompt_line(prompt: &str) -> Result<String> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    if std::io::stdin().is_terminal() {
+        eprint!("{prompt}: ");
+        std::io::stderr().flush().ok();
+    }
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_owned())
 }
 
 async fn clawbot_run(

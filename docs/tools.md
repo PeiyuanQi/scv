@@ -36,12 +36,12 @@ risk.
 ## `bash`
 
 ```json
-{"command":"cargo test --workspace","timeout_seconds":120}
+{"command":"cargo test --workspace","timeout_seconds":900}
 ```
 
 `command` is passed to `/bin/bash -lc` in the workspace. Without
-`timeout_seconds` a call gets `tools.command_timeout_seconds` (default 120).
-A call may choose any timeout up to `tools.max_timeout_seconds` (default 1800),
+`timeout_seconds` a call gets `tools.command_timeout_seconds` (default 600).
+A call may choose any timeout up to `tools.max_timeout_seconds` (default 14400),
 which the schema advertises as its `maximum`; a larger request is refused
 before approval with an error naming the ceiling. The result contains exit status and bounded
 combined stdout/stderr, with truncation metadata. Shell execution has process
@@ -56,10 +56,17 @@ keep a tool call alive indefinitely.
 
 ## Native agent adapters
 
-The tools `agent_claude`, `agent_codex`, and `agent_pi` share this schema:
+SCV knows five agent CLIs: Claude Code (`agent_claude`), Codex
+(`agent_codex`), Grok Build (`agent_grok`), DeepSeek Harness (`agent_dsh`),
+and pi (`agent_pi`). Each is one descriptor in `scv_tools::adapters` holding
+its default command line, where its state lives inside the private home, the
+variables it must not inherit, and how it signs in; adding an agent is one
+more entry. A session offers only the agents whose executable resolves when
+the session starts, so an agent installed later appears in new sessions.
+They share this schema:
 
 ```json
-{"prompt":"Land the fix with the feature-flow skill.","cwd":"scv","timeout_seconds":1800,"model":"sonnet","effort":"medium"}
+{"prompt":"Land the fix with the feature-flow skill.","cwd":"scv","timeout_seconds":7200,"model":"sonnet","effort":"medium"}
 ```
 
 `cwd` is optional: a directory inside the workspace, relative (such as a
@@ -70,13 +77,14 @@ root. Running in a project directory is how a delegated agent picks up that
 project's `AGENTS.md` or `CLAUDE.md` and its skills (`.agents/skills` for
 Codex, `.claude/skills` for Claude Code), exactly as when the user starts the
 CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
-(default 600) and may be raised up to `tools.max_timeout_seconds` (default
-1800) for long work such as builds, releases, or landing a change.
+(default 3600) and may be raised up to `tools.max_timeout_seconds` (default
+14400) for long work such as builds, releases, or landing a change.
 
 `model` and `effort` are optional and offered only when the adapter configures
 `model_args` or `effort_args`. Their schema descriptions name the adapter's
 model family (Claude aliases such as `sonnet` for `agent_claude`, OpenAI model
-IDs for `agent_codex`) and tell the model to set them only when the user asks,
+IDs for `agent_codex`, Grok model IDs for `agent_grok`, pi model patterns or
+`provider/id` for `agent_pi`) and tell the model to set them only when the user asks,
 so an omitted value leaves the agent's own configured default in place. A
 blank `cwd`, `model`, or `effort` counts as omitted, since models often send
 `""` for an optional field they mean to leave unset. A model is 1-128 ASCII letters, digits, or
@@ -85,15 +93,26 @@ blank `cwd`, `model`, or `effort` counts as omitted, since models often send
 shell text, so the CLI itself reports values it does not support.
 
 Each tool resolves only its configured executable and fixed argument vector,
-adds any selected model/effort arguments, appends the prompt as one argument,
-and starts it directly in the workspace or the selected `cwd`. A prompt cannot start with `-`, so it
-is never read as a flag.
+adds any selected model/effort arguments, then any `prompt_args` (for CLIs
+whose prompt is a flag value, such as `grok -p`), appends the prompt as one
+argument, and starts it directly in the workspace or the selected `cwd`. A
+prompt cannot start with `-`, so it is never read as a flag.
+The executable is looked up in the user's per-user install directories
+(`~/.local/bin`, plus `~/.grok/bin` for Grok) before `PATH`, the order a login
+shell uses, because the user service's `PATH` omits them; the daemon therefore
+runs the same install the user's shell does.
 Native adapters receive an instance-private `HOME`, `SCV_HOME`, and XDG
-configuration/data/state directory, plus `CODEX_HOME` for Codex. SCV selector
-variables, provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, and
-`CLAUDE_CONFIG_DIR` are removed so a nested agent cannot reuse the parent
-instance's configuration or credentials from outside its private home. The `bash` tool retains the normal inherited
-environment for compatibility.
+configuration/data/state directory, plus the agent's own state location inside
+it: `CODEX_HOME`, `GROK_HOME` (`.grok`), `DSH_HOME` (`.dsh`), or
+`PI_CODING_AGENT_DIR` (`.pi/agent`). Grok also gets
+`GROK_DISABLE_AUTOUPDATER=1`. Before those are set, SCV removes every inherited
+variable ending in `_API_KEY`, SCV's selector variables, and each adapter's
+credential, endpoint, and state variables (`ANTHROPIC_*` keys and tokens,
+`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `OPENAI_BASE_URL`,
+`CODEX_BASE_URL`, `GROK_*`, `DSH_*`, `DEEPSEEK_BASE_URL`, `PI_*`, and similar),
+so no nested agent reuses the parent's configuration or another agent's
+credentials from outside its private home. The `bash` tool retains the normal
+inherited environment for compatibility.
 The model cannot supply other flags or a different executable. Output, timeout,
 cancellation, and process-group behavior match `bash`. Adapter execution has
 delegate risk because the child agent may independently read, write, run
@@ -105,7 +124,25 @@ The default invocation contracts are:
 | --- | --- |
 | `agent_claude` | `claude -p [--model <model>] [--effort <effort>] <prompt>` |
 | `agent_codex` | `codex exec [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
-| `agent_pi` | `pi -p <prompt>` |
+| `agent_grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
+| `agent_dsh` | `dsh --profile headless <prompt>` |
+| `agent_pi` | `pi -p [--model <model>] [--thinking <effort>] <prompt>` |
+
+Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness takes its
+model from its profile, so `agent_dsh` offers no `model` or `effort`.
+
+By default SCV adds nothing to an agent's own permission settings, and in
+print mode Claude Code, for example, refuses Bash, Edit, and Write without a
+permission mode. `[agents.<name>] permissions = "full"` is the user's explicit
+opt-in to the CLI's own full-autonomy switches, placed after the fixed
+arguments: `--permission-mode bypassPermissions` for Claude Code (which also
+allows WebSearch and WebFetch), `--dangerously-bypass-approvals-and-sandbox -c
+web_search="live"` for Codex (`codex exec` has no `--search` flag), and
+`--always-approve` for Grok (web search is on by default); DeepSeek Harness
+gets `DSH_PERMISSION_MODE=danger-full-access`, and pi, which has no approval
+prompts, sandbox, or built-in web search, gets nothing. The approval summary
+then states `FULL PERMISSIONS`. See
+[Agent permissions](configuration.md#agent-permissions).
 
 Before approval, SCV resolves the executable through the server environment
 and displays its absolute path, full argument vector, bounded prompt, requested
@@ -116,7 +153,8 @@ executable or arguments.
 Adapter processes use instance-private state directories under
 `$SCV_HOME/adapters/<name>`. In particular, `agent_codex` receives
 `CODEX_HOME=$SCV_HOME/adapters/codex` and does not read the user's normal
-`~/.codex` state, and `agent_claude` does not read `~/.claude`.
+`~/.codex` state, `agent_claude` does not read `~/.claude`, and Grok, DeepSeek
+Harness, and pi never read `~/.grok`, `~/.dsh`, or `~/.pi`.
 
 ### Signing in delegated agents
 
@@ -129,15 +167,46 @@ scv agents login claude                 # claude auth login
 scv agents login codex                  # codex login
 scv agents login codex -- --device-auth # extra arguments after --
 scv agents import codex                 # or copy your own Codex setup
-scv agents status                       # both agents' sign-in state
+scv agents login grok -- --device-auth  # grok login, device code for SSH hosts
+scv agents login dsh                    # prompts for a DeepSeek API key
+scv agents login pi                     # opens pi: run /login, then /quit
+scv agents login pi --openai-compatible # or point pi at any OpenAI-compatible endpoint
+scv agents import pi --from-scv-provider # or reuse SCV's own provider
+scv agents status                       # every agent's sign-in state
 scv agents logout claude
 ```
 
-They work from any directory. `login`, `status`, and `logout` run the agent's
-own command with exactly the private home and cleaned environment that the
-daemon's `agent_*` tool uses, with the terminal attached for browser or
-device-code flows. The agent CLI itself writes those credentials under
-`$SCV_HOME/adapters/<name>` (mode `0700`).
+They work from any directory. For Claude Code, Codex, and Grok, `login` and
+`logout` run the agent's own command with exactly the private home and cleaned
+environment that the daemon's `agent_*` tool uses, with the terminal attached
+for browser or device-code flows, and the agent CLI itself writes those
+credentials under `$SCV_HOME/adapters/<name>` (mode `0700`). Claude Code and
+Codex report their own `status`; for the others SCV reads the credential file
+and reports only whether one is stored, never its value.
+
+DeepSeek Harness signs in with an API key only. `scv agents login dsh` reads
+it without echo, or from stdin when stdin is not a terminal, and writes it as
+`refs.DEEPSEEK_API_KEY` in `.dsh/.credentials.yaml`, DeepSeek Harness's own
+credential file, atomically with mode `0600`. `logout` removes that file. A key
+is never accepted as an argument.
+
+pi's own `/login` covers its built-in providers. For any OpenAI-compatible
+endpoint, `scv agents login pi --openai-compatible` asks for the base URL, the
+wire API (`responses` or `chat`), and the default model (or takes them from
+`--base-url`, `--wire-api`, and `--model`), then reads the key without echo.
+`scv agents import pi --from-scv-provider` takes all four from SCV's active
+provider instead, reading an `api_key_env` variable at import time because
+delegated agents never inherit key variables. Either way SCV writes pi's own
+files in `.pi/agent`, each atomically with mode `0600`: provider `scv` in
+`models.json` (for the Responses API with
+`compat.sessionAffinityFormat = "openai-nosession"`, because pi's default
+`session_id` header is rejected by proxies that refuse underscores in header
+names), its key in `auth.json`, and `defaultProvider`/`defaultModel` in
+`settings.json`, so a bare `agent_pi` call uses it and `model` can name
+`scv/<id>`. Other providers and settings in those files are preserved.
+`status` shows the default provider, API, endpoint host, and model, and which
+providers have stored sign-ins; `logout` removes `auth.json`, the `scv`
+provider, and a default that points at it.
 
 `scv agents import codex [--from DIR]` instead copies an existing Codex setup,
 by default from `$CODEX_HOME` or `~/.codex`. It is for custom providers such as
@@ -168,7 +237,10 @@ followed from a remote chat.
 A fake agent script, run through `bash` so tests never execute a freshly
 written file, verifies native-agent argument boundaries, model/effort argument
 mapping and validation, workspace and `cwd` selection including symlink
-escapes, and the timeout ceiling without requiring these CLIs in CI. Shared process-runner tests cover
+escapes, prompt-flag placement, the timeout ceiling, per-adapter environment
+removal, and that uninstalled agents are not offered, without requiring these
+CLIs in CI. Fake SCV homes cover the DeepSeek Harness key file, pi's endpoint
+files and import, and that no sign-in output contains a key. Shared process-runner tests cover
 output limits, timeout, cancellation, and background-descendant cleanup.
 
 ## Tool extension contract

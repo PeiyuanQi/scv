@@ -1,5 +1,7 @@
 //! SCV's bounded, workspace-aware built-in tools.
 
+pub mod adapters;
+
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -46,9 +48,9 @@ pub struct ToolsConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            command_timeout: Duration::from_secs(120),
-            agent_timeout: Duration::from_secs(600),
-            max_timeout: Duration::from_secs(1800),
+            command_timeout: Duration::from_secs(600),
+            agent_timeout: Duration::from_secs(3600),
+            max_timeout: Duration::from_secs(14400),
             output_limit_bytes: 64 * 1024,
             max_read_bytes: 256 * 1024,
             max_write_bytes: 1024 * 1024,
@@ -60,14 +62,24 @@ impl Default for ToolsConfig {
 pub struct AgentAdapterConfig {
     pub command: String,
     pub args: Vec<String>,
+    /// Arguments placed immediately before the prompt, for CLIs that take the
+    /// prompt as a flag value.
+    pub prompt_args: Vec<String>,
+    /// The CLI's own full-autonomy arguments, placed after `args`, when the
+    /// user configured `permissions = "full"`; the approval summary says so.
+    pub full_permission_args: Option<Vec<String>>,
     /// Arguments appended for a per-call model; `{model}` is substituted.
     /// Empty means the adapter does not offer model selection.
     pub model_args: Vec<String>,
     /// Arguments appended for a per-call effort; `{effort}` is substituted.
     /// Empty means the adapter does not offer effort selection.
     pub effort_args: Vec<String>,
+    /// Describes the `model` argument for the calling model.
+    pub model_hint: String,
     /// Environment for the nested process. SCV supplies an instance-private home.
     pub environment: Vec<(OsString, OsString)>,
+    /// Per-user install directories searched when `command` is not on `PATH`.
+    pub search_dirs: Vec<PathBuf>,
 }
 
 pub type SkillMap = HashMap<String, PathBuf>;
@@ -97,7 +109,7 @@ pub fn builtin_registry(
         output_limit: config.output_limit_bytes,
     }))?;
     for (name, adapter) in adapters {
-        registry.register(Arc::new(NativeAgentTool::new(
+        let tool = NativeAgentTool::new(
             name,
             adapter,
             Timeouts {
@@ -105,7 +117,11 @@ pub fn builtin_registry(
                 max: config.max_timeout,
             },
             config.output_limit_bytes,
-        )))?;
+        );
+        // An agent that is not installed is not offered to the model.
+        if tool.resolved.is_some() {
+            registry.register(Arc::new(tool))?;
+        }
     }
     Ok(registry)
 }
@@ -570,8 +586,11 @@ struct NativeAgentTool {
     command: String,
     resolved: Option<PathBuf>,
     args: Vec<String>,
+    prompt_args: Vec<String>,
+    full_permission_args: Option<Vec<String>>,
     model_args: Vec<String>,
     effort_args: Vec<String>,
+    model_hint: String,
     environment: Vec<(OsString, OsString)>,
     timeouts: Timeouts,
     output_limit: usize,
@@ -581,8 +600,8 @@ struct NativeAgentTool {
 const AGENT_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 impl NativeAgentTool {
-    /// The fixed arguments plus validated model and effort selections; the
-    /// prompt is appended separately as the final argument.
+    /// The fixed arguments, validated model and effort selections, and the
+    /// prompt arguments; the prompt is appended separately as the final argument.
     fn command_args(&self, args: &AgentArgs) -> Result<Vec<String>, ToolError> {
         validate_process_args(&args.prompt)?;
         self.timeouts.resolve(args.timeout_seconds)?;
@@ -595,6 +614,7 @@ impl NativeAgentTool {
             return Err(ToolError("agent prompt must not start with '-'".into()));
         }
         let mut command = self.args.clone();
+        command.extend(self.full_permission_args.iter().flatten().cloned());
         for (field, value, template, placeholder) in [
             ("model", &args.model, &self.model_args, "{model}"),
             ("effort", &args.effort, &self.effort_args, "{effort}"),
@@ -618,6 +638,7 @@ impl NativeAgentTool {
             }
             command.extend(template.iter().map(|part| part.replace(placeholder, value)));
         }
+        command.extend(self.prompt_args.iter().cloned());
         Ok(command)
     }
     fn new(
@@ -626,14 +647,17 @@ impl NativeAgentTool {
         timeouts: Timeouts,
         output_limit: usize,
     ) -> Self {
-        let resolved = which::which(&config.command).ok();
+        let resolved = adapters::resolve_agent_executable(&config.command, &config.search_dirs);
         Self {
             name,
             command: config.command,
             resolved,
             args: config.args,
+            prompt_args: config.prompt_args,
+            full_permission_args: config.full_permission_args,
             model_args: config.model_args,
             effort_args: config.effort_args,
+            model_hint: config.model_hint,
             environment: config.environment,
             timeouts,
             output_limit,
@@ -721,18 +745,12 @@ impl Tool for NativeAgentTool {
             "timeout_seconds":timeout_schema(self.timeouts)
         });
         if !self.model_args.is_empty() {
-            let model = match self.name.as_str() {
-                "agent_claude" => "Claude model alias or ID, such as sonnet or opus.",
-                "agent_codex" => {
-                    "OpenAI model ID from the Codex configuration; not a Claude alias."
-                }
-                _ => "Model ID in the form this agent's CLI accepts.",
-            };
             properties["model"] = json!({
                 "type":"string",
                 "description":format!(
-                    "{model} Set only when the user asks for a specific model; \
-                     omit to use the agent's configured default."
+                    "{} Set only when the user asks for a specific model; \
+                     omit to use the agent's configured default.",
+                    self.model_hint
                 )
             });
         }
@@ -747,9 +765,11 @@ impl Tool for NativeAgentTool {
         ToolSpec {
             name: self.name.clone(),
             description: format!(
-                "Launch the configured {} CLI as a nested agent (not sandboxed). \
-                 Set cwd to the project the work is in so the agent follows that \
-                 project's instructions and skills.",
+                "Launch the configured {} CLI as a nested coding agent (not sandboxed). \
+                 Delegate substantial work here rather than doing it step by step with \
+                 bash: research and web lookups, multi-file coding, and running tools, \
+                 builds, and tests. Set cwd to the project the work is in so the agent \
+                 follows that project's instructions and skills.",
                 self.name
             ),
             parameters: json!({
@@ -779,8 +799,15 @@ impl Tool for NativeAgentTool {
             |cwd| format!("{:?} (inside the workspace)", bounded(cwd, 200)),
         );
         let timeout = self.timeouts.resolve(args.timeout_seconds)?;
+        let permissions = if self.full_permission_args.is_some() {
+            " FULL PERMISSIONS (permissions = \"full\"): the agent's own approval prompts \
+             and sandbox are off, so it edits files, runs commands, and uses the network \
+             without asking."
+        } else {
+            ""
+        };
         Ok(format!(
-            "Launch {executable} with args {command_args:?} and prompt {:?} in {directory} for up to {} seconds. The nested agent has your user permissions.",
+            "Launch {executable} with args {command_args:?} and prompt {:?} in {directory} for up to {} seconds. The nested agent has your user permissions.{permissions}",
             bounded(&args.prompt, 2000),
             timeout.as_secs()
         ))
@@ -796,7 +823,7 @@ impl Tool for NativeAgentTool {
         let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
         let executable = self.resolved.as_ref().ok_or_else(|| {
             ToolError(format!(
-                "{} executable {:?} was not found in PATH",
+                "{} executable {:?} was not found on PATH or in the user's install directories",
                 self.name, self.command
             ))
         })?;
@@ -824,32 +851,6 @@ impl Tool for NativeAgentTool {
     }
 }
 
-/// Variables removed from every native agent's environment, so an agent
-/// signs in only with credentials stored in its SCV-private home and never
-/// inherits SCV's provider settings or a config location outside that home.
-pub const AGENT_REMOVED_ENVIRONMENT: &[&str] = &[
-    "SCV_CONFIG",
-    "SCV_MODEL",
-    "SCV_PROVIDER",
-    "SCV_BASE_URL",
-    "SCV_API_KEY_ENV",
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "OPENAI_ORG_ID",
-    "OPENAI_PROJECT_ID",
-    "CODEX_API_KEY",
-    "CODEX_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CONFIG_DIR",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "AZURE_OPENAI_API_KEY",
-    "AZURE_OPENAI_ENDPOINT",
-];
-
 /// Point a failed agent run that reads like a missing sign-in at the host
 /// command that fixes it, since the agent's own advice (`/login`) cannot be
 /// followed from a remote chat.
@@ -857,11 +858,13 @@ fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
     let lower = output.content.to_ascii_lowercase();
     let unauthenticated = [
         "not logged in",
-        "/login",
-        "codex login",
+        "not signed in",
+        "not authenticated",
+        "login",
         "log in",
         "unauthorized",
         "authentication",
+        "missing_credential",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
@@ -881,6 +884,33 @@ fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
     }
 }
 
+/// Give a native agent command its adapter environment: remove every
+/// inherited credential, endpoint, and state-location variable any adapter
+/// declares, then set `environment` (such as the relocated config home).
+pub fn apply_agent_environment(
+    command: &mut std::process::Command,
+    environment: &[(OsString, OsString)],
+) {
+    apply_agent_environment_from(
+        command,
+        std::env::vars_os().map(|(variable, _)| variable),
+        environment,
+    );
+}
+
+fn apply_agent_environment_from(
+    command: &mut std::process::Command,
+    inherited: impl IntoIterator<Item = OsString>,
+    environment: &[(OsString, OsString)],
+) {
+    for variable in inherited {
+        if adapters::is_removed_agent_variable(&variable) {
+            command.env_remove(variable);
+        }
+    }
+    command.envs(environment.iter().map(|(key, value)| (key, value)));
+}
+
 struct ProcessSpec {
     executable: OsString,
     args: Vec<OsString>,
@@ -897,19 +927,18 @@ async fn execute_process(
 ) -> Result<ToolOutput, ToolError> {
     let deadline = Instant::now() + spec.timeout;
     let mut command = Command::new(&spec.executable);
+    if spec.sanitize_scv_environment {
+        apply_agent_environment(command.as_std_mut(), &spec.environment);
+    } else {
+        command.envs(spec.environment);
+    }
     command
         .args(&spec.args)
         .current_dir(&spec.cwd)
-        .envs(spec.environment)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    if spec.sanitize_scv_environment {
-        for variable in AGENT_REMOVED_ENVIRONMENT {
-            command.env_remove(variable);
-        }
-    }
     command.as_std_mut().process_group(0);
     let mut child = command
         .spawn()
@@ -1457,6 +1486,17 @@ mod tests {
         args: &[&str],
         environment: Vec<(OsString, OsString)>,
     ) -> NativeAgentTool {
+        fake_agent_with_prompt_args(workspace, name, script, args, &[], environment)
+    }
+
+    fn fake_agent_with_prompt_args(
+        workspace: &Path,
+        name: &str,
+        script: &str,
+        args: &[&str],
+        prompt_args: &[&str],
+        environment: Vec<(OsString, OsString)>,
+    ) -> NativeAgentTool {
         let script_path = workspace.join("fake-agent.sh");
         std::fs::write(&script_path, script).unwrap();
         let mut fixed = vec![script_path.display().to_string()];
@@ -1466,9 +1506,18 @@ mod tests {
             AgentAdapterConfig {
                 command: "bash".into(),
                 args: fixed,
+                prompt_args: prompt_args.iter().map(|arg| arg.to_string()).collect(),
+                full_permission_args: None,
                 model_args: vec!["--model".into(), "{model}".into()],
                 effort_args: vec!["--effort".into(), "{effort}".into()],
+                model_hint: adapters::adapter(name.trim_start_matches("agent_"))
+                    .map_or(
+                        "Model ID in the form this agent's CLI accepts.",
+                        |adapter| adapter.model_hint,
+                    )
+                    .into(),
                 environment,
+                search_dirs: Vec::new(),
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -1553,9 +1602,13 @@ mod tests {
             AgentAdapterConfig {
                 command: "pi".into(),
                 args: vec!["-p".into()],
+                prompt_args: Vec::new(),
+                full_permission_args: None,
                 model_args: Vec::new(),
                 effort_args: Vec::new(),
+                model_hint: String::new(),
                 environment: Vec::new(),
+                search_dirs: Vec::new(),
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -1673,6 +1726,133 @@ mod tests {
         assert!(output.content.contains("SCV_CONFIG=unset"));
         assert!(output.content.contains("OPENAI_API_KEY=unset"));
         assert!(output.content.contains("CODEX_API_KEY=unset"));
+    }
+
+    #[tokio::test]
+    async fn native_agent_places_prompt_flags_just_before_the_prompt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let tool = fake_agent_with_prompt_args(
+            workspace.path(),
+            "agent_grok",
+            "printf '%s\\n' \"$@\"\n",
+            &[],
+            &["-p"],
+            Vec::new(),
+        );
+        let arguments = json!({"prompt":"hi","model":"grok-4","effort":"high"});
+        assert!(
+            tool.approval_summary(&arguments)
+                .unwrap()
+                .contains(r#""--model", "grok-4", "--effort", "high", "-p""#)
+        );
+        let output = tool
+            .execute(arguments, context(workspace.path()))
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(
+            output["output"],
+            "--model\ngrok-4\n--effort\nhigh\n-p\nhi\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_permissions_follow_the_fixed_arguments_and_are_announced() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut tool = fake_agent(
+            workspace.path(),
+            "agent_claude",
+            "printf '%s\\n' \"$@\"\n",
+            &["-p"],
+            Vec::new(),
+        );
+        let arguments = json!({"prompt":"hi","model":"opus"});
+        assert!(!tool.approval_summary(&arguments).unwrap().contains("FULL"));
+        tool.full_permission_args =
+            Some(vec!["--permission-mode".into(), "bypassPermissions".into()]);
+        let summary = tool.approval_summary(&arguments).unwrap();
+        assert!(summary.contains("FULL PERMISSIONS"), "{summary}");
+        assert!(
+            summary
+                .contains(r#""-p", "--permission-mode", "bypassPermissions", "--model", "opus""#)
+        );
+        let output = tool
+            .execute(arguments, context(workspace.path()))
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(
+            output["output"],
+            "-p\n--permission-mode\nbypassPermissions\n--model\nopus\nhi\n"
+        );
+    }
+
+    #[test]
+    fn agent_environment_drops_inherited_credentials_but_keeps_its_own_home() {
+        let mut command = std::process::Command::new("true");
+        apply_agent_environment_from(
+            &mut command,
+            [
+                "GROK_HOME",
+                "XAI_API_KEY",
+                "PI_CODING_AGENT_DIR",
+                "DEEPSEEK_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENROUTER_API_KEY",
+                "PATH",
+            ]
+            .map(OsString::from),
+            &[("GROK_HOME".into(), "/private/.grok".into())],
+        );
+        let envs: HashMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned)))
+            .collect();
+        assert_eq!(
+            envs[&OsString::from("GROK_HOME")],
+            Some(OsString::from("/private/.grok"))
+        );
+        for removed in [
+            "XAI_API_KEY",
+            "PI_CODING_AGENT_DIR",
+            "DEEPSEEK_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+        ] {
+            assert_eq!(envs[&OsString::from(removed)], None, "{removed}");
+        }
+        assert!(!envs.contains_key(&OsString::from("PATH")));
+    }
+
+    #[test]
+    fn uninstalled_agents_are_not_offered() {
+        let adapter = |command: &str| AgentAdapterConfig {
+            command: command.into(),
+            args: Vec::new(),
+            prompt_args: Vec::new(),
+            full_permission_args: None,
+            model_args: Vec::new(),
+            effort_args: Vec::new(),
+            model_hint: String::new(),
+            environment: Vec::new(),
+            search_dirs: Vec::new(),
+        };
+        let registry = builtin_registry(
+            ToolsConfig::default(),
+            SkillMap::new(),
+            Vec::new(),
+            1024,
+            HashMap::from([
+                ("agent_present".to_owned(), adapter("bash")),
+                (
+                    "agent_missing".to_owned(),
+                    adapter("scv-test-agent-that-is-not-installed"),
+                ),
+            ]),
+        )
+        .unwrap();
+        assert!(registry.get("agent_present").is_some());
+        assert!(registry.get("agent_missing").is_none());
     }
 
     #[tokio::test]

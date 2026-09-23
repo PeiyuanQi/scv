@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.21`, with exact `=0.1.21` pins for dependencies
+All packages use version `0.1.22`, with exact `=0.1.22` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -218,7 +218,7 @@ reserve_output_tokens = 8192
 
 [tools]
 approval_policy = "on-risk"
-command_timeout_seconds = 120
+command_timeout_seconds = 600
 
 [agents.codex]
 command = "codex"
@@ -245,19 +245,25 @@ Claude Code skills (`.agents/skills`, `.claude/skills`) of the workspace and its
 child projects as `<project>:<name>`, so SCV knows to delegate that work to an
 agent running in the project.
 
-The built-in `agent_claude`, `agent_codex`, and `agent_pi` tools launch those
-installed CLIs directly, without shell interpolation. They are optional,
+The built-in `agent_claude`, `agent_codex`, `agent_grok`, `agent_dsh`, and
+`agent_pi` tools launch Claude Code, Codex, Grok Build, DeepSeek Harness, and pi
+directly, without shell interpolation; a session offers only those installed. They are optional,
 approval-gated, cancellable subprocess adapters and share the same output and
 timeout limits as other process tools. A call may set `cwd` to a project
 directory inside the workspace, where the agent loads that project's
 `AGENTS.md`/`CLAUDE.md` and skills, and may raise `timeout_seconds` up to
-`tools.max_timeout_seconds` (default 1800) for long work such as landing a
+`tools.max_timeout_seconds` (default 14400) for long work such as landing a
 change. Each adapter receives an instance-private
-`HOME`, `SCV_HOME`, XDG directories, and (for Codex) `CODEX_HOME` under
-`$SCV_HOME/adapters/<name>`. SCV never reuses or modifies the user's normal
-`~/.claude` or `~/.codex` configuration. Sign the agents in for SCV once with
-`scv agents login claude` or `scv agents login codex`, or copy a custom-provider
-Codex setup with `scv agents import codex`, and check with `scv agents status`.
+`HOME`, `SCV_HOME`, XDG directories, and the agent's own state directory
+(`CODEX_HOME`, `GROK_HOME`, `DSH_HOME`, `PI_CODING_AGENT_DIR`) under
+`$SCV_HOME/adapters/<name>`, and inherits no API-key variables. SCV never
+reuses or modifies the user's normal `~/.claude`, `~/.codex`, `~/.grok`,
+`~/.dsh`, or `~/.pi` configuration. Sign the agents in for SCV once with
+`scv agents login <name>`, copy a custom-provider Codex setup with
+`scv agents import codex`, point pi at SCV's own provider with
+`scv agents import pi --from-scv-provider` (or any OpenAI-compatible endpoint
+with `scv agents login pi --openai-compatible`), and check with
+`scv agents status`.
 
 ## Architecture
 

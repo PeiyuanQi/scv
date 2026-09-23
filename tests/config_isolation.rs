@@ -175,3 +175,138 @@ fn codex_import_copies_into_the_instance_adapter_home() {
     );
     assert!(adapter.join("config.toml").is_file());
 }
+
+fn scv(home: &std::path::Path, args: &[&str], stdin: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .args(["--scv-home"])
+        .arg(home)
+        .args(args)
+        .env("OPENAI_API_KEY", "sk-env-secret")
+        .env_remove("SCV_CONFIG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    for stream in [&output.stdout, &output.stderr] {
+        assert!(
+            !String::from_utf8_lossy(stream).contains("secret"),
+            "{}",
+            String::from_utf8_lossy(stream)
+        );
+    }
+    output
+}
+
+fn success(output: &std::process::Output) -> String {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn dsh_login_stores_a_piped_key_in_its_private_home() {
+    let home = tempfile::tempdir().unwrap();
+    write_private(&home.path().join("config.toml"), &provider("model"));
+    let stdout = success(&scv(
+        home.path(),
+        &["agents", "login", "dsh"],
+        "sk-dsh-secret\n",
+    ));
+    assert!(
+        stdout.contains("Stored the API key as DEEPSEEK_API_KEY"),
+        "{stdout}"
+    );
+    let credentials = home.path().join("adapters/dsh/.dsh/.credentials.yaml");
+    assert!(
+        std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains("\"sk-dsh-secret\"")
+    );
+    let status = success(&scv(home.path(), &["agents", "status", "dsh"], ""));
+    assert!(
+        status.contains("API key stored as DEEPSEEK_API_KEY"),
+        "{status}"
+    );
+    success(&scv(home.path(), &["agents", "logout", "dsh"], ""));
+    assert!(!credentials.exists());
+    assert!(
+        success(&scv(home.path(), &["agents", "status", "dsh"], ""))
+            .contains("scv agents login dsh")
+    );
+}
+
+#[test]
+fn pi_imports_the_scv_provider_as_its_default_endpoint() {
+    let home = tempfile::tempdir().unwrap();
+    // The key comes from the provider's api_key_env, read at import time.
+    write_private(&home.path().join("config.toml"), &provider("gpt-relay"));
+    let stdout = success(&scv(
+        home.path(),
+        &["agents", "import", "pi", "--from-scv-provider"],
+        "",
+    ));
+    assert!(
+        stdout.contains(r#"openai-responses at provider.invalid, model "gpt-relay""#),
+        "{stdout}"
+    );
+    let dir = home.path().join("adapters/pi/.pi/agent");
+    let auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("auth.json")).unwrap()).unwrap();
+    assert_eq!(auth["scv"]["key"], "sk-env-secret");
+    let models: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("models.json")).unwrap()).unwrap();
+    assert_eq!(
+        models["providers"]["scv"]["baseUrl"],
+        "https://provider.invalid/v1"
+    );
+    let status = success(&scv(home.path(), &["agents", "status", "pi"], ""));
+    assert!(status.contains(r#"default provider "scv""#), "{status}");
+
+    // An explicit endpoint replaces it, reading only the key from stdin.
+    success(&scv(
+        home.path(),
+        &[
+            "agents",
+            "login",
+            "pi",
+            "--openai-compatible",
+            "--base-url",
+            "https://chat.invalid/v1",
+            "--wire-api",
+            "chat",
+            "--model",
+            "chat-model",
+        ],
+        "sk-chat-secret\n",
+    ));
+    let models: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("models.json")).unwrap()).unwrap();
+    assert_eq!(models["providers"]["scv"]["api"], "openai-completions");
+    assert!(models["providers"]["scv"].get("compat").is_none());
+    assert_eq!(models["providers"]["scv"]["models"][0]["id"], "chat-model");
+    assert!(
+        std::fs::read_to_string(dir.join("auth.json"))
+            .unwrap()
+            .contains("sk-chat-secret")
+    );
+    assert!(
+        !scv(
+            home.path(),
+            &["agents", "import", "codex", "--from-scv-provider"],
+            ""
+        )
+        .status
+        .success()
+    );
+}

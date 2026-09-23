@@ -35,7 +35,7 @@ table and may be developed in parallel with others; landings stay sequential.
 | # | Step | Depends on |
 |---|---|---|
 | 0a | Replay tool calls to the Responses API (done, 0.1.21) | — |
-| 0b | Adapter table, grok/zcode/dsh/pi, full-work defaults, `permissions` | 0a |
+| 0b | Adapter table, grok/dsh/pi, full-work defaults, `permissions` (done, 0.1.22; zcode deferred) | 0a |
 | 1 | Delegation foundation: structured results, registry, cleanup | 0b |
 | 2 | ClawBot long-turn resilience | 0b landed |
 | 3 | Multi-turn conversations (resume) | 1 |

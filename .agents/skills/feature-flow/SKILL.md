@@ -26,9 +26,11 @@ stage 0.
   passes straight through.
 - **SCV delegating this flow:** call `agent_codex` or `agent_claude` with `cwd`
   set to this repository (`scv` in a `~/projects` workspace) so the agent loads
-  this skill and `AGENTS.md`, and with `timeout_seconds` near the
-  `tools.max_timeout_seconds` ceiling (default 1800). Gates, CI, and publishing
-  take 10-20 minutes, well past the 600-second agent default.
+  this skill and `AGENTS.md`. The agent default of `tools.agent_timeout_seconds`
+  (3600) covers a normal landing (gates, CI, and publishing take 20-50
+  minutes); pass a larger `timeout_seconds`, up to `tools.max_timeout_seconds`
+  (14400), when CI reruns are likely. The agent needs `permissions = "full"`
+  in its `[agents.<name>]` user config to run commands and edit files unprompted.
 - **Secrets:** never print `~/.scv/config.toml`, `~/.scv/clawbot/accounts/`,
   `~/.scv/adapters/*/auth.json`, or `~/.cargo/credentials.toml`.
 

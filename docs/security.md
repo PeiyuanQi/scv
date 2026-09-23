@@ -65,16 +65,40 @@ refused. The nested agent loads that directory's own instructions (such as
 `AGENTS.md` or `CLAUDE.md`) and project skills, which are untrusted repository
 content just like any file the agent reads there; choosing a directory never
 widens what the agent could already reach with the user's permissions. SCV supplies an instance-private `HOME`, `SCV_HOME`, XDG
-directories, and `CODEX_HOME` for Codex, while removing SCV selector variables,
-provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, and `CLAUDE_CONFIG_DIR`
-from the child environment. Agents sign in only through `scv agents login`,
-which stores the agent's own credentials in that private home, or through
-`scv agents import codex`. The import copies the user's Codex `config.toml`,
-plus `auth.json` only when it holds a static API key; it never copies a ChatGPT
-refresh token. Delegated runs therefore never share the user's personal Claude
-Code or Codex session. The delegated CLI still has the user's operating
-system permissions and may implement its own tools and approvals, but it cannot
-silently reuse the user's normal Codex state.
+directories, and the agent's own state variable (`CODEX_HOME`, `GROK_HOME`,
+`DSH_HOME`, or `PI_CODING_AGENT_DIR`) inside that home. It first removes from
+the child environment SCV's selector variables, every variable ending in
+`_API_KEY`, and the credential, endpoint, and state variables that any adapter
+declares (such as `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
+`OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, and `PI_*`), so no agent inherits the
+user's or another agent's credentials. Agents sign in only through
+`scv agents login`, which runs the agent's own sign-in in that private home or,
+for DeepSeek Harness and pi endpoints, reads an API key without echo (or from
+stdin) and writes it into the agent's own credential file with mode `0600`;
+keys are never command-line arguments and never printed. `scv agents import
+codex` copies the user's Codex `config.toml`, plus `auth.json` only when it
+holds a static API key; it never copies a ChatGPT refresh token. `scv agents
+import pi --from-scv-provider` copies SCV's own provider endpoint and key into
+pi's private files only on that explicit command. Delegated runs therefore
+never share the user's personal Claude Code, Codex, Grok, DeepSeek Harness, or
+pi session. The delegated CLI still has the user's operating system
+permissions and may implement its own tools and approvals, but it cannot
+silently reuse the user's normal agent state.
+
+`[agents.<name>] permissions = "full"` is the user's explicit opt-in to hand
+a delegated CLI its own full-autonomy switches (for example Claude Code's
+`--permission-mode bypassPermissions` or Codex's
+`--dangerously-bypass-approvals-and-sandbox`), turning off that CLI's approval
+prompts and sandbox and enabling web search where the CLI gates it. It is off
+by default, only user-level configuration can set it, and every approval
+summary for such an agent states `FULL PERMISSIONS`. Combined with ClawBot's
+owner tools, it lets the owner's WeChat account run unattended development
+work, equivalent to the owner running those agents unprompted in a terminal.
+
+A session offers only agents whose executable resolves. SCV looks in the
+user's per-user install directories (`~/.local/bin`, and `~/.grok/bin` for
+Grok) before `PATH`, as a login shell does; anything able to write those
+directories can already run code as the user.
 
 Project skill discovery reads only `SKILL.md` files that resolve inside the
 workspace, bounded in count and size, and only for tool-enabled sessions, so a

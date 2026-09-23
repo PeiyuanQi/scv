@@ -1,4 +1,10 @@
-use std::{collections::HashMap, ffi::OsString, io::Write, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ffi::OsString,
+    io::Write,
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use scv_core::{AgentConfig as CoreAgentConfig, ContextConfig, HistoryLimits};
@@ -64,7 +70,7 @@ impl Default for ProviderConfig {
             base_url: "https://api.openai.com/v1".into(),
             api_key: None,
             api_key_env: Some("OPENAI_API_KEY".into()),
-            timeout_seconds: 120,
+            timeout_seconds: 600,
             headers: HashMap::new(),
         }
     }
@@ -134,7 +140,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_steps: 32,
+            max_steps: 128,
             system_prompt: "You are SCV, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
         }
     }
@@ -228,9 +234,9 @@ impl Default for ToolConfig {
     fn default() -> Self {
         Self {
             approval_policy: ApprovalPolicy::OnRisk,
-            command_timeout_seconds: 120,
-            agent_timeout_seconds: 600,
-            max_timeout_seconds: 1800,
+            command_timeout_seconds: 600,
+            agent_timeout_seconds: 3600,
+            max_timeout_seconds: 14400,
             output_limit_bytes: 64 * 1024,
             max_read_bytes: 256 * 1024,
             max_write_bytes: 1024 * 1024,
@@ -326,42 +332,54 @@ impl Default for SkillsConfig {
 pub struct AdapterConfig {
     pub command: String,
     pub args: Vec<String>,
+    /// `full` adds the CLI's own switches for unprompted, unsandboxed work.
+    pub permissions: AgentPermissions,
+    /// Placed immediately before the prompt (`grok -p <prompt>`).
+    pub prompt_args: Vec<String>,
     /// Appended when a call selects a model; `{model}` is substituted.
     pub model_args: Vec<String>,
     /// Appended when a call selects an effort; `{effort}` is substituted.
     pub effort_args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentsConfig {
-    pub claude: AdapterConfig,
-    pub codex: AdapterConfig,
-    pub pi: AdapterConfig,
+/// How much a delegated CLI may do without its own prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentPermissions {
+    /// Add nothing: the CLI's own configuration decides.
+    #[default]
+    Default,
+    /// Add the CLI's full-autonomy switches: no approval prompts, no sandbox,
+    /// and web search where the CLI gates it. An explicit user opt-in.
+    Full,
 }
+
+/// `[agents.<name>]` for every adapter in [`scv_tools::adapters::ADAPTERS`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentsConfig(pub BTreeMap<String, AdapterConfig>);
 
 impl Default for AgentsConfig {
     fn default() -> Self {
-        Self {
-            claude: AdapterConfig {
-                command: "claude".into(),
-                args: vec!["-p".into()],
-                model_args: vec!["--model".into(), "{model}".into()],
-                effort_args: vec!["--effort".into(), "{effort}".into()],
-            },
-            codex: AdapterConfig {
-                command: "codex".into(),
-                args: vec!["exec".into()],
-                model_args: vec!["-m".into(), "{model}".into()],
-                effort_args: vec!["-c".into(), "model_reasoning_effort=\"{effort}\"".into()],
-            },
-            pi: AdapterConfig {
-                command: "pi".into(),
-                args: vec!["-p".into()],
-                model_args: Vec::new(),
-                effort_args: Vec::new(),
-            },
-        }
+        let strings = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
+        Self(
+            scv_tools::adapters::ADAPTERS
+                .iter()
+                .map(|adapter| {
+                    (
+                        adapter.name.to_owned(),
+                        AdapterConfig {
+                            command: adapter.command.into(),
+                            args: strings(adapter.args),
+                            permissions: AgentPermissions::Default,
+                            prompt_args: strings(adapter.prompt_args),
+                            model_args: strings(adapter.model_args),
+                            effort_args: strings(adapter.effort_args),
+                        },
+                    )
+                })
+                .collect(),
+        )
     }
 }
 
@@ -521,50 +539,79 @@ impl Config {
     }
 
     pub fn adapters(&self) -> HashMap<String, AgentAdapterConfig> {
-        [
-            ("agent_claude", &self.agents.claude),
-            ("agent_codex", &self.agents.codex),
-            ("agent_pi", &self.agents.pi),
-        ]
-        .into_iter()
-        .map(|(name, config)| {
-            let adapter_name = name.strip_prefix("agent_").unwrap_or(name);
-            let adapter_home = self.instance_home.join("adapters").join(adapter_name);
-            let mut environment = vec![
-                (OsString::from("SCV_HOME"), adapter_home.clone().into()),
-                (OsString::from("HOME"), adapter_home.clone().into()),
-                (
-                    OsString::from("XDG_CONFIG_HOME"),
-                    adapter_home.join("config").into(),
-                ),
-                (
-                    OsString::from("XDG_DATA_HOME"),
-                    adapter_home.join("data").into(),
-                ),
-                (
-                    OsString::from("XDG_STATE_HOME"),
-                    adapter_home.join("state").into(),
-                ),
-            ];
-            if adapter_name == "codex" {
-                environment.push((OsString::from("CODEX_HOME"), adapter_home.clone().into()));
-            }
-            (
-                name.to_owned(),
-                AgentAdapterConfig {
-                    command: config.command.clone(),
-                    args: config.args.clone(),
-                    model_args: config.model_args.clone(),
-                    effort_args: config.effort_args.clone(),
-                    environment,
-                },
-            )
-        })
-        .collect()
+        let user_home = dirs::home_dir();
+        self.agents
+            .0
+            .iter()
+            .filter_map(|(name, config)| {
+                let descriptor = scv_tools::adapters::adapter(name)?;
+                let adapter_home = self.instance_home.join("adapters").join(name);
+                let mut environment = vec![
+                    (OsString::from("SCV_HOME"), adapter_home.clone().into()),
+                    (OsString::from("HOME"), adapter_home.clone().into()),
+                    (
+                        OsString::from("XDG_CONFIG_HOME"),
+                        adapter_home.join("config").into(),
+                    ),
+                    (
+                        OsString::from("XDG_DATA_HOME"),
+                        adapter_home.join("data").into(),
+                    ),
+                    (
+                        OsString::from("XDG_STATE_HOME"),
+                        adapter_home.join("state").into(),
+                    ),
+                ];
+                for (variable, relative) in descriptor.home_environment {
+                    let path = if relative.is_empty() {
+                        adapter_home.clone()
+                    } else {
+                        adapter_home.join(relative)
+                    };
+                    environment.push((OsString::from(variable), path.into()));
+                }
+                let full = config.permissions == AgentPermissions::Full;
+                environment.extend(
+                    descriptor
+                        .fixed_environment
+                        .iter()
+                        .chain(
+                            descriptor
+                                .full_permission_environment
+                                .iter()
+                                .filter(|_| full),
+                        )
+                        .map(|(variable, value)| (OsString::from(variable), OsString::from(value))),
+                );
+                Some((
+                    format!("agent_{name}"),
+                    AgentAdapterConfig {
+                        command: config.command.clone(),
+                        args: config.args.clone(),
+                        prompt_args: config.prompt_args.clone(),
+                        full_permission_args: full.then(|| {
+                            descriptor
+                                .full_permission_args
+                                .iter()
+                                .map(|arg| (*arg).to_owned())
+                                .collect()
+                        }),
+                        model_args: config.model_args.clone(),
+                        effort_args: config.effort_args.clone(),
+                        model_hint: descriptor.model_hint.into(),
+                        environment,
+                        search_dirs: user_home
+                            .as_deref()
+                            .map(|home| scv_tools::adapters::adapter_search_dirs(descriptor, home))
+                            .unwrap_or_default(),
+                    },
+                ))
+            })
+            .collect()
     }
 
     pub fn prepare_adapter_homes(&self) -> Result<()> {
-        for name in ["claude", "codex", "pi"] {
+        for name in self.agents.0.keys() {
             let path = self.instance_home.join("adapters").join(name);
             std::fs::create_dir_all(&path)
                 .with_context(|| format!("create isolated {name} adapter home"))?;
@@ -603,11 +650,18 @@ impl Config {
                 "provider model and base_url must be non-empty; configure api_key or api_key_env"
             );
         }
-        for (name, adapter) in [
-            ("agents.claude.command", &self.agents.claude),
-            ("agents.codex.command", &self.agents.codex),
-            ("agents.pi.command", &self.agents.pi),
-        ] {
+        for (agent, adapter) in &self.agents.0 {
+            if scv_tools::adapters::adapter(agent).is_none() {
+                let known: Vec<_> = scv_tools::adapters::ADAPTERS
+                    .iter()
+                    .map(|adapter| adapter.name)
+                    .collect();
+                bail!(
+                    "unknown agent [agents.{agent}]; known agents are {}",
+                    known.join(", ")
+                );
+            }
+            let name = format!("agents.{agent}.command");
             if adapter.command.trim().is_empty() {
                 bail!("{name} must be non-empty");
             }
@@ -621,11 +675,16 @@ impl Config {
                 }
             }
             let adapter_bytes = adapter.command.len()
-                + [&adapter.args, &adapter.model_args, &adapter.effort_args]
-                    .into_iter()
-                    .flatten()
-                    .map(String::len)
-                    .sum::<usize>();
+                + [
+                    &adapter.args,
+                    &adapter.prompt_args,
+                    &adapter.model_args,
+                    &adapter.effort_args,
+                ]
+                .into_iter()
+                .flatten()
+                .map(String::len)
+                .sum::<usize>();
             if adapter_bytes > 16 * 1024 {
                 bail!("{name} and its fixed arguments exceed 16384 bytes");
             }
@@ -1102,11 +1161,19 @@ command = "/tmp/fake"
                 user.tools.agent_timeout_seconds,
                 user.tools.max_timeout_seconds
             ),
-            (120, 600, 1800)
+            (600, 3600, 14400)
         );
+        assert_eq!(user.agent.max_steps, 128);
+        assert_eq!(user.provider.timeout_seconds, 600);
         let tools = user.tools();
-        assert_eq!(tools.agent_timeout, Duration::from_secs(600));
-        assert_eq!(tools.max_timeout, Duration::from_secs(1800));
+        assert_eq!(tools.command_timeout, Duration::from_secs(600));
+        assert_eq!(tools.agent_timeout, Duration::from_secs(3600));
+        assert_eq!(tools.max_timeout, Duration::from_secs(14400));
+        // A ClawBot owner turn outlasts the ceiling by five minutes: 4h05m.
+        assert_eq!(
+            scv_clawbot::owner_turn_timeout(tools.max_timeout),
+            Duration::from_secs(4 * 3600 + 5 * 60)
+        );
 
         for (field, name) in [
             (0, "tools.command_timeout_seconds"),
@@ -1175,13 +1242,18 @@ args = ["-p", "--permission-mode", "acceptEdits"]
             .unwrap(),
         );
         let config: Config = value.try_into().unwrap();
-        assert_eq!(config.agents.claude.args.len(), 3);
-        assert_eq!(config.agents.claude.model_args, ["--model", "{model}"]);
-        assert_eq!(config.agents.claude.effort_args, ["--effort", "{effort}"]);
-        assert!(config.agents.pi.model_args.is_empty());
+        let claude = &config.agents.0["claude"];
+        assert_eq!(claude.args.len(), 3);
+        assert_eq!(claude.model_args, ["--model", "{model}"]);
+        assert_eq!(claude.effort_args, ["--effort", "{effort}"]);
+        assert_eq!(
+            config.agents.0["pi"].effort_args,
+            ["--thinking", "{effort}"]
+        );
+        assert_eq!(config.agents.0["grok"].prompt_args, ["-p"]);
 
         let mut invalid = Config::default();
-        invalid.agents.claude.effort_args = vec!["--effort".into()];
+        invalid.agents.0.get_mut("claude").unwrap().effort_args = vec!["--effort".into()];
         assert!(
             invalid
                 .validate()
@@ -1207,5 +1279,137 @@ args = ["-p", "--permission-mode", "acceptEdits"]
             OsString::from("SCV_HOME"),
             OsString::from("/tmp/scv-instance/adapters/codex")
         )));
+        for (agent, variable, path) in [
+            ("grok", "GROK_HOME", "/tmp/scv-instance/adapters/grok/.grok"),
+            ("dsh", "DSH_HOME", "/tmp/scv-instance/adapters/dsh/.dsh"),
+            (
+                "pi",
+                "PI_CODING_AGENT_DIR",
+                "/tmp/scv-instance/adapters/pi/.pi/agent",
+            ),
+        ] {
+            let adapter = &adapters[&format!("agent_{agent}")];
+            assert!(
+                adapter
+                    .environment
+                    .contains(&(OsString::from(variable), OsString::from(path))),
+                "{agent}"
+            );
+            assert!(adapter.environment.contains(&(
+                OsString::from("HOME"),
+                OsString::from(format!("/tmp/scv-instance/adapters/{agent}"))
+            )));
+        }
+        assert!(adapters["agent_grok"].environment.contains(&(
+            OsString::from("GROK_DISABLE_AUTOUPDATER"),
+            OsString::from("1")
+        )));
+        assert_eq!(adapters["agent_grok"].prompt_args, ["-p"]);
+        assert!(adapters["agent_pi"].model_hint.contains("provider scv"));
+    }
+
+    #[test]
+    fn full_permissions_are_opt_in_per_agent_and_combine_with_args() {
+        let defaults = Config::default().adapters();
+        for adapter in defaults.values() {
+            assert_eq!(adapter.full_permission_args, None);
+        }
+        let mut value: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut value,
+            toml::from_str(
+                "[agents.claude]\npermissions = \"full\"\n\n\
+                 [agents.codex]\nargs = [\"exec\", \"--skip-git-repo-check\"]\npermissions = \"full\"\n\n\
+                 [agents.grok]\npermissions = \"full\"\n\n\
+                 [agents.dsh]\npermissions = \"full\"\n\n\
+                 [agents.pi]\npermissions = \"full\"\n",
+            )
+            .unwrap(),
+        );
+        let config: Config = value.try_into().unwrap();
+        config.validate().unwrap();
+        let adapters = config.adapters();
+        let full = |agent: &str| {
+            adapters[&format!("agent_{agent}")]
+                .full_permission_args
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(full("claude"), ["--permission-mode", "bypassPermissions"]);
+        assert_eq!(
+            full("codex"),
+            [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "web_search=\"live\""
+            ]
+        );
+        assert_eq!(
+            adapters["agent_codex"].args,
+            ["exec", "--skip-git-repo-check"]
+        );
+        assert_eq!(full("grok"), ["--always-approve"]);
+        assert!(full("dsh").is_empty());
+        assert!(adapters["agent_dsh"].environment.contains(&(
+            OsString::from("DSH_PERMISSION_MODE"),
+            OsString::from("danger-full-access")
+        )));
+        assert!(
+            !defaults["agent_dsh"]
+                .environment
+                .iter()
+                .any(|(variable, _)| variable == "DSH_PERMISSION_MODE")
+        );
+        // pi has no permission system: `full` is accepted and adds nothing.
+        assert!(full("pi").is_empty());
+
+        let mut invalid: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut invalid,
+            toml::from_str("[agents.claude]\npermissions = \"yolo\"\n").unwrap(),
+        );
+        assert!(invalid.try_into::<Config>().is_err());
+    }
+
+    #[test]
+    fn user_agent_overrides_merge_over_every_built_in_and_unknown_agents_fail() {
+        let mut value: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut value,
+            toml::from_str(
+                "[agents.pi]
+model_args = []
+
+[agents.grok]
+args = [\"--always-approve\"]
+",
+            )
+            .unwrap(),
+        );
+        let config: Config = value.clone().try_into().unwrap();
+        assert!(config.agents.0["pi"].model_args.is_empty());
+        assert_eq!(config.agents.0["pi"].args, ["-p"]);
+        assert_eq!(config.agents.0["grok"].args, ["--always-approve"]);
+        assert_eq!(config.agents.0["grok"].prompt_args, ["-p"]);
+        assert_eq!(
+            config.agents.0.keys().collect::<Vec<_>>(),
+            ["claude", "codex", "dsh", "grok", "pi"]
+        );
+
+        merge(
+            &mut value,
+            toml::from_str(
+                "[agents.zcode]
+command = \"zcode\"
+",
+            )
+            .unwrap(),
+        );
+        let unknown: Config = value.try_into().unwrap();
+        let error = unknown.validate().unwrap_err().to_string();
+        assert!(error.contains("unknown agent [agents.zcode]"), "{error}");
     }
 }

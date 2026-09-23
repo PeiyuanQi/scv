@@ -44,7 +44,7 @@ model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-your-key"
 api_key_env = "OPENAI_API_KEY" # optional fallback
-timeout_seconds = 120
+timeout_seconds = 600
 
 [providers.custom]
 kind = "openai-compatible"
@@ -52,10 +52,10 @@ model = "your-model"
 base_url = "https://provider.example/v1"
 api_key_env = "CUSTOM_PROVIDER_KEY"
 headers = { "X-Organization" = "example" }
-timeout_seconds = 120
+timeout_seconds = 600
 
 [agent]
-max_steps = 32
+max_steps = 128
 system_prompt = "You are SCV, a concise and careful coding agent."
 
 [session]
@@ -71,9 +71,9 @@ summary_max_chars = 6000
 
 [tools]
 approval_policy = "on-risk"
-command_timeout_seconds = 120
-agent_timeout_seconds = 600
-max_timeout_seconds = 1800
+command_timeout_seconds = 600
+agent_timeout_seconds = 3600
+max_timeout_seconds = 14400
 output_limit_bytes = 65536
 max_read_bytes = 262144
 max_write_bytes = 1048576
@@ -105,6 +105,7 @@ max_skill_bytes = 262144
 [agents.claude]
 command = "claude"
 args = ["-p"]
+permissions = "default"
 model_args = ["--model", "{model}"]
 effort_args = ["--effort", "{effort}"]
 
@@ -114,20 +115,40 @@ args = ["exec"]
 model_args = ["-m", "{model}"]
 effort_args = ["-c", "model_reasoning_effort=\"{effort}\""]
 
+[agents.dsh]
+command = "dsh"
+args = ["--profile", "headless"]
+prompt_args = []
+model_args = []
+effort_args = []
+
+[agents.grok]
+command = "grok"
+args = []
+prompt_args = ["-p"]
+model_args = ["-m", "{model}"]
+effort_args = ["--reasoning-effort", "{effort}"]
+
 [agents.pi]
 command = "pi"
 args = ["-p"]
-model_args = []
-effort_args = []
+model_args = ["--model", "{model}"]
+effort_args = ["--thinking", "{effort}"]
 ```
+
+Every table also accepts `prompt_args` (default `[]` except Grok) and
+`permissions` (default `"default"`; see [Agent permissions](#agent-permissions)). The agent
+names are fixed; an unknown `[agents.<name>]` is a startup error that lists the
+known ones.
 
 `agents.*.args` is an argument vector, not a shell string. SCV appends the
 delegated prompt as the final argument and runs the child in the session
 workspace, or in the directory inside it that the call names with `cwd`. When a call selects a `model` or `effort`, SCV substitutes the value
 for `{model}` or `{effort}` in `model_args` or `effort_args` and inserts those
-arguments between the fixed arguments and the prompt. An empty template means
+arguments between the fixed arguments and the prompt, followed by
+`prompt_args` for CLIs whose prompt is a flag value. An empty template means
 the adapter offers no such selection; a non-empty one must contain its
-placeholder. Overriding only `command` or `args` keeps the built-in templates. The three built-in adapters are enabled when their executable is
+placeholder. Overriding only `command` or `args` keeps the built-in templates. The built-in adapters are enabled when their executable is
 available; attempting to call a missing adapter returns a clear tool error.
 
 `provider`, `agents.*`, and `skills.user_dir` are accepted only from built-in,
@@ -148,11 +169,12 @@ A tool call may choose its own `timeout_seconds`, so the model can grant long
 work more time when it starts it, for example when the owner asks from WeChat
 to land a change. Three keys bound this:
 
-- `command_timeout_seconds` (default 120) applies to `bash` calls that do not
-  choose a timeout;
-- `agent_timeout_seconds` (default 600) applies to `agent_*` calls that do not
-  choose one;
-- `max_timeout_seconds` (default 1800) is the ceiling any single call may
+- `command_timeout_seconds` (default 600) applies to `bash` calls that do not
+  choose a timeout, enough for a cold release build or strict Clippy;
+- `agent_timeout_seconds` (default 3600) applies to `agent_*` calls that do not
+  choose one, enough for a delegated feature through CI, landing, release, and
+  deploy (such runs have taken 27 to 48 minutes);
+- `max_timeout_seconds` (default 14400, four hours) is the ceiling any single call may
   request, and is advertised in each tool's schema. A request above it is
   refused with an error naming the ceiling rather than silently shortened.
 
@@ -161,12 +183,48 @@ Both defaults must not exceed the ceiling, and the ceiling is at most 86400
 
 ```toml
 [tools]
-max_timeout_seconds = 3600
+max_timeout_seconds = 28800
 ```
 
 A ClawBot owner turn may run for the ceiling plus five minutes of model time,
-and never less than 30 minutes; the component reads the ceiling from the
-workspace configuration each time it starts.
+and never less than 30 minutes, so four hours and five minutes by default; the
+component reads the ceiling from the workspace configuration each time it
+starts. `agent.max_steps` (default 128) bounds model/tool rounds per turn.
+`providers.*.timeout_seconds` (default 600) bounds each whole model request,
+including its streamed response, not just idle time, so it must cover the
+longest single response. Project configuration may lower all of these but not
+raise them.
+
+### Agent permissions
+
+`[agents.<name>] permissions` sets how much a delegated CLI may do without its
+own prompts:
+
+- `"default"` adds nothing; the CLI's own configuration decides. This is the
+  built-in value, so no install bypasses an agent's safeguards unless its user
+  asks.
+- `"full"` adds the CLI's own full-autonomy switches after `args`, so the agent
+  can research, edit files, run commands, and use the network without asking:
+
+| Agent | `"full"` adds | Web search |
+| --- | --- | --- |
+| `claude` | `--permission-mode bypassPermissions` | WebSearch and WebFetch, unprompted |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox -c web_search="live"` | native `web_search` tool (if the provider supports it) |
+| `grok` | `--always-approve` | on by default |
+| `dsh` | `DSH_PERMISSION_MODE=danger-full-access` (sandbox off, approvals `never`) | its own web tool |
+| `pi` | nothing: pi has no approval prompts or sandbox | none built in |
+
+```toml
+[agents.claude]
+permissions = "full"
+
+[agents.codex]
+args = ["exec", "--skip-git-repo-check"]
+permissions = "full"
+```
+
+Every approval summary for such an agent says `FULL PERMISSIONS`. Only the
+user layers can set `[agents]`; see [security](security.md).
 
 ### Project skills
 
@@ -253,13 +311,16 @@ stable hashed service name and persist `SCV_HOME`/`SCV_CONFIG` in that unit.
 `scv update` installs the shared binary but restarts only the selected instance.
 
 Native agent adapters run with an instance-private `HOME`, `SCV_HOME`, XDG
-configuration/data/state directories, and `CODEX_HOME` for Codex. They do not
-inherit `SCV_CONFIG`, `SCV_MODEL`, `SCV_PROVIDER`, `SCV_BASE_URL`, or
-`SCV_API_KEY_ENV`, provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, or
-`CLAUDE_CONFIG_DIR`, and therefore cannot silently reuse or alter the user's
-normal Claude Code or Codex configuration. Sign the agents in for SCV with
-`scv agents login claude` or `scv agents login codex`, or copy your Codex
-provider setup with `scv agents import codex`; see
+configuration/data/state directories, and the agent's own state variable
+pointing inside it (`CODEX_HOME`, `GROK_HOME`, `DSH_HOME`, or
+`PI_CODING_AGENT_DIR`). They do not inherit `SCV_CONFIG`, `SCV_MODEL`,
+`SCV_PROVIDER`, `SCV_BASE_URL`, `SCV_API_KEY_ENV`, any `*_API_KEY` variable, or
+any adapter's credential, endpoint, or state variables (such as
+`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `GROK_*`, `DSH_*`, or `PI_*`),
+and therefore cannot silently reuse or alter the user's normal agent
+configuration. Sign the agents in for SCV with `scv agents login <name>`, copy
+your Codex provider setup with `scv agents import codex`, or point pi at SCV's
+own provider with `scv agents import pi --from-scv-provider`; see
 [Signing in delegated agents](tools.md#signing-in-delegated-agents).
 
 Secrets are never included in diagnostics, protocol events, approval summaries,
