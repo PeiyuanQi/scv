@@ -57,6 +57,20 @@ before downgrading.
 
 ## Publication and checks
 
+The end-to-end landing flow for this repository is the `feature-flow` agent
+skill at `.agents/skills/feature-flow/SKILL.md`. Codex reads it from
+`.agents/skills`, and Claude Code from the `.claude/skills` symlink to the same
+directory. The flow develops in a sibling worktree and passes the checks
+below. It rebases onto `origin/main`, through a `gh` pull request when `gh` is
+signed in or a fast-forward push otherwise, then publishes, installs the
+release, and restarts the local daemon. Its scripts cover the steps that are
+easy to get wrong:
+
+- `publish.sh`: a resumable publish in dependency order;
+- `deploy.sh`: install, restart, and verify;
+- `host.sh`: run landing commands from agents that SCV started with a private
+  home.
+
 Publish from a clean verified checkout after authenticating with `cargo login`.
 Wait for each dependency version to become available before publishing its
 dependents:
