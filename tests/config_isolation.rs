@@ -352,3 +352,38 @@ fn a_delegated_run_may_not_manage_daemons() {
         );
     }
 }
+
+#[test]
+fn codex_status_on_stderr_is_summarized_without_the_key() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = home.path().join("fake-codex");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$*\" = \"login status\" ] || exit 2\n\
+         echo 'Logged in using an API key - sk-proj-***wxyz' >&2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_private(
+        &home.path().join("config.toml"),
+        &format!(
+            "{}[agents.codex]\ncommand = {:?}\n",
+            provider("model"),
+            fake.display().to_string()
+        ),
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .arg("--scv-home")
+        .arg(home.path())
+        .args(["agents", "status", "codex"])
+        .env("OPENAI_API_KEY", "test-only")
+        .env_remove("SCV_CONFIG")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "codex:\n  signed in (API key)\n"
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("sk-"));
+}

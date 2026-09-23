@@ -328,7 +328,11 @@ pub fn summarize_status(summary: StatusSummary, succeeded: bool, output: &str) -
     let signed_out = "not signed in".to_owned();
     match summary {
         StatusSummary::ClaudeJson => {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+            // The first JSON value; anything after it (such as stderr) is ignored.
+            let first = serde_json::Deserializer::from_str(output)
+                .into_iter::<serde_json::Value>()
+                .next();
+            let Some(Ok(value)) = first else {
                 return if succeeded {
                     "signed in".into()
                 } else {
@@ -487,6 +491,14 @@ mod tests {
         assert_eq!(
             summarize_status(StatusSummary::ClaudeJson, false, r#"{"loggedIn":false}"#),
             "not signed in"
+        );
+        assert_eq!(
+            summarize_status(
+                StatusSummary::ClaudeJson,
+                true,
+                "{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}\n\nsome stderr"
+            ),
+            "signed in (Claude account)"
         );
         assert_eq!(
             summarize_status(
