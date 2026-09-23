@@ -68,6 +68,15 @@ Daemon and component changes require focused coverage for:
   accepted (including a returned regional host) with the TLS port pinned and
   redirects not followed, oversized responses rejected before parsing, and
   replies chunked on UTF-8 boundaries within the byte limit;
+- polling and other senders continuing during a long owner turn, a
+  conversation's messages running in order with their own context tokens, at
+  most four turns at once, busy notices beyond the queue limits without a
+  turn, recovery answering every claim once without replay, and shutdown
+  closing every running turn while keeping its claim;
+- refused replies held per conversation within count, byte, total, and age
+  limits, delivered ahead of the next reply only as far as one message allows,
+  restored when the carrying reply is refused, busy notices never held, and
+  reply content absent from logs;
 - no-tools remote sessions by default, SIGTERM/Ctrl+C shutdown, and tracked
   session cleanup;
 - writer/turn descendants joined after forced handler abort, cancellation-aware
