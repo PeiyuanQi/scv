@@ -22,6 +22,8 @@ pub enum Login {
     },
     /// Prompt for an API key and store it in the CLI's own credential file.
     ApiKey(KeyStore),
+    /// Copy SCV's own configuration: `scv agents import <name>`.
+    Import,
 }
 
 /// How SCV reports whether an agent is signed in.
@@ -59,6 +61,25 @@ impl OutputFormat {
             Self::CodexJsonl => &["--json"],
             Self::PiJson => &["--mode", "json"],
         }
+    }
+}
+
+/// How SCV talks to an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// One CLI process per turn: the prompt is an argument and the reply is
+    /// read from its output ([`OutputFormat`]), continued through [`Resume`].
+    Process,
+    /// A long-running `scv server --stdio` per conversation, driven over the
+    /// SCV protocol: its tool approvals are relayed to the calling session
+    /// and its events become progress.
+    ScvProtocol,
+}
+
+impl Transport {
+    /// Whether one child process lives for a whole conversation.
+    pub fn is_live(self) -> bool {
+        !matches!(self, Self::Process)
     }
 }
 
@@ -139,6 +160,9 @@ pub enum KeyStore {
     /// pi's agent directory: `auth.json`, plus the SCV-configured
     /// OpenAI-compatible endpoint in `models.json` and `settings.json`.
     Pi { dir: &'static str },
+    /// A nested SCV's own `config.toml`, holding the provider copied from the
+    /// user's SCV by `scv agents import scv`.
+    Scv { config: &'static str },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +211,8 @@ pub struct AdapterDescriptor {
     pub resume: Resume,
     /// Transcripts `scv agents gc` may remove; `None` when unknown.
     pub conversation_files: Option<ConversationFiles>,
+    /// How SCV talks to the agent.
+    pub transport: Transport,
 }
 
 /// Directories every adapter searches before `PATH`, relative to the user's home.
@@ -208,6 +234,9 @@ const COMMON_REMOVED_ENVIRONMENT: &[&str] = &[
 ];
 
 const PI_STORE: KeyStore = KeyStore::Pi { dir: ".pi/agent" };
+const SCV_STORE: KeyStore = KeyStore::Scv {
+    config: "config.toml",
+};
 const DSH_STORE: KeyStore = KeyStore::DshRefs {
     path: ".dsh/.credentials.yaml",
     variable: "DEEPSEEK_API_KEY",
@@ -252,6 +281,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             dir: ".claude/projects",
             extension: "jsonl",
         }),
+        transport: Transport::Process,
     },
     AdapterDescriptor {
         name: "codex",
@@ -297,6 +327,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             dir: "sessions",
             extension: "jsonl",
         }),
+        transport: Transport::Process,
     },
     AdapterDescriptor {
         name: "grok",
@@ -327,6 +358,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // verified while it is signed out here.
         resume: Resume::Unsupported,
         conversation_files: None,
+        transport: Transport::Process,
     },
     AdapterDescriptor {
         name: "dsh",
@@ -352,6 +384,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Only its interactive profile documents `--resume`.
         resume: Resume::Unsupported,
         conversation_files: None,
+        transport: Transport::Process,
     },
     AdapterDescriptor {
         name: "pi",
@@ -388,6 +421,36 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             dir: ".pi/agent/sessions",
             extension: "jsonl",
         }),
+        transport: Transport::Process,
+    },
+    AdapterDescriptor {
+        name: "scv",
+        product: "SCV",
+        command: "scv",
+        args: &["server", "--stdio"],
+        prompt_args: &[],
+        // A model is chosen per conversation through `session.start`.
+        model_args: &[],
+        effort_args: &[],
+        model_hint: "Model ID for the nested SCV's provider; applies to a new conversation only.",
+        // `SCV_HOME` already points at the adapter home, where the nested
+        // SCV keeps its config, skills, and its own delegations.
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &[],
+        // Its tool approvals are relayed to the calling session instead.
+        full_permission_args: &[],
+        full_permission_environment: &[],
+        // Where `cargo install` puts `scv`; a user service's PATH omits it.
+        search_dirs: &[".cargo/bin"],
+        login: Login::Import,
+        status: Status::Stored(SCV_STORE),
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Stored(SCV_STORE),
+        output: OutputFormat::Text,
+        resume: Resume::Unsupported,
+        conversation_files: None,
+        transport: Transport::ScvProtocol,
     },
 ];
 
@@ -571,6 +634,8 @@ mod tests {
                     KeyStore::Grok { auth, config } => vec![auth, config],
                     KeyStore::DshRefs { path, .. } => vec![path],
                     KeyStore::Pi { dir } => vec![dir],
+                    // The nested SCV's `SCV_HOME` is the adapter home itself.
+                    KeyStore::Scv { .. } => vec![],
                 };
                 for path in paths {
                     assert!(

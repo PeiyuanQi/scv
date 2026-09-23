@@ -152,6 +152,10 @@ command = "pi"
 args = ["-p"]
 model_args = ["--model", "{model}"]
 effort_args = ["--thinking", "{effort}"]
+
+[agents.scv]
+command = "scv"
+args = ["server", "--stdio"]
 ```
 
 Every table also accepts `prompt_args` (default `[]` except Grok) and
@@ -404,7 +408,10 @@ configuration. Sign the agents in for SCV with `scv agents login <name>`, copy
 your Codex provider setup with `scv agents import codex` or your Grok model
 profiles with `scv agents import grok`, or point pi at SCV's own provider with
 `scv agents import pi --from-scv-provider`; see
-[Signing in delegated agents](tools.md#signing-in-delegated-agents).
+[Signing in delegated agents](tools.md#signing-in-delegated-agents). The nested
+SCV behind `agent_scv` gets `SCV_HOME=$SCV_HOME/adapters/scv`, so its own
+`config.toml`, skills, and delegations live there; give it SCV's own provider
+with `scv agents import scv` (see [Nested SCV](tools.md#nested-scv-agent_scv)).
 
 Secrets are never included in diagnostics, protocol events, approval summaries,
 or tool results.

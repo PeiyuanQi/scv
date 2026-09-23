@@ -2,8 +2,8 @@
 
 Status: final design for v0.1
 
-The current workspace release is `0.1.30`. All crates share that version, and
-dependencies between workspace packages use exact `=0.1.30` pins.
+The current workspace release is `0.1.31`. All crates share that version, and
+dependencies between workspace packages use exact `=0.1.31` pins.
 
 SCV v0.1 supports the latest patch release of stable Rust 1.88 or newer on:
 

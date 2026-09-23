@@ -80,6 +80,20 @@ impl ToolRisk {
             Self::Network => "network",
         }
     }
+
+    /// The risk named by [`ToolRisk::as_str`], such as one a nested SCV
+    /// reported for its own tool call.
+    pub fn parse(value: &str) -> Option<Self> {
+        [
+            Self::ReadOnly,
+            Self::Filesystem,
+            Self::Process,
+            Self::Delegate,
+            Self::Network,
+        ]
+        .into_iter()
+        .find(|risk| risk.as_str() == value)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,16 +102,82 @@ pub struct ToolContext {
     pub cancellation: CancellationToken,
     /// Where the tool may report short status lines while it runs.
     pub progress: ProgressSink,
+    /// The session's approval gate, for a tool relaying a nested agent's own
+    /// approval requests.
+    pub approvals: ToolApprovals,
 }
 
 impl ToolContext {
-    /// A context whose progress reports go nowhere.
+    /// A context whose progress reports go nowhere and whose relayed
+    /// approval requests are denied.
     pub fn new(workspace: PathBuf, cancellation: CancellationToken) -> Self {
         Self {
             workspace,
             cancellation,
             progress: ProgressSink::default(),
+            approvals: ToolApprovals::default(),
         }
+    }
+}
+
+/// The session's approval gate as seen by one running tool call. A tool that
+/// drives a nested agent (such as another SCV) asks it on the nested agent's
+/// behalf, so the session's policy and its user decide every nested side
+/// effect too. Without a gate, every request is denied.
+#[derive(Clone, Default)]
+pub struct ToolApprovals {
+    gate: Option<Arc<dyn ApprovalGate>>,
+    call_id: String,
+}
+
+impl fmt::Debug for ToolApprovals {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolApprovals")
+            .field("enabled", &self.gate.is_some())
+            .field("call_id", &self.call_id)
+            .finish()
+    }
+}
+
+impl ToolApprovals {
+    /// Requests for the tool call `call_id`, decided by `gate`.
+    pub fn new(gate: Arc<dyn ApprovalGate>, call_id: impl Into<String>) -> Self {
+        Self {
+            gate: Some(gate),
+            call_id: call_id.into(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.gate.is_some()
+    }
+
+    /// Ask the session's gate to approve a nested agent's tool call. The
+    /// request carries this tool call's ID; `name`, `risk`, and `summary`
+    /// describe the nested call.
+    pub async fn request(
+        &self,
+        name: impl Into<String>,
+        risk: ToolRisk,
+        cwd: PathBuf,
+        summary: impl Into<String>,
+        cancellation: CancellationToken,
+    ) -> Result<bool, AgentError> {
+        let Some(gate) = &self.gate else {
+            return Ok(false);
+        };
+        gate.approve(
+            ApprovalRequest {
+                call_id: self.call_id.clone(),
+                name: name.into(),
+                risk,
+                cwd,
+                summary: summary.into(),
+            },
+            cancellation,
+        )
+        .await
     }
 }
 
@@ -929,6 +1009,7 @@ impl AgentRuntime {
                             workspace: self.workspace.clone(),
                             cancellation: cancellation.child_token(),
                             progress: progress.clone(),
+                            approvals: ToolApprovals::new(Arc::clone(&approvals), call.id.clone()),
                         },
                     );
                     forward_progress(execution, &progress, sink.as_ref(), &call.id)
@@ -1202,6 +1283,67 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[test]
+    fn risks_parse_from_their_wire_names() {
+        for risk in [
+            ToolRisk::ReadOnly,
+            ToolRisk::Filesystem,
+            ToolRisk::Process,
+            ToolRisk::Delegate,
+            ToolRisk::Network,
+        ] {
+            assert_eq!(ToolRisk::parse(risk.as_str()), Some(risk));
+        }
+        assert_eq!(ToolRisk::parse("root"), None);
+    }
+
+    struct RecordingGate(Mutex<Vec<ApprovalRequest>>);
+
+    #[async_trait]
+    impl ApprovalGate for RecordingGate {
+        async fn approve(
+            &self,
+            request: ApprovalRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<bool, AgentError> {
+            self.0.lock().unwrap().push(request);
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_approvals_carry_the_call_and_deny_without_a_gate() {
+        let denied = ToolApprovals::default()
+            .request(
+                "bash",
+                ToolRisk::Process,
+                PathBuf::from("/w"),
+                "Run it",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!denied);
+        let gate = Arc::new(RecordingGate(Mutex::new(Vec::new())));
+        let approvals = ToolApprovals::new(Arc::clone(&gate) as Arc<dyn ApprovalGate>, "call-7");
+        assert!(approvals.is_enabled());
+        assert!(
+            approvals
+                .request(
+                    "bash",
+                    ToolRisk::Process,
+                    PathBuf::from("/w"),
+                    "[scv-1 depth 1] Run it",
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+        );
+        let requests = gate.0.lock().unwrap();
+        assert_eq!(requests[0].call_id, "call-7");
+        assert_eq!(requests[0].summary, "[scv-1 depth 1] Run it");
+    }
 
     struct ScriptedProvider {
         responses: Mutex<VecDeque<AssistantResponse>>,

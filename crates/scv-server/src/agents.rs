@@ -512,6 +512,9 @@ pub fn store_key(store: KeyStore, home: &Path, key: &str) -> Result<Vec<String>>
         KeyStore::Grok { .. } | KeyStore::Pi { .. } => {
             bail!("this agent signs in with its own login, not a stored key")
         }
+        KeyStore::Scv { .. } => {
+            bail!("the nested SCV uses SCV's own provider: run `scv agents import scv`")
+        }
     }
 }
 
@@ -536,13 +539,16 @@ pub fn stored_status(store: KeyStore, home: &Path) -> Result<(bool, Vec<String>)
             })
         }
         KeyStore::Pi { dir } => pi_status(&home.join(dir)),
+        KeyStore::Scv { config } => scv_child_status(&home.join(config)),
     }
 }
 
 /// Remove the credentials SCV can see in `store`.
 pub fn remove_stored(store: KeyStore, home: &Path) -> Result<Vec<String>> {
     match store {
-        KeyStore::Grok { auth: path, .. } | KeyStore::DshRefs { path, .. } => {
+        KeyStore::Grok { auth: path, .. }
+        | KeyStore::DshRefs { path, .. }
+        | KeyStore::Scv { config: path } => {
             let path = home.join(path);
             Ok(vec![if remove_if_present(&path)? {
                 format!("Removed {}", display(&path, home))
@@ -586,6 +592,152 @@ pub fn remove_stored(store: KeyStore, home: &Path) -> Result<Vec<String>> {
             Ok(notes)
         }
     }
+}
+
+/// The provider profile name `scv agents import scv` writes for the nested SCV.
+pub const SCV_CHILD_PROVIDER: &str = "scv";
+
+/// The parts of SCV's own provider that the nested SCV copies.
+pub struct ScvChildProvider<'a> {
+    pub wire_api: &'a str,
+    pub model: &'a str,
+    pub base_url: &'a str,
+    pub timeout_seconds: u64,
+    pub headers: &'a std::collections::HashMap<String, String>,
+    /// Offer the endpoint's hosted web search, as SCV's own config does.
+    pub hosted_web_search: bool,
+}
+
+/// Write the nested SCV's `config.toml` in `home` (mode 0600): SCV's own
+/// provider as profile [`SCV_CHILD_PROVIDER`], with `key` stored in the file
+/// because delegated agents never inherit key variables. Other settings
+/// already in the file are kept. Returns display lines without the key.
+pub fn configure_scv_child(
+    home: &Path,
+    provider: &ScvChildProvider<'_>,
+    key: &str,
+) -> Result<Vec<String>> {
+    validate_secret(key)?;
+    let base_url = validate_base_url(provider.base_url)?;
+    if !valid_model_id(provider.model) {
+        bail!("invalid model id {:?}", provider.model);
+    }
+    let path = home.join("config.toml");
+    create_private_dirs(home, &path)?;
+    let mut table: toml::Table = match read_bounded(&path)? {
+        Some(text) => text
+            .parse()
+            .with_context(|| format!("parse existing {}", display(&path, home)))?,
+        None => toml::Table::new(),
+    };
+    let mut selection = toml::Table::new();
+    selection.insert("active".into(), SCV_CHILD_PROVIDER.into());
+    table.insert("provider".into(), selection.into());
+    let mut profile = toml::Table::new();
+    profile.insert("kind".into(), "openai-compatible".into());
+    profile.insert("wire_api".into(), provider.wire_api.into());
+    profile.insert("model".into(), provider.model.into());
+    profile.insert("base_url".into(), base_url.clone().into());
+    profile.insert("api_key".into(), key.into());
+    profile.insert(
+        "timeout_seconds".into(),
+        i64::try_from(provider.timeout_seconds)
+            .unwrap_or(i64::MAX)
+            .into(),
+    );
+    if !provider.headers.is_empty() {
+        let headers: toml::Table = provider
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone().into()))
+            .collect();
+        profile.insert("headers".into(), headers.into());
+    }
+    let providers = table
+        .entry("providers")
+        .or_insert_with(|| toml::Table::new().into());
+    let Some(providers) = providers.as_table_mut() else {
+        bail!(
+            "{} has a `providers` value that is not a table",
+            display(&path, home)
+        );
+    };
+    providers.insert(SCV_CHILD_PROVIDER.into(), profile.into());
+    if provider.hosted_web_search {
+        let web = table
+            .entry("web")
+            .or_insert_with(|| toml::Table::new().into());
+        let Some(web) = web.as_table_mut() else {
+            bail!(
+                "{} has a `web` value that is not a table",
+                display(&path, home)
+            );
+        };
+        web.insert("search".into(), "provider".into());
+    }
+    let text = toml::to_string(&table).context("encode the nested SCV config")?;
+    text.parse::<toml::Table>()
+        .context("the nested SCV config did not round-trip")?;
+    write_private(&path, &text)?;
+    let mut lines = vec![
+        format!(
+            "Wrote {} (mode 0600): provider {SCV_CHILD_PROVIDER:?}, model {:?} at {}",
+            display(&path, home),
+            provider.model,
+            host(&base_url)
+        ),
+        "The API key is stored in that file and not shown".into(),
+    ];
+    if provider.hosted_web_search {
+        lines.push("Hosted web search is on, as in SCV's own config".into());
+    }
+    Ok(lines)
+}
+
+/// What the nested SCV's `config.toml` provides, never printing its key.
+fn scv_child_status(path: &Path) -> Result<(bool, Vec<String>)> {
+    let Some(text) = read_bounded(path)? else {
+        return Ok((
+            false,
+            vec!["not configured: run `scv agents import scv`".into()],
+        ));
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Ok((false, vec!["config.toml is not valid TOML".into()]));
+    };
+    let active = table
+        .get("provider")
+        .and_then(|provider| provider.get("active"))
+        .and_then(toml::Value::as_str);
+    let profile = active.and_then(|active| {
+        table
+            .get("providers")
+            .and_then(|providers| providers.get(active))
+            .and_then(toml::Value::as_table)
+    });
+    let (Some(active), Some(profile)) = (active, profile) else {
+        return Ok((
+            false,
+            vec!["no active provider: run `scv agents import scv`".into()],
+        ));
+    };
+    let text = |key: &str| profile.get(key).and_then(toml::Value::as_str);
+    let keyed = text("api_key").is_some_and(|key| !key.trim().is_empty());
+    let location = format!(
+        "provider {active:?}: model {:?} at {}",
+        text("model").unwrap_or("unset"),
+        text("base_url").map_or_else(|| "no base URL".into(), host)
+    );
+    Ok(if keyed {
+        (true, vec![format!("{location}, API key stored")])
+    } else {
+        (
+            false,
+            vec![format!(
+                "{location}, no stored API key (a key variable is not inherited): run `scv agents import scv`"
+            )],
+        )
+    })
 }
 
 /// Point pi at an OpenAI-compatible endpoint as provider [`PI_PROVIDER`]
@@ -1178,5 +1330,86 @@ default = "relay-4.7"
         let empty = tempfile::tempdir().unwrap();
         assert!(import_codex(empty.path(), destination.path()).is_err());
         assert!(import_codex(destination.path(), destination.path()).is_err());
+    }
+
+    #[test]
+    fn the_nested_scv_gets_a_private_copy_of_the_provider() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, "[agent]\nmax_steps = 7\n").unwrap();
+        let headers = std::collections::HashMap::from([("X-Team".to_owned(), "core".to_owned())]);
+        let key = "sk-nested-secret-0123456789";
+        let lines = configure_scv_child(
+            home.path(),
+            &ScvChildProvider {
+                wire_api: "responses",
+                model: "gpt-test",
+                base_url: "https://relay.invalid/v1/",
+                timeout_seconds: 600,
+                headers: &headers,
+                hosted_web_search: true,
+            },
+            key,
+        )
+        .unwrap();
+        assert!(lines.iter().all(|line| !line.contains(key)), "{lines:?}");
+        assert!(lines[0].contains("gpt-test") && lines[0].contains("relay.invalid"));
+        assert_eq!(mode(&path), 0o600);
+        let table: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            table["agent"]["max_steps"].as_integer(),
+            Some(7),
+            "other settings kept"
+        );
+        assert_eq!(
+            table["provider"]["active"].as_str(),
+            Some(SCV_CHILD_PROVIDER)
+        );
+        let profile = &table["providers"][SCV_CHILD_PROVIDER];
+        assert_eq!(
+            profile["base_url"].as_str(),
+            Some("https://relay.invalid/v1")
+        );
+        assert_eq!(profile["api_key"].as_str(), Some(key));
+        assert_eq!(profile["headers"]["X-Team"].as_str(), Some("core"));
+        assert_eq!(table["web"]["search"].as_str(), Some("provider"));
+
+        let store = KeyStore::Scv {
+            config: "config.toml",
+        };
+        let (ready, status) = stored_status(store, home.path()).unwrap();
+        assert!(ready);
+        assert!(status.iter().all(|line| !line.contains(key)), "{status:?}");
+        assert!(status[0].contains("API key stored"), "{status:?}");
+        assert!(store_key(store, home.path(), key).is_err());
+        remove_stored(store, home.path()).unwrap();
+        let (ready, status) = stored_status(store, home.path()).unwrap();
+        assert!(!ready);
+        assert!(status[0].contains("scv agents import scv"), "{status:?}");
+    }
+
+    #[test]
+    fn a_broken_nested_scv_config_is_not_overwritten() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, "not = [valid").unwrap();
+        let headers = std::collections::HashMap::new();
+        let provider = ScvChildProvider {
+            wire_api: "responses",
+            model: "gpt-test",
+            base_url: "https://relay.invalid",
+            timeout_seconds: 60,
+            headers: &headers,
+            hosted_web_search: false,
+        };
+        assert!(configure_scv_child(home.path(), &provider, "sk-key-0123456789").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [valid");
+        let bad_url = ScvChildProvider {
+            base_url: "ftp://relay.invalid",
+            ..provider
+        };
+        std::fs::remove_file(&path).unwrap();
+        assert!(configure_scv_child(home.path(), &bad_url, "sk-key-0123456789").is_err());
+        assert!(!path.exists());
     }
 }

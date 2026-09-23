@@ -31,6 +31,7 @@ flowchart LR
     tui --> protocol
     client --> protocol
     tools --> core
+    tools --> protocol
     provider --> core
 ```
 
@@ -74,9 +75,10 @@ The repository is one Cargo workspace with these packages:
 
 The integration dependency chain is `server -> clawbot -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
-on core; core contains no concrete transport, provider, tool, server, or TUI
+on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
+nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.30` and exact workspace dependency pins.
+`0.1.31` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
@@ -171,6 +173,18 @@ on Linux the daemon is a child subreaper. `delegations` and `delegation_kill`
 control actions serve `scv agents ps` and `scv agents kill`. A session whose
 client declares `session.start.delegation_depth` (a delegated client) counts
 its runs from that depth when it exceeds the process's own.
+
+Live delegations keep one child for a whole conversation. `scv_tools::live`
+holds the protocol-neutral part: `LiveChild` starts the child in its adapter
+environment and own process group, records it as a delegation, frames its
+stdout into bounded lines, and shuts it down (stdin closed, a 2-second grace,
+then a group kill and a sweep of tagged processes). The conversation store
+keeps the child as the conversation's attachment, so forgetting, expiring, or
+ending the conversation's session is what shuts it down. `scv_tools::scv_agent`
+runs the SCV protocol client on top of it for `agent_scv`; an ACP adapter can
+run a JSON-RPC client on the same runtime. Tools reach the session's approval
+gate through `ToolContext.approvals`, which carries the running call's ID, so a
+nested agent's approval requests are decided like the session's own.
 
 ## Agent loop
 

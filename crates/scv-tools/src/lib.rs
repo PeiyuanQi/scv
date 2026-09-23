@@ -5,6 +5,8 @@ mod agent_output;
 mod agent_progress;
 pub mod conversation;
 pub mod delegation;
+mod live;
+mod scv_agent;
 pub mod web;
 
 use std::{
@@ -28,7 +30,7 @@ use cap_std::{
 use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRisk, ToolSpec};
 
 use crate::{
-    adapters::{OutputFormat, Resume},
+    adapters::{OutputFormat, Resume, Transport},
     agent_output::{AgentStream, RunExit, STDERR_TAIL_BYTES, TailBuffer},
     conversation::{ConversationLimits, ConversationStore},
     delegation::{DelegationGuard, DelegationRegistry},
@@ -127,6 +129,8 @@ pub struct AgentAdapterConfig {
     pub resume: Resume,
     /// SCV's private home for this agent, for files SCV hands the CLI.
     pub home: Option<PathBuf>,
+    /// How SCV talks to the agent.
+    pub transport: Transport,
 }
 
 pub type SkillMap = HashMap<String, PathBuf>;
@@ -174,6 +178,28 @@ pub fn builtin_registry(
             .map(|context| context.registry.conversation_dir()),
     ));
     for (name, adapter) in adapters {
+        if adapter.transport == Transport::ScvProtocol {
+            let resolved =
+                adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs);
+            // An agent that is not installed is not offered to the model.
+            if resolved.is_some() {
+                registry.register(Arc::new(scv_agent::ScvAgentTool {
+                    name,
+                    command: adapter.command,
+                    resolved,
+                    args: adapter.args,
+                    environment: adapter.environment,
+                    timeouts: Timeouts {
+                        default: config.agent_timeout,
+                        max: config.max_timeout,
+                    },
+                    output_limit: config.output_limit_bytes,
+                    delegation: config.delegation.clone(),
+                    conversations: Arc::clone(&conversations),
+                }))?;
+            }
+            continue;
+        }
         let tool = NativeAgentTool::new(
             name,
             adapter,
@@ -545,16 +571,16 @@ impl BashTool {
 
 /// A process tool's default timeout and the ceiling a call may raise it to.
 #[derive(Debug, Clone, Copy)]
-struct Timeouts {
-    default: Duration,
-    max: Duration,
+pub(crate) struct Timeouts {
+    pub(crate) default: Duration,
+    pub(crate) max: Duration,
 }
 
 impl Timeouts {
     /// The call's timeout: its own request up to the ceiling, else the
     /// default. A request above the ceiling is refused, never clamped, so the
     /// caller learns the limit instead of being cut off early.
-    fn resolve(self, requested: Option<u64>) -> Result<Duration, ToolError> {
+    pub(crate) fn resolve(self, requested: Option<u64>) -> Result<Duration, ToolError> {
         match requested {
             None => Ok(self.default.min(self.max)),
             Some(0) => Err(ToolError("timeout_seconds must be positive".into())),
@@ -568,7 +594,7 @@ impl Timeouts {
     }
 }
 
-fn timeout_schema(timeouts: Timeouts) -> Value {
+pub(crate) fn timeout_schema(timeouts: Timeouts) -> Value {
     json!({
         "type":"integer",
         "minimum":1,
@@ -810,17 +836,17 @@ fn take_file(path: &Path, limit: usize) -> Option<String> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AgentArgs {
-    prompt: String,
-    timeout_seconds: Option<u64>,
+pub(crate) struct AgentArgs {
+    pub(crate) prompt: String,
+    pub(crate) timeout_seconds: Option<u64>,
     #[serde(default, deserialize_with = "blank_as_none")]
-    session: Option<String>,
+    pub(crate) session: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
-    cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
-    model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
-    effort: Option<String>,
+    pub(crate) effort: Option<String>,
 }
 
 /// Models often send an optional string they mean to leave unset as `""`, so
@@ -835,7 +861,7 @@ fn blank_as_none<'de, D: serde::Deserializer<'de>>(
 /// Longest `cwd` argument accepted, in bytes.
 const MAX_AGENT_CWD_BYTES: usize = 4096;
 
-fn validate_agent_cwd(cwd: &str) -> Result<(), ToolError> {
+pub(crate) fn validate_agent_cwd(cwd: &str) -> Result<(), ToolError> {
     if cwd.trim().is_empty() || cwd.len() > MAX_AGENT_CWD_BYTES || cwd.contains('\0') {
         return Err(ToolError(format!(
             "cwd must be a non-empty directory path of at most {MAX_AGENT_CWD_BYTES} bytes"
@@ -847,7 +873,7 @@ fn validate_agent_cwd(cwd: &str) -> Result<(), ToolError> {
 /// Resolve a requested agent directory against the workspace. Resolution
 /// follows symlinks, so a link pointing outside the workspace is refused
 /// rather than trusted by name.
-fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<PathBuf, ToolError> {
+pub(crate) fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<PathBuf, ToolError> {
     let root = std::fs::canonicalize(workspace)
         .map_err(|error| ToolError(format!("resolve workspace: {error}")))?;
     let Some(cwd) = cwd else {
@@ -867,7 +893,7 @@ fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<PathBuf, Too
 
 /// Model names are passed as one argument, so only reject values that could
 /// read as a flag, name an `@file` argument, or carry unexpected characters.
-fn valid_model_name(value: &str) -> bool {
+pub(crate) fn valid_model_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && !value.starts_with(['-', '@'])
@@ -1127,7 +1153,7 @@ impl Tool for NativeAgentTool {
 /// Point a failed agent run that reads like a missing sign-in at the host
 /// command that fixes it, since the agent's own advice (`/login`) cannot be
 /// followed from a remote chat.
-fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
+pub(crate) fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
     let lower = output.content.to_ascii_lowercase();
     let unauthenticated = [
         "not logged in",
@@ -1453,7 +1479,7 @@ async fn finish_drain(task: Option<JoinHandle<()>>, deadline: Instant) {
 }
 
 /// Where a child's output goes as it is read.
-trait OutputSink: Send + 'static {
+pub(crate) trait OutputSink: Send + 'static {
     fn push(&mut self, bytes: &[u8]);
 }
 
@@ -1475,7 +1501,7 @@ impl OutputSink for TailBuffer {
     }
 }
 
-async fn drain_output<R, S>(mut reader: R, output: Arc<Mutex<S>>)
+pub(crate) async fn drain_output<R, S>(mut reader: R, output: Arc<Mutex<S>>)
 where
     R: tokio::io::AsyncRead + Unpin,
     S: OutputSink,
@@ -1512,7 +1538,7 @@ impl BoundedOutput {
     }
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, ToolError> {
+pub(crate) fn parse_args<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, ToolError> {
     serde_json::from_value(value.clone())
         .map_err(|error| ToolError(format!("invalid arguments: {error}")))
 }
@@ -1524,7 +1550,7 @@ fn validate_read_args(args: &ReadArgs) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn validate_process_args(value: &str) -> Result<(), ToolError> {
+pub(crate) fn validate_process_args(value: &str) -> Result<(), ToolError> {
     if value.trim().is_empty() {
         return Err(ToolError("command or prompt must be non-empty".into()));
     }
@@ -1578,7 +1604,7 @@ fn is_secret_like(path: &Path) -> bool {
     })
 }
 
-fn bounded(value: &str, max_chars: usize) -> String {
+pub(crate) fn bounded(value: &str, max_chars: usize) -> String {
     let mut output: String = value.chars().take(max_chars).collect();
     if value.chars().count() > max_chars {
         output.push('…');
@@ -1917,6 +1943,7 @@ mod tests {
                 output: OutputFormat::Text,
                 resume: Resume::Unsupported,
                 home: None,
+                transport: Transport::Process,
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -2010,6 +2037,7 @@ mod tests {
                 output: OutputFormat::Text,
                 resume: Resume::Unsupported,
                 home: None,
+                transport: Transport::Process,
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -2265,6 +2293,7 @@ mod tests {
             output: OutputFormat::Text,
             resume: Resume::Unsupported,
             home: None,
+            transport: Transport::Process,
         };
         let registry = builtin_registry(
             ToolsConfig::default(),
@@ -2486,6 +2515,7 @@ mod tests {
                 output: format,
                 resume,
                 home,
+                transport: Transport::Process,
             },
             Timeouts {
                 default: timeout,
@@ -2917,6 +2947,7 @@ exit 1
             output: OutputFormat::Text,
             resume: Resume::Unsupported,
             home: None,
+            transport: Transport::Process,
         };
         let home = tempfile::tempdir().unwrap();
         for (max_depth, offered) in [(0, false), (1, true)] {

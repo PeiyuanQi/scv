@@ -747,6 +747,7 @@ impl Config {
                         output: descriptor.output,
                         resume: descriptor.resume,
                         home: Some(adapter_home),
+                        transport: descriptor.transport,
                     },
                 ))
             })
@@ -1867,7 +1868,7 @@ args = [\"--always-approve\"]
         assert_eq!(config.agents.0["grok"].prompt_args, ["-p"]);
         assert_eq!(
             config.agents.0.keys().collect::<Vec<_>>(),
-            ["claude", "codex", "dsh", "grok", "pi"]
+            ["claude", "codex", "dsh", "grok", "pi", "scv"]
         );
 
         merge(
