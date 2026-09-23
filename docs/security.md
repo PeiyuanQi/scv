@@ -105,6 +105,32 @@ workspace, bounded in count and size, and only for tool-enabled sessions, so a
 tool-free remote sender never learns the workspace's project or skill names.
 Listed skills are untrusted instructions, like `.scv/skills`.
 
+## Web access
+
+`web_fetch` sends a GET request to a URL the model chooses, so the URL can
+carry anything the model has read, such as a secret that a prompt-injected
+page told it to send. Fetches therefore need approval unless the URL is HTTPS
+on a host in `web.auto_approve_domains`, a user-only list of documentation and
+registry hosts where a GET cannot publish data. The default list is `docs.rs`,
+`crates.io`, `doc.rust-lang.org`, `docs.python.org`, `pypi.org`, and
+`developer.mozilla.org`. A redirect cannot leave that list without failing the
+call.
+
+To keep fetches off the host's own network, `web_fetch` refuses loopback,
+private, link-local (including cloud metadata), shared, multicast, and
+reserved addresses, and IPv6 forms that embed them. Names resolve once through
+a checking resolver whose addresses are the only ones connected to, so DNS
+rebinding cannot swap in a private address; IP literals and redirect targets
+are checked before any request. `web.allow_private_addresses` lifts this for
+trusted networks. Requests send no cookies, credentials, or referrer and
+ignore proxy variables.
+
+A configured `web_search` backend receives only the query, and hosted search
+sends queries only to the model provider. Neither is offered to tool-free
+sessions. Project configuration can disable web access but cannot add
+auto-approved hosts, allow private addresses, or choose search endpoints or
+keys.
+
 ## Approval behavior
 
 An approval prompt includes the exact tool name and a bounded, human-readable
@@ -117,8 +143,9 @@ not mean silently execute them.
 
 ## Network and protocol
 
-Outbound network clients include the configured model provider and the ClawBot
-iLink adapter. The updater delegates registry downloads to Cargo. Project
+Outbound network clients include the configured model provider, the ClawBot
+iLink adapter, and the web tools (`web_fetch` and a configured search
+backend). The updater delegates registry downloads to Cargo. Project
 configuration cannot provide inline credentials or redirect these authorities.
 
 The normal server transport is a local Unix socket at `$SCV_HOME/server.sock`

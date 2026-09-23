@@ -58,6 +58,9 @@ pub enum ToolRisk {
     Filesystem,
     Process,
     Delegate,
+    /// Sends a request to a host outside the auto-approved set, whose URL can
+    /// carry data the model has read.
+    Network,
 }
 
 impl ToolRisk {
@@ -67,6 +70,7 @@ impl ToolRisk {
             Self::Filesystem => "filesystem",
             Self::Process => "process",
             Self::Delegate => "delegate",
+            Self::Network => "network",
         }
     }
 }

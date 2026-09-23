@@ -54,6 +54,74 @@ deadline sends `KILL` immediately. SCV also cleans up descendants after the
 group leader exits and bounds output-pipe draining, so a background child cannot
 keep a tool call alive indefinitely.
 
+## `web_fetch`
+
+```json
+{"url":"https://docs.rs/serde/latest/serde/","offset":0}
+```
+
+Fetches one public `http` or `https` URL with a GET request and returns it as
+text. HTML becomes readable plain text with numbered link references, JSON and
+other text types pass through, and a declared binary type such as an image,
+PDF, or archive is refused before it downloads. The result begins with the
+final URL, status, content type, and the character range returned. SCV
+downloads at most `web.fetch_max_bytes` (default 2 MiB) and returns at most
+`tools.output_limit_bytes`; a longer page ends with the `offset` that returns
+its next part. An HTTP error status returns the body as a failed result.
+
+Requests carry a `scv/<version>` User-Agent and no cookies, credentials, or
+referrer, ignore proxy variables, follow at most `web.max_redirects` (default
+5) redirects, and stop after `web.fetch_timeout_seconds` (default 30). URLs
+with another scheme or embedded credentials are refused.
+
+Only public addresses are reachable unless `web.allow_private_addresses` is
+set. Loopback, private, shared (CGNAT), link-local (including cloud metadata
+at `169.254.169.254`), multicast, reserved, and documentation ranges, IPv6
+unique-local and link-local addresses, and IPv6 forms that embed a refused
+IPv4 address are all refused. A host name is resolved once by a checking
+resolver: if any of its addresses is refused the name is refused, and the
+connection uses only the checked addresses, so a name cannot be rebound to a
+private address between check and connect. IP-literal URLs and every redirect
+target are checked the same way.
+
+An HTTPS URL whose host is in `web.auto_approve_domains` has `read_only`
+risk, so it runs without approval under `on-risk` and is allowed under
+`never`. A redirect from such a fetch may lead only to another listed HTTPS
+host; otherwise the call fails and names the target, which the model can then
+request on its own. Every other URL has `network` risk and needs approval,
+because the URL itself can carry data the model has read to a host that a
+prompt-injected page chose. The approval summary shows the full URL.
+
+## `web_search`
+
+With `web.search = "provider"`, each model request also offers the endpoint's
+hosted Responses tool `{"type":"web_search"}`. The provider runs the searches
+and returns the answer with `url_citation` annotations; SCV appends a
+`Sources:` list for any cited URL that the answer does not already link. No
+SCV tool call or approval is involved, and the queries reach only the model
+provider, which already receives the conversation.
+
+With `web.search = "searxng"` or `"brave"`, SCV registers a `web_search` tool:
+
+```json
+{"query":"tokio latest version","count":5}
+```
+
+It returns up to `count` (at most `web.max_search_results`, default 8) titles,
+URLs, and snippets from SearXNG (`GET <web.searxng_url>/search?format=json`)
+or the Brave Search API. It has `read_only` risk: the query goes only to the
+search service the user configured, not to a host the model picks. A backend
+failure returns a failed result with a hint for the common SearXNG and Brave
+setup errors.
+
+Tool-free sessions, such as ClawBot senders without remote tools, get neither
+web tool nor hosted search. Fetch tests use local servers with a port-aware
+address check to cover HTML conversion, content-type and size limits, paging,
+redirect limits, and loopback, metadata, name-resolved, and redirected private
+targets; search tests use fake SearXNG and Brave responses; a stdio test
+covers approval with and without the allowlist and the hosted tool in the
+request.
+
 ## Native agent adapters
 
 SCV knows five agent CLIs: Claude Code (`agent_claude`), Codex
@@ -247,7 +315,7 @@ output limits, timeout, cancellation, and background-descendant cleanup.
 
 A `Tool` supplies a unique name, description, JSON Schema, declared `ToolRisk`,
 approval summary, and asynchronous executor. Stable risk values are
-`read_only`, `filesystem`, `process`, and `delegate`. Registration rejects
+`read_only`, `filesystem`, `process`, `delegate`, and `network`. Registration rejects
 duplicate names. The loop and TUI do not contain name-specific execution code.
 
 ## `read_skill`

@@ -1170,24 +1170,32 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
     }).filter(|key| !key.trim().is_empty()).ok_or_else(|| anyhow!("provider credential is not configured; set provider.api_key or provider.api_key_env"))?;
     let skills = discover_skills(&workspace, &config, !no_tools)?;
     let system_prompt = build_system_prompt(&workspace, &config, &skills)?;
-    let provider = Arc::new(OpenAiProvider::new(
+    let mut provider = OpenAiProvider::new(
         provider_config.model.clone(),
         provider_config.base_url.clone(),
         api_key,
         Duration::from_secs(provider_config.timeout_seconds),
         config.provider_limits(),
         provider_config.headers.clone(),
-    )?);
+    )?;
+    if !no_tools && config.hosted_web_search() {
+        provider = provider.with_web_search();
+    }
+    let provider = Arc::new(provider);
     let tools = if no_tools {
         Arc::new(ToolRegistry::default())
     } else {
-        Arc::new(builtin_registry(
+        let mut registry = builtin_registry(
             config.tools(),
             skills.map,
             skills.roots,
             config.skills.max_skill_bytes,
             config.adapters(),
-        )?)
+        )?;
+        if let Some(web) = config.web_tools() {
+            scv_tools::web::register(&mut registry, web)?;
+        }
+        Arc::new(registry)
     };
     let context = Arc::new(BudgetContextPolicy::new((&config.context).into())?);
     let runtime = Arc::new(AgentRuntime::new(

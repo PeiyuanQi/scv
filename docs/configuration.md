@@ -103,6 +103,20 @@ scan_projects = true
 max_skills = 128
 max_skill_bytes = 262144
 
+[web]
+enabled = true
+fetch_max_bytes = 2097152
+fetch_timeout_seconds = 30
+max_redirects = 5
+auto_approve_domains = ["docs.rs", "crates.io", "doc.rust-lang.org", "docs.python.org", "pypi.org", "developer.mozilla.org"]
+allow_private_addresses = false
+search = "off" # "provider", "searxng", or "brave"
+# searxng_url = "https://searx.example"
+brave_url = "https://api.search.brave.com/res/v1/web/search"
+# brave_api_key = "your-brave-key"
+brave_api_key_env = "BRAVE_SEARCH_API_KEY"
+max_search_results = 8
+
 [agents.claude]
 command = "claude"
 args = ["-p"]
@@ -161,7 +175,8 @@ the bounded prompt argument before launch.
 
 Project configuration may lower context, size, output, and timeout limits; make
 approval policy stricter; set `skills.project_dir` within the workspace; turn
-`skills.scan_projects` off; and append project instructions. Attempts to weaken a limit or set a user-only key
+`skills.scan_projects`, `web.enabled`, or `web.search` off; and append project
+instructions. Attempts to weaken a limit or set a user-only key
 are startup errors rather than ignored fields.
 
 ### Tool timeouts
@@ -264,6 +279,37 @@ total are considered; entries that resolve outside the workspace, or that
 cannot be read, are skipped. Tool-free sessions, such as ClawBot senders
 without remote tools, never list project skills.
 
+### Web tools
+
+With `web.enabled` (default `true`), tool-enabled sessions get `web_fetch`,
+and web search when `web.search` names a source:
+
+- `off` (default): no search.
+- `provider`: offer the provider endpoint's hosted Responses `web_search` tool
+  with every request. The provider runs the searches itself and returns a
+  cited answer. Use it only with an endpoint that supports it (OpenAI does, as
+  do relays that pass the tool through); others reject the request.
+- `searxng`: a `web_search` tool that queries `web.searxng_url`, a SearXNG
+  instance with the JSON format enabled.
+- `brave`: a `web_search` tool that queries the Brave Search API with the key
+  from `web.brave_api_key` or the variable named by `web.brave_api_key_env`.
+  The user service does not load the shell profile, so put the key in the
+  private user file or the unit's environment. Without a key the tool is left
+  out and the daemon logs a warning.
+
+`web_fetch` reads HTTPS pages on `web.auto_approve_domains` without approval
+and asks before any other URL; an entry is a host name, or `*.example.com` for
+its subdomains. It downloads at most `web.fetch_max_bytes`, follows at most
+`web.max_redirects` redirects, and gives up after `web.fetch_timeout_seconds`,
+which must not exceed `tools.max_timeout_seconds`. `web.allow_private_addresses
+= true` lets it reach loopback and private networks, such as an intranet
+documentation server. See [web tools](tools.md#web_fetch) and
+[security](security.md#web-access).
+
+`web.auto_approve_domains`, `web.allow_private_addresses`, and the search
+endpoints and keys are user-only. Project configuration may only disable web
+access, turn search off, or lower the limits.
+
 Cross-field validation requires every specific content limit plus serialization
 overhead to fit its protocol frame limit, tool arguments to fit provider
 responses, and all count/byte limits to be positive. SCV fails startup with the
@@ -271,8 +317,9 @@ conflicting key names instead of silently clamping values.
 
 Approval policies are:
 
-- `on-risk` (default): approve ordinary `read` calls; prompt for secret-like
-  reads, `write`, `bash`, and every `agent_*` tool;
+- `on-risk` (default): approve ordinary `read` calls, `web_search`, and
+  `web_fetch` of auto-approved hosts; prompt for secret-like reads, `write`,
+  `bash`, other `web_fetch` URLs, and every `agent_*` tool;
 - `always`: prompt for every tool;
 - `never`: deny tools whose declared risk is not read-only.
 

@@ -9,7 +9,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use scv_core::{AgentConfig as CoreAgentConfig, ContextConfig, HistoryLimits};
 use scv_provider_openai::ProviderLimits;
-use scv_tools::{AgentAdapterConfig, ToolsConfig};
+use scv_tools::{
+    AgentAdapterConfig, ToolsConfig,
+    web::{SearchBackend, WebToolsConfig},
+};
 use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -36,6 +39,7 @@ pub struct Config {
     pub provider_limits: ProviderLimitsFile,
     pub skills: SkillsConfig,
     pub agents: AgentsConfig,
+    pub web: WebConfig,
     /// The process-owned root used for sockets, credentials, skills, and adapters.
     #[serde(skip)]
     pub instance_home: PathBuf,
@@ -331,6 +335,65 @@ impl Default for SkillsConfig {
     }
 }
 
+/// Where `web_search` results come from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchMode {
+    Off,
+    /// The provider endpoint's hosted Responses `web_search` tool.
+    Provider,
+    Searxng,
+    Brave,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebConfig {
+    /// Offer `web_fetch` (and search, when configured) to tool-enabled sessions.
+    pub enabled: bool,
+    pub fetch_max_bytes: usize,
+    pub fetch_timeout_seconds: u64,
+    pub max_redirects: usize,
+    /// HTTPS hosts `web_fetch` may read without approval.
+    pub auto_approve_domains: Vec<String>,
+    /// Let `web_fetch` reach loopback, private, and link-local addresses.
+    pub allow_private_addresses: bool,
+    pub search: WebSearchMode,
+    pub searxng_url: Option<String>,
+    pub brave_url: String,
+    pub brave_api_key: Option<String>,
+    pub brave_api_key_env: Option<String>,
+    pub max_search_results: usize,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            fetch_max_bytes: 2 * 1024 * 1024,
+            fetch_timeout_seconds: 30,
+            max_redirects: 5,
+            auto_approve_domains: [
+                "docs.rs",
+                "crates.io",
+                "doc.rust-lang.org",
+                "docs.python.org",
+                "pypi.org",
+                "developer.mozilla.org",
+            ]
+            .map(String::from)
+            .to_vec(),
+            allow_private_addresses: false,
+            search: WebSearchMode::Off,
+            searxng_url: None,
+            brave_url: "https://api.search.brave.com/res/v1/web/search".into(),
+            brave_api_key: None,
+            brave_api_key_env: Some("BRAVE_SEARCH_API_KEY".into()),
+            max_search_results: 8,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdapterConfig {
@@ -530,6 +593,59 @@ impl Config {
             max_read_bytes: self.tools.max_read_bytes,
             max_write_bytes: self.tools.max_write_bytes,
         }
+    }
+
+    /// Web tool settings for a tool-enabled session, or `None` when disabled.
+    /// A Brave backend without a key is left out rather than failing the session.
+    pub fn web_tools(&self) -> Option<WebToolsConfig> {
+        if !self.web.enabled {
+            return None;
+        }
+        let search = match self.web.search {
+            WebSearchMode::Off | WebSearchMode::Provider => None,
+            WebSearchMode::Searxng => self
+                .web
+                .searxng_url
+                .clone()
+                .map(|url| SearchBackend::Searxng { url }),
+            WebSearchMode::Brave => {
+                let api_key = self
+                    .web
+                    .brave_api_key
+                    .clone()
+                    .or_else(|| {
+                        self.web
+                            .brave_api_key_env
+                            .as_deref()
+                            .and_then(|name| std::env::var(name).ok())
+                    })
+                    .filter(|key| !key.trim().is_empty());
+                if api_key.is_none() {
+                    tracing::warn!(
+                        "web.search is \"brave\" but no Brave API key is configured; web_search is unavailable"
+                    );
+                }
+                api_key.map(|api_key| SearchBackend::Brave {
+                    url: self.web.brave_url.clone(),
+                    api_key,
+                })
+            }
+        };
+        Some(WebToolsConfig {
+            fetch_max_bytes: self.web.fetch_max_bytes,
+            fetch_timeout: Duration::from_secs(self.web.fetch_timeout_seconds),
+            max_redirects: self.web.max_redirects,
+            auto_approve_domains: self.web.auto_approve_domains.clone(),
+            allow_private_addresses: self.web.allow_private_addresses,
+            search,
+            max_search_results: self.web.max_search_results,
+            output_limit: self.tools.output_limit_bytes,
+        })
+    }
+
+    /// Whether to offer the provider's hosted web search to tool-enabled sessions.
+    pub fn hosted_web_search(&self) -> bool {
+        self.web.enabled && self.web.search == WebSearchMode::Provider
     }
 
     pub fn provider_limits(&self) -> ProviderLimits {
@@ -761,6 +877,12 @@ impl Config {
             ),
             ("skills.max_skills", self.skills.max_skills),
             ("skills.max_skill_bytes", self.skills.max_skill_bytes),
+            ("web.fetch_max_bytes", self.web.fetch_max_bytes),
+            (
+                "web.fetch_timeout_seconds",
+                usize::try_from(self.web.fetch_timeout_seconds).unwrap_or(usize::MAX),
+            ),
+            ("web.max_search_results", self.web.max_search_results),
         ];
         if let Some((name, _)) = positives.into_iter().find(|(_, value)| *value == 0) {
             bail!("{name} must be positive");
@@ -840,6 +962,7 @@ impl Config {
                 "tool or skill limits can exceed protocol.max_server_frame_bytes after JSON escaping"
             );
         }
+        self.validate_web()?;
         if self.skills.project_dir.is_absolute()
             || self
                 .skills
@@ -851,6 +974,72 @@ impl Config {
         }
         Ok(())
     }
+}
+
+impl Config {
+    fn validate_web(&self) -> Result<()> {
+        let web = &self.web;
+        if web.fetch_max_bytes > 64 * 1024 * 1024 {
+            bail!("web.fetch_max_bytes must be at most 67108864");
+        }
+        if web.fetch_timeout_seconds > self.tools.max_timeout_seconds {
+            bail!("web.fetch_timeout_seconds exceeds tools.max_timeout_seconds");
+        }
+        if web.max_redirects > 10 {
+            bail!("web.max_redirects must be at most 10");
+        }
+        if web.max_search_results > 20 {
+            bail!("web.max_search_results must be at most 20");
+        }
+        if web.auto_approve_domains.len() > 256 {
+            bail!("web.auto_approve_domains may list at most 256 hosts");
+        }
+        if let Some(entry) = web
+            .auto_approve_domains
+            .iter()
+            .find(|entry| !valid_domain_pattern(entry))
+        {
+            bail!(
+                "web.auto_approve_domains entry {entry:?} must be a host name such as docs.rs or *.example.com"
+            );
+        }
+        let http_url = |value: &str| value.starts_with("https://") || value.starts_with("http://");
+        if !http_url(&web.brave_url) {
+            bail!("web.brave_url must be an http or https URL");
+        }
+        match web.search {
+            WebSearchMode::Searxng if !web.searxng_url.as_deref().is_some_and(http_url) => {
+                bail!("web.search = \"searxng\" requires web.searxng_url (an http or https URL)");
+            }
+            WebSearchMode::Brave
+                if web.brave_api_key.as_deref().unwrap_or("").trim().is_empty()
+                    && web
+                        .brave_api_key_env
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty() =>
+            {
+                bail!("web.search = \"brave\" requires web.brave_api_key or web.brave_api_key_env");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// A host name, optionally prefixed with `*.` to match its subdomains.
+fn valid_domain_pattern(entry: &str) -> bool {
+    let host = entry.strip_prefix("*.").unwrap_or(entry);
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
 }
 
 fn user_config_path() -> Option<PathBuf> {
@@ -936,6 +1125,20 @@ fn validate_project_keys(value: &toml::Value) -> Result<()> {
         .is_some_and(|agent| agent.contains_key("system_prompt"))
     {
         bail!("project configuration cannot replace agent.system_prompt");
+    }
+    if let Some(web) = table.get("web").and_then(toml::Value::as_table) {
+        for key in [
+            "auto_approve_domains",
+            "allow_private_addresses",
+            "searxng_url",
+            "brave_url",
+            "brave_api_key",
+            "brave_api_key_env",
+        ] {
+            if web.contains_key(key) {
+                bail!("project configuration cannot set web.{key}");
+            }
+        }
     }
     Ok(())
 }
@@ -1116,6 +1319,31 @@ fn validate_project_not_weaker(user: &Config, project: &Config) -> Result<()> {
     if project.skills.scan_projects && !user.skills.scan_projects {
         bail!("project configuration cannot enable skills.scan_projects");
     }
+    if project.web.enabled && !user.web.enabled {
+        bail!("project configuration cannot enable web");
+    }
+    if project.web.search != user.web.search && project.web.search != WebSearchMode::Off {
+        bail!("project configuration can only turn web.search off");
+    }
+    no_larger!(
+        (user.web.fetch_max_bytes, project.web.fetch_max_bytes),
+        "web.fetch_max_bytes"
+    );
+    no_larger!(
+        (
+            user.web.fetch_timeout_seconds,
+            project.web.fetch_timeout_seconds
+        ),
+        "web.fetch_timeout_seconds"
+    );
+    no_larger!(
+        (user.web.max_redirects, project.web.max_redirects),
+        "web.max_redirects"
+    );
+    no_larger!(
+        (user.web.max_search_results, project.web.max_search_results),
+        "web.max_search_results"
+    );
     Ok(())
 }
 
@@ -1253,6 +1481,134 @@ command = "/tmp/fake"
         disabled.skills.scan_projects = false;
         assert!(validate_project_not_weaker(&user, &disabled).is_ok());
         assert!(validate_project_not_weaker(&disabled, &user).is_err());
+    }
+
+    #[test]
+    fn web_defaults_offer_fetch_without_search_and_validate_their_settings() {
+        let config = Config::default();
+        assert!(config.web.enabled);
+        assert_eq!(config.web.search, WebSearchMode::Off);
+        assert!(!config.hosted_web_search());
+        let tools = config.web_tools().unwrap();
+        assert!(tools.search.is_none());
+        assert!(!tools.allow_private_addresses);
+        assert_eq!(tools.fetch_max_bytes, 2 * 1024 * 1024);
+        assert_eq!(tools.output_limit, config.tools.output_limit_bytes);
+        assert!(tools.auto_approve_domains.contains(&"docs.rs".to_owned()));
+
+        let mut disabled = Config::default();
+        disabled.web.enabled = false;
+        disabled.web.search = WebSearchMode::Provider;
+        assert!(disabled.web_tools().is_none());
+        assert!(!disabled.hosted_web_search());
+
+        let mut provider = Config::default();
+        provider.web.search = WebSearchMode::Provider;
+        assert!(provider.hosted_web_search());
+        assert!(provider.web_tools().unwrap().search.is_none());
+
+        let mut searxng = Config::default();
+        searxng.web.search = WebSearchMode::Searxng;
+        assert!(
+            searxng
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("web.searxng_url")
+        );
+        searxng.web.searxng_url = Some("https://searx.example".into());
+        assert!(searxng.validate().is_ok());
+        assert!(matches!(
+            searxng.web_tools().unwrap().search,
+            Some(SearchBackend::Searxng { .. })
+        ));
+
+        let mut brave = Config::default();
+        brave.web.search = WebSearchMode::Brave;
+        brave.web.brave_api_key_env = None;
+        assert!(
+            brave
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("brave_api_key")
+        );
+        brave.web.brave_api_key = Some("inline-test-key".into());
+        assert!(matches!(
+            brave.web_tools().unwrap().search,
+            Some(SearchBackend::Brave { ref api_key, .. }) if api_key == "inline-test-key"
+        ));
+        brave.web.brave_api_key = None;
+        brave.web.brave_api_key_env = Some("SCV_TEST_UNSET_BRAVE_KEY_VARIABLE".into());
+        assert!(brave.validate().is_ok());
+        assert!(brave.web_tools().unwrap().search.is_none());
+
+        for (mutate, message) in [
+            (
+                (|config: &mut Config| {
+                    config.web.auto_approve_domains = vec!["https://docs.rs/".into()]
+                }) as fn(&mut Config),
+                "web.auto_approve_domains",
+            ),
+            (|config| config.web.max_redirects = 11, "web.max_redirects"),
+            (
+                |config| config.web.fetch_max_bytes = 0,
+                "web.fetch_max_bytes",
+            ),
+            (
+                |config| config.web.fetch_timeout_seconds = config.tools.max_timeout_seconds + 1,
+                "web.fetch_timeout_seconds",
+            ),
+            (
+                |config| config.web.max_search_results = 21,
+                "web.max_search_results",
+            ),
+        ] {
+            let mut config = Config::default();
+            mutate(&mut config);
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        }
+        for valid in ["docs.rs", "*.example.com", "a-b.c1.dev"] {
+            assert!(valid_domain_pattern(valid), "{valid}");
+        }
+        for invalid in ["", "*.", "docs.rs/path", "-a.com", "a..b", "*", "user@host"] {
+            assert!(!valid_domain_pattern(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn projects_may_narrow_but_not_widen_web_access() {
+        for key in [
+            "auto_approve_domains = [\"attacker.test\"]",
+            "allow_private_addresses = true",
+            "searxng_url = \"http://attacker.test\"",
+            "brave_url = \"http://attacker.test\"",
+            "brave_api_key_env = \"OTHER\"",
+        ] {
+            let project: toml::Value = toml::from_str(&format!("[web]\n{key}\n")).unwrap();
+            assert!(validate_project_keys(&project).is_err(), "{key}");
+        }
+        let allowed: toml::Value =
+            toml::from_str("[web]\nenabled = false\nsearch = \"off\"\nmax_redirects = 1\n")
+                .unwrap();
+        assert!(validate_project_keys(&allowed).is_ok());
+
+        let mut user = Config::default();
+        user.web.search = WebSearchMode::Provider;
+        let mut narrower = user.clone();
+        narrower.web.enabled = false;
+        narrower.web.search = WebSearchMode::Off;
+        narrower.web.fetch_max_bytes = 1024;
+        narrower.web.max_redirects = 0;
+        assert!(validate_project_not_weaker(&user, &narrower).is_ok());
+        assert!(validate_project_not_weaker(&narrower, &user).is_err());
+        let mut switched = user.clone();
+        switched.web.search = WebSearchMode::Searxng;
+        assert!(validate_project_not_weaker(&user, &switched).is_err());
+        let mut larger = user.clone();
+        larger.web.fetch_timeout_seconds += 1;
+        assert!(validate_project_not_weaker(&user, &larger).is_err());
     }
 
     #[test]

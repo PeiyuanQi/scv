@@ -19,7 +19,8 @@ async fn server_handshake_and_session_start() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
         .arg("--stdio")
         .env("OPENAI_API_KEY", "test-only")
-        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("SCV_HOME", config_home.path())
+        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -107,7 +108,8 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             &format!("http://{address}/v1"),
         ])
         .env("OPENAI_API_KEY", "test-only")
-        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("SCV_HOME", config_home.path())
+        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -328,7 +330,8 @@ async fn tool_results_are_replayed_after_their_calls() {
             &format!("http://{address}/v1"),
         ])
         .env("OPENAI_API_KEY", "test-only")
-        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("SCV_HOME", config_home.path())
+        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -457,4 +460,274 @@ async fn next_event(
         .unwrap()
         .expect("server closed stdout before the expected event");
     serde_json::from_str(&line).unwrap()
+}
+
+/// Allowlisted HTTPS fetches run without approval, other hosts ask first, and
+/// a provider with hosted search is offered it beside the function tools.
+#[tokio::test]
+async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let call = |id: &str, url: &str| {
+            let arguments = serde_json::json!({ "url": url }).to_string();
+            format!(
+                "data: {}\n\ndata: {}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n",
+                serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":arguments}),
+                serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":id,"name":"web_fetch"}}),
+            )
+        };
+        let responses = [
+            call("call_1", "https://localhost:9/docs"),
+            call("call_2", "http://example.invalid/?q=secret"),
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n".to_owned(),
+        ];
+        let mut bodies = Vec::new();
+        for body in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            bodies.push(read_json_body(&mut stream));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        bodies
+    });
+
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[provider]\nactive = \"fake\"\n\n[providers.fake]\nkind = \"openai-compatible\"\nmodel = \"fake-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n\n[web]\nauto_approve_domains = [\"localhost\"]\nsearch = \"provider\"\n"
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .arg("--stdio")
+        .env("SCV_HOME", home.path())
+        .env_remove("SCV_CONFIG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    send(
+        &mut input,
+        &ClientMessage::Initialize {
+            request_id: "init".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "integration-test".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .await;
+    send(
+        &mut input,
+        &ClientMessage::SessionStart {
+            request_id: "session".into(),
+            cwd: workspace.path().display().to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+            no_tools: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_event(&mut lines).await,
+        ServerEvent::Initialized { .. }
+    ));
+    let session_id = match next_event(&mut lines).await {
+        ServerEvent::SessionStarted { session_id, .. } => session_id,
+        event => panic!("expected session.started, received {event:?}"),
+    };
+    send(
+        &mut input,
+        &ClientMessage::TurnStart {
+            request_id: "turn".into(),
+            session_id: session_id.clone(),
+            prompt: "read the docs".into(),
+        },
+    )
+    .await;
+    let mut approvals = Vec::new();
+    let mut completed = Vec::new();
+    loop {
+        match next_event(&mut lines).await {
+            ServerEvent::ApprovalRequested {
+                approval_id,
+                call_id,
+                name,
+                risk,
+                summary,
+                ..
+            } => {
+                approvals.push((call_id, name, risk, summary));
+                send(
+                    &mut input,
+                    &ClientMessage::ApprovalResolve {
+                        request_id: "deny".into(),
+                        session_id: session_id.clone(),
+                        approval_id,
+                        approved: false,
+                    },
+                )
+                .await;
+            }
+            ServerEvent::ToolCompleted {
+                call_id,
+                success,
+                output,
+                ..
+            } => completed.push((call_id, success, output)),
+            ServerEvent::TurnCompleted { .. } => break,
+            ServerEvent::TurnFailed { code, message, .. } => {
+                panic!("turn failed with {code}: {message}")
+            }
+            _ => {}
+        }
+    }
+    input.shutdown().await.unwrap();
+    drop(input);
+    let bodies = provider.join().unwrap();
+
+    // The allowlisted HTTPS host ran without asking; the address check then
+    // refused it, since localhost is not public.
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    let (call_id, name, risk, summary) = &approvals[0];
+    assert_eq!(
+        (call_id.as_str(), name.as_str(), risk.as_str()),
+        ("call_2", "web_fetch", "network")
+    );
+    assert!(summary.contains("example.invalid"), "{summary}");
+    assert_eq!(completed.len(), 2, "{completed:?}");
+    assert_eq!(completed[0].0, "call_1");
+    assert!(!completed[0].1);
+    assert!(completed[0].2.contains("non-public"), "{}", completed[0].2);
+    assert_eq!(completed[1].0, "call_2");
+    assert!(completed[1].2.contains("denied"), "{}", completed[1].2);
+
+    let tools = bodies[0]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "web_fetch"));
+    assert!(tools.contains(&serde_json::json!({"type":"web_search"})));
+    assert!(
+        timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+/// Tool-free sessions, such as ClawBot senders without remote tools, get
+/// neither web tools nor the provider's hosted search.
+#[tokio::test]
+async fn tool_free_sessions_get_no_web_access() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = read_json_body(&mut stream);
+        let events = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        body
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[provider]\nactive = \"fake\"\n\n[providers.fake]\nkind = \"openai-compatible\"\nmodel = \"fake-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n\n[web]\nsearch = \"provider\"\n"
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .arg("--stdio")
+        .env("SCV_HOME", home.path())
+        .env_remove("SCV_CONFIG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    send(
+        &mut input,
+        &ClientMessage::Initialize {
+            request_id: "init".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "integration-test".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .await;
+    send(
+        &mut input,
+        &ClientMessage::SessionStart {
+            request_id: "session".into(),
+            cwd: workspace.path().display().to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+            no_tools: Some(true),
+        },
+    )
+    .await;
+    next_event(&mut lines).await;
+    let session_id = match next_event(&mut lines).await {
+        ServerEvent::SessionStarted { session_id, .. } => session_id,
+        event => panic!("expected session.started, received {event:?}"),
+    };
+    send(
+        &mut input,
+        &ClientMessage::TurnStart {
+            request_id: "turn".into(),
+            session_id,
+            prompt: "search the web".into(),
+        },
+    )
+    .await;
+    loop {
+        match next_event(&mut lines).await {
+            ServerEvent::TurnCompleted { .. } => break,
+            ServerEvent::TurnFailed { code, message, .. } => {
+                panic!("turn failed with {code}: {message}")
+            }
+            _ => {}
+        }
+    }
+    input.shutdown().await.unwrap();
+    drop(input);
+    let body = provider.join().unwrap();
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(
+        timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
 }

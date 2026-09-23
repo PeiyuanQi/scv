@@ -39,7 +39,7 @@ table and may be developed in parallel with others; landings stay sequential.
 | 1 | Delegation foundation: structured results, registry, cleanup | 0b |
 | 2 | ClawBot long-turn resilience (done, 0.1.23) | 0b landed |
 | 3 | Multi-turn conversations (resume) | 1 |
-| 4 | SCV web tools: `web_fetch`, `web_search` | 0b landed |
+| 4 | SCV web tools: `web_fetch`, `web_search` (done, 0.1.25) | 0b landed |
 | 5 | Progress events and protocol v3 | 3 |
 | 6 | Live mode: SCV to SCV, then ACP | 5 |
 | 7 | Background delegations | 6, iLink check |
@@ -100,10 +100,11 @@ approval summary. The built-in default stays `default`.
 
 - `web_fetch`: bounded HTTP(S) GET with HTML-to-text conversion, redirect and
   size limits, and loopback, link-local, and private addresses refused by
-  default.
-- `web_search`: the provider's hosted Responses `web_search` tool when the
-  endpoint supports it, otherwise a configured search backend. Disabled with a
-  clear error when neither is available.
+  default. HTTPS hosts in `web.auto_approve_domains` run without approval;
+  other URLs have `network` risk and need approval.
+- `web_search`: the provider's hosted Responses `web_search` tool
+  (`web.search = "provider"`), or a `web_search` tool backed by SearXNG or
+  Brave Search. Without a configured source there is no search.
 - Tool-free sessions never get them.
 
 ### 5. Progress events and protocol v3
