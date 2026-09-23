@@ -142,7 +142,9 @@ protocol stream and redact authorization headers and credential values.
 Provider streaming is capped at a 1 MiB SSE event, 4 MiB total response, 1 MiB
 assistant text, 256 KiB per tool argument object, and 32 tool calls per model
 response. A limit violation cancels the response and fails the turn before any
-not-yet-started call from that response is executed.
+not-yet-started call from that response is executed. Provider error text is
+redacted of the credential, flattened, and bounded before it reaches clients or
+logs; ClawBot senders receive only a generic failure reply.
 
 ## Supervised remote bridge
 

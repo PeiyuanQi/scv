@@ -16,6 +16,8 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 /// A day: long enough for any delegated job, short enough that deadline
 /// arithmetic never overflows.
 const MAX_TOOL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
+/// Retries multiply provider load and turn latency, so they stay small.
+const MAX_PROVIDER_RETRIES: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -288,6 +290,7 @@ pub struct ProviderLimitsFile {
     pub max_assistant_bytes: usize,
     pub max_tool_calls: usize,
     pub max_tool_arguments_bytes: usize,
+    pub max_retries: usize,
 }
 
 impl Default for ProviderLimitsFile {
@@ -299,6 +302,7 @@ impl Default for ProviderLimitsFile {
             max_assistant_bytes: value.max_assistant_bytes,
             max_tool_calls: value.max_tool_calls,
             max_tool_arguments_bytes: value.max_tool_arguments_bytes,
+            max_retries: value.max_retries,
         }
     }
 }
@@ -535,6 +539,8 @@ impl Config {
             max_assistant_bytes: self.provider_limits.max_assistant_bytes,
             max_tool_calls: self.provider_limits.max_tool_calls,
             max_tool_arguments_bytes: self.provider_limits.max_tool_arguments_bytes,
+            max_retries: self.provider_limits.max_retries,
+            ..ProviderLimits::default()
         }
     }
 
@@ -800,6 +806,9 @@ impl Config {
         if self.provider_limits.max_sse_event_bytes > self.provider_limits.max_response_bytes {
             bail!("provider SSE event limit exceeds provider response limit");
         }
+        if self.provider_limits.max_retries > MAX_PROVIDER_RETRIES {
+            bail!("provider_limits.max_retries must be at most {MAX_PROVIDER_RETRIES}");
+        }
         if self.protocol.max_client_frame_bytes < 4096 {
             bail!("protocol.max_client_frame_bytes must be at least 4096");
         }
@@ -1052,6 +1061,13 @@ fn validate_project_not_weaker(user: &Config, project: &Config) -> Result<()> {
     );
     no_larger!(
         (
+            user.provider_limits.max_retries,
+            project.provider_limits.max_retries
+        ),
+        "provider_limits.max_retries"
+    );
+    no_larger!(
+        (
             user.tui.max_transcript_bytes,
             project.tui.max_transcript_bytes
         ),
@@ -1210,6 +1226,24 @@ command = "/tmp/fake"
             raise(&mut higher);
             assert!(validate_project_not_weaker(&user, &higher).is_err());
         }
+    }
+
+    #[test]
+    fn provider_retries_are_bounded_and_projects_may_only_lower_them() {
+        let user = Config::default();
+        assert_eq!(user.provider_limits.max_retries, 2);
+        assert_eq!(user.provider_limits().max_retries, 2);
+        let mut none = user.clone();
+        none.provider_limits.max_retries = 0;
+        assert!(none.validate().is_ok());
+        assert!(validate_project_not_weaker(&user, &none).is_ok());
+        assert!(validate_project_not_weaker(&none, &user).is_err());
+        let mut excessive = user.clone();
+        excessive.provider_limits.max_retries = MAX_PROVIDER_RETRIES + 1;
+        assert_eq!(
+            excessive.validate().unwrap_err().to_string(),
+            format!("provider_limits.max_retries must be at most {MAX_PROVIDER_RETRIES}")
+        );
     }
 
     #[test]

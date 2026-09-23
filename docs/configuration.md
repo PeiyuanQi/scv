@@ -94,6 +94,7 @@ max_response_bytes = 4194304
 max_assistant_bytes = 1048576
 max_tool_calls = 32
 max_tool_arguments_bytes = 262144
+max_retries = 2
 
 [skills]
 user_dir = "~/.scv/skills"
@@ -194,6 +195,27 @@ starts. `agent.max_steps` (default 128) bounds model/tool rounds per turn.
 including its streamed response, not just idle time, so it must cover the
 longest single response. Project configuration may lower all of these but not
 raise them.
+
+### Provider errors and retries
+
+A provider error always fails the turn with `provider_error` and the
+provider's own message, redacted of the credential, flattened to one line, and
+cut to 300 characters. That covers an HTTP error status, an `error` or
+`response.failed` stream event, a `response.incomplete` event, a plain JSON
+error body sent in place of the stream, and a stream that ends before
+`response.completed` or `[DONE]`. None of them completes a turn with empty
+text.
+
+`provider_limits.max_retries` (default 2, at most 10) is how many more times
+SCV sends a request that failed transiently: HTTP 429 or 5xx, a failed
+connection, an overload, rate-limit, unavailable, or server error, or a stream
+that ends early, but not a request that reached `timeout_seconds`. Retries
+wait about 1 second, doubling each time with random jitter, or the
+`Retry-After` seconds the provider sends; a provider asking for more than 60
+seconds is reported instead. A retry happens only while nothing from
+that response has streamed, so text is never repeated. Cancelling the turn
+interrupts the wait. Set `0` to report the first failure. Project
+configuration may lower it but not raise it.
 
 ### Agent permissions
 
