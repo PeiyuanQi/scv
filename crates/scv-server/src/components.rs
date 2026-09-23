@@ -14,6 +14,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// How long an operator command waits out a bridge's state commit.
+const BUSY_RETRY: Duration = Duration::from_secs(5);
 
 /// Components must observe cancellation and must not detach child tasks.
 /// Return on failure; the supervisor owns retries and bounded shutdown.
@@ -332,10 +334,7 @@ impl Components {
     async fn account_error(&mut self, name: String, error: anyhow::Error) {
         // A bridge state commit briefly holds this same lock. Retry next refresh
         // rather than interrupting healthy work for ordinary lock contention.
-        if error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
-        {
+        if is_busy(&error) {
             return;
         }
         self.supervisor.stop(&format!("clawbot:{name}")).await;
@@ -357,35 +356,47 @@ impl Components {
                 remote_tools,
             } => {
                 state::validate_name(&account)?;
-                if state::account(&account)?.is_none() {
-                    bail!("Account is not logged in");
-                }
-                let mut settings = state::settings(&account)?;
-                settings.enabled = enabled;
-                if let Some(path) = workspace {
-                    let path = PathBuf::from(path);
-                    if !path.is_absolute() || !path.is_dir() {
-                        bail!("Invalid component workspace");
+                let workspace = match workspace {
+                    Some(path) => {
+                        let path = PathBuf::from(path);
+                        if !path.is_absolute() || !path.is_dir() {
+                            bail!("Invalid component workspace");
+                        }
+                        Some(std::fs::canonicalize(path)?)
                     }
-                    settings.workspace = Some(std::fs::canonicalize(path)?);
-                }
-                if let Some(mode) = remote_tools {
-                    settings.remote_tools = mode;
-                }
-                state::save_settings(&account, &settings)?;
+                    None => None,
+                };
+                retry_while_busy(|| {
+                    if state::account(&account)?.is_none() {
+                        bail!("Account is not logged in");
+                    }
+                    let mut settings = state::settings(&account)?;
+                    settings.enabled = enabled;
+                    if let Some(path) = &workspace {
+                        settings.workspace = Some(path.clone());
+                    }
+                    if let Some(mode) = remote_tools {
+                        settings.remote_tools = mode;
+                    }
+                    state::save_settings(&account, &settings)
+                })
+                .await?;
             }
             DaemonCommand::ClawbotLogout { account } => {
                 state::validate_name(&account)?;
                 // Persist disabled and tool-free first, so failed deletion can
                 // neither resurrect a live account nor hand a later login the grant.
-                let mut settings = state::settings(&account)?;
-                settings.enabled = false;
-                settings.remote_tools = RemoteTools::None;
-                state::save_settings(&account, &settings)?;
+                retry_while_busy(|| {
+                    let mut settings = state::settings(&account)?;
+                    settings.enabled = false;
+                    settings.remote_tools = RemoteTools::None;
+                    state::save_settings(&account, &settings)
+                })
+                .await?;
                 self.supervisor.stop(&format!("clawbot:{account}")).await;
                 self.desired.remove(&account);
                 self.inactive.remove(&account);
-                state::remove(&account)?;
+                retry_while_busy(|| state::remove(&account)).await?;
             }
         }
         self.reconcile().await?;
@@ -407,6 +418,27 @@ fn max_tool_timeout(workspace: &std::path::Path) -> std::time::Duration {
             crate::config::ToolConfig::default().max_timeout_seconds
         });
     std::time::Duration::from_secs(seconds)
+}
+
+/// Account transactions fail fast while their lock is held, and a running
+/// bridge holds it for every state commit. Operator commands retry through
+/// that contention instead of failing whenever they coincide with a commit.
+async fn retry_while_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    let deadline = tokio::time::Instant::now() + BUSY_RETRY;
+    loop {
+        match operation() {
+            Err(error) if is_busy(&error) && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn is_busy(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
 }
 
 /// Only the authenticated account owner may receive tools. Credentials without

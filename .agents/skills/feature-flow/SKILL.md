@@ -74,9 +74,10 @@ cargo build --release --locked
 git diff --check
 ```
 
-Process-timing tests in `scv-tools` and `tests/server_components.rs` can flake
-under load. Rerun a failing test once on its own before treating it as real.
-Never weaken or skip a test that fails reproducibly.
+Treat every test failure as real, and never weaken or skip a failing test.
+Process tests must wait for an observable condition under a generous ceiling,
+never a fixed budget that includes process startup: `bash -l` sources the
+host's login profile, which takes seconds on loaded CI runners.
 
 ## 4. Commit
 
@@ -106,9 +107,9 @@ locally, which fails because the main checkout already holds `main`, and the
 remote branch is then left behind.
 
 - If checks fail, read `gh run view <run-id> --log-failed`.
-  - A known flake (stage 3): run `gh run rerun <run-id> --failed` once, then
-    watch again.
-  - A real failure: fix it in the worktree, push, and repeat.
+  - A runner or network fault outside the tests: run
+    `gh run rerun <run-id> --failed` once, then watch again.
+  - A test failure: find the cause, fix it in the worktree, push, and repeat.
 - If `main` moved or the PR conflicts: rebase locally as below, then run
   `git push --force-with-lease` on the task branch only.
 

@@ -1129,6 +1129,30 @@ mod tests {
 
     use super::*;
 
+    /// `bash -l` sources the host's login profile before it runs a command,
+    /// and CI images can spend seconds there under parallel test load. Waits
+    /// that include shell startup use this ceiling; they end as soon as their
+    /// condition holds.
+    const SHELL_STARTUP: Duration = Duration::from_secs(30);
+
+    /// Polls `probe` every 10 ms until it yields a value or `limit` passes.
+    async fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if let Some(value) = probe() {
+                return Some(value);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn is_gone(pid: i32) -> Option<()> {
+        (unsafe { libc::kill(pid, 0) } != 0).then_some(())
+    }
+
     #[test]
     fn rejects_parent_traversal() {
         assert!(validate_relative(Path::new("../secret")).is_err());
@@ -1266,8 +1290,8 @@ mod tests {
     async fn bash_output_is_bounded_and_reports_truncation() {
         let workspace = tempfile::tempdir().unwrap();
         let tool = BashTool {
-            timeout: Duration::from_secs(2),
-            max_timeout: Duration::from_secs(2),
+            timeout: SHELL_STARTUP,
+            max_timeout: SHELL_STARTUP,
             output_limit: 8,
         };
         let output = tool
@@ -1318,14 +1342,13 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let root = workspace.path().canonicalize().unwrap();
         let tool = BashTool {
-            timeout: Duration::from_secs(5),
-            max_timeout: Duration::from_secs(5),
+            timeout: SHELL_STARTUP,
+            max_timeout: SHELL_STARTUP,
             output_limit: 100,
         };
-        let started = std::time::Instant::now();
         let output = tool
             .execute(
-                json!({"command":"sleep 30 & echo $! > background.pid; exit 0"}),
+                json!({"command":"sleep 60 & echo $! > background.pid; exit 0"}),
                 ToolContext {
                     workspace: root.clone(),
                     cancellation: tokio_util::sync::CancellationToken::new(),
@@ -1333,20 +1356,25 @@ mod tests {
             )
             .await
             .unwrap();
+        let returned = std::time::SystemTime::now();
         assert!(!output.is_error);
-        assert!(started.elapsed() < Duration::from_secs(3));
+        // Time from the shell's last write, which excludes its startup.
+        let exited = std::fs::metadata(root.join("background.pid"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(returned.duration_since(exited).unwrap_or_default() < Duration::from_secs(3));
         let pid: i32 = std::fs::read_to_string(root.join("background.pid"))
             .unwrap()
             .trim()
             .parse()
             .unwrap();
-        for _ in 0..20 {
-            if unsafe { libc::kill(pid, 0) } != 0 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("background descendant {pid} survived tool completion");
+        assert!(
+            wait_for(Duration::from_secs(5), || is_gone(pid))
+                .await
+                .is_some(),
+            "background descendant {pid} survived tool completion"
+        );
     }
 
     #[tokio::test]
@@ -1372,29 +1400,24 @@ mod tests {
             .await
         });
         let pid_path = root.join("stubborn.pid");
-        let mut descendant_pid = None;
-        for _ in 0..100 {
-            descendant_pid = std::fs::read_to_string(&pid_path)
+        let pid = wait_for(SHELL_STARTUP, || {
+            std::fs::read_to_string(&pid_path)
                 .ok()
-                .and_then(|value| value.trim().parse::<i32>().ok());
-            if descendant_pid.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let pid = descendant_pid.expect("command did not report its descendant pid");
+                .and_then(|value| value.trim().parse::<i32>().ok())
+        })
+        .await
+        .expect("command did not report its descendant pid");
         let started = std::time::Instant::now();
         cancel.cancel();
         let error = execution.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(3));
-        for _ in 0..20 {
-            if unsafe { libc::kill(pid, 0) } != 0 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("TERM-ignoring descendant {pid} survived cancellation");
+        assert!(
+            wait_for(Duration::from_secs(5), || is_gone(pid))
+                .await
+                .is_some(),
+            "TERM-ignoring descendant {pid} survived cancellation"
+        );
     }
 
     /// Fake agents run through `bash` so no test ever executes a file that a
