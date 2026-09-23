@@ -42,7 +42,7 @@ table and may be developed in parallel with others; landings stay sequential.
 | 4 | SCV web tools: `web_fetch`, `web_search` (done, 0.1.25) | 0b landed |
 | 5 | Progress events and protocol v3 (done, 0.1.30) | 3 |
 | 6a | Live mode: SCV to SCV (`agent_scv`) (done, 0.1.31) | 5 |
-| 6b | Live mode: ACP adapter | 6a |
+| 6b | Live mode: ACP adapter (done, 0.1.33) | 6a |
 | 7 | Background delegations | 6, iLink check |
 
 ### 0b. Adapter table and full-work defaults
@@ -145,12 +145,20 @@ approval summary. The built-in default stays `default`.
 - Future work: `[agents.scv] socket`, attaching to an existing daemon instead
   of starting a child.
 
-6b:
+6b (done, 0.1.33):
 
 - An ACP adapter maps `session/new`, `session/prompt`, `session/update`,
   `session/request_permission`, and `session/cancel`, and offers no client
   file or terminal capabilities. Adapters may prefer ACP and fall back to
   resume.
+- ACP v1 servers: Claude Code and Codex through the ACP organisation's
+  official adapters (`claude-agent-acp`, `codex-acp`), Grok Build and
+  DeepSeek Harness natively (`grok agent stdio`, `dsh --profile acp`). pi has
+  only a community adapter and stays on resume; `agent_scv` keeps the SCV
+  protocol.
+- `[agents.<name>] transport = "auto" | "acp" | "resume"`; `auto` prefers an
+  installed ACP server unless `command` is customised. `permissions = "full"`
+  maps onto each agent's own session mode or flag.
 
 ### 7. Background delegations
 

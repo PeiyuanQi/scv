@@ -491,16 +491,16 @@ async fn interrupt_error(live: &LiveChild, interrupt: Interrupt) -> ToolError {
     }
 }
 
-/// The nested SCV's reply: the last completed assistant message, or the
+/// A delegated agent's reply: the last completed assistant message, or the
 /// streamed text of one still in progress, bounded to the output limit.
-struct Reply {
+pub(crate) struct Reply {
     completed: Option<String>,
     streaming: String,
     limit: usize,
 }
 
 impl Reply {
-    fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Self {
             completed: None,
             streaming: String::new(),
@@ -508,13 +508,13 @@ impl Reply {
         }
     }
 
-    fn delta(&mut self, content: &str) {
+    pub(crate) fn delta(&mut self, content: &str) {
         if self.streaming.len() <= self.limit {
             self.streaming.push_str(content);
         }
     }
 
-    fn completed(&mut self, content: String) {
+    pub(crate) fn completed(&mut self, content: String) {
         self.streaming.clear();
         if !content.trim().is_empty() {
             self.completed = Some(content);
@@ -522,7 +522,7 @@ impl Reply {
     }
 
     /// The reply and whether it was cut.
-    fn finish(self) -> (String, bool) {
+    pub(crate) fn finish(self) -> (String, bool) {
         let text = match self.completed {
             Some(text) if self.streaming.is_empty() => text,
             Some(text) => format!("{text}\n{}", self.streaming),
@@ -535,12 +535,12 @@ impl Reply {
 
 /// Streamed assistant text reported as whole lines.
 #[derive(Default)]
-struct LineProgress {
+pub(crate) struct LineProgress {
     partial: String,
 }
 
 impl LineProgress {
-    fn push(&mut self, content: &str, sink: &scv_core::ProgressSink) {
+    pub(crate) fn push(&mut self, content: &str, sink: &scv_core::ProgressSink) {
         self.partial.push_str(content);
         while let Some(index) = self.partial.find('\n') {
             let line: String = self.partial.drain(..=index).collect();
@@ -554,7 +554,7 @@ impl LineProgress {
         }
     }
 
-    fn flush(&mut self, sink: &scv_core::ProgressSink) {
+    pub(crate) fn flush(&mut self, sink: &scv_core::ProgressSink) {
         if !self.partial.trim().is_empty() {
             sink.report(&self.partial);
         }
@@ -1219,6 +1219,7 @@ done
             resume: crate::adapters::Resume::Unsupported,
             home: None,
             transport: crate::adapters::Transport::ScvProtocol,
+            acp: None,
         };
         let home = tempfile::tempdir().unwrap();
         for (depth, offered) in [(0, true), (1, true), (2, false)] {

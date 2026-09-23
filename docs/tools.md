@@ -127,7 +127,9 @@ request.
 SCV knows five agent CLIs: Claude Code (`agent_claude`), Codex
 (`agent_codex`), Grok Build (`agent_grok`), DeepSeek Harness (`agent_dsh`),
 and pi (`agent_pi`), plus a nested SCV (`agent_scv`, see
-[Nested SCV](#nested-scv-agent_scv)). Each is one descriptor in `scv_tools::adapters` holding
+[Nested SCV](#nested-scv-agent_scv)). Claude Code, Codex, Grok Build, and DeepSeek Harness
+run over the [Agent Client Protocol](#agent-client-protocol-transport) when its
+server is installed. Each is one descriptor in `scv_tools::adapters` holding
 its default command line, where its state lives inside the private home, the
 variables it must not inherit, and how it signs in; adding an agent is one
 more entry. A session offers only the agents whose executable resolves when
@@ -417,6 +419,83 @@ active provider there, as below. Its own delegated agents live under
 Attaching to an already running daemon instead of starting a child is future
 work.
 
+### Agent Client Protocol transport
+
+Claude Code, Codex, Grok Build, and DeepSeek Harness also speak the
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP, version 1):
+JSON-RPC 2.0 over stdio, one long-running server per conversation. SCV
+prefers it when the server is installed, because it relays the agent's own
+permission requests and reports progress as it happens:
+
+| Agent | ACP server | Source |
+| --- | --- | --- |
+| `agent_claude` | `claude-agent-acp` | npm `@agentclientprotocol/claude-agent-acp` (ACP organisation; Zed's `claude-code-acp` is deprecated in its favour) |
+| `agent_codex` | `codex-acp` | npm `@agentclientprotocol/codex-acp` (ACP organisation) |
+| `agent_grok` | `grok agent stdio` | built in |
+| `agent_dsh` | `dsh --profile acp` | built in (0.1.7-rc.1) |
+
+pi has only a community adapter and stays on one process per turn, as does
+`agent_scv`, which speaks SCV's own protocol. `[agents.<name>] transport`
+chooses: `auto` (the default) uses the ACP server when it resolves (on `PATH`
+or in `~/.local/bin`) and the agent's `command` is the built-in one, and
+otherwise one CLI process per turn; `acp` requires the server and offers the
+agent only when it is installed; `resume` always uses one process per turn. A
+custom `command` points SCV at a specific CLI, which the ACP server would not
+run, so `auto` keeps it; custom `args` do not matter.
+
+```text
+initialize {protocolVersion: 1, no fs or terminal capabilities}
+  → session/new {cwd, mcpServers: []} → [set mode for permissions = "full"]
+  → [session/set_config_option for model/effort] → session/prompt per call
+```
+
+- The schema is the CLI adapters' and always includes `session`: the first
+  call returns a handle such as `claude-1`, and passing it sends the next
+  prompt to the same ACP session on the same server. A conversation keeps its
+  `cwd`, runs one turn at a time, and follows `agent.max_conversations` and
+  `agent.conversation_idle_seconds`.
+- `model` and `effort` become `session/set_config_option` on the session's
+  `model` and `effort`/`reasoning_effort` options, at any turn. A value the
+  agent does not offer fails the call with the offered list and keeps the
+  conversation.
+- `session/update` notifications become `tool.progress`: completed lines of
+  the agent's message, each tool call's title (or kind), `… failed` for a
+  failed tool call, and the current plan step. Thoughts and tool output never
+  become progress, and titles are redacted like the other adapters' lines.
+- The agent's `session/request_permission` goes through the calling session's
+  approval gate as `agent_<name>` with the summary `[claude-1 acp] <title>
+  (<kind>)`. The risk follows SCV's own tools: `read`, `search`, and `think`
+  are read-only unless a location looks secret-like, edits, deletes, and moves
+  are file-system work, `execute` is a process, `fetch` is network, and
+  anything else is delegation. An approval selects the agent's allow-once
+  option, a denial its reject-once option (each falls back to the "always"
+  variant), and a request with neither is cancelled. With no approval gate
+  every request is rejected. SCV offers no client file-system or terminal
+  capabilities, so any `fs/*`, `terminal/*`, or other request is answered with
+  JSON-RPC "method not found".
+- `permissions = "full"` maps onto each agent's own switch: Claude's
+  `bypassPermissions` and Codex's `agent-full-access` session modes (selected
+  with `session/set_mode` in every new session), `grok agent --always-approve
+  stdio`, and DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`. A
+  permission request that still arrives is relayed as usual. `codex-acp` takes
+  no `-c` overrides, so Codex's web search follows `web_search` in its private
+  `config.toml`.
+- The result has the CLI adapters' shape. `stopReason` `end_turn` completes
+  the call; `cancelled` ends it as cancelled; `refusal` fails it; any other
+  reason completes it with an `(stopped early: …)` note. A JSON-RPC error
+  fails it with the agent's redacted message and, when that reads like a
+  sign-in problem (including `session/new`'s "Authentication required"), the
+  `scv agents login <name>` hint.
+- A cancelled or timed-out call sends `session/cancel`; an agent that answers
+  within 2 seconds keeps the conversation (a timed-out turn is resumable),
+  otherwise it is shut down and the conversation forgotten. An agent that
+  exits mid-turn fails the call with its stderr tail. The server is recorded
+  like any delegation for `scv agents ps`, `kill`, and orphan reaping, and it
+  ends like the nested SCV: stdin closed, 2 seconds' grace, then a group kill.
+
+The ACP servers read the same private homes and sign-ins as the CLIs, so
+`scv agents login` and `import` cover both transports.
+
 ### Signing in delegated agents
 
 Each adapter keeps its own sign-in in its private home, separate from the
@@ -542,7 +621,15 @@ bash stand-in for `scv server --stdio` covers `agent_scv` conversations on one
 child, progress, approval relay (approved, denied, and without a gate), cancel
 and timeout relay including a child that ignores `turn.cancel`, a child dying
 mid-turn, idle and session-end teardown, and the depth limit; an end-to-end
-test runs a real parent and nested `scv` against a fake provider.
+test runs a real parent and nested `scv` against a fake provider. A Python
+stand-in ACP server covers a conversation on one session with bounded,
+redacted progress and the declared client capabilities, relayed permission
+requests (approved, denied, and without a gate) with their risks and options,
+refused `fs/*` and `terminal/*` requests, `session/cancel` on cancellation and
+timeout including an agent that ignores it, an agent dying mid-turn, sign-in
+and protocol-version failures, full-permission modes and model and effort
+options, idle teardown, and that the registry prefers an installed ACP server,
+falls back to one process per turn, and hides a required one that is missing.
 
 ## Tool extension contract
 
