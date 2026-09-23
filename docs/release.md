@@ -2,8 +2,8 @@
 
 Status: final design for v0.1
 
-The current workspace release is `0.1.15`. All crates share that version, and
-dependencies between workspace packages use exact `=0.1.15` pins.
+The current workspace release is `0.1.16`. All crates share that version, and
+dependencies between workspace packages use exact `=0.1.16` pins.
 
 SCV v0.1 supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,9 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [ClawBot identity and durable state](clawbot.md#identity-and-durable-state).
+Account settings saved with `remote_tools` by `0.1.16` or newer fail closed
+under older releases, which reject unknown settings keys; remove the key
+before downgrading.
 
 ## Publication and checks
 

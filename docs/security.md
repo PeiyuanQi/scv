@@ -55,8 +55,11 @@ and argument vector without shell interpolation, appends the model-provided
 prompt as one argument, uses the workspace as current directory, applies the
 same timeout/output bounds, kills the process group on cancellation, and
 requires approval. SCV supplies an instance-private `HOME`, `SCV_HOME`, XDG
-directories, and `CODEX_HOME` for Codex, while removing SCV selector variables
-from the child environment. The delegated CLI still has the user's operating
+directories, and `CODEX_HOME` for Codex, while removing SCV selector variables,
+provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, and `CLAUDE_CONFIG_DIR`
+from the child environment. Agents sign in only through `scv agents login`,
+which stores the agent's own credentials in that private home, so delegated
+runs never reuse the user's personal Claude Code or Codex session. The delegated CLI still has the user's operating
 system permissions and may implement its own tools and approvals, but it cannot
 silently reuse the user's normal Codex state.
 
@@ -101,9 +104,20 @@ delivery state, and settings under `$SCV_HOME/clawbot/{accounts,state,settings}`
 use mode `0600`, atomic writes, and mode `0700` parent directories. Project
 configuration cannot choose bridge accounts, workspaces, or remote authority.
 
-Remote sessions request `no_tools: true`, enforced by the server, and the bridge
-denies any approval request. Remote messages do not authorize filesystem,
-shell, or delegated-agent tools. Bridge failures produce short sanitized
+By default, remote sessions request `no_tools: true`, enforced by the server,
+and the bridge denies any approval request, so remote messages do not authorize
+filesystem, shell, or delegated-agent tools. An account's `remote_tools =
+"owner"` setting, changeable only through local CLI or daemon control, grants
+the authenticated account owner (the iLink `user_id` from QR login) full tools
+with every approval request auto-approved. That makes the owner's WeChat
+account equivalent to local shell access as the daemon user: anyone who can
+send messages from it can read and change files, run commands, and launch
+delegated agents without confirmation. Other senders, the owner's messages in
+group chats, and accounts without a known owner ID stay tool-free; group
+conversations never share the owner's direct-chat session. Logout clears the
+grant before deleting credentials. Owner replies are ordinary assistant output and may quote
+tool results the model chose to include; bridge failure details remain
+sanitized. Bridge failures produce short sanitized
 replies; raw diagnostics, credentials, tool output, and host paths are not
 forwarded as diagnostics to WeChat. Status reports identity and live health,
 with sanitized errors and successful-contact timestamps, never bearer tokens.

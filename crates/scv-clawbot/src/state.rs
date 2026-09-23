@@ -1,6 +1,7 @@
 //! Durable ClawBot credentials, settings, and delivery state.
 
 use anyhow::{Result, anyhow, bail};
+pub use scv_protocol::RemoteTools;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -21,6 +22,8 @@ pub struct Account {
 pub struct AccountSettings {
     pub enabled: bool,
     pub workspace: Option<PathBuf>,
+    /// Remote tool authority; only local CLI/daemon control can change it.
+    pub remote_tools: RemoteTools,
 }
 
 impl Default for AccountSettings {
@@ -28,6 +31,7 @@ impl Default for AccountSettings {
         Self {
             enabled: true,
             workspace: None,
+            remote_tools: RemoteTools::None,
         }
     }
 }
@@ -722,7 +726,7 @@ mod tests {
                         "default",
                         &AccountSettings {
                             enabled: false,
-                            workspace: None,
+                            ..Default::default()
                         },
                     )
                     .err()
@@ -775,10 +779,13 @@ mod tests {
         let empty: AccountSettings = serde_json::from_str("{}").unwrap();
         assert!(empty.enabled);
         assert!(empty.workspace.is_none());
+        assert_eq!(empty.remote_tools, RemoteTools::None);
         assert!(serde_json::from_str::<AccountSettings>(r#"{"enabeld":false}"#).is_err());
+        assert!(serde_json::from_str::<AccountSettings>(r#"{"remote_tools":"everyone"}"#).is_err());
         let settings = AccountSettings {
             enabled: false,
             workspace: Some(directory.path().join("workspace")),
+            remote_tools: RemoteTools::Owner,
         };
         store.save_settings("default", &settings).unwrap();
         assert!(store.settings("default").unwrap() == settings);

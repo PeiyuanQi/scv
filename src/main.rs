@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use scv_protocol::{DaemonCommand, DaemonStatus};
+use scv_protocol::{DaemonCommand, DaemonStatus, RemoteTools};
 use scv_server::{ApprovalPolicy, ConfigOverrides};
 use scv_tui::LaunchOptions;
 use std::io::{self, IsTerminal, Write};
@@ -86,6 +86,14 @@ enum Command {
         #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
         base_url: String,
     },
+    /// Sign in the Claude Code and Codex CLIs that SCV delegates to.
+    ///
+    /// Each agent keeps its own credentials in SCV's private adapter home
+    /// (`<SCV home>/adapters/<agent>`), separate from your personal login.
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
     /// Backwards-compatible alias for `clawbot login`.
     ClawbotLogin {
         /// Login API base URL.
@@ -111,6 +119,11 @@ enum ClawbotCommand {
         account: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
+        /// Grant remote tools: `owner` gives the bot's own WeChat account full,
+        /// auto-approved tools; `none` keeps every remote session tool-free.
+        /// Omitted keeps the saved setting.
+        #[arg(long, value_enum)]
+        remote_tools: Option<RemoteToolsArg>,
     },
     /// Persistently disable a supervised account (credentials are retained).
     Stop {
@@ -125,6 +138,75 @@ enum ClawbotCommand {
         #[arg(long, default_value = "default")]
         account: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentsCommand {
+    /// Run the agent's own interactive sign-in inside SCV's adapter home.
+    Login {
+        agent: AgentArg,
+        /// Extra arguments for the agent's login, after `--`
+        /// (e.g. `scv agents login codex -- --device-auth`).
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+    /// Show whether the delegated agents are signed in for SCV.
+    Status { agent: Option<AgentArg> },
+    /// Remove an agent's SCV-private sign-in; your own login is untouched.
+    Logout { agent: AgentArg },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AgentArg {
+    Claude,
+    Codex,
+}
+
+impl AgentArg {
+    const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn login_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["auth", "login"],
+            Self::Codex => &["login"],
+        }
+    }
+
+    fn status_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["auth", "status", "--text"],
+            Self::Codex => &["login", "status"],
+        }
+    }
+
+    fn logout_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["auth", "logout"],
+            Self::Codex => &["logout"],
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RemoteToolsArg {
+    None,
+    Owner,
+}
+
+impl From<RemoteToolsArg> for RemoteTools {
+    fn from(value: RemoteToolsArg) -> Self {
+        match value {
+            RemoteToolsArg::None => Self::None,
+            RemoteToolsArg::Owner => Self::Owner,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -233,12 +315,17 @@ async fn main() -> Result<()> {
             ClawbotCommand::Login { account, login_url } => {
                 clawbot_login(&login_url, &account).await
             }
-            ClawbotCommand::Run { account, workspace } => clawbot_run(&account, &workspace).await,
+            ClawbotCommand::Run {
+                account,
+                workspace,
+                remote_tools,
+            } => clawbot_run(&account, &workspace, remote_tools.map(Into::into)).await,
             ClawbotCommand::Stop { account } => {
                 control(DaemonCommand::ClawbotSet {
                     account,
                     enabled: false,
                     workspace: None,
+                    remote_tools: None,
                 })
                 .await?;
                 println!("ClawBot account disabled and stopped.");
@@ -251,6 +338,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Command::Agents { command } => agents(&cwd, command),
         Command::ClawbotLogin { login_url } => clawbot_login(&login_url, "default").await,
     }
 }
@@ -542,17 +630,91 @@ async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> 
     scv_server::run_socket(&socket, overrides).await
 }
 
-async fn clawbot_run(account: &str, workspace: &Path) -> Result<()> {
+fn agents(cwd: &Path, command: AgentsCommand) -> Result<()> {
+    match command {
+        AgentsCommand::Login { agent, extra } => {
+            let name = agent.name();
+            println!(
+                "Signing {name} in for SCV's agent_{name} tool (separate from your own {name} login)."
+            );
+            let status = scv_server::agent_command(cwd, name)?
+                .args(agent.login_args())
+                .args(&extra)
+                .status()
+                .with_context(|| format!("run {name} sign-in"))?;
+            if !status.success() {
+                bail!("{name} sign-in did not complete");
+            }
+            println!(
+                "Done. `scv agents status` shows the result; the daemon picks it up on the next call."
+            );
+            Ok(())
+        }
+        AgentsCommand::Status { agent } => {
+            let selected = agent.map_or_else(|| AgentArg::ALL.to_vec(), |agent| vec![agent]);
+            for agent in selected {
+                let name = agent.name();
+                println!("{name}:");
+                // The agent prints its own status; a signed-out agent exits
+                // non-zero, and its own advice would sign in the wrong home.
+                match scv_server::agent_command(cwd, name)?
+                    .args(agent.status_args())
+                    .status()
+                {
+                    Ok(status) if status.success() => {}
+                    Ok(_) => println!("  Sign in for SCV with: scv agents login {name}"),
+                    Err(error) => println!("  unavailable: {error}"),
+                }
+            }
+            Ok(())
+        }
+        AgentsCommand::Logout { agent } => {
+            let name = agent.name();
+            let status = scv_server::agent_command(cwd, name)?
+                .args(agent.logout_args())
+                .status()
+                .with_context(|| format!("run {name} sign-out"))?;
+            if !status.success() {
+                bail!("{name} sign-out failed");
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn clawbot_run(
+    account: &str,
+    workspace: &Path,
+    remote_tools: Option<RemoteTools>,
+) -> Result<()> {
     let workspace = std::fs::canonicalize(workspace).context("resolve ClawBot workspace")?;
-    control(DaemonCommand::ClawbotSet {
+    let status = control(DaemonCommand::ClawbotSet {
         account: account.into(),
         enabled: true,
         workspace: Some(workspace.display().to_string()),
+        remote_tools,
     })
     .await?;
     println!(
         "ClawBot enabled under the SCV daemon; use `scv clawbot status` for live connection state."
     );
+    if remote_tools == Some(RemoteTools::Owner) {
+        // Report what the daemon applied: an older daemon ignores the field
+        // and credentials without an owner ID grant tools to nobody.
+        let effective = status
+            .components
+            .iter()
+            .any(|health| health.account == account && health.remote_tools == RemoteTools::Owner);
+        if effective {
+            println!(
+                "Remote tools: the bot's own WeChat account now runs every SCV tool without approval prompts."
+            );
+        } else {
+            println!(
+                "Warning: owner remote tools are saved but not active; the daemon may predate them or the login lacks an owner ID. Remote sessions stay tool-free."
+            );
+        }
+    }
     Ok(())
 }
 

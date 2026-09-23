@@ -1,7 +1,7 @@
 //! Process-level lifecycle tests use an isolated home and no external services.
 use scv_protocol::{
     ClientMessage, ComponentState, DaemonCommand, DaemonStatus, PROTOCOL_VERSION, PeerInfo,
-    ServerEvent,
+    RemoteTools, ServerEvent,
 };
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -135,11 +135,13 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
                 account: "test".into(),
                 enabled: true,
                 workspace: None,
+                remote_tools: Some(RemoteTools::Owner),
             },
         )
         .await
         .unwrap();
         assert_eq!(running.components.len(), 1);
+        assert_eq!(running.components[0].remote_tools, RemoteTools::Owner);
     }
     let mut duplicate = start(home.path(), workspace.path());
     assert!(
@@ -183,11 +185,14 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
             account: "test".into(),
             enabled: false,
             workspace: None,
+            remote_tools: None,
         },
     )
     .await
     .unwrap();
     assert_eq!(disabled.components[0].state, ComponentState::Disabled);
+    // An omitted mode keeps the saved grant.
+    assert_eq!(disabled.components[0].remote_tools, RemoteTools::Owner);
     terminate(&mut child).await;
     let mut child = start(home.path(), workspace.path());
     status(home.path()).await;

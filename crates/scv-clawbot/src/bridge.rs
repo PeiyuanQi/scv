@@ -61,14 +61,27 @@ pub async fn send_reply_chunk(
     chunk: &str,
     client_id: &str,
 ) -> Result<()> {
-    send_reply_request(
+    match send_reply_request(
         client,
         token,
         base_url,
         &reply_body(to_user_id, context_token, chunk, client_id),
         &|_| {},
     )
-    .await
+    .await?
+    {
+        SendOutcome::Delivered => Ok(()),
+        SendOutcome::Rejected => bail!("iLink API rejected request"),
+    }
+}
+
+/// Result of a send that iLink answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    Delivered,
+    /// iLink explicitly refused the message. Retrying the same request
+    /// cannot succeed, so the refusal is final for that reply.
+    Rejected,
 }
 
 pub(crate) fn reply_body(
@@ -86,7 +99,7 @@ pub(crate) async fn send_reply_request(
     base_url: &str,
     body: &Value,
     report: &(dyn Fn(bool) + Send + Sync),
-) -> Result<()> {
+) -> Result<SendOutcome> {
     let mut delay = Duration::from_secs(1);
     for attempt in 0..3 {
         let result = async {
@@ -97,12 +110,23 @@ pub(crate) async fn send_reply_request(
                 .timeout(Duration::from_secs(20))
                 .send()
                 .await?;
-            let response = crate::response_json(response).await?;
-            crate::check_send_ack(&response)
+            let status = response.status();
+            // A permanent client error cannot succeed on resend; auth,
+            // timeout and rate-limit statuses stay retryable.
+            if status.is_client_error() && !matches!(status.as_u16(), 401 | 408 | 429) {
+                return Ok(Err(format!("HTTP status {}", status.as_u16())));
+            }
+            let body = crate::response_body(response).await?;
+            Ok::<_, anyhow::Error>(crate::check_send_ack(&body))
         }
         .await;
-        if result.is_ok() {
-            return Ok(());
+        match result {
+            Ok(Ok(())) => return Ok(SendOutcome::Delivered),
+            Ok(Err(rejection)) => {
+                tracing::warn!("ClawBot reply rejected by iLink ({rejection}); not retrying");
+                return Ok(SendOutcome::Rejected);
+            }
+            Err(error) => tracing::warn!(attempt, "ClawBot reply send failed: {error}"),
         }
         report(false);
         if attempt == 2 {

@@ -144,6 +144,7 @@ async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
             "default",
             directory.path(),
             &socket,
+            None,
             &store,
             &report,
         ),
@@ -216,6 +217,7 @@ async fn cancellation_drops_long_poll_and_pending_send() {
                 "default",
                 directory.path(),
                 &socket,
+                None,
                 &store,
                 &report,
             ),
@@ -260,6 +262,7 @@ async fn cancellation_drops_handshake_and_active_turn_with_durable_marker() {
                 "default",
                 directory.path(),
                 &socket,
+                None,
                 &store,
                 &|_| {},
             ),
@@ -355,6 +358,7 @@ async fn failed_poll_reports_unhealthy_and_cancels_backoff() {
                 "default",
                 directory.path(),
                 &socket,
+                None,
                 &store,
                 &report,
             ),
@@ -405,6 +409,7 @@ async fn failed_send_retries_same_client_id_and_only_poll_restores_health() {
             "default",
             directory.path(),
             &socket,
+            None,
             &store,
             &report,
         ),
@@ -435,66 +440,70 @@ async fn failed_send_retries_same_client_id_and_only_poll_restores_health() {
 
 #[tokio::test]
 async fn live_send_ack_without_ret_completes_pending_delivery_once() {
-    let directory = tempfile::tempdir().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let store = saved_store(directory.path(), &base);
-    let pending = new_pending("incoming", "sender", "context", "reply", MAX_REPLY_BYTES);
-    store
-        .save_state(
-            "default",
-            &state::BridgeState {
-                pending: Some(pending.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let socket = directory.path().join("missing.sock");
-    let cancel = CancellationToken::new();
-    let reports = Mutex::new(Vec::new());
-    let report = |healthy| {
-        reports.lock().unwrap().push(healthy);
-        if healthy {
-            cancel.cancel();
-        }
-    };
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            &store,
-            &report,
-        ),
-    );
-    let peer = async {
-        let (mut stream, route, body) = request(&listener).await;
-        assert!(route.ends_with("sendmessage"));
-        assert_eq!(body["msg"]["client_id"], pending.client_ids[0]);
-        respond(&mut stream, "200 OK", "{}", "").await;
-        // The next request is a poll, not a resend of the acknowledged reply.
-        let (mut stream, route, _) = request(&listener).await;
-        assert!(route.ends_with("getupdates"));
-        let saved = store.load_state("default").unwrap();
-        assert!(saved.pending.is_none());
-        assert_eq!(saved.seen, vec!["incoming".to_owned()]);
-        respond(
-            &mut stream,
-            "200 OK",
-            r#"{"msgs":[],"get_updates_buf":"next"}"#,
-            "",
-        )
-        .await;
-    };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
-            .await
+    // Live acknowledgements omit `ret`; they may be `{}` or an empty body.
+    for ack in ["{}", ""] {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let store = saved_store(directory.path(), &base);
+        let pending = new_pending("incoming", "sender", "context", "reply", MAX_REPLY_BYTES);
+        store
+            .save_state(
+                "default",
+                &state::BridgeState {
+                    pending: Some(pending.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-    result.unwrap();
-    assert_eq!(*reports.lock().unwrap(), vec![true]);
+        let socket = directory.path().join("missing.sock");
+        let cancel = CancellationToken::new();
+        let reports = Mutex::new(Vec::new());
+        let report = |healthy| {
+            reports.lock().unwrap().push(healthy);
+            if healthy {
+                cancel.cancel();
+            }
+        };
+        let work = until_cancelled(
+            cancel.clone(),
+            run_loop(
+                "token",
+                &base,
+                "default",
+                directory.path(),
+                &socket,
+                None,
+                &store,
+                &report,
+            ),
+        );
+        let peer = async {
+            let (mut stream, route, body) = request(&listener).await;
+            assert!(route.ends_with("sendmessage"));
+            assert_eq!(body["msg"]["client_id"], pending.client_ids[0]);
+            respond(&mut stream, "200 OK", ack, "").await;
+            // The next request is a poll, not a resend of the acknowledged reply.
+            let (mut stream, route, _) = request(&listener).await;
+            assert!(route.ends_with("getupdates"));
+            let saved = store.load_state("default").unwrap();
+            assert!(saved.pending.is_none());
+            assert_eq!(saved.seen, vec!["incoming".to_owned()]);
+            respond(
+                &mut stream,
+                "200 OK",
+                r#"{"msgs":[],"get_updates_buf":"next"}"#,
+                "",
+            )
+            .await;
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
+                .await
+                .unwrap();
+        result.unwrap();
+        assert_eq!(*reports.lock().unwrap(), vec![true]);
+    }
 }
 
 #[tokio::test]
@@ -521,6 +530,7 @@ async fn oversized_batch_never_executes_or_advances_cursor() {
             "default",
             directory.path(),
             &socket,
+            None,
             &store,
             &report,
         ),
@@ -588,6 +598,7 @@ async fn mismatched_credentials_never_contact_poll_or_send() {
         "default",
         directory.path(),
         &directory.path().join("missing.sock"),
+        None,
         &store,
         &|_| panic!("no contact"),
     )
@@ -686,6 +697,7 @@ async fn pre_cancelled_public_runner_does_not_touch_state() {
         "../invalid",
         Path::new("/"),
         Path::new("/missing"),
+        None,
         cancellation,
         Arc::new(|_| panic!("cancelled before startup")),
     )
@@ -702,4 +714,163 @@ async fn login_validates_account_before_network_or_url() {
             .to_string(),
         "invalid ClawBot account name"
     );
+}
+
+#[tokio::test]
+async fn rejected_send_is_final_and_polling_resumes() {
+    for (status, rejection) in [
+        ("200 OK", r#"{"ret":-2,"errmsg":"prepare failed"}"#),
+        ("400 Bad Request", ""),
+    ] {
+        rejected_send_case(status, rejection).await;
+    }
+}
+
+async fn rejected_send_case(status: &str, rejection: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let store = saved_store(directory.path(), &base);
+    let pending = new_pending("incoming", "sender", "context", "reply", MAX_REPLY_BYTES);
+    store
+        .save_state(
+            "default",
+            &state::BridgeState {
+                pending: Some(pending),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let socket = directory.path().join("missing.sock");
+    let cancel = CancellationToken::new();
+    let reports = Mutex::new(Vec::new());
+    let report = |healthy| {
+        reports.lock().unwrap().push(healthy);
+        if healthy {
+            cancel.cancel();
+        }
+    };
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            None,
+            &store,
+            &report,
+        ),
+    );
+    let peer = async {
+        let (mut stream, route, _) = request(&listener).await;
+        assert!(route.ends_with("sendmessage"));
+        respond(&mut stream, status, rejection, "").await;
+        // The refusal is final: the next request polls instead of resending.
+        let (mut stream, route, _) = request(&listener).await;
+        assert!(route.ends_with("getupdates"));
+        let saved = store.load_state("default").unwrap();
+        assert!(saved.pending.is_none());
+        assert_eq!(saved.seen, vec!["incoming".to_owned()]);
+        respond(
+            &mut stream,
+            "200 OK",
+            r#"{"msgs":[],"get_updates_buf":"next"}"#,
+            "",
+        )
+        .await;
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+    assert_eq!(*reports.lock().unwrap(), vec![true]);
+}
+
+async fn next_frame(reader: &mut BufReader<tokio::net::UnixStream>) -> Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+async fn send_frame(reader: &mut BufReader<tokio::net::UnixStream>, frame: Value) {
+    reader
+        .get_mut()
+        .write_all(format!("{frame}\n").as_bytes())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn only_the_owner_gets_tools_and_auto_approval() {
+    for (owner, group, tools) in [
+        (Some("sender"), None, true),
+        (Some("sender"), Some(json!("room")), false),
+        (Some("sender"), Some(json!(42)), false),
+        (Some("someone-else"), None, false),
+        (None, None, false),
+    ] {
+        let mut message = inbound();
+        if let Some(group) = group {
+            message["group_id"] = group;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let store = saved_store(directory.path(), &base);
+        let socket = directory.path().join("daemon.sock");
+        let daemon = UnixListener::bind(&socket).unwrap();
+        let cancel = CancellationToken::new();
+        let work = until_cancelled(
+            cancel.clone(),
+            run_loop(
+                "token",
+                &base,
+                "default",
+                directory.path(),
+                &socket,
+                owner,
+                &store,
+                &|_| {},
+            ),
+        );
+        let peer = async {
+            let (mut stream, _, _) = request(&listener).await;
+            respond(
+                &mut stream,
+                "200 OK",
+                &json!({"ret":0,"msgs":[message]}).to_string(),
+                "",
+            )
+            .await;
+            let (stream, _) = daemon.accept().await.unwrap();
+            let mut daemon_side = BufReader::new(stream);
+            assert_eq!(next_frame(&mut daemon_side).await["type"], "initialize");
+            send_frame(&mut daemon_side, json!({"type":"initialized","request_id":"clawbot-init","protocol_version":scv_protocol::PROTOCOL_VERSION,"server":{"name":"test","version":"0"}})).await;
+            assert_eq!(next_frame(&mut daemon_side).await["no_tools"], !tools);
+            send_frame(&mut daemon_side, json!({"type":"session.started","request_id":"clawbot-session","session_id":"s","cwd":"/","model":"test","context_max_tokens":1024,"max_server_frame_bytes":1024,"max_transcript_bytes":1024,"max_transcript_items":10,"max_prompt_history_bytes":1024,"max_prompt_history_items":10})).await;
+            assert_eq!(next_frame(&mut daemon_side).await["type"], "turn.start");
+            send_frame(&mut daemon_side, json!({"type":"approval.requested","request_id":"r","session_id":"s","turn_id":"t","seq":1,"approval_id":"a1","call_id":"c1","name":"agent_claude","risk":"delegate","cwd":"/","summary":"Launch claude"})).await;
+            let resolved = next_frame(&mut daemon_side).await;
+            assert_eq!(resolved["approval_id"], "a1");
+            assert_eq!(resolved["approved"], tools);
+            send_frame(&mut daemon_side, json!({"type":"assistant.completed","request_id":"r","session_id":"s","turn_id":"t","seq":2,"content":"done"})).await;
+            send_frame(&mut daemon_side, json!({"type":"turn.completed","request_id":"r","session_id":"s","turn_id":"t","seq":3,"steps":1,"usage":{}})).await;
+            let (mut stream, route, body) = request(&listener).await;
+            assert!(route.ends_with("sendmessage"));
+            assert_eq!(body["msg"]["item_list"][0]["text_item"]["text"], "done");
+            respond(&mut stream, "200 OK", "", "").await;
+            let (_stream, route, _) = request(&listener).await;
+            assert!(route.ends_with("getupdates"));
+            assert!(store.load_state("default").unwrap().pending.is_none());
+            cancel.cancel();
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
+                .await
+                .unwrap();
+        result.unwrap();
+    }
 }

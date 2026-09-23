@@ -14,7 +14,7 @@ third-party agent. The correctness contract covers:
 - protocol round trips and forward-compatible additive fields;
 - filesystem containment, symlink escape, bounded reads, atomic writes, stale
   hashes, process timeout, process-group cancellation, bounded process output,
-  and native-agent argument/cwd behavior;
+  and native-agent argument/cwd and model/effort mapping behavior;
 - configuration trust boundaries, stricter project limits, and cross-field
   bounds;
 - bounded client/server frame reading, CRLF boundaries, server handshake,
@@ -31,8 +31,17 @@ Daemon and component changes require focused coverage for:
 - default autostart, persistent stop, login honoring opt-out, periodic and
   explicit reconciliation, and joining before credential/settings replacement;
 - logout joining before deletion, private settings/state, interrupted in-flight
-  claims preventing replay, pending delivery retaining client IDs, and live
-  send acknowledgements without `ret` completing delivery exactly once;
+  claims preventing replay, pending delivery retaining client IDs, live send
+  acknowledgements without `ret` (empty or `{}`) completing delivery once, and
+  explicit send rejections or permanent 4xx statuses dropping the reply and
+  resuming polling, with only integer codes logged;
+- remote tools only for an `owner`-mode account's known owner: owner sessions
+  start with tools and auto-approve, while other senders and unknown owners
+  stay tool-free and deny approvals, as do the owner's group messages (string
+  or non-string `group_id`); the setting persists when omitted;
+- delegated agents rejecting prompts that start with `-` and models that start
+  with `-` or `@`, and signed-out agent failures gaining a
+  `scv agents login <name>` hint while other failures do not;
 - identity/origin binding, same-identity token rotation, conservative legacy
   binding, replacement requiring logout, and stale-runner write rejection;
 - nonblocking transaction/lifetime locks, serialized login/removal, atomic
@@ -42,7 +51,8 @@ Daemon and component changes require focused coverage for:
   responses and string IDs byte-bounded, unsigned 64-bit integer message IDs
   preserved exactly, and encountered duplicate IDs retained through the batch
   checkpoint;
-- no-tools remote sessions, SIGTERM/Ctrl+C shutdown, and tracked session cleanup;
+- no-tools remote sessions by default, SIGTERM/Ctrl+C shutdown, and tracked
+  session cleanup;
 - writer/turn descendants joined after forced handler abort, cancellation-aware
   reconciliation, and management locks released before blocked response writes;
 - TUI reconnect creating a fresh session without history restoration or

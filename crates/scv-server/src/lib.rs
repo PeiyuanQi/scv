@@ -28,6 +28,26 @@ pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<St
         .index_url)
 }
 
+/// Build a command for a native agent's CLI with the same private home and
+/// cleaned environment the daemon's `agent_<name>` tool uses, so the agent's
+/// own sign-in stores credentials where delegated runs will find them.
+pub fn agent_command(workspace: &Path, agent: &str) -> Result<std::process::Command> {
+    let config = Config::load(workspace, ConfigOverrides::default())?;
+    config.prepare_adapter_homes()?;
+    let adapter = config
+        .adapters()
+        .remove(&format!("agent_{agent}"))
+        .ok_or_else(|| anyhow!("unknown agent {agent}"))?;
+    let mut command = std::process::Command::new(&adapter.command);
+    command
+        .current_dir(config.instance_home.join("adapters").join(agent))
+        .envs(adapter.environment);
+    for variable in scv_tools::AGENT_REMOVED_ENVIRONMENT {
+        command.env_remove(variable);
+    }
+    Ok(command)
+}
+
 /// Return the user service name for the selected SCV instance.
 pub fn service_name() -> anyhow::Result<String> {
     if std::env::var_os("SCV_HOME").is_none() {

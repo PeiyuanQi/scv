@@ -312,6 +312,10 @@ impl Default for SkillsConfig {
 pub struct AdapterConfig {
     pub command: String,
     pub args: Vec<String>,
+    /// Appended when a call selects a model; `{model}` is substituted.
+    pub model_args: Vec<String>,
+    /// Appended when a call selects an effort; `{effort}` is substituted.
+    pub effort_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,14 +332,20 @@ impl Default for AgentsConfig {
             claude: AdapterConfig {
                 command: "claude".into(),
                 args: vec!["-p".into()],
+                model_args: vec!["--model".into(), "{model}".into()],
+                effort_args: vec!["--effort".into(), "{effort}".into()],
             },
             codex: AdapterConfig {
                 command: "codex".into(),
                 args: vec!["exec".into()],
+                model_args: vec!["-m".into(), "{model}".into()],
+                effort_args: vec!["-c".into(), "model_reasoning_effort=\"{effort}\"".into()],
             },
             pi: AdapterConfig {
                 command: "pi".into(),
                 args: vec!["-p".into()],
+                model_args: Vec::new(),
+                effort_args: Vec::new(),
             },
         }
     }
@@ -507,6 +517,8 @@ impl Config {
                 AgentAdapterConfig {
                     command: config.command.clone(),
                     args: config.args.clone(),
+                    model_args: config.model_args.clone(),
+                    effort_args: config.effort_args.clone(),
                     environment,
                 },
             )
@@ -562,8 +574,21 @@ impl Config {
             if adapter.command.trim().is_empty() {
                 bail!("{name} must be non-empty");
             }
-            let adapter_bytes =
-                adapter.command.len() + adapter.args.iter().map(String::len).sum::<usize>();
+            for (field, template, placeholder) in [
+                ("model_args", &adapter.model_args, "{model}"),
+                ("effort_args", &adapter.effort_args, "{effort}"),
+            ] {
+                if !template.is_empty() && !template.iter().any(|arg| arg.contains(placeholder)) {
+                    let adapter = name.trim_end_matches(".command");
+                    bail!("{adapter}.{field} must contain {placeholder} or be empty");
+                }
+            }
+            let adapter_bytes = adapter.command.len()
+                + [&adapter.args, &adapter.model_args, &adapter.effort_args]
+                    .into_iter()
+                    .flatten()
+                    .map(String::len)
+                    .sum::<usize>();
             if adapter_bytes > 16 * 1024 {
                 bail!("{name} and its fixed arguments exceed 16384 bytes");
             }
@@ -994,6 +1019,36 @@ command = "/tmp/fake"
         let mut config = Config::default();
         config.protocol.max_server_frame_bytes = config.provider_limits.max_assistant_bytes;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn adapter_selection_templates_survive_partial_overrides_and_validate() {
+        let mut value: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut value,
+            toml::from_str(
+                r#"[agents.claude]
+args = ["-p", "--permission-mode", "acceptEdits"]
+"#,
+            )
+            .unwrap(),
+        );
+        let config: Config = value.try_into().unwrap();
+        assert_eq!(config.agents.claude.args.len(), 3);
+        assert_eq!(config.agents.claude.model_args, ["--model", "{model}"]);
+        assert_eq!(config.agents.claude.effort_args, ["--effort", "{effort}"]);
+        assert!(config.agents.pi.model_args.is_empty());
+
+        let mut invalid = Config::default();
+        invalid.agents.claude.effort_args = vec!["--effort".into()];
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("agents.claude.effort_args must contain {effort}")
+        );
     }
 
     #[test]

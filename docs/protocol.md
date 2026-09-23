@@ -26,7 +26,7 @@ semantics.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":2,"client":{"name":"scv-tui","version":"0.1.15"}}
+{"type":"initialize","request_id":"1","protocol_version":2,"client":{"name":"scv-tui","version":"0.1.16"}}
 ```
 
 ### `daemon.control`
@@ -37,7 +37,7 @@ an agent session. The `command` object is tagged by `action`:
 ```json
 {"type":"daemon.control","request_id":"d1","command":{"action":"status"}}
 {"type":"daemon.control","request_id":"d2","command":{"action":"reload"}}
-{"type":"daemon.control","request_id":"d3","command":{"action":"clawbot_set","account":"default","enabled":true,"workspace":"/workspace/project"}}
+{"type":"daemon.control","request_id":"d3","command":{"action":"clawbot_set","account":"default","enabled":true,"workspace":"/workspace/project","remote_tools":"owner"}}
 {"type":"daemon.control","request_id":"d4","command":{"action":"clawbot_set","account":"default","enabled":false,"workspace":null}}
 {"type":"daemon.control","request_id":"d5","command":{"action":"clawbot_logout","account":"default"}}
 ```
@@ -45,7 +45,10 @@ an agent session. The `command` object is tagged by `action`:
 `status` reads live daemon health. `reload` reconciles saved accounts and
 settings immediately; periodic reconciliation also runs every two seconds.
 `clawbot_set` persists enablement and an optional existing absolute workspace;
-an omitted or null workspace leaves the saved workspace unchanged. Without a
+an omitted or null workspace leaves the saved workspace unchanged. The optional
+`remote_tools` (`none` or `owner`) likewise persists only when present.
+Component status reports the effective `remote_tools`, which is `owner` only
+when the account also has a known owner ID; older clients may omit the field. Without a
 saved workspace, the account uses the daemon workspace. Replacements stop and
 join the old instance first. `clawbot_logout` persists disablement and joins
 before removing credentials, delivery state, and settings. Successful actions
@@ -70,7 +73,8 @@ rejects a missing or non-directory workspace.
 
 Optional `provider`, `model`, and `base_url` overrides apply only to this session.
 `no_tools: true` disables all tools in the server-owned runtime; ClawBot remote
-sessions always set it.
+sessions set it for every sender except an account owner granted
+`remote_tools = "owner"`.
 
 ```json
 {"type":"session.start","request_id":"2","cwd":"/workspace/project"}
@@ -135,14 +139,14 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":2,"server":{"name":"scv-server","version":"0.1.15"}}
+{"type":"initialized","request_id":"1","protocol_version":2,"server":{"name":"scv-server","version":"0.1.16"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.15","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0}]}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.16","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}]}}
 ```
 
 Version and PID identify the responding server, not the installed client.

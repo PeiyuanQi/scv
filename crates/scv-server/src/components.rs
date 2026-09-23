@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use scv_clawbot::state::{self, Account, AccountSettings};
-use scv_protocol::{ComponentHealth, ComponentState, DaemonCommand, DaemonStatus};
+use scv_protocol::{ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, RemoteTools};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -179,6 +179,7 @@ struct ClawBot {
     credentials: Account,
     workspace: PathBuf,
     socket: PathBuf,
+    tool_owner: Option<String>,
 }
 
 #[async_trait]
@@ -190,6 +191,7 @@ impl Component for ClawBot {
             &self.account,
             &self.workspace,
             &self.socket,
+            self.tool_owner.as_deref(),
             cancellation,
             Arc::new(move |connected| health.contact(connected)),
         )
@@ -279,6 +281,10 @@ impl Components {
             self.supervisor.stop(&format!("clawbot:{name}")).await;
             self.inactive.remove(&name);
             let mut health = initial_health(&name, Some(&credentials), settings.enabled);
+            let tool_owner = tool_owner(&credentials, &settings);
+            if tool_owner.is_some() {
+                health.remote_tools = RemoteTools::Owner;
+            }
             if settings.enabled {
                 let workspace = settings
                     .workspace
@@ -298,6 +304,7 @@ impl Components {
                         credentials: credentials.clone(),
                         workspace,
                         socket: self.socket.clone(),
+                        tool_owner,
                     }),
                     health,
                 );
@@ -335,6 +342,7 @@ impl Components {
                 account,
                 enabled,
                 workspace,
+                remote_tools,
             } => {
                 state::validate_name(&account)?;
                 if state::account(&account)?.is_none() {
@@ -349,13 +357,18 @@ impl Components {
                     }
                     settings.workspace = Some(std::fs::canonicalize(path)?);
                 }
+                if let Some(mode) = remote_tools {
+                    settings.remote_tools = mode;
+                }
                 state::save_settings(&account, &settings)?;
             }
             DaemonCommand::ClawbotLogout { account } => {
                 state::validate_name(&account)?;
-                // Persist disabled first, so failed deletion cannot resurrect a live account.
+                // Persist disabled and tool-free first, so failed deletion can
+                // neither resurrect a live account nor hand a later login the grant.
                 let mut settings = state::settings(&account)?;
                 settings.enabled = false;
+                settings.remote_tools = RemoteTools::None;
                 state::save_settings(&account, &settings)?;
                 self.supervisor.stop(&format!("clawbot:{account}")).await;
                 self.desired.remove(&account);
@@ -372,6 +385,15 @@ impl Components {
     }
 }
 
+/// Only the authenticated account owner may receive tools. Credentials without
+/// a known owner ID grant tools to nobody, even when the setting asks for it.
+fn tool_owner(credentials: &Account, settings: &AccountSettings) -> Option<String> {
+    (settings.remote_tools == RemoteTools::Owner)
+        .then(|| credentials.user_id.clone())
+        .flatten()
+        .filter(|owner| !owner.is_empty())
+}
+
 fn initial_health(account: &str, credentials: Option<&Account>, enabled: bool) -> ComponentHealth {
     ComponentHealth {
         id: format!("clawbot:{account}"),
@@ -383,6 +405,7 @@ fn initial_health(account: &str, credentials: Option<&Account>, enabled: bool) -
         last_success_unix_seconds: None,
         error: None,
         restarts: 0,
+        remote_tools: RemoteTools::None,
     }
 }
 
@@ -533,5 +556,32 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), supervisor.shutdown())
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn remote_tools_require_owner_mode_and_known_owner() {
+        let account = |user_id: Option<&str>| Account {
+            token: "token".into(),
+            base_url: "https://example.invalid".into(),
+            bot_id: Some("bot".into()),
+            user_id: user_id.map(Into::into),
+        };
+        let owner = AccountSettings {
+            remote_tools: RemoteTools::Owner,
+            ..Default::default()
+        };
+        assert_eq!(
+            tool_owner(&account(Some("owner@im.wechat")), &owner).as_deref(),
+            Some("owner@im.wechat")
+        );
+        assert_eq!(tool_owner(&account(None), &owner), None);
+        assert_eq!(tool_owner(&account(Some("")), &owner), None);
+        assert_eq!(
+            tool_owner(
+                &account(Some("owner@im.wechat")),
+                &AccountSettings::default()
+            ),
+            None
+        );
     }
 }

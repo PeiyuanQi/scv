@@ -1,7 +1,10 @@
 # ClawBot Lifecycle
 
-`run_supervised(token, base_url, account, workspace, socket, cancellation,
-report)` connects to the caller's daemon socket. It launches no process and
+`run_supervised(token, base_url, account, workspace, socket, tool_owner,
+cancellation, report)` connects to the caller's daemon socket. `tool_owner` is
+the authenticated owner's iLink `user_id` when the account grants remote tools;
+only that sender's direct-chat sessions get tools and auto-approval, and every
+other session stays tool-free. It launches no process and
 spawns no adapter tasks. Cancelling drops active HTTP requests and protocol
 sessions; callers should enforce an external bounded stop timeout. The health
 callback reports true only after a successful authenticated, validated
@@ -10,7 +13,8 @@ HTTP redirects are disabled, including during login.
 
 `state::Account` preserves old credentials while optionally recording `bot_id`
 and `user_id`. It intentionally has no `Debug` implementation.
-`state::AccountSettings` defaults to enabled with no workspace override.
+`state::AccountSettings` defaults to enabled with no workspace override and
+`remote_tools: none`.
 `state::settings`, `save_settings`, and `account_names` support supervisor
 configuration and discovery. Discovery fails on more than 128 entries (including
 the legacy default account) or directory-entry errors, validates names, and

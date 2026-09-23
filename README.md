@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.15`, with exact `=0.1.15` pins for dependencies
+All packages use version `0.1.16`, with exact `=0.1.16` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -152,7 +152,11 @@ without known identity. Stop any old `0.1.9` standalone ClawBot process before
 enabling the supervised account; those processes do not honor the new locks.
 
 `scv clawbot run --account NAME --workspace /path/to/workspace` persistently
-enables the account in the running daemon and returns. `scv clawbot stop
+enables the account in the running daemon and returns. WeChat sessions are
+tool-free by default; add `--remote-tools owner` to give the bot's own WeChat
+account every SCV tool, including delegated Claude Code and Codex, with
+approvals granted automatically. That equals shell access from that WeChat
+account; `--remote-tools none` revokes it. `scv clawbot stop
 --account NAME` persistently disables it while retaining credentials.
 `scv clawbot status --account NAME` queries live daemon health, including
 identity and last successful contact; saved credentials alone do not mean
@@ -160,8 +164,8 @@ connected. `scv clawbot logout --account NAME` requires a live daemon and joins
 the component before deleting credentials, delivery state, and settings.
 
 Account settings live at `$SCV_HOME/clawbot/settings/<account>.json`, with
-`enabled` defaulting to `true` and an optional workspace defaulting to the
-daemon workspace. The daemon reconciles accounts and settings every two seconds
+`enabled` defaulting to `true`, `remote_tools` defaulting to `"none"`, and an
+optional workspace defaulting to the daemon workspace. The daemon reconciles accounts and settings every two seconds
 or immediately on `scv reload`. To opt out while offline, set `enabled` to
 `false` in the private settings file before daemon startup. See the
 [ClawBot contract](docs/clawbot.md) for permissions and recovery behavior.
@@ -244,8 +248,9 @@ approval-gated, cancellable subprocess adapters and share the same output and
 timeout limits as other process tools. Each adapter receives an instance-private
 `HOME`, `SCV_HOME`, XDG directories, and (for Codex) `CODEX_HOME` under
 `$SCV_HOME/adapters/<name>`. SCV never reuses or modifies the user's normal
-`~/.codex` configuration. Authenticate a Codex adapter separately in its
-instance directory when needed.
+`~/.claude` or `~/.codex` configuration. Sign the agents in for SCV once with
+`scv agents login claude` or `scv agents login codex`, and check with
+`scv agents status`.
 
 ## Architecture
 

@@ -92,6 +92,9 @@ const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESSAGE_ID_BYTES: usize = 256;
 const MAX_BATCH_MESSAGES: usize = 4096;
 const FAILURE_REPLY: &str = "SCV could not complete that request.";
+const TURN_TIMEOUT: Duration = Duration::from_secs(300);
+/// Owner turns may run tools and delegated agents, which take longer.
+const OWNER_TURN_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Compatibility entry point. Connects to the existing daemon; launches no process.
 pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -> Result<()> {
@@ -101,6 +104,7 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
         account,
         workspace,
         &scv_client::default_socket_path()?,
+        None,
         CancellationToken::new(),
         Arc::new(|_| {}),
     )
@@ -110,12 +114,17 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
 /// Run one account until cancelled. Only a validated authenticated getupdates
 /// response reports healthy. Cancellation drops all owned I/O and sessions;
 /// no adapter tasks are spawned. The caller supplies any external stop timeout.
+///
+/// `tool_owner` is the authenticated owner's iLink user ID when the account
+/// grants its owner remote tools; every other sender stays tool-free.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
     token: &str,
     base_url: &str,
     account: &str,
     workspace: &Path,
     socket: &Path,
+    tool_owner: Option<&str>,
     cancellation: CancellationToken,
     report: Arc<dyn Fn(bool) + Send + Sync>,
 ) -> Result<()> {
@@ -129,6 +138,7 @@ pub async fn run_supervised(
             account,
             workspace,
             socket,
+            tool_owner,
             &store,
             report.as_ref(),
         )
@@ -158,9 +168,17 @@ fn http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-async fn response_json(mut response: reqwest::Response) -> Result<Value> {
+async fn response_json(response: reqwest::Response) -> Result<Value> {
+    let body = response_body(response).await?;
+    serde_json::from_slice(&body).map_err(|_| anyhow!("invalid ClawBot response"))
+}
+
+async fn response_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
     if !response.status().is_success() {
-        bail!("ClawBot HTTP request failed")
+        bail!(
+            "ClawBot HTTP request failed with status {}",
+            response.status()
+        )
     }
     if response
         .content_length()
@@ -175,15 +193,17 @@ async fn response_json(mut response: reqwest::Response) -> Result<Value> {
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body).map_err(|_| anyhow!("invalid ClawBot response"))
+    Ok(body)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     token: &str,
     base_url: &str,
     account: &str,
     workspace: &Path,
     socket: &Path,
+    tool_owner: Option<&str>,
     store: &state::Store,
     report: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<()> {
@@ -218,7 +238,8 @@ async fn run_loop(
                 report(true);
                 response
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!("ClawBot poll failed: {error}");
                 report(false);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -279,7 +300,18 @@ async fn run_loop(
                 store.save_state(account, &state)?;
                 continue;
             };
-            if !sessions.contains_key(sender)
+            // Group messages never carry owner authority and never share the
+            // sender's direct-chat session, whose history may hold tool output.
+            let group = match msg.get("group_id") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(group)) if group.is_empty() => None,
+                Some(Value::String(group)) => Some(group.clone()),
+                Some(other) => Some(other.to_string()),
+            };
+            let key = group
+                .as_ref()
+                .map_or_else(|| sender.to_owned(), |group| format!("{group}\0{sender}"));
+            if !sessions.contains_key(&key)
                 && sessions.len() >= 32
                 && let Some(oldest) = sessions
                     .iter()
@@ -294,11 +326,20 @@ async fn run_loop(
                 context_token: ctx.into(),
             });
             store.save_state(account, &state)?;
-            let result = tokio::time::timeout(Duration::from_secs(300), async {
-                let session = match sessions.entry(sender.into()) {
+            let owner = group.is_none() && tool_owner == Some(sender);
+            let limit = if owner {
+                OWNER_TURN_TIMEOUT
+            } else {
+                TURN_TIMEOUT
+            };
+            let result = tokio::time::timeout(limit, async {
+                let session = match sessions.entry(key.clone()) {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(protocol::Session::connect(socket, workspace).await?)
+                        if owner {
+                            tracing::info!("ClawBot owner session starts with remote tools");
+                        }
+                        e.insert(protocol::Session::connect(socket, workspace, owner).await?)
                     }
                 };
                 session.turn(text, MAX_REPLY_BYTES).await
@@ -307,7 +348,7 @@ async fn run_loop(
             let reply = match result {
                 Ok(Ok(reply)) => reply,
                 Ok(Err(_)) | Err(_) => {
-                    sessions.remove(sender);
+                    sessions.remove(&key);
                     FAILURE_REPLY.into()
                 }
             };
@@ -436,8 +477,18 @@ impl Delivery<'_> {
                 &chunks[index],
                 &pending.client_ids[index],
             );
-            bridge::send_reply_request(self.client, self.token, self.base_url, &body, self.report)
-                .await?;
+            let outcome = bridge::send_reply_request(
+                self.client,
+                self.token,
+                self.base_url,
+                &body,
+                self.report,
+            )
+            .await?;
+            if outcome == bridge::SendOutcome::Rejected {
+                // Explicit refusal is final; drop the rest of this reply.
+                break;
+            }
             pending.next_chunk += 1;
             state.pending = Some(pending.clone());
             self.store.save_state(self.account, state)?;
@@ -487,14 +538,39 @@ pub fn check_envelope(value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Current iLink sendmessage responses omit `ret` on success (the message is
-/// delivered), so only an explicit non-zero `ret` or `errcode` is a failure.
-pub fn check_send_ack(value: &serde_json::Value) -> Result<()> {
-    let rejected = |key| value.get(key).is_some_and(|v| v.as_i64() != Some(0));
-    if !value.is_object() || rejected("ret") || rejected("errcode") {
-        bail!("iLink API rejected request")
+/// Classify a 2xx iLink sendmessage body. Live acknowledgements omit `ret`
+/// and need not be JSON, so only an explicit non-zero `ret` or `errcode`
+/// rejects; the error is a bounded diagnostic without message content or
+/// non-integer code values.
+pub fn check_send_ack(body: &[u8]) -> std::result::Result<(), String> {
+    let Ok(Value::Object(value)) = serde_json::from_slice::<Value>(body) else {
+        return Ok(());
+    };
+    let code = |key: &str| {
+        value
+            .get(key)
+            .filter(|v| !v.is_null() && v.as_i64() != Some(0))
+            .map(|v| {
+                v.as_i64()
+                    .map_or_else(|| "non-integer".into(), |n| n.to_string())
+            })
+    };
+    let (ret, errcode) = (code("ret"), code("errcode"));
+    if ret.is_none() && errcode.is_none() {
+        return Ok(());
     }
-    Ok(())
+    let errmsg: String = value
+        .get("errmsg")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(120)
+        .collect();
+    Err(format!(
+        "ret={} errcode={} errmsg={errmsg:?}",
+        ret.as_deref().unwrap_or("-"),
+        errcode.as_deref().unwrap_or("-")
+    ))
 }
 
 pub fn split_utf8(value: &str, max: usize) -> Vec<String> {
@@ -554,12 +630,26 @@ mod tests {
 
     #[test]
     fn accepts_live_send_ack_without_ret() {
-        assert!(check_send_ack(&serde_json::json!({})).is_ok());
-        assert!(check_send_ack(&serde_json::json!({"ret":0})).is_ok());
-        assert!(check_send_ack(&serde_json::json!({"ret":-2})).is_err());
-        assert!(check_send_ack(&serde_json::json!({"errcode":40001})).is_err());
-        assert!(check_send_ack(&serde_json::json!({"ret":"0"})).is_err());
-        assert!(check_send_ack(&serde_json::json!(null)).is_err());
+        for delivered in [
+            &b""[..],
+            b"{}",
+            br#"{"ret":0}"#,
+            br#"{"ret":null}"#,
+            b"ok",
+            b"[]",
+        ] {
+            assert!(check_send_ack(delivered).is_ok());
+        }
+        assert_eq!(
+            check_send_ack(br#"{"ret":-2,"errmsg":"prepare failed"}"#).unwrap_err(),
+            r#"ret=-2 errcode=- errmsg="prepare failed""#
+        );
+        assert!(check_send_ack(br#"{"errcode":40001}"#).is_err());
+        assert!(check_send_ack(br#"{"ret":"0"}"#).is_err());
+        assert_eq!(
+            check_send_ack(br#"{"ret":{"detail":"x"},"errcode":7}"#).unwrap_err(),
+            r#"ret=non-integer errcode=7 errmsg="""#
+        );
     }
 
     #[test]

@@ -29,6 +29,20 @@ pub struct ComponentHealth {
     pub last_success_unix_seconds: Option<u64>,
     pub error: Option<String>,
     pub restarts: u64,
+    /// Effective remote tool authority; `owner` only when the owner ID is known.
+    #[serde(default)]
+    pub remote_tools: RemoteTools,
+}
+
+/// Who may use tools through a remote bridge account.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTools {
+    /// Every remote session is tool-free (the default).
+    #[default]
+    None,
+    /// The account's authenticated owner gets full, auto-approved tools.
+    Owner,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +61,9 @@ pub enum DaemonCommand {
         account: String,
         enabled: bool,
         workspace: Option<String>,
+        /// Omitted keeps the saved setting.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_tools: Option<RemoteTools>,
     },
     ClawbotLogout {
         account: String,
@@ -465,5 +482,37 @@ mod tests {
             serde_json::from_str::<ServerEvent>(&encoded).unwrap(),
             event
         );
+    }
+
+    #[test]
+    fn remote_tools_fields_are_additive() {
+        let legacy: DaemonCommand = serde_json::from_str(
+            r#"{"action":"clawbot_set","account":"a","enabled":true,"workspace":null}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            DaemonCommand::ClawbotSet {
+                remote_tools: None,
+                ..
+            }
+        ));
+        let owner = DaemonCommand::ClawbotSet {
+            account: "a".into(),
+            enabled: true,
+            workspace: None,
+            remote_tools: Some(RemoteTools::Owner),
+        };
+        let encoded = serde_json::to_string(&owner).unwrap();
+        assert!(encoded.contains(r#""remote_tools":"owner""#));
+        assert_eq!(
+            serde_json::from_str::<DaemonCommand>(&encoded).unwrap(),
+            owner
+        );
+        let health: ComponentHealth = serde_json::from_str(
+            r#"{"id":"clawbot:a","account":"a","bot_id":null,"user_id":null,"enabled":true,"state":"connected","last_success_unix_seconds":null,"error":null,"restarts":0}"#,
+        )
+        .unwrap();
+        assert_eq!(health.remote_tools, RemoteTools::None);
     }
 }

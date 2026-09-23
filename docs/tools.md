@@ -56,17 +56,26 @@ keep a tool call alive indefinitely.
 The tools `agent_claude`, `agent_codex`, and `agent_pi` share this schema:
 
 ```json
-{"prompt":"Review the error handling in this workspace.","timeout_seconds":120}
+{"prompt":"Review the error handling in this workspace.","timeout_seconds":120,"model":"sonnet","effort":"medium"}
 ```
 
+`model` and `effort` are optional and offered only when the adapter configures
+`model_args` or `effort_args`. A model is 1-128 ASCII letters, digits, or
+`._:/@[]-` and cannot start with `-` or `@`; an effort is `low`, `medium`, `high`,
+`xhigh`, or `max`. Each selected value becomes one substituted argument, never
+shell text, so the CLI itself reports values it does not support.
+
 Each tool resolves only its configured executable and fixed argument vector,
-appends the prompt as one argument, and starts it directly in the workspace.
+adds any selected model/effort arguments, appends the prompt as one argument,
+and starts it directly in the workspace. A prompt cannot start with `-`, so it
+is never read as a flag.
 Native adapters receive an instance-private `HOME`, `SCV_HOME`, and XDG
 configuration/data/state directory, plus `CODEX_HOME` for Codex. SCV selector
-variables are removed so a nested Codex process cannot reuse the parent
-instance's configuration. The `bash` tool retains the normal inherited
+variables, provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, and
+`CLAUDE_CONFIG_DIR` are removed so a nested agent cannot reuse the parent
+instance's configuration or credentials from outside its private home. The `bash` tool retains the normal inherited
 environment for compatibility.
-The model cannot supply flags or a different executable. Output, timeout,
+The model cannot supply other flags or a different executable. Output, timeout,
 cancellation, and process-group behavior match `bash`. Adapter execution has
 delegate risk because the child agent may independently read, write, run
 commands, access inherited credentials, or ask its own model provider.
@@ -75,23 +84,48 @@ The default invocation contracts are:
 
 | Tool | Invocation |
 | --- | --- |
-| `agent_claude` | `claude -p <prompt>` |
-| `agent_codex` | `codex exec <prompt>` |
+| `agent_claude` | `claude -p [--model <model>] [--effort <effort>] <prompt>` |
+| `agent_codex` | `codex exec [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
 | `agent_pi` | `pi -p <prompt>` |
 
 Before approval, SCV resolves the executable through the server environment
-and displays its absolute path, full fixed argument vector, bounded prompt,
+and displays its absolute path, full argument vector, bounded prompt,
 workspace, and delegate-risk warning. Project configuration cannot replace the
 executable or arguments.
 
 Adapter processes use instance-private state directories under
 `$SCV_HOME/adapters/<name>`. In particular, `agent_codex` receives
 `CODEX_HOME=$SCV_HOME/adapters/codex` and does not read the user's normal
-`~/.codex` state. Run Codex authentication separately with that `CODEX_HOME`
-when the adapter requires it.
+`~/.codex` state, and `agent_claude` does not read `~/.claude`.
 
-A fake executable verifies native-agent argument boundaries and workspace
-selection without requiring these CLIs in CI. Shared process-runner tests cover
+### Signing in delegated agents
+
+Each adapter keeps its own sign-in in its private home, separate from the
+user's personal login, so token refreshes by one never invalidate the other.
+Sign the agents in once on the SCV host:
+
+```sh
+scv agents login claude                 # claude auth login
+scv agents login codex                  # codex login
+scv agents login codex -- --device-auth # extra arguments after --
+scv agents status                       # both agents' sign-in state
+scv agents logout claude
+```
+
+These run the agent's own login, status, or logout command with exactly the
+private home and cleaned environment that the daemon's `agent_*` tool uses, with
+the terminal attached for browser or device-code flows. Credentials are written
+by the agent CLI itself under `$SCV_HOME/adapters/<name>` (mode `0700`); SCV
+never reads or copies them. The daemon needs no restart: the next delegated call
+uses the new sign-in. When a delegated run fails with output that reads like a
+missing sign-in, its tool result gains a `hint` naming
+`scv agents login <name>`, since the agent's own advice (`/login`) cannot be
+followed from a remote chat.
+
+A fake agent script, run through `bash` so tests never execute a freshly
+written file, verifies native-agent argument boundaries, model/effort argument
+mapping and validation, and workspace selection without requiring these CLIs
+in CI. Shared process-runner tests cover
 output limits, timeout, cancellation, and background-descendant cleanup.
 
 ## Tool extension contract

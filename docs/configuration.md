@@ -98,19 +98,29 @@ max_skill_bytes = 262144
 [agents.claude]
 command = "claude"
 args = ["-p"]
+model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
 
 [agents.codex]
 command = "codex"
 args = ["exec"]
+model_args = ["-m", "{model}"]
+effort_args = ["-c", "model_reasoning_effort=\"{effort}\""]
 
 [agents.pi]
 command = "pi"
 args = ["-p"]
+model_args = []
+effort_args = []
 ```
 
 `agents.*.args` is an argument vector, not a shell string. SCV appends the
 delegated prompt as the final argument and runs the child in the session
-workspace. The three built-in adapters are enabled when their executable is
+workspace. When a call selects a `model` or `effort`, SCV substitutes the value
+for `{model}` or `{effort}` in `model_args` or `effort_args` and inserts those
+arguments between the fixed arguments and the prompt. An empty template means
+the adapter offers no such selection; a non-empty one must contain its
+placeholder. Overriding only `command` or `args` keeps the built-in templates. The three built-in adapters are enabled when their executable is
 available; attempting to call a missing adapter returns a clear tool error.
 
 `provider`, `agents.*`, and `skills.user_dir` are accepted only from built-in,
@@ -194,9 +204,11 @@ stable hashed service name and persist `SCV_HOME`/`SCV_CONFIG` in that unit.
 Native agent adapters run with an instance-private `HOME`, `SCV_HOME`, XDG
 configuration/data/state directories, and `CODEX_HOME` for Codex. They do not
 inherit `SCV_CONFIG`, `SCV_MODEL`, `SCV_PROVIDER`, `SCV_BASE_URL`, or
-`SCV_API_KEY_ENV`, and therefore cannot silently reuse or alter the user's
-normal Codex configuration. Authenticate Codex separately under
-`$SCV_HOME/adapters/codex` when the adapter needs credentials.
+`SCV_API_KEY_ENV`, provider API-key variables, `CLAUDE_CODE_OAUTH_TOKEN`, or
+`CLAUDE_CONFIG_DIR`, and therefore cannot silently reuse or alter the user's
+normal Claude Code or Codex configuration. Sign the agents in for SCV with
+`scv agents login claude` or `scv agents login codex`; see
+[Signing in delegated agents](tools.md#signing-in-delegated-agents).
 
 Secrets are never included in diagnostics, protocol events, approval summaries,
 or tool results.
@@ -215,11 +227,11 @@ settings are separate from project TOML, at
 `$SCV_HOME/clawbot/settings/<account>.json`:
 
 ```json
-{"enabled":true,"workspace":"/absolute/path/to/workspace"}
+{"enabled":true,"workspace":"/absolute/path/to/workspace","remote_tools":"none"}
 ```
 
-Missing settings default to `enabled: true`; an omitted or null `workspace`
-uses the daemon workspace. An explicit workspace must be an existing absolute
+Missing settings default to `enabled: true` and `remote_tools: "none"`; an
+omitted or null `workspace` uses the daemon workspace. An explicit workspace must be an existing absolute
 directory. Saved accounts autostart when enabled, but QR login is always
 explicit. Logging in again preserves a saved disabled setting.
 
@@ -233,7 +245,11 @@ A busy transaction during the snapshot defers reconciliation; the current
 instance keeps running until a later pass can read the account.
 
 `scv clawbot run --account NAME --workspace PATH` persists enablement and the
-resolved workspace through the live daemon, then returns. `scv clawbot stop
+resolved workspace through the live daemon, then returns. Adding
+`--remote-tools owner` grants the account's authenticated owner full,
+auto-approved tools from WeChat; `--remote-tools none` revokes it. The value is
+saved as `remote_tools` (`"none"` by default) in the account settings; see the
+[security model](security.md#supervised-remote-bridge) before enabling it. `scv clawbot stop
 --account NAME` persists `enabled: false` and joins the instance while retaining
 credentials. Credential or settings changes join the old instance before a
 replacement starts. `scv clawbot logout --account NAME` requires a live daemon
