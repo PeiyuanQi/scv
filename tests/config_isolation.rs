@@ -1,3 +1,6 @@
+mod common;
+
+use common::Isolated;
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::fs::PermissionsExt as _,
@@ -8,11 +11,11 @@ use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
 
 fn session_model(home: &std::path::Path, workspace: &std::path::Path) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home)
         .args(["--scv-home"])
         .arg(home)
         .args(["server", "--stdio"])
         .env("OPENAI_API_KEY", "test-only")
-        .env_remove("SCV_CONFIG")
         .current_dir(workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -111,11 +114,11 @@ fn agent_sign_in_ignores_project_configuration() {
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
         .args(["--scv-home"])
         .arg(home.path())
         .args(["agents", "status", "claude"])
         .env("OPENAI_API_KEY", "test-only")
-        .env_remove("SCV_CONFIG")
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -166,12 +169,12 @@ fn codex_import_copies_into_the_instance_adapter_home() {
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
         .args(["--scv-home"])
         .arg(home.path())
         .args(["agents", "import", "codex", "--from"])
         .arg(codex.path())
         .env("OPENAI_API_KEY", "test-only")
-        .env_remove("SCV_CONFIG")
         .output()
         .unwrap();
     assert!(
@@ -193,11 +196,11 @@ fn codex_import_copies_into_the_instance_adapter_home() {
 
 fn scv(home: &std::path::Path, args: &[&str], stdin: &str) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home)
         .args(["--scv-home"])
         .arg(home)
         .args(args)
         .env("OPENAI_API_KEY", "sk-env-secret")
-        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -338,6 +341,7 @@ fn a_delegated_run_may_not_manage_daemons() {
         &["clawbot", "status"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+            .isolated(home.path())
             .arg("--scv-home")
             .arg(home.path())
             .args(args)
@@ -373,11 +377,11 @@ fn codex_status_on_stderr_is_summarized_without_the_key() {
         ),
     );
     let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
         .arg("--scv-home")
         .arg(home.path())
         .args(["agents", "status", "codex"])
         .env("OPENAI_API_KEY", "test-only")
-        .env_remove("SCV_CONFIG")
         .output()
         .unwrap();
     assert!(output.status.success());
