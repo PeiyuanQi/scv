@@ -7,7 +7,9 @@
 //! named after its session ID tells `scv agents gc` to keep its transcript.
 
 use std::{
+    any::Any,
     collections::HashMap,
+    fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime},
@@ -38,6 +40,18 @@ pub struct ConversationLimits {
     pub idle: Duration,
 }
 
+/// What a live conversation keeps between turns, such as its running child
+/// process. Dropping the last reference (when the conversation is forgotten,
+/// expires, or its session ends) is what shuts the child down.
+#[derive(Clone)]
+pub(crate) struct Attachment(pub Arc<dyn Any + Send + Sync>);
+
+impl fmt::Debug for Attachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Attachment")
+    }
+}
+
 #[derive(Debug)]
 struct Conversation {
     agent: String,
@@ -47,6 +61,7 @@ struct Conversation {
     turns: u32,
     busy: bool,
     last_used: Instant,
+    attachment: Option<Attachment>,
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +97,9 @@ pub(crate) struct TurnGuard {
     pub turn: u32,
     /// Continuing: the known session ID. Starting: the ID SCV chose, if any.
     pub vendor: Option<String>,
+    /// Continuing: what the conversation kept. Starting: what
+    /// [`TurnGuard::attach`] set, stored when the turn finishes.
+    attachment: Option<Attachment>,
     finished: bool,
 }
 
@@ -188,6 +206,7 @@ impl ConversationStore {
             handle: handle.to_owned(),
             turn: conversation.turns + 1,
             vendor: Some(vendor),
+            attachment: conversation.attachment.clone(),
             finished: false,
         })
     }
@@ -230,6 +249,7 @@ impl ConversationStore {
                 turns: 0,
                 busy: true,
                 last_used: now,
+                attachment: None,
             },
         );
         if let Some(vendor) = &vendor {
@@ -240,6 +260,7 @@ impl ConversationStore {
             handle,
             turn: 1,
             vendor,
+            attachment: None,
             finished: false,
         })
     }
@@ -293,6 +314,35 @@ impl Drop for ConversationStore {
 }
 
 impl TurnGuard {
+    /// What the conversation keeps between turns, if anything.
+    pub(crate) fn attachment(&self) -> Option<&Attachment> {
+        self.attachment.as_ref()
+    }
+
+    /// Keep `attachment` with the conversation once this turn finishes.
+    pub(crate) fn attach(&mut self, attachment: Attachment) {
+        self.attachment = Some(attachment);
+    }
+
+    /// End the conversation now, for one that cannot go on (its live child
+    /// exited). Its attachment is dropped.
+    pub(crate) fn forget(mut self) {
+        self.finished = true;
+        let removed = self
+            .store
+            .inner
+            .lock()
+            .expect("conversation lock")
+            .conversations
+            .remove(&self.handle);
+        self.store.remove_marker(
+            removed
+                .and_then(|conversation| conversation.vendor)
+                .as_deref(),
+        );
+        self.store.remove_marker(self.vendor.as_deref());
+    }
+
     /// Settle the turn. `reported` is the session ID the CLI printed. Returns
     /// the handle when the conversation can be continued; a first turn that
     /// failed without the CLI reporting a session is forgotten.
@@ -309,6 +359,9 @@ impl TurnGuard {
         }
         let vendor = reported.or_else(|| self.vendor.clone());
         let conversation = inner.conversations.get_mut(&self.handle)?;
+        if let Some(attachment) = self.attachment.take() {
+            conversation.attachment = Some(attachment);
+        }
         conversation.busy = false;
         conversation.turns = self.turn;
         conversation.last_used = Instant::now();

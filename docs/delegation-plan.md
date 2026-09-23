@@ -41,7 +41,8 @@ table and may be developed in parallel with others; landings stay sequential.
 | 3 | Multi-turn conversations (resume) (done, 0.1.28) | 1 |
 | 4 | SCV web tools: `web_fetch`, `web_search` (done, 0.1.25) | 0b landed |
 | 5 | Progress events and protocol v3 (done, 0.1.30) | 3 |
-| 6 | Live mode: SCV to SCV, then ACP | 5 |
+| 6a | Live mode: SCV to SCV (`agent_scv`) (done, 0.1.31) | 5 |
+| 6b | Live mode: ACP adapter | 6a |
 | 7 | Background delegations | 6, iLink check |
 
 ### 0b. Adapter table and full-work defaults
@@ -130,14 +131,22 @@ approval summary. The built-in default stays `default`.
 
 ### 6. Live mode
 
+6a (done, 0.1.31):
+
 - A live child per conversation, registered like any delegation. Closing stdin
   is followed by a 2-second grace period and a group kill.
-- `ToolContext` gains the parent's approval gate.
+  `scv_tools::live::LiveChild` is protocol-neutral, and the conversation
+  store keeps it as the conversation's attachment, so 6b reuses both.
+- `ToolContext.approvals` gives tools the session's approval gate.
 - `agent_scv` runs `scv server --stdio` with its own home
   (`~/.scv/adapters/scv`), configured by `scv agents import scv`. The child's
   `approval.requested` goes through the parent's approval gate; cancellation
-  and timeouts become `turn.cancel`. `[agents.scv] socket` attaches to an
-  existing daemon instead.
+  and timeouts become `turn.cancel`.
+- Future work: `[agents.scv] socket`, attaching to an existing daemon instead
+  of starting a child.
+
+6b:
+
 - An ACP adapter maps `session/new`, `session/prompt`, `session/update`,
   `session/request_permission`, and `session/cancel`, and offers no client
   file or terminal capabilities. Adapters may prefer ACP and fall back to

@@ -126,7 +126,8 @@ request.
 
 SCV knows five agent CLIs: Claude Code (`agent_claude`), Codex
 (`agent_codex`), Grok Build (`agent_grok`), DeepSeek Harness (`agent_dsh`),
-and pi (`agent_pi`). Each is one descriptor in `scv_tools::adapters` holding
+and pi (`agent_pi`), plus a nested SCV (`agent_scv`, see
+[Nested SCV](#nested-scv-agent_scv)). Each is one descriptor in `scv_tools::adapters` holding
 its default command line, where its state lives inside the private home, the
 variables it must not inherit, and how it signs in; adding an agent is one
 more entry. A session offers only the agents whose executable resolves when
@@ -362,6 +363,60 @@ Adapter processes use instance-private state directories under
 `~/.codex` state, `agent_claude` does not read `~/.claude`, and Grok, DeepSeek
 Harness, and pi never read `~/.grok`, `~/.dsh`, or `~/.pi`.
 
+### Nested SCV (`agent_scv`)
+
+`agent_scv` delegates to another SCV: a separate session in SCV's private
+home `$SCV_HOME/adapters/scv`, with its own context, instructions, and tools.
+Unlike the CLI adapters, which start one process per turn, it keeps one
+`scv server --stdio` running for a whole conversation and speaks the
+[client protocol](protocol.md) to it:
+
+```text
+initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.start per call
+```
+
+- Its schema has `prompt`, `cwd`, `session`, `timeout_seconds`, and `model`
+  (a new conversation only, sent as the session's model override); there is no
+  `effort`.
+- The first call starts the nested SCV and returns a handle such as `scv-1`;
+  passing it as `session` sends the next prompt to the same nested session,
+  which keeps its history. A conversation keeps its `cwd`, runs one turn at a
+  time, and follows `agent.max_conversations` and
+  `agent.conversation_idle_seconds` like the CLI conversations.
+- The nested SCV's events become `tool.progress` of the calling tool:
+  completed lines of its assistant text, `bash …` and `bash done|failed` as
+  its tools start and finish, and its own tools' progress lines. Tool output
+  never becomes progress.
+- Its `approval.requested` goes through the calling session's approval gate
+  with the summary prefixed `[scv-1 depth N]`, keeping the nested tool's name
+  and risk, and the answer returns as `approval.resolve`. The session's policy
+  and its user (or a WeChat owner's auto-approval) therefore decide every
+  nested side effect; with no approval gate the request is denied.
+- The result is `{"agent":"scv","status","reply","usage","session","turn"}`.
+  A call that is cancelled or times out sends `turn.cancel`; a turn that
+  settles within 2 seconds leaves the conversation usable (a timed-out turn is
+  resumable), otherwise the nested SCV is shut down and the conversation
+  forgotten. A nested SCV that exits mid-turn fails the call with its stderr
+  tail and ends the conversation.
+- The nested SCV is recorded like any delegation, so `scv agents ps` lists it
+  with its current turn, `scv agents kill` stops it, and the orphan
+  reconcile reaps it if its parent dies. It ends when its conversation is
+  forgotten, expires, or its session ends: SCV closes its stdin (the server
+  exits on EOF), waits 2 seconds, then kills its process group and anything
+  still tagged with it.
+- The nested SCV runs one delegation level deeper and declares that depth in
+  `session.start`, so `agent.max_delegation_depth` applies on both sides: the
+  default of 2 lets it delegate once more, and it cannot start, restart, or
+  update a daemon or manage ClawBot. It has no parent daemon socket.
+
+`agent_scv` needs the `scv` executable (searched on `PATH` and in
+`~/.cargo/bin`, where `cargo install` puts it) and a provider in its private
+home: `scv agents import scv` (or `scv agents login scv`) copies SCV's own
+active provider there, as below. Its own delegated agents live under
+`$SCV_HOME/adapters/scv/adapters` and are signed out unless signed in there.
+Attaching to an already running daemon instead of starting a child is future
+work.
+
 ### Signing in delegated agents
 
 Each adapter keeps its own sign-in in its private home, separate from the
@@ -435,6 +490,17 @@ names), its key in `auth.json`, and `defaultProvider`/`defaultModel` in
 providers have stored sign-ins; `logout` removes `auth.json`, the `scv`
 provider, and a default that points at it.
 
+`scv agents import scv` gives the nested SCV behind `agent_scv` a copy of
+SCV's own active provider: `$SCV_HOME/adapters/scv/config.toml` (mode `0600`,
+written atomically) gets `[provider] active = "scv"` and a `[providers.scv]`
+profile with the same kind, wire API, model, base URL, timeout, and headers,
+plus `[web] search = "provider"` when SCV's own config uses hosted search. The
+key is resolved at import time from `api_key` or the `api_key_env` variable
+and stored in that file, because delegated agents never inherit key
+variables; it is never printed. Other settings already in that file are kept,
+and an unreadable file is left untouched. `status` shows the provider, model,
+and endpoint host; `logout` removes the file.
+
 `scv agents import codex [--from DIR]` instead copies an existing Codex setup,
 by default from `$CODEX_HOME` or `~/.codex`. It is for custom providers such as
 an OpenAI-compatible relay (`model_providers` with `base_url`, `wire_api`,
@@ -471,7 +537,12 @@ lines, the Codex `-o` file, and bounded replies; real processes cover records,
 kill, a timed-out run's `setsid` descendant, and an orphan left by a
 SIGKILLed `scv server --stdio`. Fake SCV homes cover the DeepSeek Harness key file, pi's endpoint
 files and import, and that no sign-in output contains a key. Shared process-runner tests cover
-output limits, timeout, cancellation, and background-descendant cleanup.
+output limits, timeout, cancellation, and background-descendant cleanup. A
+bash stand-in for `scv server --stdio` covers `agent_scv` conversations on one
+child, progress, approval relay (approved, denied, and without a gate), cancel
+and timeout relay including a child that ignores `turn.cancel`, a child dying
+mid-turn, idle and session-end teardown, and the depth limit; an end-to-end
+test runs a real parent and nested `scv` against a fake provider.
 
 ## Tool extension contract
 

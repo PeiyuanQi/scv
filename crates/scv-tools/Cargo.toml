@@ -16,6 +16,7 @@ html2text.workspace = true
 libc.workspace = true
 reqwest.workspace = true
 scv-core.workspace = true
+scv-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

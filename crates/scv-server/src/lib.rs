@@ -148,19 +148,7 @@ pub fn configure_pi_endpoint(endpoint: &Endpoint, key: &str) -> Result<Vec<Strin
 pub fn import_pi_from_scv_provider() -> Result<Vec<String>> {
     let config = Config::load_user(ConfigOverrides::default())?;
     let provider = &config.provider;
-    if provider.kind != "openai-compatible" {
-        return Err(anyhow!("SCV's provider is not openai-compatible"));
-    }
-    let key = match (&provider.api_key, &provider.api_key_env) {
-        (Some(key), _) if !key.trim().is_empty() => key.trim().to_owned(),
-        (_, Some(variable)) => std::env::var(variable)
-            .ok()
-            .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| {
-                anyhow!("SCV's provider reads its key from ${variable}, which is not set here")
-            })?,
-        _ => return Err(anyhow!("SCV's provider has no API key configured")),
-    };
+    let key = scv_provider_key(provider)?;
     let endpoint = Endpoint {
         base_url: provider.base_url.clone(),
         api: WireApi::Responses,
@@ -175,6 +163,45 @@ pub fn import_pi_from_scv_provider() -> Result<Vec<String>> {
         );
     }
     Ok(notes)
+}
+
+/// The key of SCV's own provider: `api_key`, or the `api_key_env` variable
+/// read now, since delegated agents never inherit key variables.
+fn scv_provider_key(provider: &config::ProviderConfig) -> Result<String> {
+    if provider.kind != "openai-compatible" {
+        return Err(anyhow!("SCV's provider is not openai-compatible"));
+    }
+    match (&provider.api_key, &provider.api_key_env) {
+        (Some(key), _) if !key.trim().is_empty() => Ok(key.trim().to_owned()),
+        (_, Some(variable)) => std::env::var(variable)
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!("SCV's provider reads its key from ${variable}, which is not set here")
+            }),
+        _ => Err(anyhow!("SCV's provider has no API key configured")),
+    }
+}
+
+/// Give the nested SCV (`agent_scv`) its own copy of SCV's active provider,
+/// in `$SCV_HOME/adapters/scv/config.toml` (mode 0600).
+pub fn import_scv_from_scv_provider() -> Result<Vec<String>> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    config.prepare_adapter_homes()?;
+    let provider = &config.provider;
+    let key = scv_provider_key(provider)?;
+    agents::configure_scv_child(
+        &agent_home("scv")?,
+        &agents::ScvChildProvider {
+            wire_api: &provider.wire_api,
+            model: &provider.model,
+            base_url: &provider.base_url,
+            timeout_seconds: provider.timeout_seconds,
+            headers: &provider.headers,
+            hosted_web_search: config.hosted_web_search(),
+        },
+        &key,
+    )
 }
 
 fn pi_agent_dir() -> Result<PathBuf> {

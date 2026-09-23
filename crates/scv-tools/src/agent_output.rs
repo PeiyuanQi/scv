@@ -419,7 +419,7 @@ fn add_usage(total: Option<AgentUsage>, turn: Option<AgentUsage>) -> Option<Agen
     }
 }
 
-fn truncate_utf8(value: &str, limit: usize) -> (&str, bool) {
+pub(crate) fn truncate_utf8(value: &str, limit: usize) -> (&str, bool) {
     if value.len() <= limit {
         return (value, false);
     }

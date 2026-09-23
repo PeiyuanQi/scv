@@ -31,7 +31,7 @@ pub const PARENT_VARIABLE: &str = "SCV_PARENT";
 /// Environment variable carrying how deeply this process is delegated.
 pub const DEPTH_VARIABLE: &str = "SCV_DELEGATION_DEPTH";
 /// Grace between TERM and KILL when stopping delegated processes.
-const STOP_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(2);
 /// Largest record file read.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 /// A zombie child younger than this may still be awaited by its spawner.
@@ -416,6 +416,17 @@ impl DelegationGuard {
         &self.handle
     }
 
+    /// Record that the run moved on to `turn` of its conversation, for a
+    /// live child that serves every turn. Bookkeeping only: a failure to
+    /// rewrite the record never fails the turn.
+    pub(crate) fn set_turn(&self, turn: u32) {
+        let dir = &self.registry.record_dir;
+        if let Some(mut record) = read_record(&dir.join(format!("{}.json", self.handle))) {
+            record.turn = Some(turn);
+            let _ = write_record(dir, &record);
+        }
+    }
+
     /// Whether `scv agents kill` stopped this run.
     pub(crate) fn was_killed(&self) -> bool {
         self.killed.load(Ordering::Acquire)
@@ -520,7 +531,7 @@ fn signal(pid: u32, signal: i32) {
     }
 }
 
-fn signal_group(pgid: u32, signal: i32) {
+pub(crate) fn signal_group(pgid: u32, signal: i32) {
     // Never address group 0 or 1 (this process's own group, or init's).
     if let Ok(pgid) = i32::try_from(pgid)
         && pgid > 1
@@ -532,7 +543,7 @@ fn signal_group(pgid: u32, signal: i32) {
 }
 
 /// Whether the process group still has a running member (zombies excluded on Linux).
-fn group_exists(pgid: u32) -> bool {
+pub(crate) fn group_exists(pgid: u32) -> bool {
     let Ok(group) = i32::try_from(pgid) else {
         return false;
     };

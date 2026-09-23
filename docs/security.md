@@ -134,6 +134,18 @@ of live conversations and anything written in the last hour.
 own status output, never the account email or key fragment that output
 contains.
 
+A nested SCV (`agent_scv`) is a delegated agent like the others and adds no
+new trust: it runs as the user, unsandboxed, in its private home, one
+delegation level deeper. Its tools are still gated by approval, and each of
+its `approval.requested` events is relayed to the calling session's own
+approval gate (labelled `[scv-1 depth N]`, with the nested tool's name and
+risk), so the policy and user deciding the parent's side effects also decide
+the nested ones; a relay without a gate denies. `scv agents import scv`
+stores a copy of SCV's provider key in the nested SCV's `config.toml`
+(mode `0600`), because delegated agents never inherit key variables. The
+nested SCV has no parent daemon socket, and its protocol lines are bounded
+by its frame limit.
+
 ## Web access
 
 `web_fetch` sends a GET request to a URL the model chooses, so the URL can

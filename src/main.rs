@@ -223,6 +223,18 @@ enum AgentsCommand {
     },
 }
 
+/// Give the nested SCV behind `agent_scv` a copy of SCV's own provider.
+fn import_scv_child() -> Result<()> {
+    println!("Giving SCV's nested SCV (agent_scv) a copy of SCV's own provider");
+    for line in scv_server::import_scv_from_scv_provider()? {
+        println!("  {line}");
+    }
+    println!(
+        "This is a copy: re-run after changing SCV's provider. Check with `scv agents status scv`."
+    );
+    Ok(())
+}
+
 fn agent_names() -> clap::builder::PossibleValuesParser {
     clap::builder::PossibleValuesParser::new(
         scv_server::adapters::ADAPTERS
@@ -772,6 +784,12 @@ async fn agents(command: AgentsCommand) -> Result<()> {
                     println!("Opening {} in SCV's adapter home: {hint}.", adapter.product);
                     run_agent(name, args, &extra, "sign-in")?;
                 }
+                Login::Import => {
+                    if !extra.is_empty() {
+                        bail!("{name} copies SCV's own configuration and takes no arguments");
+                    }
+                    import_scv_child()?;
+                }
                 Login::ApiKey(store) => {
                     if !extra.is_empty() {
                         bail!("{name} takes its API key from a prompt or stdin, not arguments");
@@ -928,6 +946,12 @@ async fn agents(command: AgentsCommand) -> Result<()> {
                     "This is a copy: re-run after changing your own Grok config. Check with `scv agents status grok`."
                 );
                 Ok(())
+            }
+            "scv" => {
+                if from.is_some() {
+                    bail!("scv imports SCV's own provider; it takes no --from");
+                }
+                import_scv_child()
             }
             "pi" => {
                 if !from_scv_provider || from.is_some() {
