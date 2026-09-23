@@ -41,6 +41,9 @@ impl Default for ProviderLimits {
     }
 }
 
+/// How long an idle pooled connection is kept for reuse.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The longest `Retry-After` SCV waits for; a provider asking for more is
 /// reported instead of retried.
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
@@ -108,6 +111,10 @@ impl OpenAiProvider {
         }
         let client = Client::builder()
             .timeout(timeout)
+            // Proxies commonly drop idle keep-alive connections after 60 s or
+            // more; retiring them sooner keeps SCV from sending a request on
+            // a socket the server has already closed.
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
             .build()
             .map_err(|error| ProviderError::new(ProviderErrorKind::Provider, error.to_string()))?;
         Ok(Self {
@@ -227,8 +234,13 @@ impl OpenAiProvider {
                 .headers(self.headers.clone().into_iter().filter_map(|(k,v)| Some((k.parse().ok()?, v.parse().ok()?))).collect())
                 .json(body)
                 .send() => result.map_err(|error| {
-                    // Nothing reached the provider when the connection failed.
-                    let transient = error.is_connect();
+                    // No response status arrived, so nothing was streamed and
+                    // a repeat cannot duplicate output. That covers a refused
+                    // connection and a pooled keep-alive connection the server
+                    // had already closed. A timeout bounds the whole request
+                    // and a malformed request fails again, so neither repeats.
+                    let transient =
+                        !(error.is_timeout() || error.is_builder() || error.is_redirect());
                     AttemptFailure {
                         error: ProviderError::new(ProviderErrorKind::Provider, self.sanitize(&error.to_string())),
                         transient,
@@ -1049,7 +1061,7 @@ mod tests {
 
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
-            net::TcpListener,
+            net::{TcpListener, TcpStream},
         };
 
         use super::*;
@@ -1083,6 +1095,39 @@ mod tests {
             .concat())
         }
 
+        /// Reads one whole HTTP request; false when the peer closed first.
+        async fn read_request(stream: &mut TcpStream) -> bool {
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                if read == 0 {
+                    return false;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length: usize = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        /// Closes a connection with a TCP reset rather than a clean close.
+        fn reset(stream: TcpStream) {
+            stream.set_zero_linger().unwrap();
+            drop(stream);
+        }
+
         /// Answers each request with the next canned response and counts
         /// the requests it received.
         async fn serve(responses: Vec<String>) -> (String, Arc<AtomicUsize>) {
@@ -1094,29 +1139,7 @@ mod tests {
                 for response in responses {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     served.fetch_add(1, Ordering::SeqCst);
-                    let mut request = Vec::new();
-                    let mut buffer = [0u8; 8192];
-                    loop {
-                        let read = stream.read(&mut buffer).await.unwrap();
-                        request.extend_from_slice(&buffer[..read]);
-                        let text = String::from_utf8_lossy(&request);
-                        if let Some(end) = text.find("\r\n\r\n") {
-                            let length: usize = text[..end]
-                                .lines()
-                                .find_map(|line| {
-                                    let (name, value) = line.split_once(':')?;
-                                    name.eq_ignore_ascii_case("content-length")
-                                        .then(|| value.trim().parse().unwrap())
-                                })
-                                .unwrap_or(0);
-                            if request.len() >= end + 4 + length {
-                                break;
-                            }
-                        }
-                        if read == 0 {
-                            break;
-                        }
-                    }
+                    read_request(&mut stream).await;
                     stream.write_all(response.as_bytes()).await.unwrap();
                     let _ = stream.shutdown().await;
                 }
@@ -1129,11 +1152,20 @@ mod tests {
             max_retries: usize,
             retry_base_delay: Duration,
         ) -> OpenAiProvider {
+            provider_with_timeout(base, max_retries, retry_base_delay, Duration::from_secs(10))
+        }
+
+        fn provider_with_timeout(
+            base: String,
+            max_retries: usize,
+            retry_base_delay: Duration,
+            timeout: Duration,
+        ) -> OpenAiProvider {
             OpenAiProvider::new(
                 "model".into(),
                 base,
                 KEY.into(),
-                Duration::from_secs(10),
+                timeout,
                 ProviderLimits {
                     max_retries,
                     retry_base_delay,
@@ -1385,6 +1417,128 @@ mod tests {
                 !ErrorDetails::from_value(&json!({"code":"invalid_request_error","message":"no"}))
                     .is_transient()
             );
+        }
+
+        fn keep_alive(response: &str) -> String {
+            response.replace("Connection: close", "Connection: keep-alive")
+        }
+
+        #[tokio::test]
+        async fn a_request_on_a_closed_pooled_connection_is_retried() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            let reused = Arc::new(AtomicUsize::new(0));
+            let reuse_seen = Arc::clone(&reused);
+            let server = tokio::spawn(async move {
+                let (mut pooled, _) = listener.accept().await.unwrap();
+                assert!(read_request(&mut pooled).await);
+                pooled
+                    .write_all(keep_alive(&hello()).as_bytes())
+                    .await
+                    .unwrap();
+                // The next request arrives on the kept-alive connection, which
+                // closes without an answer, as a proxy's expired socket does.
+                tokio::select! {
+                    second = read_request(&mut pooled) => {
+                        if second {
+                            reuse_seen.fetch_add(1, Ordering::SeqCst);
+                        }
+                        drop(pooled);
+                        let (mut fresh, _) = listener.accept().await.unwrap();
+                        assert!(read_request(&mut fresh).await);
+                        fresh.write_all(hello().as_bytes()).await.unwrap();
+                    }
+                    fresh = listener.accept() => {
+                        let (mut fresh, _) = fresh.unwrap();
+                        assert!(read_request(&mut fresh).await);
+                        fresh.write_all(hello().as_bytes()).await.unwrap();
+                    }
+                }
+            });
+            let provider = provider(base, 2, FAST);
+            let (first, _) = run(&provider, CancellationToken::new()).await;
+            assert_eq!(first.unwrap().content, "hello");
+            let (second, streamed) = run(&provider, CancellationToken::new()).await;
+            assert_eq!(second.unwrap().content, "hello");
+            assert_eq!(streamed, "hello");
+            server.await.unwrap();
+            assert_eq!(
+                reused.load(Ordering::SeqCst),
+                1,
+                "the second request must be sent on the pooled connection"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_reset_before_the_response_is_retried() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut first, _) = listener.accept().await.unwrap();
+                assert!(read_request(&mut first).await);
+                reset(first);
+                let (mut second, _) = listener.accept().await.unwrap();
+                assert!(read_request(&mut second).await);
+                second.write_all(hello().as_bytes()).await.unwrap();
+            });
+            let (result, _) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            assert_eq!(result.unwrap().content, "hello");
+            server.await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_request_timeout_is_not_retried() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&accepted);
+            tokio::spawn(async move {
+                let mut held = Vec::new();
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    read_request(&mut stream).await;
+                    held.push(stream);
+                }
+            });
+            let provider = provider_with_timeout(base, 2, FAST, Duration::from_millis(300));
+            let (result, _) = run(&provider, CancellationToken::new()).await;
+            let error = result.unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::Provider);
+            assert!(!error.message.contains("gave up"), "{}", error.message);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn a_transport_error_after_output_is_not_retried() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&accepted);
+            tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    read_request(&mut stream).await;
+                    let partial =
+                        event(r#"{"type":"response.output_text.delta","delta":"partial"}"#);
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                        partial.len() + 1000
+                    );
+                    stream.write_all(head.as_bytes()).await.unwrap();
+                    stream.write_all(partial.as_bytes()).await.unwrap();
+                    stream.flush().await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    reset(stream);
+                }
+            });
+            let (result, streamed) = run(&provider(base, 2, FAST), CancellationToken::new()).await;
+            assert!(result.is_err());
+            assert_eq!(streamed, "partial");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(accepted.load(Ordering::SeqCst), 1);
         }
 
         #[test]

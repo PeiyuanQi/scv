@@ -239,15 +239,23 @@ error body sent in place of the stream, and a stream that ends before
 text.
 
 `provider_limits.max_retries` (default 2, at most 10) is how many more times
-SCV sends a request that failed transiently: HTTP 429 or 5xx, a failed
-connection, an overload, rate-limit, unavailable, or server error, or a stream
-that ends early, but not a request that reached `timeout_seconds`. Retries
+SCV sends a request that failed transiently: HTTP 429 or 5xx, any failure to
+send the request before a response status arrives (a refused connection, a
+reset, or a pooled keep-alive connection the server had already closed), an
+overload, rate-limit, unavailable, or server error, or a stream that ends
+early, but not a request that reached `timeout_seconds`. Retries
 wait about 1 second, doubling each time with random jitter, or the
 `Retry-After` seconds the provider sends; a provider asking for more than 60
 seconds is reported instead. A retry happens only while nothing from
 that response has streamed, so text is never repeated. Cancelling the turn
 interrupts the wait. Set `0` to report the first failure. Project
 configuration may lower it but not raise it.
+
+SCV reuses provider connections but retires one after 30 idle seconds.
+Proxies in front of providers commonly close idle keep-alive connections after
+a minute or so, and a request written to a connection that is already closed
+fails before any response. Retiring connections sooner makes that rare, and
+the retry above covers the rest.
 
 ### Agent permissions
 
