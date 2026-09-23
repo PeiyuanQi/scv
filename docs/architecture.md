@@ -76,7 +76,7 @@ The integration dependency chain is `server -> clawbot -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
 on core; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.29` and exact workspace dependency pins.
+`0.1.30` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
@@ -168,7 +168,9 @@ Records live in `$SCV_HOME/run/delegations`, so the daemon also sees runs that
 `scv exec` servers started. A separate daemon task reconciles them at startup
 and every 60 seconds, stopping orphans, and collects exited orphan processes;
 on Linux the daemon is a child subreaper. `delegations` and `delegation_kill`
-control actions serve `scv agents ps` and `scv agents kill`.
+control actions serve `scv agents ps` and `scv agents kill`. A session whose
+client declares `session.start.delegation_depth` (a delegated client) counts
+its runs from that depth when it exceeds the process's own.
 
 ## Agent loop
 
@@ -181,7 +183,10 @@ For each user turn, the server-owned session performs this sequence:
 4. Emit assistant text deltas while accumulating the canonical assistant
    message, then append that complete message.
 5. If the message contains tool calls, approve and execute them in call order,
-   append their bounded results, and return to step 2.
+   append their bounded results, and return to step 2. While a tool runs, the
+   lines it reports to `ToolContext.progress` are forwarded as `ToolProgress`
+   events at most every 500 ms; they are display-only and never enter the
+   history.
 6. Finish when the provider returns no tool calls. Cancellation produces a
    cancelled terminal event; provider, invariant, and configured resource-limit
    failures produce a failed terminal event.
@@ -206,7 +211,8 @@ active group.
 Rust traits are the stable internal extension seam:
 
 - `Provider` converts a model request into one assistant message and usage;
-- `Tool` publishes a JSON schema, an approval risk, and asynchronous execution;
+- `Tool` publishes a JSON schema, an approval risk, and asynchronous execution,
+  and may report status lines through the `ProgressSink` in its context;
 - `ContextPolicy` selects or compacts model-visible history;
 - `ApprovalGate` resolves side-effecting work;
 - `EventSink` receives typed lifecycle events.

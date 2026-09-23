@@ -2,8 +2,8 @@
 
 Status: final design for v0.1
 
-The current workspace release is `0.1.29`. All crates share that version, and
-dependencies between workspace packages use exact `=0.1.29` pins.
+The current workspace release is `0.1.30`. All crates share that version, and
+dependencies between workspace packages use exact `=0.1.30` pins.
 
 SCV v0.1 supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -104,7 +104,9 @@ are release requirements, not a record of a successful run.
 ## Compatibility policy
 
 - The JSONL protocol used by both Unix sockets and stdio is versioned
-  independently from the crate version; version 2 includes daemon management.
+  independently from the crate version; version 2 added daemon management and
+  version 3 added `tool.progress`. Clients and the server share one binary, so a
+  running TUI from an older release must be restarted after an update.
 - Additive object fields do not change the protocol version.
 - Removing a field, changing its meaning, or changing message ordering requires
   a protocol version increase.

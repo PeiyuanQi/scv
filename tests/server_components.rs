@@ -102,6 +102,7 @@ async fn session(
             model: None,
             base_url: None,
             no_tools: Some(true),
+            delegation_depth: None,
         },
     ] {
         write

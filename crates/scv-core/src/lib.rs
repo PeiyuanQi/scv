@@ -1,6 +1,13 @@
 //! SCV's provider-independent agent loop and extension traits.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -79,6 +86,157 @@ impl ToolRisk {
 pub struct ToolContext {
     pub workspace: PathBuf,
     pub cancellation: CancellationToken,
+    /// Where the tool may report short status lines while it runs.
+    pub progress: ProgressSink,
+}
+
+impl ToolContext {
+    /// A context whose progress reports go nowhere.
+    pub fn new(workspace: PathBuf, cancellation: CancellationToken) -> Self {
+        Self {
+            workspace,
+            cancellation,
+            progress: ProgressSink::default(),
+        }
+    }
+}
+
+/// Longest progress line a tool can report; longer lines are cut.
+pub const MAX_PROGRESS_LINE_BYTES: usize = 200;
+/// Largest progress event: the newest lines reported since the previous
+/// event, with older ones dropped first.
+pub const MAX_PROGRESS_EVENT_BYTES: usize = 512;
+/// Minimum spacing of one call's progress events (at most two a second).
+pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Where a running tool reports short status lines, such as a delegated
+/// agent's commands. Each report becomes one bounded line; the runtime
+/// forwards the pending lines to the client at most twice a second and never
+/// adds them to the model's history. The default sink discards reports, so a
+/// tool may always report.
+#[derive(Clone, Default)]
+pub struct ProgressSink {
+    pending: Option<Arc<Mutex<PendingProgress>>>,
+}
+
+impl fmt::Debug for ProgressSink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProgressSink")
+            .field("enabled", &self.is_enabled())
+            .finish()
+    }
+}
+
+impl ProgressSink {
+    /// A sink that keeps reports until the runtime takes them.
+    pub fn buffered() -> Self {
+        Self {
+            pending: Some(Arc::default()),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Report one status line. Control characters and line breaks become
+    /// spaces and the line is cut to `MAX_PROGRESS_LINE_BYTES`.
+    pub fn report(&self, text: &str) {
+        let Some(pending) = &self.pending else {
+            return;
+        };
+        let line = progress_line(text);
+        if !line.is_empty() {
+            pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(line);
+        }
+    }
+
+    /// The lines reported since the previous call, as one event text of at
+    /// most `MAX_PROGRESS_EVENT_BYTES`, or `None` when nothing is pending.
+    pub fn take(&self) -> Option<String> {
+        self.pending
+            .as_ref()?
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
+/// Marker for lines dropped from the front of an event.
+const PROGRESS_ELIDED: &str = "…";
+
+#[derive(Debug, Default)]
+struct PendingProgress {
+    lines: VecDeque<String>,
+    /// Joined length of `lines`, separators included.
+    bytes: usize,
+    dropped: bool,
+}
+
+impl PendingProgress {
+    fn push(&mut self, line: String) {
+        self.bytes += line.len() + usize::from(!self.lines.is_empty());
+        self.lines.push_back(line);
+        // Leave room for the elision marker and its separator.
+        let budget = MAX_PROGRESS_EVENT_BYTES - PROGRESS_ELIDED.len() - 1;
+        while self.bytes > budget && self.lines.len() > 1 {
+            if let Some(oldest) = self.lines.pop_front() {
+                self.bytes -= oldest.len() + 1;
+                self.dropped = true;
+            }
+        }
+    }
+
+    fn take(&mut self) -> Option<String> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let mut text = String::with_capacity(self.bytes + PROGRESS_ELIDED.len() + 1);
+        if std::mem::take(&mut self.dropped) {
+            text.push_str(PROGRESS_ELIDED);
+            text.push('\n');
+        }
+        for (index, line) in self.lines.drain(..).enumerate() {
+            if index > 0 {
+                text.push('\n');
+            }
+            text.push_str(&line);
+        }
+        self.bytes = 0;
+        Some(text)
+    }
+}
+
+/// One bounded display line: control characters become spaces, runs of
+/// whitespace collapse, and the result is cut on a character boundary.
+fn progress_line(text: &str) -> String {
+    let mut line = String::new();
+    for word in text
+        .split(|character: char| character.is_whitespace() || character.is_control())
+        .filter(|word| !word.is_empty())
+    {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+        if line.len() > MAX_PROGRESS_LINE_BYTES {
+            break;
+        }
+    }
+    if line.len() <= MAX_PROGRESS_LINE_BYTES {
+        return line;
+    }
+    let mut end = MAX_PROGRESS_LINE_BYTES - PROGRESS_ELIDED.len();
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line.truncate(end);
+    line.push_str(PROGRESS_ELIDED);
+    line
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +397,11 @@ pub enum CoreEvent {
     ToolStarted {
         call_id: String,
         name: String,
+    },
+    /// Status lines a running tool reported, for display only.
+    ToolProgress {
+        call_id: String,
+        text: String,
     },
     ToolCompleted {
         call_id: String,
@@ -759,15 +922,18 @@ impl AgentRuntime {
                         name: call.name.clone(),
                     })
                     .await?;
-                    tool.execute(
+                    let progress = ProgressSink::buffered();
+                    let execution = tool.execute(
                         call.arguments.clone(),
                         ToolContext {
                             workspace: self.workspace.clone(),
                             cancellation: cancellation.child_token(),
+                            progress: progress.clone(),
                         },
-                    )
-                    .await
-                    .unwrap_or_else(|error| ToolOutput::failure(error.to_string()))
+                    );
+                    forward_progress(execution, &progress, sink.as_ref(), &call.id)
+                        .await
+                        .unwrap_or_else(|error| ToolOutput::failure(error.to_string()))
                 } else {
                     ToolOutput::failure("tool call denied by policy or user")
                 };
@@ -872,6 +1038,51 @@ impl AgentRuntime {
         }
         Ok(())
     }
+}
+
+/// Run a tool while forwarding what it reports to `sink`, at most one
+/// `ToolProgress` event per `PROGRESS_INTERVAL`. Progress is best effort: a
+/// sink error stops forwarding but never fails the tool.
+async fn forward_progress<T>(
+    execution: impl Future<Output = T>,
+    progress: &ProgressSink,
+    sink: &dyn EventSink,
+    call_id: &str,
+) -> T {
+    let mut execution = std::pin::pin!(execution);
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + PROGRESS_INTERVAL,
+        PROGRESS_INTERVAL,
+    );
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_sent: Option<tokio::time::Instant> = None;
+    let mut forwarding = true;
+    let result = loop {
+        tokio::select! {
+            biased;
+            result = &mut execution => break result,
+            _ = ticker.tick(), if forwarding => {
+                if let Some(text) = progress.take() {
+                    let event = CoreEvent::ToolProgress { call_id: call_id.to_owned(), text };
+                    forwarding = sink.emit(event).await.is_ok();
+                    last_sent = Some(tokio::time::Instant::now());
+                }
+            }
+        }
+    };
+    // Lines reported since the last event, when sending them keeps the pace.
+    if forwarding
+        && last_sent.is_none_or(|sent| sent.elapsed() >= PROGRESS_INTERVAL)
+        && let Some(text) = progress.take()
+    {
+        let _ = sink
+            .emit(CoreEvent::ToolProgress {
+                call_id: call_id.to_owned(),
+                text,
+            })
+            .await;
+    }
+    result
 }
 
 fn map_provider_error(error: ProviderError) -> AgentError {
@@ -1105,6 +1316,171 @@ mod tests {
                 arguments["value"].as_str().unwrap_or_default(),
             ))
         }
+    }
+
+    #[test]
+    fn progress_lines_are_single_bounded_lines() {
+        assert_eq!(
+            progress_line("  run\n\tcargo \u{7}test  "),
+            "run cargo test"
+        );
+        let long = progress_line(&"x".repeat(1000));
+        assert!(long.len() <= MAX_PROGRESS_LINE_BYTES && long.ends_with(PROGRESS_ELIDED));
+        let wide = progress_line(&"é".repeat(300));
+        assert!(wide.len() <= MAX_PROGRESS_LINE_BYTES);
+        let discard = ProgressSink::default();
+        discard.report("ignored");
+        assert!(!discard.is_enabled() && discard.take().is_none());
+    }
+
+    #[test]
+    fn progress_events_keep_the_newest_lines_within_the_limit() {
+        let progress = ProgressSink::buffered();
+        assert!(progress.take().is_none());
+        progress.report("first");
+        progress.report("second");
+        assert_eq!(progress.take().as_deref(), Some("first\nsecond"));
+        assert!(progress.take().is_none());
+        for index in 0..50 {
+            progress.report(&format!("{index:03} {}", "y".repeat(96)));
+        }
+        let text = progress.take().unwrap();
+        assert!(text.len() <= MAX_PROGRESS_EVENT_BYTES, "{}", text.len());
+        assert!(text.starts_with(&format!("{PROGRESS_ELIDED}\n")));
+        assert!(text.lines().last().unwrap().starts_with("049 "));
+        progress.report("after");
+        assert_eq!(progress.take().as_deref(), Some("after"));
+    }
+
+    struct ProgressTool;
+
+    #[async_trait]
+    impl Tool for ProgressTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "work".into(),
+                description: "Report progress while working".into(),
+                parameters: serde_json::json!({"type":"object"}),
+            }
+        }
+
+        fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
+            Ok(ToolRisk::ReadOnly)
+        }
+
+        fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
+            Ok("Work".into())
+        }
+
+        async fn execute(
+            &self,
+            _arguments: Value,
+            context: ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            for step in 0..22 {
+                context.progress.report(&format!("step {step}"));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(ToolOutput::success("worked"))
+        }
+    }
+
+    struct TimedSink(Mutex<Vec<(tokio::time::Instant, CoreEvent)>>);
+
+    #[async_trait]
+    impl EventSink for TimedSink {
+        async fn emit(&self, event: CoreEvent) -> Result<(), AgentError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((tokio::time::Instant::now(), event));
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_progress_is_paced_and_kept_out_of_history() {
+        let provider = Arc::new(ScriptedProvider {
+            responses: Mutex::new(VecDeque::from([
+                AssistantResponse {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".into(),
+                        name: "work".into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    usage: Usage::default(),
+                },
+                AssistantResponse {
+                    content: "done".into(),
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                },
+            ])),
+        });
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(ProgressTool)).unwrap();
+        let runtime = AgentRuntime::new(
+            provider,
+            Arc::new(registry),
+            Arc::new(BudgetContextPolicy::new(ContextConfig::default()).unwrap()),
+            AgentConfig {
+                system_prompt: "test".into(),
+                max_steps: 3,
+                history_limits: HistoryLimits::default(),
+            },
+            PathBuf::from("/tmp"),
+        );
+        let sink = Arc::new(TimedSink(Mutex::new(Vec::new())));
+        let mut history = Vec::new();
+        runtime
+            .run_turn(
+                &mut history,
+                "go".into(),
+                sink.clone(),
+                Arc::new(Allow),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let events = sink.0.lock().unwrap();
+        let started = events
+            .iter()
+            .position(|(_, event)| matches!(event, CoreEvent::ToolStarted { .. }))
+            .unwrap();
+        let completed = events
+            .iter()
+            .position(|(_, event)| matches!(event, CoreEvent::ToolCompleted { .. }))
+            .unwrap();
+        let progress: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (at, event))| match event {
+                CoreEvent::ToolProgress { call_id, text } => Some((index, *at, call_id, text)),
+                _ => None,
+            })
+            .collect();
+        // 2.2 seconds of work at two events a second: four ticks, plus at
+        // most one final flush.
+        assert!((4..=5).contains(&progress.len()), "{}", progress.len());
+        for (index, _, call_id, text) in &progress {
+            assert!(*index > started && *index < completed);
+            assert_eq!(call_id.as_str(), "call-1");
+            assert!(text.len() <= MAX_PROGRESS_EVENT_BYTES);
+        }
+        for pair in progress.windows(2) {
+            assert!(pair[1].1 - pair[0].1 >= PROGRESS_INTERVAL);
+        }
+        let all: Vec<&str> = progress
+            .iter()
+            .flat_map(|(_, _, _, text)| text.lines())
+            .collect();
+        assert_eq!(all.first(), Some(&"step 0"));
+        // Lines reported within an interval of the last event are dropped
+        // rather than breaking the pace; `ToolCompleted` follows at once.
+        assert!(all.contains(&"step 19"));
+        let stored = serde_json::to_string(&history).unwrap();
+        assert!(!stored.contains("step 1"), "progress leaked into history");
     }
 
     #[tokio::test]

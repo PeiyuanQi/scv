@@ -2,6 +2,7 @@
 
 pub mod adapters;
 mod agent_output;
+mod agent_progress;
 pub mod conversation;
 pub mod delegation;
 pub mod web;
@@ -86,6 +87,16 @@ impl Default for ToolsConfig {
 pub struct DelegationContext {
     pub registry: Arc<DelegationRegistry>,
     pub session: String,
+    /// Delegation depth the session's client declared (0 for a direct
+    /// client). Runs count from the larger of this and the process's own.
+    pub depth: u32,
+}
+
+impl DelegationContext {
+    /// The depth delegated runs of this session start from.
+    pub fn owner_depth(&self) -> u32 {
+        self.registry.depth().max(self.depth)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -148,9 +159,7 @@ pub fn builtin_registry(
     let depth = config
         .delegation
         .as_ref()
-        .map_or_else(delegation::current_depth, |context| {
-            context.registry.depth()
-        });
+        .map_or_else(delegation::current_depth, DelegationContext::owner_depth);
     let adapters = if depth < config.max_delegation_depth {
         adapters
     } else {
@@ -993,7 +1002,8 @@ impl Tool for NativeAgentTool {
             None
         };
         let pending = self.delegation.as_ref().map(|delegation| {
-            delegation.registry.begin(
+            delegation.registry.begin_at(
+                delegation.owner_depth(),
                 agent,
                 &delegation.session,
                 &cwd,
@@ -1075,7 +1085,7 @@ impl Tool for NativeAgentTool {
                 timeout: requested,
                 output_limit: self.output_limit,
             },
-            AgentStream::new(self.output, self.output_limit),
+            AgentStream::new(self.output, self.output_limit).with_progress(context.progress),
             registration,
             context.cancellation,
         )
@@ -1634,10 +1644,10 @@ mod tests {
         let output = tool
             .execute(
                 json!({"path":"hello.txt"}),
-                ToolContext {
-                    workspace: directory.path().canonicalize().unwrap(),
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                },
+                ToolContext::new(
+                    directory.path().canonicalize().unwrap(),
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             )
             .await
             .unwrap();
@@ -1655,10 +1665,10 @@ mod tests {
         let result = tool
             .execute(
                 json!({"path":"escape/secret"}),
-                ToolContext {
-                    workspace: workspace.path().canonicalize().unwrap(),
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                },
+                ToolContext::new(
+                    workspace.path().canonicalize().unwrap(),
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             )
             .await;
         assert!(result.unwrap_err().to_string().contains("workspace"));
@@ -1671,20 +1681,14 @@ mod tests {
         let tool = WriteTool { max_bytes: 100 };
         tool.execute(
             json!({"path":"file.txt","content":"first","mode":"create"}),
-            ToolContext {
-                workspace: root.clone(),
-                cancellation: tokio_util::sync::CancellationToken::new(),
-            },
+            ToolContext::new(root.clone(), tokio_util::sync::CancellationToken::new()),
         )
         .await
         .unwrap();
         let hash = format!("{:x}", Sha256::digest(b"first"));
         tool.execute(
             json!({"path":"file.txt","content":"second","mode":"replace","expected_sha256":hash}),
-            ToolContext {
-                workspace: root.clone(),
-                cancellation: tokio_util::sync::CancellationToken::new(),
-            },
+            ToolContext::new(root.clone(), tokio_util::sync::CancellationToken::new()),
         )
         .await
         .unwrap();
@@ -1695,10 +1699,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"path":"file.txt","content":"third","mode":"replace","expected_sha256":"deadbeef"}),
-                ToolContext {
-                    workspace: root,
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                },
+                ToolContext::new(root, tokio_util::sync::CancellationToken::new()),
             )
             .await;
         assert!(result.unwrap_err().to_string().contains("changed"));
@@ -1713,10 +1714,10 @@ mod tests {
         let result = tool
             .execute(
                 json!({"path":"escape/file.txt","content":"nope","mode":"create"}),
-                ToolContext {
-                    workspace: workspace.path().canonicalize().unwrap(),
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                },
+                ToolContext::new(
+                    workspace.path().canonicalize().unwrap(),
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             )
             .await;
         assert!(result.unwrap_err().to_string().contains("workspace"));
@@ -1735,10 +1736,10 @@ mod tests {
         let output = tool
             .execute(
                 json!({"command":"sleep 5"}),
-                ToolContext {
-                    workspace: workspace.path().canonicalize().unwrap(),
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                },
+                ToolContext::new(
+                    workspace.path().canonicalize().unwrap(),
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             )
             .await
             .unwrap();
@@ -1757,10 +1758,10 @@ mod tests {
         let output = tool
             .execute(
                 json!({"command":"printf 12345678901234567890"}),
-                ToolContext {
-                    workspace: workspace.path().canonicalize().unwrap(),
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                },
+                ToolContext::new(
+                    workspace.path().canonicalize().unwrap(),
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             )
             .await
             .unwrap();
@@ -1783,10 +1784,7 @@ mod tests {
         let execution = tokio::spawn(async move {
             tool.execute(
                 json!({"command":"sleep 30"}),
-                ToolContext {
-                    workspace: workspace.path().canonicalize().unwrap(),
-                    cancellation,
-                },
+                ToolContext::new(workspace.path().canonicalize().unwrap(), cancellation),
             )
             .await
         });
@@ -1809,10 +1807,7 @@ mod tests {
         let output = tool
             .execute(
                 json!({"command":"sleep 60 & echo $! > background.pid; exit 0"}),
-                ToolContext {
-                    workspace: root.clone(),
-                    cancellation: tokio_util::sync::CancellationToken::new(),
-                },
+                ToolContext::new(root.clone(), tokio_util::sync::CancellationToken::new()),
             )
             .await
             .unwrap();
@@ -1852,10 +1847,7 @@ mod tests {
         let execution = tokio::spawn(async move {
             tool.execute(
                 json!({"command":"trap '' TERM; (trap '' TERM; sleep 30) & echo $! > stubborn.pid; wait"}),
-                ToolContext {
-                    workspace: command_root,
-                    cancellation,
-                },
+                ToolContext::new(command_root, cancellation),
             )
             .await
         });
@@ -1937,10 +1929,10 @@ mod tests {
     }
 
     fn context(workspace: &Path) -> ToolContext {
-        ToolContext {
-            workspace: workspace.canonicalize().unwrap(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-        }
+        ToolContext::new(
+            workspace.canonicalize().unwrap(),
+            tokio_util::sync::CancellationToken::new(),
+        )
     }
 
     #[tokio::test]
@@ -2509,6 +2501,7 @@ mod tests {
         DelegationContext {
             registry: Arc::new(DelegationRegistry::new(home)),
             session: "session-1".into(),
+            depth: 0,
         }
     }
 
@@ -2941,6 +2934,30 @@ exit 1
             .unwrap();
             assert_eq!(registry.get("agent_claude").is_some(), offered);
             assert!(registry.get("bash").is_some());
+        }
+        // A client that is itself delegated (`session.start.delegation_depth`)
+        // counts too, even though this process is not delegated.
+        for (declared, max_depth, offered) in [(1, 1, false), (1, 2, true), (5, 2, false)] {
+            let registry = builtin_registry(
+                ToolsConfig {
+                    max_delegation_depth: max_depth,
+                    delegation: Some(DelegationContext {
+                        depth: declared,
+                        ..delegation_context(home.path())
+                    }),
+                    ..ToolsConfig::default()
+                },
+                SkillMap::new(),
+                Vec::new(),
+                1024,
+                HashMap::from([("agent_claude".to_owned(), adapter.clone())]),
+            )
+            .unwrap();
+            assert_eq!(
+                registry.get("agent_claude").is_some(),
+                offered,
+                "declared {declared}, limit {max_depth}"
+            );
         }
     }
 }

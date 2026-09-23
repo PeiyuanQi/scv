@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +169,11 @@ pub enum ClientMessage {
         base_url: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         no_tools: Option<bool>,
+        /// Delegation depth of the client, when it is itself a delegated
+        /// agent (such as a nested SCV). Tools started from the session count
+        /// from it, so the depth limit holds across processes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegation_depth: Option<u32>,
     },
     #[serde(rename = "session.attach")]
     SessionAttach {
@@ -387,6 +392,17 @@ pub enum ServerEvent {
         call_id: String,
         name: String,
     },
+    /// Short status lines from a running tool, at most two events a second
+    /// per call and 512 bytes each. Display only; not part of the history.
+    #[serde(rename = "tool.progress")]
+    ToolProgress {
+        request_id: String,
+        session_id: String,
+        turn_id: String,
+        seq: u64,
+        call_id: String,
+        text: String,
+    },
     #[serde(rename = "tool.completed")]
     ToolCompleted {
         request_id: String,
@@ -475,6 +491,46 @@ mod tests {
             serde_json::from_str::<ClientMessage>(&json).unwrap(),
             message
         );
+    }
+
+    #[test]
+    fn tool_progress_and_delegation_depth_round_trip() {
+        let event = ServerEvent::ToolProgress {
+            request_id: "r".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            seq: 4,
+            call_id: "c".into(),
+            text: "$ cargo test\nupdate …/src/lib.rs".into(),
+        };
+        let wire = serde_json::to_string(&event).unwrap();
+        assert!(wire.contains(r#""type":"tool.progress""#));
+        assert_eq!(serde_json::from_str::<ServerEvent>(&wire).unwrap(), event);
+
+        let start = |depth| ClientMessage::SessionStart {
+            request_id: "1".into(),
+            cwd: "/w".into(),
+            provider: None,
+            model: None,
+            base_url: None,
+            no_tools: None,
+            delegation_depth: depth,
+        };
+        let nested = serde_json::to_string(&start(Some(2))).unwrap();
+        assert!(nested.contains(r#""delegation_depth":2"#));
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&nested).unwrap(),
+            start(Some(2))
+        );
+        // Omitted when unset, and optional on the wire.
+        let direct = serde_json::to_string(&start(None)).unwrap();
+        assert!(!direct.contains("delegation_depth"));
+        let older = r#"{"type":"session.start","request_id":"1","cwd":"/w"}"#;
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(older).unwrap(),
+            start(None)
+        );
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     #[test]

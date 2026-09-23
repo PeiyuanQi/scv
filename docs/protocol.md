@@ -1,6 +1,6 @@
 # SCV Client Protocol
 
-Status: protocol version 2
+Status: protocol version 3
 
 The SCV client protocol is bidirectional newline-delimited JSON over the local
 Unix socket or stdin/stdout. Each line is one UTF-8 JSON object. The server
@@ -10,7 +10,7 @@ helper; it depends on wire types in `scv-protocol`, not server implementation.
 
 ## Version and envelopes
 
-The protocol version is the integer `2`. Every client message has a `type` and
+The protocol version is the integer `3`. Every client message has a `type` and
 `request_id`. Every server event has a `type`; events produced in response to a
 request also carry its `request_id`. Session events carry a monotonically
 increasing `seq`, allowing clients to detect a dropped or duplicated frame.
@@ -19,14 +19,16 @@ Session and turn events carry their identifiers explicitly.
 Unknown object fields are ignored. Unknown message types are rejected with an
 `error` event. A client must initialize before sending other messages. A version
 mismatch is a fatal error so neither side silently interprets incompatible
-semantics.
+semantics. Version 3 added `tool.progress`, which a version 2 client could not
+parse, so a v2 client receives `version_mismatch`; a TUI started before an
+update must be restarted after it.
 
 ## Client messages
 
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":2,"client":{"name":"scv-tui","version":"0.1.29"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.1.30"}}
 ```
 
 ### `daemon.control`
@@ -85,6 +87,12 @@ Optional `provider`, `model`, and `base_url` overrides apply only to this sessio
 `no_tools: true` disables all tools in the server-owned runtime; ClawBot remote
 sessions set it for every sender except an account owner granted
 `remote_tools = "owner"`.
+
+`delegation_depth` is optional and declared by a client that is itself a
+delegated agent, such as a nested SCV or an `scv` command run by one (from its
+`SCV_DELEGATION_DEPTH`). The session's delegated runs count from the larger of
+it and the server process's own depth, so `agent.max_delegation_depth` holds
+across processes. A direct client omits it.
 
 ```json
 {"type":"session.start","request_id":"2","cwd":"/workspace/project"}
@@ -149,15 +157,15 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":2,"server":{"name":"scv-server","version":"0.1.29"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.1.30"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.29","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.1.29","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.30","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.1.30","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -210,12 +218,24 @@ daemon socket does not imply cross-client queue broadcast or session attachment.
 ```json
 {"type":"tool.proposed","request_id":"3","session_id":"...","turn_id":"...","seq":5,"call_id":"call_123","name":"bash","arguments":{"command":"cargo test"}}
 {"type":"approval.requested","request_id":"3","session_id":"...","turn_id":"...","seq":6,"approval_id":"...","call_id":"call_123","name":"bash","risk":"process","cwd":"/workspace/project","summary":"Run shell command: cargo test"}
-{"type":"tool.started","request_id":"3","session_id":"...","turn_id":"...","seq":7,"call_id":"call_123","name":"bash"}
-{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":8,"call_id":"call_123","name":"bash","success":true,"output":"...","truncated":false}
+{"type":"tool.started","request_id":"3","session_id":"...","turn_id":"...","seq":7,"call_id":"call_123","name":"agent_codex"}
+{"type":"tool.progress","request_id":"3","session_id":"...","turn_id":"...","seq":8,"call_id":"call_123","text":"$ cargo test --workspace\nupdate …/src/lib.rs"}
+{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":9,"call_id":"call_123","name":"agent_codex","success":true,"output":"...","truncated":false}
 ```
 
 Arguments and outputs are bounded by configuration before serialization. A
 denied call completes with `success: false` and a model-visible denial message.
+
+`tool.progress` carries short status lines a running tool reported: for a
+delegated agent, the commands it runs, files it changes, searches, and tools
+it calls, never their output. Lines are single lines of at most 200 bytes with
+credential-like values replaced by `…`. One event joins the lines reported
+since the previous one with newlines; it is at most 512 bytes, keeping the
+newest lines behind a leading `…` line when older ones were dropped. A call
+produces at most one event per 500 ms, only between its `tool.started` and
+`tool.completed`; lines reported within 500 ms of `tool.completed` may be
+dropped. Progress is display-only: it never enters the model's history or the
+tool result, and ClawBot never forwards it.
 
 ### Context and completion
 

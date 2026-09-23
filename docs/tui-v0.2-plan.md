@@ -36,7 +36,7 @@ boundary.
 ## Dependency and compatibility decisions
 
 - Keep the provider and tool crates unchanged. Extend `scv-protocol` and
-  `scv-server` for protocol version 2 and queue authority.
+  `scv-server` for the current protocol version and queue authority.
 - Prefer Ratatui primitives and a small internal Markdown event renderer. A new
   parsing dependency is acceptable only if it handles CommonMark edge cases,
   supports Rust 1.88, and avoids terminal or HTML rendering dependencies.

@@ -1560,6 +1560,59 @@ fn owner_turns_outlast_the_longest_tool_call() {
 }
 
 #[tokio::test]
+async fn tool_progress_never_reaches_wechat() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            None,
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message("m1", "sender", "hello")]);
+        let (mut side, start) = accept_session(&daemon).await;
+        // A direct client declares no delegation depth.
+        assert!(start.get("delegation_depth").is_none(), "{start}");
+        assert_eq!(next_turn(&mut side).await, "hello");
+        send_frame(&mut side, json!({"type":"tool.started","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent_codex"})).await;
+        for seq in 2..5 {
+            send_frame(&mut side, json!({"type":"tool.progress","request_id":"r","session_id":"s","turn_id":"t","seq":seq,"call_id":"c","text":format!("$ step {seq} PROGRESS")})).await;
+        }
+        send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":5,"call_id":"c","name":"agent_codex","success":true,"output":"{}","truncated":false})).await;
+        send_frame(&mut side, json!({"type":"assistant.completed","request_id":"r","session_id":"s","turn_id":"t","seq":6,"content":"final answer"})).await;
+        send_frame(&mut side, json!({"type":"turn.completed","request_id":"r","session_id":"s","turn_id":"t","seq":7,"steps":2,"usage":{}})).await;
+        let body = ilink.sent().await;
+        assert_eq!(sent_text(&body), "final answer");
+        assert!(!body.to_string().contains("PROGRESS"));
+        // Nothing else is sent for this turn.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), ilink.sent())
+                .await
+                .is_err()
+        );
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
 async fn a_failed_turn_replies_with_the_generic_failure_message() {
     let directory = tempfile::tempdir().unwrap();
     let mut ilink = FakeIlink::start().await;

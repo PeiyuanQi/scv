@@ -144,6 +144,8 @@ pub(crate) struct PendingDelegation {
     session: String,
     cwd: PathBuf,
     conversation: Option<(String, u32)>,
+    /// Depth of the delegated process.
+    depth: u32,
 }
 
 impl DelegationRegistry {
@@ -193,8 +195,22 @@ impl DelegationRegistry {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn begin(
         &self,
+        agent: &str,
+        session: &str,
+        cwd: &Path,
+        conversation: Option<(&str, u32)>,
+    ) -> PendingDelegation {
+        self.begin_at(self.depth, agent, session, cwd, conversation)
+    }
+
+    /// Start recording a delegation whose owner is at `owner_depth`: the
+    /// process's own depth, or more when its client is itself delegated.
+    pub(crate) fn begin_at(
+        &self,
+        owner_depth: u32,
         agent: &str,
         session: &str,
         cwd: &Path,
@@ -210,13 +226,17 @@ impl DelegationRegistry {
         PendingDelegation {
             environment: vec![
                 (PARENT_VARIABLE.into(), chain.into()),
-                (DEPTH_VARIABLE.into(), (self.depth + 1).to_string().into()),
+                (
+                    DEPTH_VARIABLE.into(),
+                    owner_depth.saturating_add(1).to_string().into(),
+                ),
             ],
             handle,
             agent: agent.to_owned(),
             session: session.to_owned(),
             cwd: cwd.to_owned(),
             conversation: conversation.map(|(handle, turn)| (handle.to_owned(), turn)),
+            depth: owner_depth.saturating_add(1),
         }
     }
 
@@ -243,7 +263,7 @@ impl DelegationRegistry {
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_secs()),
-            depth: self.depth + 1,
+            depth: pending.depth,
             conversation: pending
                 .conversation
                 .as_ref()
@@ -858,6 +878,20 @@ mod tests {
         ));
         assert!(!chain_names("abcd/s1/codex-1a2b3c", "codex-1a2b3"));
         assert!(!chain_names("abcd/s1/codex-1a2b3c", "1a2b3c"));
+    }
+
+    #[test]
+    fn a_declared_client_depth_raises_the_recorded_depth() {
+        let home = tempfile::tempdir().unwrap();
+        let registry = DelegationRegistry::new(home.path());
+        let pending = registry.begin_at(2, "codex", "session", home.path(), None);
+        assert_eq!(pending.depth, 3);
+        assert!(
+            pending
+                .environment
+                .iter()
+                .any(|(name, value)| { name == DEPTH_VARIABLE && value == "3" })
+        );
     }
 
     #[test]

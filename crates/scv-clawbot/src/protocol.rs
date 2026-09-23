@@ -71,6 +71,7 @@ impl Session {
                 model: None,
                 base_url: None,
                 no_tools: Some(!tools),
+                delegation_depth: None,
             },
         )
         .await?;
@@ -154,6 +155,9 @@ impl Session {
                     bail!("{message}")
                 }
                 ServerEvent::TurnCancelled { .. } => bail!("turn cancelled"),
+                // Tool status lines are for local displays; WeChat gets only
+                // the final answer.
+                ServerEvent::ToolProgress { .. } => {}
                 _ => {}
             }
         }

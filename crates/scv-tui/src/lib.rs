@@ -42,6 +42,8 @@ const SOCKET_TIMEOUT: Duration = Duration::from_secs(3);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 // The server may spend three seconds stopping an active turn and three more
 // draining its writer after stdin EOF. Keep the client grace strictly longer.
+/// Longest progress line shown under a running tool.
+const MAX_PROGRESS_DISPLAY_CHARS: usize = 160;
 const SERVER_EXIT_GRACE: Duration = Duration::from_secs(7);
 
 #[derive(Debug, Clone, Default)]
@@ -106,6 +108,11 @@ pub async fn run_exec(
                             approved: approve_risky,
                         })
                         .await?;
+                }
+                ServerEvent::ToolProgress { text, .. } => {
+                    for line in text.lines() {
+                        eprintln!("  ↳ {line}");
+                    }
                 }
                 ServerEvent::ToolCompleted {
                     name,
@@ -261,6 +268,7 @@ impl Client {
             model: options.model.clone(),
             base_url: options.base_url.clone(),
             no_tools: None,
+            delegation_depth: scv_client::inherited_delegation_depth(),
         })
         .await?;
         let session = match self.read_event().await? {
@@ -476,6 +484,8 @@ enum TranscriptItem {
         status: ToolStatus,
         arguments: String,
         output: String,
+        /// The latest progress line while the tool runs.
+        progress: String,
         expanded: bool,
     },
     System(String),
@@ -492,13 +502,14 @@ impl TranscriptItem {
                 name,
                 arguments,
                 output,
+                progress,
                 ..
-            } => call_id.len() + name.len() + arguments.len() + output.len(),
+            } => call_id.len() + name.len() + arguments.len() + output.len() + progress.len(),
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolStatus {
     Proposed,
     Approval,
@@ -827,6 +838,7 @@ impl App {
                 status: ToolStatus::Proposed,
                 arguments: arguments.to_string(),
                 output: String::new(),
+                progress: String::new(),
                 expanded: false,
             }),
             ServerEvent::ApprovalRequested {
@@ -850,6 +862,9 @@ impl App {
             ServerEvent::ToolStarted { call_id, .. } => {
                 self.pending_approval = None;
                 self.set_tool_status(&call_id, ToolStatus::Running, None);
+            }
+            ServerEvent::ToolProgress { call_id, text, .. } => {
+                self.set_tool_progress(&call_id, &text);
             }
             ServerEvent::ToolCompleted {
                 call_id,
@@ -949,17 +964,46 @@ impl App {
         }
     }
 
+    /// Show the newest line of a running tool's progress under it.
+    fn set_tool_progress(&mut self, call_id: &str, text: &str) {
+        let latest = text.lines().rev().find(|line| !line.trim().is_empty());
+        for item in self.items.iter_mut().rev() {
+            if let TranscriptItem::Tool {
+                call_id: current,
+                status,
+                progress,
+                ..
+            } = item
+                && current == call_id
+            {
+                if *status == ToolStatus::Running
+                    && let Some(latest) = latest
+                {
+                    self.items_bytes = self.items_bytes.saturating_sub(progress.len());
+                    *progress = bounded_text(latest.trim(), MAX_PROGRESS_DISPLAY_CHARS);
+                    self.items_bytes += progress.len();
+                }
+                break;
+            }
+        }
+    }
+
     fn set_tool_status(&mut self, call_id: &str, status: ToolStatus, output: Option<String>) {
         for item in self.items.iter_mut().rev() {
             if let TranscriptItem::Tool {
                 call_id: current,
                 status: current_status,
                 output: current_output,
+                progress,
                 ..
             } = item
                 && current == call_id
             {
                 *current_status = status;
+                if status != ToolStatus::Running {
+                    self.items_bytes = self.items_bytes.saturating_sub(progress.len());
+                    progress.clear();
+                }
                 if let Some(output) = output {
                     self.items_bytes = self.items_bytes.saturating_sub(current_output.len());
                     *current_output = output;
@@ -1496,6 +1540,7 @@ fn transcript_text(app: &App) -> Text<'static> {
                 status,
                 arguments,
                 output,
+                progress,
                 expanded,
                 ..
             } => {
@@ -1518,6 +1563,12 @@ fn transcript_text(app: &App) -> Text<'static> {
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
+                if *status == ToolStatus::Running && !progress.is_empty() {
+                    lines.push(Line::styled(
+                        format!("  ↳ {progress}"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
                 if *expanded && !output.is_empty() {
                     for line in bounded_text(output, 4000).lines() {
                         lines.push(Line::styled(
@@ -1599,6 +1650,7 @@ fn event_seq(event: &ServerEvent) -> Option<u64> {
         | ServerEvent::ToolProposed { seq, .. }
         | ServerEvent::ApprovalRequested { seq, .. }
         | ServerEvent::ToolStarted { seq, .. }
+        | ServerEvent::ToolProgress { seq, .. }
         | ServerEvent::ToolCompleted { seq, .. }
         | ServerEvent::ContextCompacted { seq, .. }
         | ServerEvent::SessionTrimmed { seq, .. }
@@ -1778,6 +1830,7 @@ mod tests {
             status: ToolStatus::Running,
             arguments: String::new(),
             output: String::new(),
+            progress: String::new(),
             expanded: false,
         });
         app.push_item(TranscriptItem::Assistant {
@@ -2134,6 +2187,90 @@ mod tests {
         assert!(contents.contains("connected"));
         assert!(contents.contains("message"));
         assert!(contents.contains("Enter send"));
+    }
+
+    #[test]
+    fn running_tools_show_their_latest_progress_line() {
+        let screen = |app: &App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            terminal.draw(|frame| render(frame, app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        let meta = |seq| (String::from("r"), String::from("s"), String::from("t"), seq);
+        let mut app = App::new(SessionInfo {
+            id: "s".into(),
+            cwd: "/tmp".into(),
+            model: "test".into(),
+            context_max_tokens: 100,
+            max_server_frame_bytes: DEFAULT_SERVER_FRAME_LIMIT,
+            max_transcript_bytes: 64 * 1024,
+            max_transcript_items: 100,
+            max_prompt_history_bytes: 1024,
+            max_prompt_history_items: 10,
+        });
+        let (request_id, session_id, turn_id, seq) = meta(1);
+        app.handle_server_event(ServerEvent::ToolProposed {
+            request_id,
+            session_id,
+            turn_id,
+            seq,
+            call_id: "c1".into(),
+            name: "agent_codex".into(),
+            arguments: serde_json::json!({"prompt":"work"}),
+        });
+        let (request_id, session_id, turn_id, seq) = meta(2);
+        app.handle_server_event(ServerEvent::ToolStarted {
+            request_id,
+            session_id,
+            turn_id,
+            seq,
+            call_id: "c1".into(),
+            name: "agent_codex".into(),
+        });
+        let (request_id, session_id, turn_id, seq) = meta(3);
+        app.handle_server_event(ServerEvent::ToolProgress {
+            request_id,
+            session_id,
+            turn_id,
+            seq,
+            call_id: "c1".into(),
+            text: "$ cargo build\n$ cargo test --workspace".into(),
+        });
+        let running = screen(&app);
+        assert!(running.contains("↳ $ cargo test --workspace"), "{running}");
+        assert!(!running.contains("cargo build"));
+
+        let (request_id, session_id, turn_id, seq) = meta(4);
+        app.handle_server_event(ServerEvent::ToolCompleted {
+            request_id,
+            session_id,
+            turn_id,
+            seq,
+            call_id: "c1".into(),
+            name: "agent_codex".into(),
+            success: true,
+            output: "{}".into(),
+            truncated: false,
+        });
+        let finished = screen(&app);
+        assert!(!finished.contains("cargo test"), "{finished}");
+        // Progress for a tool that is not running is ignored.
+        let (request_id, session_id, turn_id, seq) = meta(5);
+        app.handle_server_event(ServerEvent::ToolProgress {
+            request_id,
+            session_id,
+            turn_id,
+            seq,
+            call_id: "c1".into(),
+            text: "late line".into(),
+        });
+        assert!(!screen(&app).contains("late line"));
     }
 
     #[tokio::test]

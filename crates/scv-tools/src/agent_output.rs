@@ -5,9 +5,10 @@
 //! reaches the parent model. Unknown events and fields are ignored, and a
 //! stream with no parsable event falls back to its text.
 
+use scv_core::ProgressSink;
 use serde_json::{Value, json};
 
-use crate::adapters::OutputFormat;
+use crate::{adapters::OutputFormat, agent_progress::progress_lines};
 
 /// Longest stdout line parsed as an event. Longer lines (such as a tool
 /// result echoed back in full) are skipped; the events SCV needs are short.
@@ -61,6 +62,8 @@ pub(crate) struct AgentStream {
     usage: Option<AgentUsage>,
     /// The CLI's own session ID, for continuing the conversation.
     session: Option<String>,
+    /// Where status lines from structured events go while the run lasts.
+    progress: ProgressSink,
 }
 
 impl AgentStream {
@@ -83,7 +86,15 @@ impl AgentStream {
             completed: false,
             usage: None,
             session: None,
+            progress: ProgressSink::default(),
         }
+    }
+
+    /// Report what the agent does (commands, files, searches, tool calls)
+    /// to `progress` as its events arrive.
+    pub(crate) fn with_progress(mut self, progress: ProgressSink) -> Self {
+        self.progress = progress;
+        self
     }
 
     pub(crate) fn push(&mut self, bytes: &[u8]) {
@@ -140,6 +151,11 @@ impl AgentStream {
 
     fn event(&mut self, event: &Value) {
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        if self.progress.is_enabled() {
+            for line in progress_lines(self.format, kind, event) {
+                self.progress.report(&line);
+            }
+        }
         let session = match (self.format, kind) {
             (OutputFormat::ClaudeStreamJson, "system" | "result") => event.get("session_id"),
             (OutputFormat::CodexJsonl, "thread.started") => event.get("thread_id"),

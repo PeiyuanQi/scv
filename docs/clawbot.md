@@ -164,7 +164,7 @@ are deferred.
 
 ## Sessions and safety
 
-Each direct-chat sender has one long-lived SCV protocol-v2 socket session. A
+Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A
 message carrying a non-empty `group_id` uses a separate session per group and
 sender, so group members never see the sender's direct-chat history. Sessions
 idle for 30 minutes after their last turn ends are dropped, and at most 32

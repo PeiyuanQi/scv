@@ -851,10 +851,7 @@ mod tests {
     }
 
     fn context() -> ToolContext {
-        ToolContext {
-            workspace: std::env::temp_dir(),
-            cancellation: CancellationToken::new(),
-        }
+        ToolContext::new(std::env::temp_dir(), CancellationToken::new())
     }
 
     /// Serves canned HTTP responses, one per connection, and returns the

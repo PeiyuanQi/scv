@@ -636,7 +636,7 @@ where
                             send_error(&output_tx, &request_id, "unsupported", "Component management requires the daemon socket", false, server_frame_limit(&session)).await?;
                         }
                     }
-                    ClientMessage::SessionStart { request_id, cwd, provider, model, base_url, no_tools } => {
+                    ClientMessage::SessionStart { request_id, cwd, provider, model, base_url, no_tools, delegation_depth } => {
                         if session.is_some() {
                             send_error(&output_tx, &request_id, "invalid_request", "this connection already has a session", false, server_frame_limit(&session)).await?;
                             continue;
@@ -648,7 +648,7 @@ where
                             approval_policy: overrides.approval_policy,
                             no_tools: no_tools.unwrap_or(overrides.no_tools),
                         };
-                        match build_session(&cwd, session_overrides, &registry).await {
+                        match build_session(&cwd, session_overrides, delegation_depth.unwrap_or(0), &registry).await {
                             Ok(new_session) => {
                                 output_tx.ensure_capacity(output_queue_bytes(
                                     new_session.config.protocol.max_server_frame_bytes,
@@ -1359,9 +1359,12 @@ fn next_seq(sequence: &AtomicU64) -> u64 {
     sequence.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// `delegation_depth` is the depth the client declared in `session.start`
+/// (0 for a direct client); the session's delegated runs count from it.
 async fn build_session(
     cwd: &str,
     overrides: ConfigOverrides,
+    delegation_depth: u32,
     registry: &Arc<DelegationRegistry>,
 ) -> Result<Session> {
     let id = Uuid::new_v4().to_string();
@@ -1399,6 +1402,7 @@ async fn build_session(
         tools.delegation = Some(DelegationContext {
             registry: Arc::clone(registry),
             session: id.clone(),
+            depth: delegation_depth,
         });
         let mut registry = builtin_registry(
             tools,
@@ -1694,6 +1698,19 @@ fn skill_description(content: &str) -> String {
         .collect()
 }
 
+/// Cut progress text to `MAX_PROGRESS_EVENT_BYTES` on a character boundary.
+fn bounded_progress(mut text: String) -> String {
+    let limit = scv_core::MAX_PROGRESS_EVENT_BYTES;
+    if text.len() > limit {
+        let mut end = limit;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
 struct ProtocolSink {
     meta: TurnMeta,
     output: OutboundSender,
@@ -1739,6 +1756,16 @@ impl EventSink for ProtocolSink {
                 seq,
                 call_id,
                 name,
+            },
+            CoreEvent::ToolProgress { call_id, text } => ServerEvent::ToolProgress {
+                request_id: self.meta.request_id.clone(),
+                session_id: self.meta.session_id.clone(),
+                turn_id: self.meta.turn_id.clone(),
+                seq,
+                call_id,
+                // Tools report through a bounded sink; bound again here so a
+                // custom tool can never grow a frame past the documented size.
+                text: bounded_progress(text),
             },
             CoreEvent::ToolCompleted {
                 call_id,
@@ -1928,6 +1955,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn clients_and_tools_agree_on_the_depth_variable() {
+        assert_eq!(
+            scv_client::DELEGATION_DEPTH_VARIABLE,
+            scv_tools::delegation::DEPTH_VARIABLE
+        );
+    }
+
+    #[test]
+    fn progress_text_is_bounded_on_a_character_boundary() {
+        let text = "é".repeat(400);
+        let bounded = bounded_progress(text);
+        assert!(bounded.len() <= scv_core::MAX_PROGRESS_EVENT_BYTES);
+        assert!(bounded.chars().all(|character| character == 'é'));
+        assert_eq!(bounded_progress("short".into()), "short");
+    }
 
     struct DropSignal(Arc<AtomicBool>);
 
@@ -2262,10 +2306,7 @@ mod tests {
         let loaded = read_skill
             .execute(
                 serde_json::json!({"name":"scv:feature-flow"}),
-                scv_core::ToolContext {
-                    workspace: workspace.clone(),
-                    cancellation: CancellationToken::new(),
-                },
+                scv_core::ToolContext::new(workspace.clone(), CancellationToken::new()),
             )
             .await
             .unwrap();
