@@ -823,6 +823,10 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
         let socket = directory.path().join("daemon.sock");
         let daemon = UnixListener::bind(&socket).unwrap();
         let cancel = CancellationToken::new();
+        let owner = owner.map(|user_id: &str| ToolOwner {
+            user_id: user_id.into(),
+            turn_timeout: owner_turn_timeout(Duration::from_secs(1800)),
+        });
         let work = until_cancelled(
             cancel.clone(),
             run_loop(
@@ -831,7 +835,7 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
                 "default",
                 directory.path(),
                 &socket,
-                owner,
+                owner.as_ref(),
                 &store,
                 &|_| {},
             ),
@@ -873,4 +877,22 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
                 .unwrap();
         result.unwrap();
     }
+}
+
+#[test]
+fn owner_turns_outlast_the_longest_tool_call() {
+    assert_eq!(
+        owner_turn_timeout(Duration::from_secs(1800)),
+        Duration::from_secs(2100)
+    );
+    assert_eq!(
+        owner_turn_timeout(Duration::from_secs(3600)),
+        Duration::from_secs(3900)
+    );
+    // Short tool ceilings keep the 30-minute floor for multi-step turns.
+    assert_eq!(
+        owner_turn_timeout(Duration::from_secs(60)),
+        OWNER_TURN_TIMEOUT
+    );
+    assert_eq!(owner_turn_timeout(Duration::MAX), Duration::MAX);
 }

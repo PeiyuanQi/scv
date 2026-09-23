@@ -32,7 +32,12 @@ use tokio::{
 
 #[derive(Debug, Clone)]
 pub struct ToolsConfig {
+    /// Default `bash` timeout when a call does not choose one.
     pub command_timeout: Duration,
+    /// Default native-agent timeout when a call does not choose one.
+    pub agent_timeout: Duration,
+    /// The longest timeout any single call may request.
+    pub max_timeout: Duration,
     pub output_limit_bytes: usize,
     pub max_read_bytes: usize,
     pub max_write_bytes: usize,
@@ -42,6 +47,8 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             command_timeout: Duration::from_secs(120),
+            agent_timeout: Duration::from_secs(600),
+            max_timeout: Duration::from_secs(1800),
             output_limit_bytes: 64 * 1024,
             max_read_bytes: 256 * 1024,
             max_write_bytes: 1024 * 1024,
@@ -86,13 +93,17 @@ pub fn builtin_registry(
     }))?;
     registry.register(Arc::new(BashTool {
         timeout: config.command_timeout,
+        max_timeout: config.max_timeout,
         output_limit: config.output_limit_bytes,
     }))?;
     for (name, adapter) in adapters {
         registry.register(Arc::new(NativeAgentTool::new(
             name,
             adapter,
-            config.command_timeout,
+            Timeouts {
+                default: config.agent_timeout,
+                max: config.max_timeout,
+            },
             config.output_limit_bytes,
         )))?;
     }
@@ -436,7 +447,56 @@ impl Tool for WriteTool {
 
 struct BashTool {
     timeout: Duration,
+    max_timeout: Duration,
     output_limit: usize,
+}
+
+impl BashTool {
+    fn timeouts(&self) -> Timeouts {
+        Timeouts {
+            default: self.timeout,
+            max: self.max_timeout,
+        }
+    }
+}
+
+/// A process tool's default timeout and the ceiling a call may raise it to.
+#[derive(Debug, Clone, Copy)]
+struct Timeouts {
+    default: Duration,
+    max: Duration,
+}
+
+impl Timeouts {
+    /// The call's timeout: its own request up to the ceiling, else the
+    /// default. A request above the ceiling is refused, never clamped, so the
+    /// caller learns the limit instead of being cut off early.
+    fn resolve(self, requested: Option<u64>) -> Result<Duration, ToolError> {
+        match requested {
+            None => Ok(self.default.min(self.max)),
+            Some(0) => Err(ToolError("timeout_seconds must be positive".into())),
+            Some(seconds) if seconds > self.max.as_secs() => Err(ToolError(format!(
+                "timeout_seconds {seconds} exceeds the configured maximum of {} seconds \
+                 (tools.max_timeout_seconds)",
+                self.max.as_secs()
+            ))),
+            Some(seconds) => Ok(Duration::from_secs(seconds)),
+        }
+    }
+}
+
+fn timeout_schema(timeouts: Timeouts) -> Value {
+    json!({
+        "type":"integer",
+        "minimum":1,
+        "maximum":timeouts.max.as_secs(),
+        "description":format!(
+            "Seconds before the process is killed. Defaults to {}; at most {}. \
+             Raise it for long work such as builds, releases, or landing a change.",
+            timeouts.default.min(timeouts.max).as_secs(),
+            timeouts.max.as_secs()
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -456,7 +516,7 @@ impl Tool for BashTool {
                 "type":"object",
                 "properties":{
                     "command":{"type":"string"},
-                    "timeout_seconds":{"type":"integer","minimum":1}
+                    "timeout_seconds":timeout_schema(self.timeouts())
                 },
                 "required":["command"],
                 "additionalProperties":false
@@ -466,13 +526,15 @@ impl Tool for BashTool {
 
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
         let args: BashArgs = parse_args(arguments)?;
-        validate_process_args(&args.command, args.timeout_seconds)?;
+        validate_process_args(&args.command)?;
+        self.timeouts().resolve(args.timeout_seconds)?;
         Ok(ToolRisk::Process)
     }
 
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
         let args: BashArgs = parse_args(arguments)?;
-        validate_process_args(&args.command, args.timeout_seconds)?;
+        validate_process_args(&args.command)?;
+        self.timeouts().resolve(args.timeout_seconds)?;
         Ok(format!(
             "Run with /bin/bash -lc: {}",
             bounded(&args.command, 2000)
@@ -485,12 +547,8 @@ impl Tool for BashTool {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: BashArgs = parse_args(&arguments)?;
-        validate_process_args(&args.command, args.timeout_seconds)?;
-        let requested = args
-            .timeout_seconds
-            .map(Duration::from_secs)
-            .unwrap_or(self.timeout)
-            .min(self.timeout);
+        validate_process_args(&args.command)?;
+        let requested = self.timeouts().resolve(args.timeout_seconds)?;
         execute_process(
             ProcessSpec {
                 executable: OsString::from("/bin/bash"),
@@ -515,7 +573,7 @@ struct NativeAgentTool {
     model_args: Vec<String>,
     effort_args: Vec<String>,
     environment: Vec<(OsString, OsString)>,
-    timeout: Duration,
+    timeouts: Timeouts,
     output_limit: usize,
 }
 
@@ -526,7 +584,11 @@ impl NativeAgentTool {
     /// The fixed arguments plus validated model and effort selections; the
     /// prompt is appended separately as the final argument.
     fn command_args(&self, args: &AgentArgs) -> Result<Vec<String>, ToolError> {
-        validate_process_args(&args.prompt, args.timeout_seconds)?;
+        validate_process_args(&args.prompt)?;
+        self.timeouts.resolve(args.timeout_seconds)?;
+        if let Some(cwd) = &args.cwd {
+            validate_agent_cwd(cwd)?;
+        }
         // The prompt follows the flags as a positional argument, so it must
         // not be readable as one.
         if args.prompt.starts_with('-') {
@@ -561,7 +623,7 @@ impl NativeAgentTool {
     fn new(
         name: String,
         config: AgentAdapterConfig,
-        timeout: Duration,
+        timeouts: Timeouts,
         output_limit: usize,
     ) -> Self {
         let resolved = which::which(&config.command).ok();
@@ -573,7 +635,7 @@ impl NativeAgentTool {
             model_args: config.model_args,
             effort_args: config.effort_args,
             environment: config.environment,
-            timeout,
+            timeouts,
             output_limit,
         }
     }
@@ -584,8 +646,42 @@ impl NativeAgentTool {
 struct AgentArgs {
     prompt: String,
     timeout_seconds: Option<u64>,
+    cwd: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+}
+
+/// Longest `cwd` argument accepted, in bytes.
+const MAX_AGENT_CWD_BYTES: usize = 4096;
+
+fn validate_agent_cwd(cwd: &str) -> Result<(), ToolError> {
+    if cwd.trim().is_empty() || cwd.len() > MAX_AGENT_CWD_BYTES || cwd.contains('\0') {
+        return Err(ToolError(format!(
+            "cwd must be a non-empty directory path of at most {MAX_AGENT_CWD_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve a requested agent directory against the workspace. Resolution
+/// follows symlinks, so a link pointing outside the workspace is refused
+/// rather than trusted by name.
+fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<PathBuf, ToolError> {
+    let root = std::fs::canonicalize(workspace)
+        .map_err(|error| ToolError(format!("resolve workspace: {error}")))?;
+    let Some(cwd) = cwd else {
+        return Ok(root);
+    };
+    validate_agent_cwd(cwd)?;
+    let resolved = std::fs::canonicalize(root.join(cwd))
+        .map_err(|error| ToolError(format!("cwd {cwd:?}: {error}")))?;
+    if !resolved.starts_with(&root) {
+        return Err(ToolError(format!("cwd {cwd:?} is outside the workspace")));
+    }
+    if !resolved.is_dir() {
+        return Err(ToolError(format!("cwd {cwd:?} is not a directory")));
+    }
+    Ok(resolved)
 }
 
 /// Model names are passed as one argument, so only reject values that could
@@ -604,7 +700,13 @@ impl Tool for NativeAgentTool {
     fn spec(&self) -> ToolSpec {
         let mut properties = json!({
             "prompt":{"type":"string"},
-            "timeout_seconds":{"type":"integer","minimum":1}
+            "cwd":{
+                "type":"string",
+                "description":"Directory inside the workspace to run in, such as a project directory (\"scv\"). \
+                    The agent loads that directory's AGENTS.md or CLAUDE.md and its project skills. \
+                    Defaults to the workspace root."
+            },
+            "timeout_seconds":timeout_schema(self.timeouts)
         });
         if !self.model_args.is_empty() {
             properties["model"] = json!({
@@ -618,7 +720,9 @@ impl Tool for NativeAgentTool {
         ToolSpec {
             name: self.name.clone(),
             description: format!(
-                "Launch the configured {} CLI as a nested agent (not sandboxed)",
+                "Launch the configured {} CLI as a nested agent (not sandboxed). \
+                 Set cwd to the project the work is in so the agent follows that \
+                 project's instructions and skills.",
                 self.name
             ),
             parameters: json!({
@@ -643,9 +747,15 @@ impl Tool for NativeAgentTool {
             || self.command.as_str().into(),
             |path| path.display().to_string(),
         );
+        let directory = args.cwd.as_deref().map_or_else(
+            || "the workspace root".to_owned(),
+            |cwd| format!("{:?} (inside the workspace)", bounded(cwd, 200)),
+        );
+        let timeout = self.timeouts.resolve(args.timeout_seconds)?;
         Ok(format!(
-            "Launch {executable} with args {command_args:?} and prompt {:?}. The nested agent has your user permissions.",
-            bounded(&args.prompt, 2000)
+            "Launch {executable} with args {command_args:?} and prompt {:?} in {directory} for up to {} seconds. The nested agent has your user permissions.",
+            bounded(&args.prompt, 2000),
+            timeout.as_secs()
         ))
     }
 
@@ -656,6 +766,7 @@ impl Tool for NativeAgentTool {
     ) -> Result<ToolOutput, ToolError> {
         let args: AgentArgs = parse_args(&arguments)?;
         let command_args = self.command_args(&args)?;
+        let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
         let executable = self.resolved.as_ref().ok_or_else(|| {
             ToolError(format!(
                 "{} executable {:?} was not found in PATH",
@@ -665,16 +776,12 @@ impl Tool for NativeAgentTool {
         let mut command_args: Vec<OsString> =
             command_args.into_iter().map(OsString::from).collect();
         command_args.push(OsString::from(args.prompt));
-        let requested = args
-            .timeout_seconds
-            .map(Duration::from_secs)
-            .unwrap_or(self.timeout)
-            .min(self.timeout);
+        let requested = self.timeouts.resolve(args.timeout_seconds)?;
         let mut output = execute_process(
             ProcessSpec {
                 executable: executable.as_os_str().to_owned(),
                 args: command_args,
-                cwd: context.workspace,
+                cwd,
                 environment: self.environment.clone(),
                 sanitize_scv_environment: true,
                 timeout: requested,
@@ -954,12 +1061,9 @@ fn validate_read_args(args: &ReadArgs) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn validate_process_args(value: &str, timeout_seconds: Option<u64>) -> Result<(), ToolError> {
+fn validate_process_args(value: &str) -> Result<(), ToolError> {
     if value.trim().is_empty() {
         return Err(ToolError("command or prompt must be non-empty".into()));
-    }
-    if timeout_seconds == Some(0) {
-        return Err(ToolError("timeout_seconds must be positive".into()));
     }
     Ok(())
 }
@@ -1140,6 +1244,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let tool = BashTool {
             timeout: Duration::from_millis(50),
+            max_timeout: Duration::from_millis(50),
             output_limit: 100,
         };
         let started = std::time::Instant::now();
@@ -1162,6 +1267,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let tool = BashTool {
             timeout: Duration::from_secs(2),
+            max_timeout: Duration::from_secs(2),
             output_limit: 8,
         };
         let output = tool
@@ -1184,6 +1290,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let tool = BashTool {
             timeout: Duration::from_secs(30),
+            max_timeout: Duration::from_secs(30),
             output_limit: 100,
         };
         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -1212,6 +1319,7 @@ mod tests {
         let root = workspace.path().canonicalize().unwrap();
         let tool = BashTool {
             timeout: Duration::from_secs(5),
+            max_timeout: Duration::from_secs(5),
             output_limit: 100,
         };
         let started = std::time::Instant::now();
@@ -1247,6 +1355,7 @@ mod tests {
         let root = workspace.path().canonicalize().unwrap();
         let tool = BashTool {
             timeout: Duration::from_secs(30),
+            max_timeout: Duration::from_secs(30),
             output_limit: 100,
         };
         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -1311,7 +1420,10 @@ mod tests {
                 effort_args: vec!["--effort".into(), "{effort}".into()],
                 environment,
             },
-            Duration::from_secs(2),
+            Timeouts {
+                default: Duration::from_secs(2),
+                max: Duration::from_secs(5),
+            },
             1024,
         )
     }
@@ -1395,7 +1507,10 @@ mod tests {
                 effort_args: Vec::new(),
                 environment: Vec::new(),
             },
-            Duration::from_secs(2),
+            Timeouts {
+                default: Duration::from_secs(2),
+                max: Duration::from_secs(2),
+            },
             1024,
         );
         assert!(
@@ -1481,5 +1596,148 @@ mod tests {
         assert!(output.content.contains("SCV_CONFIG=unset"));
         assert!(output.content.contains("OPENAI_API_KEY=unset"));
         assert!(output.content.contains("CODEX_API_KEY=unset"));
+    }
+
+    #[tokio::test]
+    async fn native_agent_runs_in_a_contained_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("project")).unwrap();
+        std::fs::write(root.join("notes.txt"), "not a directory").unwrap();
+        symlink(outside.path(), root.join("escape")).unwrap();
+        symlink(root.join("project"), root.join("inner-link")).unwrap();
+        let tool = fake_agent(&root, "agent_codex", "pwd\n", &[], Vec::new());
+        let run = |arguments: Value| tool.execute(arguments, context(&root));
+
+        let output = run(json!({"prompt":"hi"})).await.unwrap();
+        let output: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(output["output"], format!("{}\n", root.display()));
+        for cwd in [
+            "project".to_owned(),
+            "project/".to_owned(),
+            "inner-link".to_owned(),
+            root.join("project").display().to_string(),
+        ] {
+            let output = run(json!({"prompt":"hi","cwd":cwd})).await.unwrap();
+            let output: Value = serde_json::from_str(&output.content).unwrap();
+            assert_eq!(
+                output["output"],
+                format!("{}\n", root.join("project").display()),
+                "{cwd}"
+            );
+        }
+        for (cwd, error) in [
+            ("..", "outside the workspace"),
+            ("escape", "outside the workspace"),
+            ("/", "outside the workspace"),
+            ("notes.txt", "not a directory"),
+            ("missing", "No such file"),
+        ] {
+            let result = run(json!({"prompt":"hi","cwd":cwd})).await;
+            assert!(
+                result.as_ref().unwrap_err().to_string().contains(error),
+                "{cwd}: {result:?}"
+            );
+        }
+        for invalid in ["", "  ", "a\0b"] {
+            assert!(tool.risk(&json!({"prompt":"hi","cwd":invalid})).is_err());
+        }
+        assert!(
+            tool.risk(&json!({"prompt":"hi","cwd":"x".repeat(MAX_AGENT_CWD_BYTES + 1)}))
+                .is_err()
+        );
+        let summary = tool
+            .approval_summary(&json!({"prompt":"hi","cwd":"project","timeout_seconds":4}))
+            .unwrap();
+        assert!(summary.contains(r#"in "project" (inside the workspace) for up to 4 seconds"#));
+        assert!(
+            tool.approval_summary(&json!({"prompt":"hi"}))
+                .unwrap()
+                .contains("in the workspace root for up to 2 seconds")
+        );
+        let description = tool.spec().parameters["properties"]["cwd"]["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(description.contains("AGENTS.md"));
+    }
+
+    #[tokio::test]
+    async fn per_call_timeouts_may_rise_to_the_ceiling_but_not_past_it() {
+        let timeouts = Timeouts {
+            default: Duration::from_secs(120),
+            max: Duration::from_secs(1800),
+        };
+        assert_eq!(timeouts.resolve(None).unwrap(), Duration::from_secs(120));
+        assert_eq!(timeouts.resolve(Some(30)).unwrap(), Duration::from_secs(30));
+        assert_eq!(
+            timeouts.resolve(Some(1800)).unwrap(),
+            Duration::from_secs(1800)
+        );
+        assert!(timeouts.resolve(Some(0)).is_err());
+        assert!(
+            timeouts
+                .resolve(Some(1801))
+                .unwrap_err()
+                .to_string()
+                .contains("maximum of 1800 seconds (tools.max_timeout_seconds)")
+        );
+
+        let workspace = tempfile::tempdir().unwrap();
+        let agent = fake_agent(
+            workspace.path(),
+            "agent_codex",
+            "echo ran\n",
+            &[],
+            Vec::new(),
+        );
+        let schema = &agent.spec().parameters["properties"]["timeout_seconds"];
+        assert_eq!(schema["maximum"], 5);
+        assert!(
+            schema["description"]
+                .as_str()
+                .unwrap()
+                .contains("Defaults to 2; at most 5")
+        );
+        assert!(
+            agent
+                .risk(&json!({"prompt":"hi","timeout_seconds":5}))
+                .is_ok()
+        );
+        assert!(
+            agent
+                .risk(&json!({"prompt":"hi","timeout_seconds":6}))
+                .is_err()
+        );
+        assert!(
+            agent
+                .execute(
+                    json!({"prompt":"hi","timeout_seconds":6}),
+                    context(workspace.path())
+                )
+                .await
+                .is_err()
+        );
+
+        let bash = BashTool {
+            timeout: Duration::from_secs(1),
+            max_timeout: Duration::from_secs(3),
+            output_limit: 100,
+        };
+        assert_eq!(
+            bash.spec().parameters["properties"]["timeout_seconds"]["maximum"],
+            3
+        );
+        assert!(
+            bash.risk(&json!({"command":"true","timeout_seconds":3}))
+                .is_ok()
+        );
+        assert!(
+            bash.risk(&json!({"command":"true","timeout_seconds":4}))
+                .unwrap_err()
+                .to_string()
+                .contains("tools.max_timeout_seconds")
+        );
     }
 }

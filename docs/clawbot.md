@@ -172,7 +172,10 @@ CLI or daemon control can change:
   SCV tool, and the bridge approves that session's approval requests. Other
   senders, and the owner writing in a group (any non-empty `group_id`), keep
   `none` behavior. Accounts without a known owner ID grant tools to nobody.
-  Owner turns may run up to 30 minutes instead of 5. Logout resets the setting
+  Owner turns may run for the configured tool ceiling
+  (`tools.max_timeout_seconds`, default 30 minutes) plus five minutes, and at
+  least 30 minutes, instead of 5; the ceiling is read from the workspace
+  configuration when the component starts. Logout resets the setting
   to `none` before deleting credentials, so a later login never inherits it.
 
 `scv clawbot run --remote-tools owner` reports whether the daemon actually

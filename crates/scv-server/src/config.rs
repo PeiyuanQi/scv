@@ -7,6 +7,9 @@ use scv_tools::{AgentAdapterConfig, ToolsConfig};
 use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+/// A day: long enough for any delegated job, short enough that deadline
+/// arithmetic never overflows.
+const MAX_TOOL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -210,7 +213,12 @@ impl ApprovalPolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct ToolConfig {
     pub approval_policy: ApprovalPolicy,
+    /// `bash` timeout when a call does not choose one.
     pub command_timeout_seconds: u64,
+    /// Native-agent timeout when a call does not choose one.
+    pub agent_timeout_seconds: u64,
+    /// The longest timeout a single tool call may request.
+    pub max_timeout_seconds: u64,
     pub output_limit_bytes: usize,
     pub max_read_bytes: usize,
     pub max_write_bytes: usize,
@@ -221,6 +229,8 @@ impl Default for ToolConfig {
         Self {
             approval_policy: ApprovalPolicy::OnRisk,
             command_timeout_seconds: 120,
+            agent_timeout_seconds: 600,
+            max_timeout_seconds: 1800,
             output_limit_bytes: 64 * 1024,
             max_read_bytes: 256 * 1024,
             max_write_bytes: 1024 * 1024,
@@ -292,6 +302,9 @@ impl Default for ProviderLimitsFile {
 pub struct SkillsConfig {
     pub user_dir: PathBuf,
     pub project_dir: PathBuf,
+    /// List the agent skills (`.agents/skills`, `.claude/skills`) of the
+    /// workspace and its immediate child projects in tool-enabled sessions.
+    pub scan_projects: bool,
     pub max_skills: usize,
     pub max_skill_bytes: usize,
 }
@@ -301,6 +314,7 @@ impl Default for SkillsConfig {
         Self {
             user_dir: PathBuf::from("~/.scv/skills"),
             project_dir: PathBuf::from(".scv/skills"),
+            scan_projects: true,
             max_skills: 128,
             max_skill_bytes: 256 * 1024,
         }
@@ -488,6 +502,8 @@ impl Config {
     pub fn tools(&self) -> ToolsConfig {
         ToolsConfig {
             command_timeout: Duration::from_secs(self.tools.command_timeout_seconds),
+            agent_timeout: Duration::from_secs(self.tools.agent_timeout_seconds),
+            max_timeout: Duration::from_secs(self.tools.max_timeout_seconds),
             output_limit_bytes: self.tools.output_limit_bytes,
             max_read_bytes: self.tools.max_read_bytes,
             max_write_bytes: self.tools.max_write_bytes,
@@ -629,6 +645,14 @@ impl Config {
                 "tools.command_timeout_seconds",
                 usize::try_from(self.tools.command_timeout_seconds).unwrap_or(usize::MAX),
             ),
+            (
+                "tools.agent_timeout_seconds",
+                usize::try_from(self.tools.agent_timeout_seconds).unwrap_or(usize::MAX),
+            ),
+            (
+                "tools.max_timeout_seconds",
+                usize::try_from(self.tools.max_timeout_seconds).unwrap_or(usize::MAX),
+            ),
             ("tools.output_limit_bytes", self.tools.output_limit_bytes),
             ("tools.max_read_bytes", self.tools.max_read_bytes),
             ("tools.max_write_bytes", self.tools.max_write_bytes),
@@ -675,6 +699,23 @@ impl Config {
         ];
         if let Some((name, _)) = positives.into_iter().find(|(_, value)| *value == 0) {
             bail!("{name} must be positive");
+        }
+        for (name, value) in [
+            (
+                "tools.command_timeout_seconds",
+                self.tools.command_timeout_seconds,
+            ),
+            (
+                "tools.agent_timeout_seconds",
+                self.tools.agent_timeout_seconds,
+            ),
+        ] {
+            if value > self.tools.max_timeout_seconds {
+                bail!("{name} exceeds tools.max_timeout_seconds");
+            }
+        }
+        if self.tools.max_timeout_seconds > MAX_TOOL_TIMEOUT_SECONDS {
+            bail!("tools.max_timeout_seconds must be at most {MAX_TOOL_TIMEOUT_SECONDS}");
         }
         if self
             .context
@@ -874,6 +915,20 @@ fn validate_project_not_weaker(user: &Config, project: &Config) -> Result<()> {
     );
     no_larger!(
         (
+            user.tools.agent_timeout_seconds,
+            project.tools.agent_timeout_seconds
+        ),
+        "tools.agent_timeout_seconds"
+    );
+    no_larger!(
+        (
+            user.tools.max_timeout_seconds,
+            project.tools.max_timeout_seconds
+        ),
+        "tools.max_timeout_seconds"
+    );
+    no_larger!(
+        (
             user.tools.output_limit_bytes,
             project.tools.output_limit_bytes
         ),
@@ -983,6 +1038,9 @@ fn validate_project_not_weaker(user: &Config, project: &Config) -> Result<()> {
     if project.tools.approval_policy.strictness() < user.tools.approval_policy.strictness() {
         bail!("project configuration cannot weaken tools.approval_policy");
     }
+    if project.skills.scan_projects && !user.skills.scan_projects {
+        bail!("project configuration cannot enable skills.scan_projects");
+    }
     Ok(())
 }
 
@@ -1033,6 +1091,67 @@ command = "/tmp/fake"
         let mut weaker = user.clone();
         weaker.tools.output_limit_bytes *= 2;
         assert!(validate_project_not_weaker(&user, &weaker).is_err());
+    }
+
+    #[test]
+    fn timeouts_default_below_a_ceiling_that_projects_may_only_lower() {
+        let user = Config::default();
+        assert_eq!(
+            (
+                user.tools.command_timeout_seconds,
+                user.tools.agent_timeout_seconds,
+                user.tools.max_timeout_seconds
+            ),
+            (120, 600, 1800)
+        );
+        let tools = user.tools();
+        assert_eq!(tools.agent_timeout, Duration::from_secs(600));
+        assert_eq!(tools.max_timeout, Duration::from_secs(1800));
+
+        for (field, name) in [
+            (0, "tools.command_timeout_seconds"),
+            (1, "tools.agent_timeout_seconds"),
+        ] {
+            let mut config = Config::default();
+            let value = if field == 0 {
+                &mut config.tools.command_timeout_seconds
+            } else {
+                &mut config.tools.agent_timeout_seconds
+            };
+            *value = config.tools.max_timeout_seconds + 1;
+            assert_eq!(
+                config.validate().unwrap_err().to_string(),
+                format!("{name} exceeds tools.max_timeout_seconds")
+            );
+        }
+        let mut unbounded = Config::default();
+        unbounded.tools.max_timeout_seconds = MAX_TOOL_TIMEOUT_SECONDS + 1;
+        assert!(unbounded.validate().is_err());
+        let mut zero = Config::default();
+        zero.tools.agent_timeout_seconds = 0;
+        assert!(zero.validate().is_err());
+
+        let mut lower = user.clone();
+        lower.tools.max_timeout_seconds = 900;
+        lower.tools.agent_timeout_seconds = 300;
+        assert!(validate_project_not_weaker(&user, &lower).is_ok());
+        for raise in [
+            |config: &mut Config| config.tools.max_timeout_seconds += 1,
+            |config: &mut Config| config.tools.agent_timeout_seconds += 1,
+        ] {
+            let mut higher = user.clone();
+            raise(&mut higher);
+            assert!(validate_project_not_weaker(&user, &higher).is_err());
+        }
+    }
+
+    #[test]
+    fn projects_may_disable_but_not_enable_project_skill_scanning() {
+        let user = Config::default();
+        let mut disabled = user.clone();
+        disabled.skills.scan_projects = false;
+        assert!(validate_project_not_weaker(&user, &disabled).is_ok());
+        assert!(validate_project_not_weaker(&disabled, &user).is_err());
     }
 
     #[test]

@@ -39,8 +39,11 @@ risk.
 {"command":"cargo test --workspace","timeout_seconds":120}
 ```
 
-`command` is passed to `/bin/bash -lc` in the workspace. The optional timeout may
-only reduce the configured maximum. The result contains exit status and bounded
+`command` is passed to `/bin/bash -lc` in the workspace. Without
+`timeout_seconds` a call gets `tools.command_timeout_seconds` (default 120).
+A call may choose any timeout up to `tools.max_timeout_seconds` (default 1800),
+which the schema advertises as its `maximum`; a larger request is refused
+before approval with an error naming the ceiling. The result contains exit status and bounded
 combined stdout/stderr, with truncation metadata. Shell execution has process
 risk and is not sandboxed.
 
@@ -56,8 +59,19 @@ keep a tool call alive indefinitely.
 The tools `agent_claude`, `agent_codex`, and `agent_pi` share this schema:
 
 ```json
-{"prompt":"Review the error handling in this workspace.","timeout_seconds":120,"model":"sonnet","effort":"medium"}
+{"prompt":"Land the fix with the feature-flow skill.","cwd":"scv","timeout_seconds":1800,"model":"sonnet","effort":"medium"}
 ```
+
+`cwd` is optional: a directory inside the workspace, relative (such as a
+project directory) or absolute. It resolves, following symlinks, when the call
+runs and must be an existing directory under the workspace; otherwise the call
+fails without launching anything. Without it the agent runs in the workspace
+root. Running in a project directory is how a delegated agent picks up that
+project's `AGENTS.md` or `CLAUDE.md` and its skills (`.agents/skills` for
+Codex, `.claude/skills` for Claude Code), exactly as when the user starts the
+CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
+(default 600) and may be raised up to `tools.max_timeout_seconds` (default
+1800) for long work such as builds, releases, or landing a change.
 
 `model` and `effort` are optional and offered only when the adapter configures
 `model_args` or `effort_args`. A model is 1-128 ASCII letters, digits, or
@@ -67,7 +81,7 @@ shell text, so the CLI itself reports values it does not support.
 
 Each tool resolves only its configured executable and fixed argument vector,
 adds any selected model/effort arguments, appends the prompt as one argument,
-and starts it directly in the workspace. A prompt cannot start with `-`, so it
+and starts it directly in the workspace or the selected `cwd`. A prompt cannot start with `-`, so it
 is never read as a flag.
 Native adapters receive an instance-private `HOME`, `SCV_HOME`, and XDG
 configuration/data/state directory, plus `CODEX_HOME` for Codex. SCV selector
@@ -89,8 +103,9 @@ The default invocation contracts are:
 | `agent_pi` | `pi -p <prompt>` |
 
 Before approval, SCV resolves the executable through the server environment
-and displays its absolute path, full argument vector, bounded prompt,
-workspace, and delegate-risk warning. Project configuration cannot replace the
+and displays its absolute path, full argument vector, bounded prompt, requested
+directory, timeout, and delegate-risk warning; the approval request also
+carries the session workspace. Project configuration cannot replace the
 executable or arguments.
 
 Adapter processes use instance-private state directories under
@@ -147,8 +162,8 @@ followed from a remote chat.
 
 A fake agent script, run through `bash` so tests never execute a freshly
 written file, verifies native-agent argument boundaries, model/effort argument
-mapping and validation, and workspace selection without requiring these CLIs
-in CI. Shared process-runner tests cover
+mapping and validation, workspace and `cwd` selection including symlink
+escapes, and the timeout ceiling without requiring these CLIs in CI. Shared process-runner tests cover
 output limits, timeout, cancellation, and background-descendant cleanup.
 
 ## Tool extension contract
@@ -168,5 +183,10 @@ At session start, the server discovers at most `skills.max_skills` valid skill
 directories and builds a name-to-canonical-path map. `read_skill` accepts only a
 name from that map, revalidates containment under its original project or user
 skill root, and returns at most `skills.max_skill_bytes` of `SKILL.md`. It does
-not accept a path and cannot be used as a general out-of-workspace read. Skill
+not accept a path and cannot be used as a general out-of-workspace read.
+Tool-enabled sessions also map workspace project skills (`.agents/skills` and
+`.claude/skills` of the workspace and its child projects) under
+`<project>:<name>`, listed separately with the instruction to delegate to that
+project with `agent_*` and `cwd`; see
+[Project skills](configuration.md#project-skills). Skill
 metadata and content remain untrusted instructions.

@@ -185,13 +185,25 @@ struct ClawBot {
 #[async_trait]
 impl Component for ClawBot {
     async fn run(&self, cancellation: CancellationToken, health: HealthReporter) -> Result<()> {
+        let tool_owner = self.tool_owner.clone().map(|user_id| {
+            let turn_timeout = scv_clawbot::owner_turn_timeout(max_tool_timeout(&self.workspace));
+            tracing::info!(
+                "ClawBot {} owner turns may run up to {} seconds",
+                self.account,
+                turn_timeout.as_secs()
+            );
+            scv_clawbot::ToolOwner {
+                user_id,
+                turn_timeout,
+            }
+        });
         scv_clawbot::run_supervised(
             &self.credentials.token,
             &self.credentials.base_url,
             &self.account,
             &self.workspace,
             &self.socket,
-            self.tool_owner.as_deref(),
+            tool_owner.as_ref(),
             cancellation,
             Arc::new(move |connected| health.contact(connected)),
         )
@@ -383,6 +395,18 @@ impl Components {
     pub async fn shutdown(&mut self) {
         self.supervisor.shutdown().await;
     }
+}
+
+/// The longest tool call an owner session in `workspace` may make, from the
+/// configuration its sessions load. Read at each (re)start of the component.
+fn max_tool_timeout(workspace: &std::path::Path) -> std::time::Duration {
+    let seconds = crate::Config::load(workspace, crate::ConfigOverrides::default())
+        .map(|config| config.tools.max_timeout_seconds)
+        .unwrap_or_else(|error| {
+            tracing::warn!("ClawBot uses the default tool timeout ceiling: {error:#}");
+            crate::config::ToolConfig::default().max_timeout_seconds
+        });
+    std::time::Duration::from_secs(seconds)
 }
 
 /// Only the authenticated account owner may receive tools. Credentials without

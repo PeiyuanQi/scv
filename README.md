@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.19`, with exact `=0.1.19` pins for dependencies
+All packages use version `0.1.20`, with exact `=0.1.20` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -240,12 +240,19 @@ Skills use `.scv/skills/<name>/SKILL.md` in a project or
 `~/.scv/skills/<name>/SKILL.md` for the user. Set `SCV_HOME` to relocate all user
 configuration and skills. Only skill metadata enters
 the initial prompt; the model loads full instructions through the contained
-`read_skill` tool when needed.
+`read_skill` tool when needed. Tool-enabled sessions also list the Codex and
+Claude Code skills (`.agents/skills`, `.claude/skills`) of the workspace and its
+child projects as `<project>:<name>`, so SCV knows to delegate that work to an
+agent running in the project.
 
 The built-in `agent_claude`, `agent_codex`, and `agent_pi` tools launch those
 installed CLIs directly, without shell interpolation. They are optional,
 approval-gated, cancellable subprocess adapters and share the same output and
-timeout limits as other process tools. Each adapter receives an instance-private
+timeout limits as other process tools. A call may set `cwd` to a project
+directory inside the workspace, where the agent loads that project's
+`AGENTS.md`/`CLAUDE.md` and skills, and may raise `timeout_seconds` up to
+`tools.max_timeout_seconds` (default 1800) for long work such as landing a
+change. Each adapter receives an instance-private
 `HOME`, `SCV_HOME`, XDG directories, and (for Codex) `CODEX_HOME` under
 `$SCV_HOME/adapters/<name>`. SCV never reuses or modifies the user's normal
 `~/.claude` or `~/.codex` configuration. Sign the agents in for SCV once with

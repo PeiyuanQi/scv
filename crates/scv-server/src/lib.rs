@@ -1065,8 +1065,8 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
     let api_key = provider_config.api_key.clone().or_else(|| {
         provider_config.api_key_env.as_deref().and_then(|name| std::env::var(name).ok())
     }).filter(|key| !key.trim().is_empty()).ok_or_else(|| anyhow!("provider credential is not configured; set provider.api_key or provider.api_key_env"))?;
-    let (skills, skill_roots, skill_prompt) = discover_skills(&workspace, &config)?;
-    let system_prompt = build_system_prompt(&workspace, &config, &skill_prompt)?;
+    let skills = discover_skills(&workspace, &config, !no_tools)?;
+    let system_prompt = build_system_prompt(&workspace, &config, &skills)?;
     let provider = Arc::new(OpenAiProvider::new(
         provider_config.model.clone(),
         provider_config.base_url.clone(),
@@ -1080,8 +1080,8 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
     } else {
         Arc::new(builtin_registry(
             config.tools(),
-            skills,
-            skill_roots,
+            skills.map,
+            skills.roots,
             config.skills.max_skill_bytes,
             config.adapters(),
         )?)
@@ -1106,7 +1106,11 @@ async fn build_session(cwd: &str, overrides: ConfigOverrides) -> Result<Session>
     })
 }
 
-fn build_system_prompt(workspace: &Path, config: &Config, skills: &str) -> Result<String> {
+fn build_system_prompt(
+    workspace: &Path,
+    config: &Config,
+    skills: &DiscoveredSkills,
+) -> Result<String> {
     let mut prompt = config.agent.system_prompt.clone();
     prompt.push_str(&format!(
         "\nCurrent working directory: {}\n",
@@ -1127,15 +1131,48 @@ fn build_system_prompt(workspace: &Path, config: &Config, skills: &str) -> Resul
             prompt.push_str("\n[AGENTS.md truncated by configured read limit]\n");
         }
     }
-    if !skills.is_empty() {
+    if !skills.listing.is_empty() {
         prompt.push_str("\n# Available skills\n");
-        prompt.push_str(skills);
+        prompt.push_str(&skills.listing);
         prompt.push_str("\nUse read_skill with a skill name when its workflow applies.\n");
+    }
+    if !skills.project_listing.is_empty() {
+        prompt.push_str("\n# Project skills\n");
+        prompt.push_str(
+            "Projects in this workspace provide these skills to agents working in them:\n",
+        );
+        prompt.push_str(&skills.project_listing);
+        prompt.push_str(
+            "\nTo use one, delegate with an agent_* tool such as agent_codex or agent_claude, \
+             set its cwd to the skill's project, and name the skill in the prompt: that agent \
+             then loads the project's instructions and skills itself. read_skill loads a \
+             skill for reference.\n",
+        );
     }
     Ok(prompt)
 }
 
-fn discover_skills(workspace: &Path, config: &Config) -> Result<(SkillMap, Vec<PathBuf>, String)> {
+/// Skills found at session start: the names `read_skill` serves, the roots it
+/// revalidates them against, and their system-prompt listings.
+struct DiscoveredSkills {
+    map: SkillMap,
+    roots: Vec<PathBuf>,
+    listing: String,
+    project_listing: String,
+}
+
+/// Agent-native skill directories, relative to a project, that Codex and
+/// Claude Code load from their working directory.
+const PROJECT_SKILL_DIRS: [&str; 2] = [".agents/skills", ".claude/skills"];
+/// Workspace entries and child projects inspected for project skills, so a
+/// large workspace such as a home directory costs bounded lookups.
+const MAX_WORKSPACE_ENTRIES: usize = 4096;
+const MAX_SKILL_PROJECTS: usize = 256;
+/// Bytes read to find a project skill's description, and its listed length.
+const PROJECT_SKILL_HEADER_BYTES: usize = 16 * 1024;
+const MAX_PROJECT_SKILL_DESCRIPTION: usize = 400;
+
+fn discover_skills(workspace: &Path, config: &Config, tools: bool) -> Result<DiscoveredSkills> {
     let mut skills = SkillMap::new();
     let mut roots = Vec::new();
     let project_root = workspace.join(&config.skills.project_dir);
@@ -1183,7 +1220,118 @@ fn discover_skills(workspace: &Path, config: &Config) -> Result<(SkillMap, Vec<P
         let description = skill_description(&content);
         listing.push_str(&format!("- {name}: {description}\n"));
     }
-    Ok((skills, roots, listing))
+    // Project skills are only actionable by delegating, so tool-free sessions
+    // neither list them nor learn the workspace's project names.
+    let project_listing = if tools && config.skills.scan_projects {
+        discover_project_skills(workspace, config, &mut skills, &mut roots)
+    } else {
+        String::new()
+    };
+    Ok(DiscoveredSkills {
+        map: skills,
+        roots,
+        listing,
+        project_listing,
+    })
+}
+
+/// List the agent skills of the workspace and its immediate, non-hidden child
+/// projects. A child's skills are named `<project>:<skill>`. Everything
+/// resolves inside the workspace, SKILL.md files that resolve to the same file
+/// (such as a `.claude/skills` link to `.agents/skills`) count once, and
+/// unreadable entries are skipped so one broken project cannot stop a session.
+fn discover_project_skills(
+    workspace: &Path,
+    config: &Config,
+    skills: &mut SkillMap,
+    roots: &mut Vec<PathBuf>,
+) -> String {
+    let mut projects = vec![(None, workspace.to_path_buf())];
+    let mut names: Vec<_> = std::fs::read_dir(workspace)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .take(MAX_WORKSPACE_ENTRIES)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    for name in names {
+        if projects.len() > MAX_SKILL_PROJECTS {
+            break;
+        }
+        let Ok(directory) = std::fs::canonicalize(workspace.join(&name)) else {
+            continue;
+        };
+        if directory.is_dir()
+            && directory.starts_with(workspace)
+            && !projects.iter().any(|(_, seen)| seen == &directory)
+        {
+            projects.push((Some(name), directory));
+        }
+    }
+    let mut seen_files = std::collections::HashSet::new();
+    let mut listing = String::new();
+    'projects: for (project, directory) in projects {
+        let project_roots: Vec<PathBuf> = PROJECT_SKILL_DIRS
+            .iter()
+            .filter_map(|relative| std::fs::canonicalize(directory.join(relative)).ok())
+            .filter(|root| root.is_dir() && root.starts_with(workspace))
+            .collect();
+        for root in &project_roots {
+            if !roots.contains(root) {
+                roots.push(root.clone());
+            }
+        }
+        for root in &project_roots {
+            let mut entries: Vec<_> = std::fs::read_dir(root)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .take(MAX_WORKSPACE_ENTRIES)
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                if skills.len() >= config.skills.max_skills {
+                    break 'projects;
+                }
+                let Ok(file) = std::fs::canonicalize(entry.path().join("SKILL.md")) else {
+                    continue;
+                };
+                if !file.is_file()
+                    || !project_roots.iter().any(|root| file.starts_with(root))
+                    || !seen_files.insert(file.clone())
+                {
+                    continue;
+                }
+                let skill = entry.file_name().to_string_lossy().into_owned();
+                let (name, location) = match &project {
+                    Some(project) => (format!("{project}:{skill}"), format!("project {project}")),
+                    None => (skill, "workspace root".to_owned()),
+                };
+                // SCV's own and the user's skills keep their names.
+                if skills.contains_key(&name) {
+                    continue;
+                }
+                let header = read_prefix(
+                    &file,
+                    config
+                        .skills
+                        .max_skill_bytes
+                        .min(PROJECT_SKILL_HEADER_BYTES),
+                )
+                .map(|(bytes, _)| bytes)
+                .unwrap_or_default();
+                let description: String = skill_description(&String::from_utf8_lossy(&header))
+                    .chars()
+                    .take(MAX_PROJECT_SKILL_DESCRIPTION)
+                    .collect();
+                listing.push_str(&format!("- {name} ({location}): {description}\n"));
+                skills.insert(name, file);
+            }
+        }
+    }
+    listing
 }
 
 fn read_prefix(path: &Path, max_bytes: usize) -> std::io::Result<(Vec<u8>, bool)> {
@@ -1695,5 +1843,111 @@ mod tests {
 
         assert!(result.is_err());
         assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn workspace_projects_list_their_agent_skills_for_delegation() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        let write_skill = |directory: &Path, description: &str| {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(
+                directory.join("SKILL.md"),
+                format!(
+                    "---\nname: skill\ndescription: {description}\n---\nBody of {description}\n"
+                ),
+            )
+            .unwrap();
+        };
+        write_skill(
+            &workspace.join("scv/.agents/skills/feature-flow"),
+            "Land SCV",
+        );
+        std::fs::create_dir_all(workspace.join("scv/.claude/skills")).unwrap();
+        symlink(
+            "../../.agents/skills/feature-flow",
+            workspace.join("scv/.claude/skills/feature-flow"),
+        )
+        .unwrap();
+        write_skill(
+            &workspace.join("web/.claude/skills/deploy"),
+            "Deploy the site",
+        );
+        write_skill(&workspace.join(".agents/skills/triage"), "Root triage");
+        write_skill(&workspace.join(".agents/skills/notes"), "Root notes");
+        write_skill(&workspace.join(".scv/skills/triage"), "SCV triage");
+        write_skill(&workspace.join(".hidden/.agents/skills/secret"), "Hidden");
+        write_skill(&outside.join(".agents/skills/evil"), "Outside");
+        symlink(&outside, workspace.join("escape")).unwrap();
+        std::fs::create_dir_all(workspace.join("rogue/.agents")).unwrap();
+        symlink(
+            outside.join(".agents/skills"),
+            workspace.join("rogue/.agents/skills"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.join("sneaky/.agents/skills/leak")).unwrap();
+        symlink(
+            outside.join(".agents/skills/evil/SKILL.md"),
+            workspace.join("sneaky/.agents/skills/leak/SKILL.md"),
+        )
+        .unwrap();
+        std::fs::write(workspace.join("file"), "not a project").unwrap();
+        let mut config = Config::default();
+        config.skills.user_dir = workspace.join("no-user-skills");
+
+        let skills = discover_skills(&workspace, &config, true).unwrap();
+        let mut names: Vec<_> = skills.map.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, ["notes", "scv:feature-flow", "triage", "web:deploy"]);
+        assert_eq!(
+            skills.map["triage"],
+            workspace.join(".scv/skills/triage/SKILL.md")
+        );
+        assert_eq!(
+            skills.project_listing,
+            "- notes (workspace root): Root notes\n\
+             - scv:feature-flow (project scv): Land SCV\n\
+             - web:deploy (project web): Deploy the site\n"
+        );
+        let prompt = build_system_prompt(&workspace, &config, &skills).unwrap();
+        assert!(prompt.contains("# Project skills"));
+        assert!(prompt.contains("set its cwd to the skill's project"));
+
+        let registry = builtin_registry(
+            config.tools(),
+            skills.map,
+            skills.roots,
+            config.skills.max_skill_bytes,
+            HashMap::new(),
+        )
+        .unwrap();
+        let read_skill = registry.get("read_skill").unwrap();
+        let loaded = read_skill
+            .execute(
+                serde_json::json!({"name":"scv:feature-flow"}),
+                scv_core::ToolContext {
+                    workspace: workspace.clone(),
+                    cancellation: CancellationToken::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(loaded.content.contains("Body of Land SCV"));
+
+        let tool_free = discover_skills(&workspace, &config, false).unwrap();
+        assert!(tool_free.project_listing.is_empty());
+        assert!(!tool_free.map.contains_key("scv:feature-flow"));
+        config.skills.scan_projects = false;
+        let disabled = discover_skills(&workspace, &config, true).unwrap();
+        assert!(disabled.project_listing.is_empty());
+        config.skills.scan_projects = true;
+        config.skills.max_skills = 3;
+        let capped = discover_skills(&workspace, &config, true).unwrap();
+        assert_eq!(capped.map.len(), 3);
+        assert!(capped.map.contains_key("scv:feature-flow"));
+        assert!(!capped.map.contains_key("web:deploy"));
     }
 }
