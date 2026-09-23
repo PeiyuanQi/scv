@@ -434,6 +434,70 @@ async fn failed_send_retries_same_client_id_and_only_poll_restores_health() {
 }
 
 #[tokio::test]
+async fn live_send_ack_without_ret_completes_pending_delivery_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let store = saved_store(directory.path(), &base);
+    let pending = new_pending("incoming", "sender", "context", "reply", MAX_REPLY_BYTES);
+    store
+        .save_state(
+            "default",
+            &state::BridgeState {
+                pending: Some(pending.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let socket = directory.path().join("missing.sock");
+    let cancel = CancellationToken::new();
+    let reports = Mutex::new(Vec::new());
+    let report = |healthy| {
+        reports.lock().unwrap().push(healthy);
+        if healthy {
+            cancel.cancel();
+        }
+    };
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            &store,
+            &report,
+        ),
+    );
+    let peer = async {
+        let (mut stream, route, body) = request(&listener).await;
+        assert!(route.ends_with("sendmessage"));
+        assert_eq!(body["msg"]["client_id"], pending.client_ids[0]);
+        respond(&mut stream, "200 OK", "{}", "").await;
+        // The next request is a poll, not a resend of the acknowledged reply.
+        let (mut stream, route, _) = request(&listener).await;
+        assert!(route.ends_with("getupdates"));
+        let saved = store.load_state("default").unwrap();
+        assert!(saved.pending.is_none());
+        assert_eq!(saved.seen, vec!["incoming".to_owned()]);
+        respond(
+            &mut stream,
+            "200 OK",
+            r#"{"msgs":[],"get_updates_buf":"next"}"#,
+            "",
+        )
+        .await;
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+    assert_eq!(*reports.lock().unwrap(), vec![true]);
+}
+
+#[tokio::test]
 async fn oversized_batch_never_executes_or_advances_cursor() {
     let directory = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

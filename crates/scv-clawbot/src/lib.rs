@@ -487,6 +487,16 @@ pub fn check_envelope(value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// Current iLink sendmessage responses omit `ret` on success (the message is
+/// delivered), so only an explicit non-zero `ret` or `errcode` is a failure.
+pub fn check_send_ack(value: &serde_json::Value) -> Result<()> {
+    let rejected = |key| value.get(key).is_some_and(|v| v.as_i64() != Some(0));
+    if !value.is_object() || rejected("ret") || rejected("errcode") {
+        bail!("iLink API rejected request")
+    }
+    Ok(())
+}
+
 pub fn split_utf8(value: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = value;
@@ -540,6 +550,16 @@ mod tests {
     fn validates_ret() {
         assert!(check_envelope(&serde_json::json!({"ret":0})).is_ok());
         assert!(check_envelope(&serde_json::json!({"ret":1})).is_err());
+    }
+
+    #[test]
+    fn accepts_live_send_ack_without_ret() {
+        assert!(check_send_ack(&serde_json::json!({})).is_ok());
+        assert!(check_send_ack(&serde_json::json!({"ret":0})).is_ok());
+        assert!(check_send_ack(&serde_json::json!({"ret":-2})).is_err());
+        assert!(check_send_ack(&serde_json::json!({"errcode":40001})).is_err());
+        assert!(check_send_ack(&serde_json::json!({"ret":"0"})).is_err());
+        assert!(check_send_ack(&serde_json::json!(null)).is_err());
     }
 
     #[test]

@@ -31,7 +31,8 @@ Daemon and component changes require focused coverage for:
 - default autostart, persistent stop, login honoring opt-out, periodic and
   explicit reconciliation, and joining before credential/settings replacement;
 - logout joining before deletion, private settings/state, interrupted in-flight
-  claims preventing replay, and pending delivery retaining client IDs;
+  claims preventing replay, pending delivery retaining client IDs, and live
+  send acknowledgements without `ret` completing delivery exactly once;
 - identity/origin binding, same-identity token rotation, conservative legacy
   binding, replacement requiring logout, and stale-runner write rejection;
 - nonblocking transaction/lifetime locks, serialized login/removal, atomic

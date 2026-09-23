@@ -109,7 +109,8 @@ Bodies include `base_info.channel_version = "1.0.0"`. Error responses with
 `ret != 0` or a non-zero `errcode` are converted to redacted bridge errors.
 Successful `getupdates` responses from the live iLink API omit `ret` and are
 accepted only when they contain an array `msgs` field and a string
-`get_updates_buf` cursor.
+`get_updates_buf` cursor. Successful `sendmessage` responses also omit `ret`;
+any JSON object without a non-zero `ret` or `errcode` acknowledges delivery.
 
 `POST /ilink/bot/getupdates` long-polls with the opaque `get_updates_buf`
 cursor. Only inbound user text messages with sender ID, message ID, context

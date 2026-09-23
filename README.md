@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.14`, with exact `=0.1.14` pins for dependencies
+All packages use version `0.1.15`, with exact `=0.1.15` pins for dependencies
 between workspace packages.
 
 ```bash

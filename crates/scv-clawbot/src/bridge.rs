@@ -98,7 +98,7 @@ pub(crate) async fn send_reply_request(
                 .send()
                 .await?;
             let response = crate::response_json(response).await?;
-            crate::check_envelope(&response)
+            crate::check_send_ack(&response)
         }
         .await;
         if result.is_ok() {
