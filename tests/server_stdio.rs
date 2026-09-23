@@ -1,3 +1,6 @@
+mod common;
+
+use common::Isolated;
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -17,10 +20,9 @@ async fn server_handshake_and_session_start() {
     let workspace = tempfile::tempdir().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(config_home.path())
         .arg("--stdio")
         .env("OPENAI_API_KEY", "test-only")
-        .env("SCV_HOME", config_home.path())
-        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -100,6 +102,7 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
     let workspace = tempfile::tempdir().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(config_home.path())
         .args([
             "--stdio",
             "--model",
@@ -108,8 +111,6 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             &format!("http://{address}/v1"),
         ])
         .env("OPENAI_API_KEY", "test-only")
-        .env("SCV_HOME", config_home.path())
-        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -206,6 +207,7 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
     let workspace = tempfile::tempdir().unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(config_home.path())
         .args([
             "--stdio",
             "--model",
@@ -214,7 +216,6 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
             &format!("http://{address}/v1"),
         ])
         .env("OPENAI_API_KEY", "test-only")
-        .env("XDG_CONFIG_HOME", config_home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -322,6 +323,7 @@ async fn tool_results_are_replayed_after_their_calls() {
     std::fs::write(workspace.path().join("README.md"), "fixture text").unwrap();
     let config_home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(config_home.path())
         .args([
             "--stdio",
             "--model",
@@ -330,8 +332,6 @@ async fn tool_results_are_replayed_after_their_calls() {
             &format!("http://{address}/v1"),
         ])
         .env("OPENAI_API_KEY", "test-only")
-        .env("SCV_HOME", config_home.path())
-        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -510,9 +510,8 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(home.path())
         .arg("--stdio")
-        .env("SCV_HOME", home.path())
-        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -662,9 +661,8 @@ async fn tool_free_sessions_get_no_web_access() {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(home.path())
         .arg("--stdio")
-        .env("SCV_HOME", home.path())
-        .env_remove("SCV_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

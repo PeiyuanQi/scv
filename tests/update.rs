@@ -1,3 +1,6 @@
+mod common;
+
+use common::Isolated;
 use std::{os::unix::fs::PermissionsExt, process::Command};
 
 fn update(install_succeeds: bool) -> (std::process::Output, String) {
@@ -22,10 +25,9 @@ fn update(install_succeeds: bool) -> (std::process::Output, String) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(temp.path())
         .args(["update", "--index-url", "https://example.invalid/index"])
         .env("PATH", temp.path())
-        .env("SCV_HOME", temp.path())
-        .env_remove("SCV_CONFIG")
         .env("SCV_TEST_LOG", &log)
         .current_dir(temp.path())
         .output()

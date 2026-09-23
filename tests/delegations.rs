@@ -1,6 +1,9 @@
 //! Delegated runs outlive a killed SCV process only until the next reconcile.
 #![cfg(target_os = "linux")]
 
+mod common;
+
+use common::Isolated;
 use std::{
     io::{Read as _, Write as _},
     net::TcpListener,
@@ -82,6 +85,7 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
     );
 
     let mut server = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(&home_path)
         .arg("--scv-home")
         .arg(&home_path)
         .args([
@@ -93,9 +97,6 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
             "--stdio",
         ])
         .env("OPENAI_API_KEY", "test-only")
-        .env_remove("SCV_CONFIG")
-        .env_remove("SCV_PARENT")
-        .env_remove("SCV_DELEGATION_DEPTH")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

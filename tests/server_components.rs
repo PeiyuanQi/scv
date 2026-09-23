@@ -1,4 +1,7 @@
 //! Process-level lifecycle tests use an isolated home and no external services.
+mod common;
+
+use common::Isolated;
 use scv_protocol::{
     ClientMessage, ComponentState, DaemonCommand, DaemonStatus, PROTOCOL_VERSION, PeerInfo,
     RemoteTools, ServerEvent,
@@ -12,10 +15,9 @@ use tokio::{
 
 fn start(home: &Path, workspace: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home)
         .args(["run", "--workspace"])
         .arg(workspace)
-        .env("SCV_HOME", home)
-        .env_remove("SCV_CONFIG")
         .env("OPENAI_API_KEY", "test-only")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
