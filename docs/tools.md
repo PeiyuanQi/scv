@@ -74,7 +74,12 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 1800) for long work such as builds, releases, or landing a change.
 
 `model` and `effort` are optional and offered only when the adapter configures
-`model_args` or `effort_args`. A model is 1-128 ASCII letters, digits, or
+`model_args` or `effort_args`. Their schema descriptions name the adapter's
+model family (Claude aliases such as `sonnet` for `agent_claude`, OpenAI model
+IDs for `agent_codex`) and tell the model to set them only when the user asks,
+so an omitted value leaves the agent's own configured default in place. A
+blank `cwd`, `model`, or `effort` counts as omitted, since models often send
+`""` for an optional field they mean to leave unset. A model is 1-128 ASCII letters, digits, or
 `._:/@[]-` and cannot start with `-` or `@`; an effort is `low`, `medium`, `high`,
 `xhigh`, or `max`. Each selected value becomes one substituted argument, never
 shell text, so the CLI itself reports values it does not support.

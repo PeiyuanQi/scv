@@ -1,4 +1,4 @@
-//! Streaming OpenAI-compatible chat-completions provider.
+//! Streaming OpenAI-compatible Responses provider.
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -73,12 +73,10 @@ impl OpenAiProvider {
     }
 
     fn request_body(&self, request: &ProviderRequest) -> Value {
-        let input: Vec<Value> = request
-            .messages
-            .iter()
-            .map(message_to_response_json)
-            .collect();
-        let tools: Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters})).collect();
+        let input = response_input(&request.messages);
+        // Tool schemas leave optional fields out of `required`. Strict mode,
+        // the Responses default, would make the model fill every field anyway.
+        let tools: Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
         let mut body = json!({"model": self.model, "instructions": request.system_prompt, "input": input, "stream": true});
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
@@ -268,15 +266,73 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn message_to_response_json(message: &Message) -> Value {
-    match message {
-        Message::User { content } => json!({"role":"user","content":content}),
-        Message::Assistant { content, .. } => json!({"role":"assistant","content":content}),
-        Message::Tool {
-            call_id, content, ..
-        } => json!({"type":"function_call_output","call_id":call_id,"output":content}),
-        Message::HistoryNote { content } => json!({"role":"user","content":content}),
+/// Replays the conversation as Responses input items.
+///
+/// The Responses API answers a `function_call_output` only when the input also
+/// carries its `function_call`, and rejects a `function_call` that has no
+/// output, so every call and output are emitted as a pair. A turn cancelled
+/// between a call and its result leaves an unanswered call in history, which
+/// is closed with a synthetic failure before the next message.
+fn response_input(messages: &[Message]) -> Vec<Value> {
+    let mut input = Vec::with_capacity(messages.len());
+    let mut unanswered: Vec<&str> = Vec::new();
+    for message in messages {
+        match message {
+            Message::Tool {
+                call_id,
+                name,
+                content,
+                ..
+            } => {
+                if let Some(position) = unanswered.iter().position(|id| *id == call_id) {
+                    unanswered.remove(position);
+                } else {
+                    input.push(function_call(call_id, name, "{}"));
+                }
+                input.push(function_call_output(call_id, content));
+            }
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
+                close_unanswered(&mut input, &mut unanswered);
+                if !content.is_empty() || tool_calls.is_empty() {
+                    input.push(json!({"role":"assistant","content":content}));
+                }
+                for call in tool_calls {
+                    input.push(function_call(
+                        &call.id,
+                        &call.name,
+                        &call.arguments.to_string(),
+                    ));
+                    unanswered.push(&call.id);
+                }
+            }
+            Message::User { content } | Message::HistoryNote { content } => {
+                close_unanswered(&mut input, &mut unanswered);
+                input.push(json!({"role":"user","content":content}));
+            }
+        }
     }
+    close_unanswered(&mut input, &mut unanswered);
+    input
+}
+
+fn close_unanswered(input: &mut Vec<Value>, unanswered: &mut Vec<&str>) {
+    for call_id in unanswered.drain(..) {
+        input.push(function_call_output(
+            call_id,
+            "Tool call did not complete: the turn ended before it returned a result.",
+        ));
+    }
+}
+
+fn function_call(call_id: &str, name: &str, arguments: &str) -> Value {
+    json!({"type":"function_call","call_id":call_id,"name":name,"arguments":arguments})
+}
+
+fn function_call_output(call_id: &str, output: &str) -> Value {
+    json!({"type":"function_call_output","call_id":call_id,"output":output})
 }
 
 fn find_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
@@ -332,4 +388,210 @@ struct ResponseItem {
     _id: Option<String>,
     call_id: Option<String>,
     name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    fn tool(id: &str, name: &str, content: &str) -> Message {
+        Message::Tool {
+            call_id: id.into(),
+            name: name.into(),
+            content: content.into(),
+            is_error: false,
+        }
+    }
+
+    fn user(content: &str) -> Message {
+        Message::User {
+            content: content.into(),
+        }
+    }
+
+    fn assistant(content: &str, tool_calls: Vec<ToolCall>) -> Message {
+        Message::Assistant {
+            content: content.into(),
+            tool_calls,
+        }
+    }
+
+    fn fc(id: &str, name: &str, arguments: &str) -> Value {
+        json!({"type":"function_call","call_id":id,"name":name,"arguments":arguments})
+    }
+
+    fn out(id: &str, output: &str) -> Value {
+        json!({"type":"function_call_output","call_id":id,"output":output})
+    }
+
+    #[test]
+    fn multi_step_turns_replay_each_call_before_its_output() {
+        let messages = vec![
+            user("summarize README"),
+            assistant("", vec![call("c1", "read", json!({"path":"README.md"}))]),
+            tool("c1", "read", "# SCV"),
+            assistant("", vec![call("c2", "bash", json!({"command":"ls"}))]),
+            tool("c2", "bash", "src"),
+            assistant("A Rust agent.", Vec::new()),
+            user("thanks"),
+        ];
+        assert_eq!(
+            response_input(&messages),
+            vec![
+                json!({"role":"user","content":"summarize README"}),
+                fc("c1", "read", r#"{"path":"README.md"}"#),
+                out("c1", "# SCV"),
+                fc("c2", "bash", r#"{"command":"ls"}"#),
+                out("c2", "src"),
+                json!({"role":"assistant","content":"A Rust agent."}),
+                json!({"role":"user","content":"thanks"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn parallel_calls_keep_the_assistant_text_and_call_order() {
+        let messages = vec![
+            user("compare"),
+            assistant(
+                "Reading both.",
+                vec![
+                    call("a", "read", json!({"path":"a"})),
+                    call("b", "read", json!({"path":"b"})),
+                ],
+            ),
+            tool("a", "read", "A"),
+            tool("b", "read", "B"),
+        ];
+        assert_eq!(
+            response_input(&messages),
+            vec![
+                json!({"role":"user","content":"compare"}),
+                json!({"role":"assistant","content":"Reading both."}),
+                fc("a", "read", r#"{"path":"a"}"#),
+                fc("b", "read", r#"{"path":"b"}"#),
+                out("a", "A"),
+                out("b", "B"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_interrupted_call_is_closed_before_the_next_message() {
+        let messages = vec![
+            user("run both"),
+            assistant(
+                "",
+                vec![
+                    call("a", "bash", json!({"command":"true"})),
+                    call("b", "bash", json!({"command":"sleep 99"})),
+                ],
+            ),
+            tool("a", "bash", "ok"),
+            user("never mind"),
+        ];
+        let input = response_input(&messages);
+        assert_eq!(input[3], out("a", "ok"));
+        assert_eq!(input[4]["type"], "function_call_output");
+        assert_eq!(input[4]["call_id"], "b");
+        assert!(
+            input[4]["output"]
+                .as_str()
+                .unwrap()
+                .contains("did not complete")
+        );
+        assert_eq!(input[5], json!({"role":"user","content":"never mind"}));
+        assert_eq!(input.len(), 6);
+    }
+
+    #[test]
+    fn an_output_without_its_call_gets_one_and_plain_messages_are_unchanged() {
+        let messages = vec![
+            Message::HistoryNote {
+                content: "[earlier]".into(),
+            },
+            tool("x", "read", "orphaned"),
+            assistant("", Vec::new()),
+        ];
+        assert_eq!(
+            response_input(&messages),
+            vec![
+                json!({"role":"user","content":"[earlier]"}),
+                fc("x", "read", "{}"),
+                out("x", "orphaned"),
+                json!({"role":"assistant","content":""}),
+            ]
+        );
+    }
+
+    #[test]
+    fn request_body_carries_the_paired_input() {
+        let provider = OpenAiProvider::new(
+            "model".into(),
+            "http://127.0.0.1:9/v1".into(),
+            "key".into(),
+            Duration::from_secs(1),
+            ProviderLimits::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let body = provider.request_body(&ProviderRequest {
+            system_prompt: "system".into(),
+            messages: vec![
+                user("hi"),
+                assistant("", vec![call("c", "read", json!({"path":"x"}))]),
+                tool("c", "read", "y"),
+            ],
+            tools: Vec::new(),
+        });
+        assert_eq!(body["input"][1], fc("c", "read", r#"{"path":"x"}"#));
+        assert_eq!(body["input"][2], out("c", "y"));
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn tools_are_sent_non_strict_so_optional_fields_stay_optional() {
+        let provider = OpenAiProvider::new(
+            "model".into(),
+            "http://127.0.0.1:9/v1".into(),
+            "key".into(),
+            Duration::from_secs(1),
+            ProviderLimits::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let parameters = json!({
+            "type":"object",
+            "properties":{"path":{"type":"string"},"limit":{"type":"integer"}},
+            "required":["path"],
+            "additionalProperties":false
+        });
+        let body = provider.request_body(&ProviderRequest {
+            system_prompt: String::new(),
+            messages: vec![user("hi")],
+            tools: vec![scv_core::ToolSpec {
+                name: "read".into(),
+                description: "Read a file".into(),
+                parameters: parameters.clone(),
+            }],
+        });
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "type":"function",
+                "name":"read",
+                "description":"Read a file",
+                "parameters":parameters,
+                "strict":false
+            }])
+        );
+    }
 }

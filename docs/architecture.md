@@ -75,7 +75,7 @@ The integration dependency chain is `server -> clawbot -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
 on core; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.20` and exact workspace dependency pins.
+`0.1.21` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
@@ -243,9 +243,18 @@ an SCV adapter from reusing or changing the user's normal Codex configuration.
 
 The built-in provider uses the OpenAI-compatible `/responses` endpoint and
 function-tool schema. It assembles streamed tool-call arguments and validates
-the final JSON before returning a call to the loop. The base URL, API-key
-environment variable, model, and timeout are configuration. API keys are read
-from the environment and never accepted in project configuration.
+the final JSON before returning a call to the loop. Requests are stateless: each
+one replays the conversation, with every earlier tool call sent as a
+`function_call` item before its `function_call_output`. A call whose turn was
+cancelled before it returned is closed with a failed output, so the replayed
+history always pairs calls with results as the API requires. Function tools are
+sent with `strict: false`: SCV schemas leave optional fields out of `required`,
+and strict mode, the Responses default, would make the model fill every one of
+them, such as an unrequested `model` or `effort` for a delegated agent.
+
+The base URL, API-key environment variable, model, and timeout are
+configuration. API keys are read from the environment and never accepted in
+project configuration.
 
 The core `Provider` trait does not expose HTTP types. Native Anthropic,
 Responses API, local-model, streaming, and subscription-auth providers can be

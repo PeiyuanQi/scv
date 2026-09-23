@@ -646,9 +646,21 @@ impl NativeAgentTool {
 struct AgentArgs {
     prompt: String,
     timeout_seconds: Option<u64>,
+    #[serde(default, deserialize_with = "blank_as_none")]
     cwd: Option<String>,
+    #[serde(default, deserialize_with = "blank_as_none")]
     model: Option<String>,
+    #[serde(default, deserialize_with = "blank_as_none")]
     effort: Option<String>,
+}
+
+/// Models often send an optional string they mean to leave unset as `""`, so
+/// a blank value selects the default rather than failing the call.
+fn blank_as_none<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|value| !value.trim().is_empty()))
 }
 
 /// Longest `cwd` argument accepted, in bytes.
@@ -709,13 +721,28 @@ impl Tool for NativeAgentTool {
             "timeout_seconds":timeout_schema(self.timeouts)
         });
         if !self.model_args.is_empty() {
+            let model = match self.name.as_str() {
+                "agent_claude" => "Claude model alias or ID, such as sonnet or opus.",
+                "agent_codex" => {
+                    "OpenAI model ID from the Codex configuration; not a Claude alias."
+                }
+                _ => "Model ID in the form this agent's CLI accepts.",
+            };
             properties["model"] = json!({
                 "type":"string",
-                "description":"Model alias or ID for this call, e.g. sonnet or opus"
+                "description":format!(
+                    "{model} Set only when the user asks for a specific model; \
+                     omit to use the agent's configured default."
+                )
             });
         }
         if !self.effort_args.is_empty() {
-            properties["effort"] = json!({"type":"string","enum":AGENT_EFFORTS});
+            properties["effort"] = json!({
+                "type":"string",
+                "enum":AGENT_EFFORTS,
+                "description":"Reasoning effort. Set only when the user asks for one; \
+                    omit to use the agent's configured default."
+            });
         }
         ToolSpec {
             name: self.name.clone(),
@@ -1551,6 +1578,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_agent_model_hints_name_the_adapter_family_and_default() {
+        let workspace = tempfile::tempdir().unwrap();
+        let description = |name: &str, field: &str| {
+            fake_agent(workspace.path(), name, "", &[], Vec::new())
+                .spec()
+                .parameters["properties"][field]["description"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let claude = description("agent_claude", "model");
+        let codex = description("agent_codex", "model");
+        let other = description("agent_other", "model");
+        assert!(claude.contains("sonnet or opus"));
+        for text in [&codex, &other] {
+            assert!(!text.contains("sonnet"), "{text}");
+        }
+        assert!(codex.contains("not a Claude alias"));
+        for text in [claude, codex, other, description("agent_codex", "effort")] {
+            assert!(
+                text.contains("omit to use the agent's configured default"),
+                "{text}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn signed_out_agent_failure_names_the_host_login_command() {
         let workspace = tempfile::tempdir().unwrap();
@@ -1633,9 +1687,19 @@ mod tests {
         let tool = fake_agent(&root, "agent_codex", "pwd\n", &[], Vec::new());
         let run = |arguments: Value| tool.execute(arguments, context(&root));
 
-        let output = run(json!({"prompt":"hi"})).await.unwrap();
-        let output: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(output["output"], format!("{}\n", root.display()));
+        for arguments in [
+            json!({"prompt":"hi"}),
+            json!({"prompt":"hi","cwd":""}),
+            json!({"prompt":"hi","cwd":"  ","model":"","effort":" "}),
+        ] {
+            let output = run(arguments.clone()).await.unwrap();
+            let output: Value = serde_json::from_str(&output.content).unwrap();
+            assert_eq!(
+                output["output"],
+                format!("{}\n", root.display()),
+                "{arguments}"
+            );
+        }
         for cwd in [
             "project".to_owned(),
             "project/".to_owned(),
@@ -1663,9 +1727,7 @@ mod tests {
                 "{cwd}: {result:?}"
             );
         }
-        for invalid in ["", "  ", "a\0b"] {
-            assert!(tool.risk(&json!({"prompt":"hi","cwd":invalid})).is_err());
-        }
+        assert!(tool.risk(&json!({"prompt":"hi","cwd":"a\0b"})).is_err());
         assert!(
             tool.risk(&json!({"prompt":"hi","cwd":"x".repeat(MAX_AGENT_CWD_BYTES + 1)}))
                 .is_err()
