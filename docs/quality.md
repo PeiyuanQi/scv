@@ -55,6 +55,10 @@ Daemon and component changes require focused coverage for:
   responses and string IDs byte-bounded, unsigned 64-bit integer message IDs
   preserved exactly, and encountered duplicate IDs retained through the batch
   checkpoint;
+- iLink requests carrying the account's bearer token, only trusted origins
+  accepted (including a returned regional host) with the TLS port pinned and
+  redirects not followed, oversized responses rejected before parsing, and
+  replies chunked on UTF-8 boundaries within the byte limit;
 - no-tools remote sessions by default, SIGTERM/Ctrl+C shutdown, and tracked
   session cleanup;
 - writer/turn descendants joined after forced handler abort, cancellation-aware

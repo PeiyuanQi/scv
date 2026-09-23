@@ -23,6 +23,8 @@ interactive starts ask whether to continue and non-interactive starts fail.
   state remain within that profile; custom homes do not fall back to `~/.scv`.
 - Provider credentials are secrets. They remain server-side and are sent only
   to the configured provider endpoint, never to the TUI.
+- ClawBot tokens and delivery state are secrets. Inbound sender IDs, cursors,
+  and message content are untrusted remote input and are kept out of logs.
 - Project configuration cannot select the provider endpoint, credential
   variable, user skill root, or native-agent executable/arguments. Those values
   require a user, explicit-config, environment, or CLI layer.
@@ -101,6 +103,13 @@ interface, including daemon management; it is not a remotely authenticated
 network service. A process running as the same user can access that authority.
 The stdio endpoint remains available for one-shot local clients and does not
 support component management. Both transports require the versioned handshake.
+
+The opt-in ClawBot bridge is an outbound HTTPS client of iLink, not a server
+transport; it opens no listening port. It accepts only trusted iLink origins,
+validates response envelopes, persists state atomically, and never reports
+bearer tokens. Remote sessions are tool-free unless the account grants its owner
+tools; see [Supervised remote bridge](#supervised-remote-bridge). Remote
+messages cannot bypass server policy.
 
 Protocol lines, tool arguments, tool output, and provider responses are size
 bounded. Malformed messages fail closed. Diagnostics are separated from the
