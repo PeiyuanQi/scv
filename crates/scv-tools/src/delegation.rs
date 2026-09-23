@@ -115,6 +115,8 @@ pub struct ReconcileReport {
     pub reaped: Vec<String>,
     /// Orphaned records whose processes had already exited.
     pub removed: usize,
+    /// Conversation markers left by SCV processes that no longer run.
+    pub stale_markers: usize,
 }
 
 #[derive(Debug, Default)]
@@ -339,6 +341,7 @@ impl DelegationRegistry {
             remove_record(&self.record_dir, &record.handle);
         }
         self.inner.lock().expect("registry lock").reaped += report.reaped.len() as u64;
+        report.stale_markers = crate::conversation::remove_stale_markers(&self.conversation_dir());
         report
     }
 
@@ -925,6 +928,31 @@ mod tests {
         assert!(child.wait().unwrap().code().is_none(), "killed by a signal");
         assert!(registry.kill("claude-nosuch").await.is_err());
         guard.finish().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reconcile_removes_conversation_markers_of_exited_processes() {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = registry(home.path());
+        let markers = daemon.conversation_dir();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        let dead = ProcessIdentity {
+            pid: gone_pid,
+            start_time: 1,
+        };
+        let live = ProcessIdentity::current().unwrap();
+        for (id, owner) in [("dead-id", dead), ("live-id", live)] {
+            let marker = serde_json::json!({"owner": owner, "agent": "codex", "handle": "codex-1"});
+            write_private_json(&markers, &format!("{id}.json"), &marker).unwrap();
+        }
+        let report = daemon.reconcile().await;
+        assert_eq!(report.stale_markers, 1);
+        assert!(!markers.join("dead-id.json").exists());
+        assert!(markers.join("live-id.json").is_file());
+        assert_eq!(daemon.reconcile().await, ReconcileReport::default());
     }
 
     #[cfg(target_os = "linux")]

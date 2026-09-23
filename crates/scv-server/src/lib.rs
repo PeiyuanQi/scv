@@ -197,6 +197,30 @@ pub fn import_codex(source: &Path) -> Result<Vec<String>> {
     agents::import_codex(source, &config.instance_home.join("adapters").join("codex"))
 }
 
+/// Copy the user's own Grok `config.toml` from `source` (a Grok home) into
+/// SCV's private Grok home, keeping settings only SCV's copy has. Returns
+/// display lines that never contain secret values.
+pub fn import_grok(source: &Path) -> Result<Vec<String>> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    config.prepare_adapter_homes()?;
+    let descriptor =
+        scv_tools::adapters::adapter("grok").ok_or_else(|| anyhow!("unknown agent grok"))?;
+    let grok_home = descriptor
+        .home_environment
+        .iter()
+        .find(|(variable, _)| *variable == "GROK_HOME")
+        .map(|(_, relative)| *relative)
+        .ok_or_else(|| anyhow!("grok has no GROK_HOME in its adapter home"))?;
+    agents::import_grok(
+        source,
+        &config
+            .instance_home
+            .join("adapters")
+            .join("grok")
+            .join(grok_home),
+    )
+}
+
 /// Return the user service name for the selected SCV instance.
 pub fn service_name() -> anyhow::Result<String> {
     if std::env::var_os("SCV_HOME").is_none() {
@@ -425,6 +449,12 @@ async fn reconcile_delegations(registry: Arc<DelegationRegistry>) {
         tracing::debug!(
             "Removed {} delegation records whose processes had exited",
             report.removed
+        );
+    }
+    if report.stale_markers > 0 {
+        tracing::debug!(
+            "Removed {} conversation markers whose SCV process had exited",
+            report.stale_markers
         );
     }
 }

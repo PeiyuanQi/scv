@@ -206,12 +206,15 @@ enum AgentsCommand {
         orphans: bool,
     },
     /// Copy a setup into SCV's adapter home. `codex`: your own config.toml
-    /// and an API-key auth.json (never a ChatGPT sign-in). `pi
-    /// --from-scv-provider`: SCV's own OpenAI-compatible provider as pi's default.
+    /// and an API-key auth.json (never a ChatGPT sign-in). `grok`: your own
+    /// config.toml with its model profiles (never a `grok login` sign-in).
+    /// `pi --from-scv-provider`: SCV's own OpenAI-compatible provider as pi's
+    /// default.
     Import {
         #[arg(value_parser = agent_names())]
         agent: String,
-        /// Codex home to copy from [default: $CODEX_HOME or ~/.codex].
+        /// Agent home to copy from [default: codex $CODEX_HOME or ~/.codex;
+        /// grok $GROK_HOME or ~/.grok].
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
         /// pi: use SCV's active provider (base URL, model, and key).
@@ -904,6 +907,25 @@ async fn agents(command: AgentsCommand) -> Result<()> {
                 }
                 println!(
                     "This is a copy: re-run after changing your own Codex config. Check with `scv agents status codex`."
+                );
+                Ok(())
+            }
+            "grok" => {
+                if from_scv_provider {
+                    bail!("--from-scv-provider applies to pi; grok imports your own Grok home");
+                }
+                let source = from
+                    .or_else(|| std::env::var_os("GROK_HOME").map(PathBuf::from))
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok"))
+                    })
+                    .context("cannot determine your Grok home; pass --from")?;
+                println!("Importing Grok setup from {}", source.display());
+                for line in scv_server::import_grok(&source)? {
+                    println!("  {line}");
+                }
+                println!(
+                    "This is a copy: re-run after changing your own Grok config. Check with `scv agents status grok`."
                 );
                 Ok(())
             }

@@ -1,5 +1,5 @@
 //! Credentials for the native agents SCV delegates to, always inside SCV's
-//! private adapter homes: importing a user's own Codex setup, and the
+//! private adapter homes: importing a user's own Codex or Grok setup, and the
 //! API-key and endpoint stores SCV writes in an agent CLI's native format.
 
 use std::io::{Read as _, Write as _};
@@ -153,6 +153,229 @@ fn config_notes(table: &toml::Table) -> Vec<String> {
     notes
 }
 
+/// Copy the user's Grok `config.toml` from `source` (a Grok home) into
+/// `destination` (SCV's Grok home), returning display lines that never
+/// contain secret values. Top-level tables from the user's file win; tables
+/// only SCV's copy has, such as the `[marketplace]` state Grok writes there,
+/// are kept. `auth.json` sign-ins are never copied. The merged file is
+/// validated before anything is written.
+pub fn import_grok(source: &Path, destination: &Path) -> Result<Vec<String>> {
+    let source = std::fs::canonicalize(source)
+        .with_context(|| format!("resolve Grok home {}", source.display()))?;
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("create {}", destination.display()))?;
+    let destination = std::fs::canonicalize(destination)
+        .with_context(|| format!("resolve SCV Grok home {}", destination.display()))?;
+    if source == destination {
+        bail!(
+            "{} is already SCV's Grok home; pass your own Grok home with --from",
+            source.display()
+        );
+    }
+    let text = read_bounded(&source.join("config.toml"))?
+        .ok_or_else(|| anyhow!("no config.toml in {}", source.display()))?;
+    // Never echo parse errors' source text: these files hold keys.
+    let user: toml::Table = text
+        .parse()
+        .map_err(|_| anyhow!("your Grok config.toml is not valid TOML"))?;
+    let target = destination.join("config.toml");
+    let existing: toml::Table = match read_bounded(&target)? {
+        Some(existing) => existing.parse().map_err(|_| {
+            anyhow!(
+                "SCV's Grok config.toml ({}) is not valid TOML; move it aside and import again",
+                target.display()
+            )
+        })?,
+        None => toml::Table::new(),
+    };
+    let kept: toml::Table = existing
+        .into_iter()
+        .filter(|(key, _)| !user.contains_key(key))
+        .collect();
+    let merged = if kept.values().all(toml::Value::is_table) {
+        // Appending whole tables keeps the user's own formatting and comments.
+        let mut merged = text.trim_end().to_owned();
+        merged.push('\n');
+        if !kept.is_empty() {
+            merged.push('\n');
+            merged.push_str(&toml::to_string(&kept).context("serialize kept settings")?);
+        }
+        merged
+    } else {
+        // A kept top-level value would land inside the user's last table if
+        // appended, so write the merged table instead.
+        let mut table = user.clone();
+        table.extend(kept.clone());
+        toml::to_string(&table).context("serialize merged Grok config")?
+    };
+    if merged.parse::<toml::Table>().is_err() {
+        bail!("the merged Grok config.toml would not be valid TOML; nothing was written");
+    }
+    write_private(&target, &merged)?;
+
+    let mut notes = vec![format!("Copied config.toml{}", describe_grok(&user))];
+    if !kept.is_empty() {
+        let names: Vec<String> = kept.keys().map(|key| format!("{key:?}")).collect();
+        notes.push(format!("Kept SCV-only settings: {}", names.join(", ")));
+    }
+    match grok_default_key(&user) {
+        GrokKey::InConfig(_) | GrokKey::NoDefault => {}
+        GrokKey::FromVariable(model, variable) => notes.push(grok_variable_note(&model, &variable)),
+        GrokKey::Missing(model) => notes.push(format!(
+            "Note: default model {model:?} has no api_key in config; sign SCV in with \
+             `scv agents login grok` or add api_key to its profile"
+        )),
+    }
+    if source.join("auth.json").exists() {
+        notes.push(
+            "Skipped auth.json: `grok login` sign-ins are not shared; sign SCV in \
+             separately with `scv agents login grok` if you need one"
+                .into(),
+        );
+    }
+    Ok(notes)
+}
+
+/// Profiles and the default model, debug-quoted so they are terminal-safe.
+fn describe_grok(table: &toml::Table) -> String {
+    let profiles: Vec<String> = table
+        .get("model")
+        .and_then(toml::Value::as_table)
+        .map(|models| models.keys().map(|key| format!("{key:?}")).collect())
+        .unwrap_or_default();
+    let default =
+        grok_default(table).map_or_else(|| "built-in".into(), |model| format!("{model:?}"));
+    if profiles.is_empty() {
+        format!(" (default model {default}; no model profiles)")
+    } else {
+        format!(
+            " (default model {default}; profiles {})",
+            profiles.join(", ")
+        )
+    }
+}
+
+/// Where the key for Grok's default model comes from.
+enum GrokKey {
+    /// No `[models] default`: Grok's built-in default needs `grok login`.
+    NoDefault,
+    /// The default's profile holds an `api_key`.
+    InConfig(String),
+    /// The default's profile reads its key from these variables.
+    FromVariable(String, Vec<String>),
+    /// The default has no profile key.
+    Missing(String),
+}
+
+fn grok_default(table: &toml::Table) -> Option<String> {
+    table
+        .get("models")?
+        .get("default")?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+/// Resolve the default model's profile, by catalog key or by model id as
+/// Grok does, and say where its key comes from.
+fn grok_default_key(table: &toml::Table) -> GrokKey {
+    let Some(default) = grok_default(table) else {
+        return GrokKey::NoDefault;
+    };
+    let models = table.get("model").and_then(toml::Value::as_table);
+    let profile = models.and_then(|models| {
+        models.get(&default).or_else(|| {
+            models.values().find(|profile| {
+                profile.get("model").and_then(toml::Value::as_str) == Some(&default)
+            })
+        })
+    });
+    let Some(profile) = profile else {
+        return GrokKey::Missing(default);
+    };
+    if profile
+        .get("api_key")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|key| !key.trim().is_empty())
+    {
+        return GrokKey::InConfig(default);
+    }
+    let variables: Vec<String> = match profile.get("env_key") {
+        Some(toml::Value::String(name)) => vec![name.clone()],
+        Some(toml::Value::Array(names)) => names
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if variables.is_empty() {
+        GrokKey::Missing(default)
+    } else {
+        GrokKey::FromVariable(default, variables)
+    }
+}
+
+/// A variable Grok can read in a delegated run: set here and not one SCV
+/// removes from delegated agents.
+fn usable_grok_variable(variables: &[String]) -> Option<&String> {
+    variables.iter().find(|variable| {
+        !scv_tools::adapters::is_removed_agent_variable(std::ffi::OsStr::new(variable.as_str()))
+            && std::env::var_os(variable).is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn grok_variable_note(model: &str, variables: &[String]) -> String {
+    let names: Vec<String> = variables.iter().map(|name| format!("${name}")).collect();
+    format!(
+        "Note: default model {model:?} reads its key from {}; SCV removes key variables \
+         from delegated agents and its service does not load your shell profile, so put \
+         api_key in the profile instead",
+        names.join(" or ")
+    )
+}
+
+fn grok_status(auth: &Path, config: &Path, home: &Path) -> Result<(bool, Vec<String>)> {
+    let entries = read_json_object(auth)?
+        .map(|object| object.values().filter(|value| !value.is_null()).count())
+        .unwrap_or(0);
+    if entries > 0 {
+        return Ok((true, vec![format!("signed in ({})", display(auth, home))]));
+    }
+    let Some(text) = read_bounded(config)? else {
+        return Ok((false, vec!["not signed in".into()]));
+    };
+    let table: toml::Table = text
+        .parse()
+        .map_err(|_| anyhow!("{} is not valid TOML", display(config, home)))?;
+    Ok(match grok_default_key(&table) {
+        GrokKey::InConfig(model) => (
+            true,
+            vec![format!("signed in (API key in config, model {model:?})")],
+        ),
+        GrokKey::FromVariable(model, variables) => match usable_grok_variable(&variables) {
+            Some(variable) => (
+                true,
+                vec![format!("signed in (key from ${variable}, model {model:?})")],
+            ),
+            None => (
+                false,
+                vec![
+                    "not signed in".into(),
+                    grok_variable_note(&model, &variables),
+                ],
+            ),
+        },
+        GrokKey::Missing(model) => (
+            false,
+            vec![
+                "not signed in".into(),
+                format!("default model {model:?} has no api_key in config"),
+            ],
+        ),
+        GrokKey::NoDefault => (false, vec!["not signed in".into()]),
+    })
+}
+
 fn write_private(path: &Path, contents: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -286,7 +509,7 @@ pub fn store_key(store: KeyStore, home: &Path, key: &str) -> Result<Vec<String>>
                 display(&path, home)
             )])
         }
-        KeyStore::JsonEntries(_) | KeyStore::Pi { .. } => {
+        KeyStore::Grok { .. } | KeyStore::Pi { .. } => {
             bail!("this agent signs in with its own login, not a stored key")
         }
     }
@@ -295,17 +518,7 @@ pub fn store_key(store: KeyStore, home: &Path, key: &str) -> Result<Vec<String>>
 /// Describe what `store` holds, never printing a secret.
 pub fn stored_status(store: KeyStore, home: &Path) -> Result<(bool, Vec<String>)> {
     match store {
-        KeyStore::JsonEntries(path) => {
-            let path = home.join(path);
-            let entries = read_json_object(&path)?
-                .map(|object| object.values().filter(|value| !value.is_null()).count())
-                .unwrap_or(0);
-            Ok(if entries > 0 {
-                (true, vec![format!("signed in ({})", display(&path, home))])
-            } else {
-                (false, vec!["not signed in".into()])
-            })
-        }
+        KeyStore::Grok { auth, config } => grok_status(&home.join(auth), &home.join(config), home),
         KeyStore::DshRefs { path, variable } => {
             let path = home.join(path);
             let stored = read_bounded(&path)?.is_some_and(|text| {
@@ -329,7 +542,7 @@ pub fn stored_status(store: KeyStore, home: &Path) -> Result<(bool, Vec<String>)
 /// Remove the credentials SCV can see in `store`.
 pub fn remove_stored(store: KeyStore, home: &Path) -> Result<Vec<String>> {
     match store {
-        KeyStore::JsonEntries(path) | KeyStore::DshRefs { path, .. } => {
+        KeyStore::Grok { auth: path, .. } | KeyStore::DshRefs { path, .. } => {
             let path = home.join(path);
             Ok(vec![if remove_if_present(&path)? {
                 format!("Removed {}", display(&path, home))
@@ -646,6 +859,153 @@ experimental_bearer_token = "sk-bearer-secret"
         variable: "DEEPSEEK_API_KEY",
     };
     const PI: KeyStore = KeyStore::Pi { dir: ".pi/agent" };
+    const GROK: KeyStore = KeyStore::Grok {
+        auth: ".grok/auth.json",
+        config: ".grok/config.toml",
+    };
+
+    const GROK_CONFIG: &str = r#"[cli]
+installer = "internal"
+
+# The relay profile.
+[model.relay]
+model = "grok-4.5"
+base_url = "https://relay.invalid"
+api_key = "xai-profile-secret"
+api_backend = "responses"
+
+[model."relay-4.7"]
+model = "grok-4.7"
+base_url = "https://relay.invalid"
+api_key = "xai-profile-secret"
+
+[models]
+default = "relay-4.7"
+"#;
+
+    fn grok_status_of(config: &str) -> (bool, String) {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".grok")).unwrap();
+        std::fs::write(home.path().join(".grok/config.toml"), config).unwrap();
+        let (ready, lines) = stored_status(GROK, home.path()).unwrap();
+        (ready, lines.join("\n"))
+    }
+
+    #[test]
+    fn grok_config_keys_count_as_signed_in_without_printing_them() {
+        let (ready, lines) = grok_status_of(GROK_CONFIG);
+        assert!(ready);
+        assert_eq!(lines, r#"signed in (API key in config, model "relay-4.7")"#);
+        // The default may name a model id instead of a catalog key.
+        let (ready, _) = grok_status_of(
+            &GROK_CONFIG.replace(r#"default = "relay-4.7""#, r#"default = "grok-4.5""#),
+        );
+        assert!(ready);
+        // A default without a key, an unknown default, and no default at all.
+        let keyless = "[model.m]\nmodel = \"grok-4.7\"\n[models]\ndefault = \"m\"\n";
+        let (ready, lines) = grok_status_of(keyless);
+        assert!(!ready);
+        assert!(lines.contains(r#"default model "m" has no api_key in config"#));
+        assert!(!grok_status_of("[models]\ndefault = \"grok-9\"\n").0);
+        assert!(!grok_status_of("[cli]\ninstaller = \"internal\"\n").0);
+        // A key variable SCV removes from delegated agents does not count.
+        let removed = "[model.m]\nenv_key = [\"XAI_API_KEY\"]\n[models]\ndefault = \"m\"\n";
+        let (ready, lines) = grok_status_of(removed);
+        assert!(!ready);
+        assert!(lines.contains("$XAI_API_KEY"), "{lines}");
+        // An unparsable config is an error that never echoes its content.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".grok")).unwrap();
+        std::fs::write(
+            home.path().join(".grok/config.toml"),
+            "api_key = xai-secret",
+        )
+        .unwrap();
+        let error = stored_status(GROK, home.path()).unwrap_err().to_string();
+        assert!(!error.contains("secret"), "{error}");
+    }
+
+    #[test]
+    fn grok_import_merges_by_table_privately_without_printing_keys() {
+        let (source, scv) = homes();
+        let destination = scv.path().join(".grok");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(source.path().join("config.toml"), GROK_CONFIG).unwrap();
+        std::fs::write(
+            source.path().join("auth.json"),
+            r#"{"a":{"key":"xai-token-secret"}}"#,
+        )
+        .unwrap();
+        // Grok's own state in SCV's copy survives; a stale user table does not.
+        std::fs::write(
+            destination.join("config.toml"),
+            "[marketplace]\ndefault_skills_installs_purged = true\n\n[cli]\ninstaller = \"old\"\n",
+        )
+        .unwrap();
+        let notes = import_grok(source.path(), &destination).unwrap().join("\n");
+        let copied = destination.join("config.toml");
+        assert_eq!(mode(&copied), 0o600);
+        let text = std::fs::read_to_string(&copied).unwrap();
+        assert!(text.starts_with(GROK_CONFIG), "user formatting is kept");
+        let table: toml::Table = text.parse().unwrap();
+        assert_eq!(table["cli"]["installer"].as_str(), Some("internal"));
+        assert_eq!(
+            table["marketplace"]["default_skills_installs_purged"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(table["models"]["default"].as_str(), Some("relay-4.7"));
+        assert!(!destination.join("auth.json").exists());
+        assert!(notes.contains(r#"default model "relay-4.7"; profiles "relay", "relay-4.7""#));
+        assert!(notes.contains(r#"Kept SCV-only settings: "marketplace""#));
+        assert!(notes.contains("Skipped auth.json"));
+        assert!(!notes.contains("secret"), "{notes}");
+        assert!(stored_status(GROK, scv.path()).unwrap().0);
+    }
+
+    #[test]
+    fn grok_import_writes_nothing_when_either_file_is_invalid() {
+        let (source, scv) = homes();
+        let destination = scv.path().join(".grok");
+        std::fs::create_dir(&destination).unwrap();
+        let existing = "[marketplace]\nkept = true\n";
+        std::fs::write(destination.join("config.toml"), existing).unwrap();
+        std::fs::write(source.path().join("config.toml"), "api_key = xai-secret").unwrap();
+        let error = import_grok(source.path(), &destination)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("config.toml")).unwrap(),
+            existing
+        );
+        std::fs::write(source.path().join("config.toml"), GROK_CONFIG).unwrap();
+        std::fs::write(destination.join("config.toml"), "broken = [").unwrap();
+        assert!(import_grok(source.path(), &destination).is_err());
+        assert_eq!(
+            std::fs::read_to_string(destination.join("config.toml")).unwrap(),
+            "broken = ["
+        );
+        assert!(import_grok(&destination, &destination).is_err());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(import_grok(empty.path(), &destination).is_err());
+    }
+
+    #[test]
+    fn grok_import_keeps_top_level_values_outside_the_users_tables() {
+        let (source, scv) = homes();
+        let destination = scv.path().join(".grok");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(source.path().join("config.toml"), GROK_CONFIG).unwrap();
+        std::fs::write(destination.join("config.toml"), "version = 3\n").unwrap();
+        import_grok(source.path(), &destination).unwrap();
+        let table: toml::Table = std::fs::read_to_string(destination.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(table["version"].as_integer(), Some(3));
+        assert!(table["models"].get("version").is_none());
+        assert_eq!(table["models"]["default"].as_str(), Some("relay-4.7"));
+    }
 
     fn endpoint() -> Endpoint {
         Endpoint {
@@ -683,9 +1043,9 @@ experimental_bearer_token = "sk-bearer-secret"
     }
 
     #[test]
-    fn json_entry_stores_report_sign_in_without_values() {
+    fn grok_login_entries_report_sign_in_without_values() {
         let home = tempfile::tempdir().unwrap();
-        let store = KeyStore::JsonEntries(".grok/auth.json");
+        let store = GROK;
         assert!(!stored_status(store, home.path()).unwrap().0);
         std::fs::create_dir(home.path().join(".grok")).unwrap();
         std::fs::write(home.path().join(".grok/auth.json"), "{}").unwrap();

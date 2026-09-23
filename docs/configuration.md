@@ -401,8 +401,9 @@ any adapter's credential, endpoint, or state variables (such as
 `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `GROK_*`, `DSH_*`, or `PI_*`),
 and therefore cannot silently reuse or alter the user's normal agent
 configuration. Sign the agents in for SCV with `scv agents login <name>`, copy
-your Codex provider setup with `scv agents import codex`, or point pi at SCV's
-own provider with `scv agents import pi --from-scv-provider`; see
+your Codex provider setup with `scv agents import codex` or your Grok model
+profiles with `scv agents import grok`, or point pi at SCV's own provider with
+`scv agents import pi --from-scv-provider`; see
 [Signing in delegated agents](tools.md#signing-in-delegated-agents).
 
 Secrets are never included in diagnostics, protocol events, approval summaries,
