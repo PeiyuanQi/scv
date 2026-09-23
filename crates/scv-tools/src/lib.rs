@@ -2070,6 +2070,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signed_out_dsh_failure_names_the_host_login_command() {
+        let workspace = tempfile::tempdir().unwrap();
+        // DeepSeek Harness 0.1.7-rc.1's startup error without a key.
+        let tool = fake_agent(
+            workspace.path(),
+            "agent_dsh",
+            "echo 'dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route \"deepseek-official\"' >&2\nexit 1\n",
+            &[],
+            Vec::new(),
+        );
+        let output = tool
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        let content: Value = serde_json::from_str(&output.content).unwrap();
+        assert!(
+            content["hint"]
+                .as_str()
+                .unwrap()
+                .ends_with("scv agents login dsh"),
+            "{content}"
+        );
+    }
+
+    #[tokio::test]
     async fn signed_out_agent_failure_names_the_host_login_command() {
         let workspace = tempfile::tempdir().unwrap();
         let tool = fake_agent(

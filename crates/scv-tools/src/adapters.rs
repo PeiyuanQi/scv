@@ -125,8 +125,12 @@ pub enum Logout {
 /// A CLI's native credential file, relative to the adapter home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStore {
-    /// A JSON object whose entries are stored sign-ins (Grok's `auth.json`).
-    JsonEntries(&'static str),
+    /// Grok: sign-ins from `grok login` in `auth` (a JSON object of entries),
+    /// or an API key in the `config` profile of its default model.
+    Grok {
+        auth: &'static str,
+        config: &'static str,
+    },
     /// DeepSeek Harness `.credentials.yaml`, holding `refs.<variable>`.
     DshRefs {
         path: &'static str,
@@ -311,7 +315,10 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         full_permission_environment: &[],
         search_dirs: &[".grok/bin"],
         login: Login::Command(&["login"]),
-        status: Status::Stored(KeyStore::JsonEntries(".grok/auth.json")),
+        status: Status::Stored(KeyStore::Grok {
+            auth: ".grok/auth.json",
+            config: ".grok/config.toml",
+        }),
         status_summary: StatusSummary::ExitStatus,
         logout: Logout::Command(&["logout"]),
         // `--output-format json` exists but its success shape is unverified here.
@@ -560,18 +567,21 @@ mod tests {
             .into_iter()
             .flatten()
             {
-                let path = match store {
-                    KeyStore::JsonEntries(path) | KeyStore::DshRefs { path, .. } => path,
-                    KeyStore::Pi { dir } => dir,
+                let paths = match store {
+                    KeyStore::Grok { auth, config } => vec![auth, config],
+                    KeyStore::DshRefs { path, .. } => vec![path],
+                    KeyStore::Pi { dir } => vec![dir],
                 };
-                assert!(
-                    adapter
-                        .home_environment
-                        .iter()
-                        .any(|(_, home)| !home.is_empty() && path.starts_with(home)),
-                    "{}: {path}",
-                    adapter.name
-                );
+                for path in paths {
+                    assert!(
+                        adapter
+                            .home_environment
+                            .iter()
+                            .any(|(_, home)| !home.is_empty() && path.starts_with(home)),
+                        "{}: {path}",
+                        adapter.name
+                    );
+                }
             }
         }
     }

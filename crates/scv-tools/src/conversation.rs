@@ -401,6 +401,30 @@ pub fn collect_garbage(
     Ok(report)
 }
 
+/// Remove markers whose owning SCV process no longer runs, returning how
+/// many were removed. A short-lived `scv exec` leaves its markers behind when
+/// it exits; the daemon's reconcile pass clears them.
+pub fn remove_stale_markers(marker_dir: &Path) -> usize {
+    let before = marker_count(marker_dir);
+    let live = live_sessions(marker_dir, false).len();
+    before.saturating_sub(live)
+}
+
+fn marker_count(marker_dir: &Path) -> usize {
+    std::fs::read_dir(marker_dir).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(".json"))
+                    .is_some_and(valid_session_id)
+            })
+            .count()
+    })
+}
+
 /// Session IDs of conversations whose owning SCV process still runs.
 fn live_sessions(marker_dir: &Path, dry_run: bool) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(marker_dir) else {

@@ -297,7 +297,9 @@ mid-flight is killed the same way. The daemon reconciles at startup and every
 60 seconds: a record whose owning SCV process is gone (for example an
 `scv exec` server that was SIGKILLed) is an orphan, and its group and tagged
 processes are stopped and the record removed. A `scv server --stdio` also
-reconciles once when it starts. On Linux the daemon is a child subreaper, so
+reconciles once when it starts. Each pass also removes conversation markers
+(below) whose owning SCV process has exited, which a short-lived `scv exec`
+leaves behind. On Linux the daemon is a child subreaper, so
 descendants a delegated agent leaves behind reparent to it rather than to
 init, and it collects those that exit.
 
@@ -351,6 +353,7 @@ scv agents login codex                  # codex login
 scv agents login codex -- --device-auth # extra arguments after --
 scv agents import codex                 # or copy your own Codex setup
 scv agents login grok -- --device-auth  # grok login, device code for SSH hosts
+scv agents import grok                  # or copy your own Grok config and model profiles
 scv agents login dsh                    # prompts for a DeepSeek API key
 scv agents login pi                     # opens pi: run /login, then /quit
 scv agents login pi --openai-compatible # or point pi at any OpenAI-compatible endpoint
@@ -370,11 +373,28 @@ because their output names the account email or part of the key; for the
 others SCV reads the credential file and reports only whether one is stored,
 never its value.
 
+Grok counts as signed in either through a `grok login` sign-in in
+`.grok/auth.json` or through an API key in `.grok/config.toml`: the profile of
+its `[models] default` (matched by catalog key or model id) holds an `api_key`,
+or an `env_key` naming a variable that is set and that SCV does not remove from
+delegated agents. Status then reads `signed in (API key in config, model
+"<id>")`. `scv agents import grok` copies your own `~/.grok/config.toml` (or
+`$GROK_HOME`, or `--from <dir>`) into `.grok/config.toml`, atomically with mode
+`0600`. It merges by top-level table: your tables win, and tables only SCV's
+copy has, such as the `[marketplace]` state Grok writes there, are kept. The
+merged file is validated before anything is written, and it prints the profiles
+and default model, never a key. `auth.json` sign-ins are never copied. Re-run it
+after changing your own Grok config.
+
 DeepSeek Harness signs in with an API key only. `scv agents login dsh` reads
 it without echo, or from stdin when stdin is not a terminal, and writes it as
 `refs.DEEPSEEK_API_KEY` in `.dsh/.credentials.yaml`, DeepSeek Harness's own
 credential file, atomically with mode `0600`. `logout` removes that file. A key
-is never accepted as an argument.
+is never accepted as an argument. DeepSeek Harness 0.1.7-rc.1 is the tested
+version; 0.1.5-rc.2 fails at startup with "cannot create effect on inactive
+context" because its sandbox plugin requires a different Cordis framework
+version than the one it installs. Signed out, it fails with `MISSING_CREDENTIAL`,
+and the `agent_dsh` result names `scv agents login dsh`.
 
 pi's own `/login` covers its built-in providers. For any OpenAI-compatible
 endpoint, `scv agents login pi --openai-compatible` asks for the base URL, the
