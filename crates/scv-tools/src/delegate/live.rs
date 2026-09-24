@@ -34,13 +34,14 @@ use tokio::{
 };
 
 use crate::{
-    agent_output::TailBuffer,
-    apply_agent_environment,
-    delegation::{
-        self, DelegationGuard, DelegationRegistry, PendingDelegation, STOP_GRACE, group_exists,
-        signal_group,
+    delegate::{
+        output::TailBuffer,
+        records::{
+            self, DelegationGuard, DelegationRegistry, PendingDelegation, STOP_GRACE, group_exists,
+        },
     },
-    drain_output,
+    process::{ProcessGroup, apply_agent_environment, drain_output},
+    sync::lock,
 };
 
 /// Last bytes of a live child's stderr kept for failure reports.
@@ -125,7 +126,7 @@ impl LiveChild {
         let pid = child
             .id()
             .ok_or_else(|| ToolError("child process has no pid".into()))?;
-        delegation::track_spawned(pid);
+        records::track_spawned(pid);
         let guard = Arc::new(StdMutex::new(
             registration.and_then(|(registry, pending)| registry.register(pending, pid).ok()),
         ));
@@ -188,12 +189,7 @@ impl LiveChild {
 
     /// Record the conversation turn this child is serving.
     pub(crate) fn set_turn(&self, turn: u32) {
-        if let Some(guard) = self
-            .guard
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_ref()
-        {
+        if let Some(guard) = lock(&self.guard).as_ref() {
             guard.set_turn(turn);
         }
     }
@@ -224,14 +220,9 @@ impl Drop for LiveChild {
             Err(_) => {
                 // No runtime to wait in, so the reaper is gone too: kill at
                 // once. The guard's drop sweeps tagged leftovers.
-                signal_group(pid, libc::SIGKILL);
-                delegation::untrack_spawned(pid);
-                drop(
-                    self.guard
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take(),
-                );
+                kill_group(pid);
+                records::untrack_spawned(pid);
+                drop(lock(&self.guard).take());
             }
         }
     }
@@ -246,7 +237,7 @@ async fn shut_down(pid: u32, stdin: Option<ChildStdin>, mut life: watch::Receive
         .await
         .is_err()
     {
-        signal_group(pid, libc::SIGKILL);
+        kill_group(pid);
     }
     // The reaper then stops leftovers, giving tagged ones their own grace.
     let _ = tokio::time::timeout(
@@ -269,13 +260,10 @@ async fn reap(
     let _ = life.send(Life::Exited);
     // Descendants may outlive the leader, so the group always goes.
     if group_exists(pid) {
-        signal_group(pid, libc::SIGKILL);
+        kill_group(pid);
     }
-    delegation::untrack_spawned(pid);
-    let guard = guard
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .take();
+    records::untrack_spawned(pid);
+    let guard = lock(&guard).take();
     if let Some(guard) = guard {
         guard.finish().await;
     }
@@ -317,83 +305,12 @@ async fn read_lines(stdout: ChildStdout, sender: mpsc::Sender<LiveLine>, max_byt
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::delegation::DelegationRegistry;
-
-    /// A live `sh -c script` recorded under a fresh registry in `home`.
-    fn spawn(home: &std::path::Path, script: &str) -> (Arc<DelegationRegistry>, Arc<LiveChild>) {
-        let registry = Arc::new(DelegationRegistry::new(home));
-        let pending = registry.begin("fake", "session", home, Some(("fake-1", 1)));
-        let child = LiveChild::spawn(
-            LiveSpec {
-                executable: "sh".into(),
-                args: vec!["-c".into(), script.into()],
-                cwd: home.to_owned(),
-                environment: pending.environment.clone(),
-                max_line_bytes: 1024,
-            },
-            Some((Arc::clone(&registry), pending)),
-        )
-        .unwrap();
-        (registry, child)
-    }
-
-    /// Whether `pid` is an uncollected zombie.
-    fn zombie(pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| {
-                let state = stat.rsplit_once(") ")?.1.chars().next()?;
-                Some(state == 'Z')
-            })
-            .unwrap_or(false)
-    }
-
-    /// Wait until the child is collected and its record is gone.
-    async fn settles(registry: &DelegationRegistry, child: &LiveChild) {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while child.is_running() || !registry.list(true).is_empty() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the exited child was collected and forgotten");
-        assert!(!zombie(child.pid), "the exited child was left a zombie");
-    }
-
-    #[tokio::test]
-    async fn a_child_exiting_between_turns_is_collected_and_forgotten() {
-        let home = tempfile::tempdir().unwrap();
-        // Idle between turns: nothing reads its output when it exits.
-        let (registry, child) = spawn(home.path(), "sleep 0.2");
-        assert!(child.is_running());
-        assert_eq!(registry.list(true).len(), 1);
-        settles(&registry, &child).await;
-        // Closing afterwards is a quick no-op.
-        tokio::time::timeout(Duration::from_secs(5), child.close())
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn killing_an_idle_child_frees_it_at_once() {
-        let home = tempfile::tempdir().unwrap();
-        let (registry, child) = spawn(home.path(), "exec sleep 30");
-        let handle = registry.list(true)[0].record.handle.clone();
-        registry.kill(&handle).await.unwrap();
-        settles(&registry, &child).await;
-    }
-
-    #[tokio::test]
-    async fn close_stops_a_running_child_and_its_record() {
-        let home = tempfile::tempdir().unwrap();
-        // Ignores the closed input, so the group kill ends it.
-        let (registry, child) = spawn(home.path(), "trap '' TERM; sleep 30");
-        child.close().await;
-        assert!(!child.is_running());
-        assert!(registry.list(true).is_empty());
-        assert!(!zombie(child.pid));
+/// Kill every process in the child's group.
+fn kill_group(pid: u32) {
+    if let Some(group) = ProcessGroup::new(pid) {
+        group.signal(libc::SIGKILL);
     }
 }
+
+#[cfg(test)]
+mod tests;

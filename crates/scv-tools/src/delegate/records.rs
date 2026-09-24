@@ -26,6 +26,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::{process::ProcessGroup, sync::lock};
+
 /// Environment variable carrying the delegation chain.
 pub const PARENT_VARIABLE: &str = "SCV_PARENT";
 /// Environment variable carrying how deeply this process is delegated.
@@ -186,7 +188,7 @@ impl DelegationRegistry {
 
     /// Delegations this process stopped as orphans since it started.
     pub fn reaped_total(&self) -> u64 {
-        self.inner.lock().expect("registry lock").reaped
+        lock(&self.inner).reaped
     }
 
     /// Where live conversations leave markers for `scv agents gc`.
@@ -272,17 +274,11 @@ impl DelegationRegistry {
                 .map(|(handle, _)| handle.clone()),
             turn: pending.conversation.as_ref().map(|(_, turn)| *turn),
         };
-        self.inner
-            .lock()
-            .expect("registry lock")
+        lock(&self.inner)
             .active
             .insert(record.handle.clone(), Arc::clone(&killed));
         if let Err(error) = write_record(&self.record_dir, &record) {
-            self.inner
-                .lock()
-                .expect("registry lock")
-                .active
-                .remove(&record.handle);
+            lock(&self.inner).active.remove(&record.handle);
             return Err(error);
         }
         Ok(DelegationGuard {
@@ -330,20 +326,14 @@ impl DelegationRegistry {
             .into_iter()
             .find(|record| record.handle == handle)
             .ok_or_else(|| format!("no running delegation {handle:?}"))?;
-        let local = self
-            .inner
-            .lock()
-            .expect("registry lock")
-            .active
-            .get(handle)
-            .cloned();
+        let local = lock(&self.inner).active.get(handle).cloned();
         if let Some(killed) = &local {
             killed.store(true, Ordering::Release);
         }
         stop_delegation(&record).await;
         if local.is_none() && !self.owner_alive(&record) {
             remove_record(&self.record_dir, handle);
-            self.inner.lock().expect("registry lock").reaped += 1;
+            lock(&self.inner).reaped += 1;
         }
         Ok(())
     }
@@ -362,8 +352,9 @@ impl DelegationRegistry {
             }
             remove_record(&self.record_dir, &record.handle);
         }
-        self.inner.lock().expect("registry lock").reaped += report.reaped.len() as u64;
-        report.stale_markers = crate::conversation::remove_stale_markers(&self.conversation_dir());
+        lock(&self.inner).reaped += report.reaped.len() as u64;
+        report.stale_markers =
+            crate::delegate::conversation::remove_stale_markers(&self.conversation_dir());
         report
     }
 
@@ -371,12 +362,7 @@ impl DelegationRegistry {
     /// process owns counts only while its run is active here.
     fn owner_alive(&self, record: &DelegationRecord) -> bool {
         if Some(record.owner) == self.owner {
-            return self
-                .inner
-                .lock()
-                .expect("registry lock")
-                .active
-                .contains_key(&record.handle);
+            return lock(&self.inner).active.contains_key(&record.handle);
         }
         record.owner.is_alive()
     }
@@ -394,11 +380,7 @@ impl DelegationRegistry {
     }
 
     fn finish_local(&self, handle: &str) {
-        self.inner
-            .lock()
-            .expect("registry lock")
-            .active
-            .remove(handle);
+        lock(&self.inner).active.remove(handle);
         remove_record(&self.record_dir, handle);
     }
 }
@@ -449,7 +431,9 @@ impl Drop for DelegationGuard {
         }
         // The run was abandoned mid-flight: kill its group now and sweep
         // tagged leftovers in the background.
-        signal_group(self.pgid, libc::SIGKILL);
+        if let Some(group) = ProcessGroup::new(self.pgid) {
+            group.signal(libc::SIGKILL);
+        }
         self.registry.finish_local(&self.handle);
         let handle = self.handle.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -477,12 +461,17 @@ async fn stop_delegation(record: &DelegationRecord) -> bool {
         };
     if group_is_ours && group_exists(record.pgid) {
         stopped = true;
-        signal_group(record.pgid, libc::SIGTERM);
+        let group = ProcessGroup::new(record.pgid);
+        if let Some(group) = group {
+            group.signal(libc::SIGTERM);
+        }
         let deadline = tokio::time::Instant::now() + STOP_GRACE;
         while group_exists(record.pgid) && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        signal_group(record.pgid, libc::SIGKILL);
+        if let Some(group) = group {
+            group.signal(libc::SIGKILL);
+        }
     }
     stopped | stop_tagged(&record.handle).await
 }
@@ -527,34 +516,20 @@ fn signal(pid: u32, signal: i32) {
     if let Ok(pid) = i32::try_from(pid)
         && pid > 0
     {
+        // SAFETY: kill(2) takes plain integers and touches no memory of
+        // ours; a positive PID addresses exactly one process.
         unsafe {
             libc::kill(pid, signal);
         }
     }
 }
 
-pub(crate) fn signal_group(pgid: u32, signal: i32) {
-    // Never address group 0 or 1 (this process's own group, or init's).
-    if let Ok(pgid) = i32::try_from(pgid)
-        && pgid > 1
-    {
-        unsafe {
-            libc::kill(-pgid, signal);
-        }
-    }
-}
-
 /// Whether the process group still has a running member (zombies excluded on Linux).
 pub(crate) fn group_exists(pgid: u32) -> bool {
-    let Ok(group) = i32::try_from(pgid) else {
+    let Some(group) = ProcessGroup::new(pgid) else {
         return false;
     };
-    if group <= 1 {
-        return false;
-    }
-    let result = unsafe { libc::kill(-group, 0) };
-    let signalable =
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    let signalable = group.is_signalable();
     #[cfg(target_os = "linux")]
     {
         signalable
@@ -619,6 +594,8 @@ fn remove_record(dir: &Path, handle: &str) {
 pub fn become_child_subreaper() -> bool {
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: PR_SET_CHILD_SUBREAPER takes integer arguments only and
+        // changes only this process's own reaping attribute.
         unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0 }
     }
     #[cfg(not(target_os = "linux"))]
@@ -631,15 +608,11 @@ static SPAWNED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
 
 /// Note a child this process spawned and will wait for itself.
 pub(crate) fn track_spawned(pid: u32) {
-    SPAWNED
-        .lock()
-        .expect("spawned lock")
-        .get_or_insert_with(HashSet::new)
-        .insert(pid);
+    lock(&SPAWNED).get_or_insert_with(HashSet::new).insert(pid);
 }
 
 pub(crate) fn untrack_spawned(pid: u32) {
-    if let Some(spawned) = SPAWNED.lock().expect("spawned lock").as_mut() {
+    if let Some(spawned) = lock(&SPAWNED).as_mut() {
         spawned.remove(&pid);
     }
 }
@@ -650,11 +623,7 @@ pub fn reap_orphaned_zombies() -> usize {
     #[cfg(target_os = "linux")]
     {
         let own = std::process::id();
-        let spawned = SPAWNED
-            .lock()
-            .expect("spawned lock")
-            .clone()
-            .unwrap_or_default();
+        let spawned = lock(&SPAWNED).clone().unwrap_or_default();
         let uptime = linux::uptime_ticks();
         let mut reaped = 0;
         for info in linux::all_stats() {
@@ -669,6 +638,8 @@ pub fn reap_orphaned_zombies() -> usize {
                 continue;
             }
             let mut status = 0;
+            // SAFETY: `status` is a live local that waitpid(2) writes one
+            // int into; WNOHANG keeps the call from blocking.
             if unsafe { libc::waitpid(info.pid as i32, &mut status, libc::WNOHANG) }
                 == info.pid as i32
             {
@@ -768,8 +739,12 @@ fn process_start_time(pid: u32) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 fn process_start_time(pid: u32) -> Option<u64> {
+    // SAFETY: proc_bsdinfo is a plain C struct of integers and byte arrays,
+    // for which all-zero bytes are a valid value.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: the buffer is `info` itself and `size` is its exact size, so
+    // proc_pidinfo(2) writes at most that many bytes into it.
     let written = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -784,6 +759,8 @@ fn process_start_time(pid: u32) -> Option<u64> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn process_start_time(pid: u32) -> Option<u64> {
+    // SAFETY: signal 0 only checks that the process exists; kill(2) takes
+    // plain integers and touches no memory of ours.
     let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
     alive.then_some(0)
 }
@@ -836,6 +813,7 @@ mod linux {
     }
 
     pub(super) fn clock_ticks() -> u64 {
+        // SAFETY: sysconf(3) only reads a system constant.
         let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
         u64::try_from(ticks)
             .ok()
@@ -851,245 +829,4 @@ mod linux {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::{fs::PermissionsExt as _, process::CommandExt as _};
-
-    fn registry(home: &Path) -> Arc<DelegationRegistry> {
-        Arc::new(DelegationRegistry::new(home))
-    }
-
-    /// Spawn `sh -c script` in its own process group with `environment`.
-    fn spawn_tagged(script: &str, environment: &[(OsString, OsString)]) -> std::process::Child {
-        std::process::Command::new("sh")
-            .args(["-c", script])
-            .envs(environment.iter().map(|(key, value)| (key, value)))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap()
-    }
-
-    async fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
-        for _ in 0..200 {
-            if condition() {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        false
-    }
-
-    #[test]
-    fn chains_match_only_their_own_handle() {
-        assert!(chain_names("abcd/s1/codex-1a2b3c", "codex-1a2b3c"));
-        assert!(chain_names(
-            "x/s/claude-000000;abcd/s1/codex-1a2b3c",
-            "codex-1a2b3c"
-        ));
-        assert!(!chain_names("abcd/s1/codex-1a2b3c", "codex-1a2b3"));
-        assert!(!chain_names("abcd/s1/codex-1a2b3c", "1a2b3c"));
-    }
-
-    #[test]
-    fn a_declared_client_depth_raises_the_recorded_depth() {
-        let home = tempfile::tempdir().unwrap();
-        let registry = DelegationRegistry::new(home.path());
-        let pending = registry.begin_at(2, "codex", "session", home.path(), None);
-        assert_eq!(pending.depth, 3);
-        assert!(
-            pending
-                .environment
-                .iter()
-                .any(|(name, value)| { name == DEPTH_VARIABLE && value == "3" })
-        );
-    }
-
-    #[test]
-    fn nested_tags_extend_the_chain_and_depth() {
-        let home = tempfile::tempdir().unwrap();
-        let mut registry = DelegationRegistry::new(home.path());
-        registry.chain = Some("aaaa/s0/codex-111111".into());
-        registry.depth = 1;
-        let pending = registry.begin("claude", "s1", home.path(), Some(("claude-1", 2)));
-        let value = |name: &str| {
-            pending
-                .environment
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.to_str().unwrap().to_owned())
-                .unwrap()
-        };
-        assert_eq!(
-            value(PARENT_VARIABLE),
-            format!(
-                "aaaa/s0/codex-111111;{}/s1/{}",
-                registry.instance, pending.handle
-            )
-        );
-        assert_eq!(value(DEPTH_VARIABLE), "2");
-        assert!(pending.handle.starts_with("claude-"));
-    }
-
-    #[tokio::test]
-    async fn records_are_private_and_removed_when_the_run_finishes() {
-        let home = tempfile::tempdir().unwrap();
-        let registry = registry(home.path());
-        let pending = registry.begin("codex", "session", home.path(), None);
-        let environment = pending.environment.clone();
-        let mut child = spawn_tagged("sleep 30", &environment);
-        let guard = registry.register(pending, child.id()).unwrap();
-        let path = registry
-            .record_dir()
-            .join(format!("{}.json", guard.handle()));
-        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&path), 0o600);
-        assert_eq!(mode(registry.record_dir()), 0o700);
-        assert_eq!(mode(registry.record_dir().parent().unwrap()), 0o700);
-
-        let listed = registry.list(false);
-        assert_eq!(listed.len(), 1);
-        assert!(!listed[0].orphaned);
-        assert_eq!(listed[0].record.process.pid, child.id());
-        assert!(listed[0].processes >= 1);
-
-        signal_group(child.id(), libc::SIGKILL);
-        child.wait().unwrap();
-        guard.finish().await;
-        assert!(!path.exists());
-        assert!(registry.list(true).is_empty());
-    }
-
-    #[tokio::test]
-    async fn kill_stops_a_local_run_and_marks_it_killed() {
-        let home = tempfile::tempdir().unwrap();
-        let registry = registry(home.path());
-        let pending = registry.begin("claude", "session", home.path(), None);
-        let environment = pending.environment.clone();
-        let mut child = spawn_tagged("trap '' TERM; sleep 30", &environment);
-        let guard = registry.register(pending, child.id()).unwrap();
-        registry.kill(guard.handle()).await.unwrap();
-        assert!(guard.was_killed());
-        assert!(child.wait().unwrap().code().is_none(), "killed by a signal");
-        assert!(registry.kill("claude-nosuch").await.is_err());
-        guard.finish().await;
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn reconcile_removes_conversation_markers_of_exited_processes() {
-        let home = tempfile::tempdir().unwrap();
-        let daemon = registry(home.path());
-        let markers = daemon.conversation_dir();
-        let mut gone = std::process::Command::new("true").spawn().unwrap();
-        let gone_pid = gone.id();
-        gone.wait().unwrap();
-        let dead = ProcessIdentity {
-            pid: gone_pid,
-            start_time: 1,
-        };
-        let live = ProcessIdentity::current().unwrap();
-        for (id, owner) in [("dead-id", dead), ("live-id", live)] {
-            let marker = serde_json::json!({"owner": owner, "agent": "codex", "handle": "codex-1"});
-            write_private_json(&markers, &format!("{id}.json"), &marker).unwrap();
-        }
-        let report = daemon.reconcile().await;
-        assert_eq!(report.stale_markers, 1);
-        assert!(!markers.join("dead-id.json").exists());
-        assert!(markers.join("live-id.json").is_file());
-        assert_eq!(daemon.reconcile().await, ReconcileReport::default());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn reconcile_reaps_an_orphan_and_its_detached_descendants() {
-        let home = tempfile::tempdir().unwrap();
-        let owner = registry(home.path());
-        let pending = owner.begin("codex", "session", home.path(), None);
-        let environment = pending.environment.clone();
-        // The agent starts a detached descendant in a new session, outside its group.
-        let mut child = spawn_tagged("setsid sleep 60 & exec sleep 60", &environment);
-        let guard = owner.register(pending, child.id()).unwrap();
-        let handle = guard.handle().to_owned();
-        assert!(wait_for(|| tagged_processes(&handle).len() >= 2).await);
-        let path = owner.record_dir().join(format!("{handle}.json"));
-        // Rewrite the record as if a process that has since died owned it.
-        let mut record = read_record(&path).unwrap();
-        let mut gone = std::process::Command::new("true").spawn().unwrap();
-        let gone_pid = gone.id();
-        gone.wait().unwrap();
-        record.owner = ProcessIdentity {
-            pid: gone_pid,
-            start_time: 1,
-        };
-        write_record(owner.record_dir(), &record).unwrap();
-        std::mem::forget(guard);
-
-        // Another SCV process of the same instance reconciles.
-        let daemon = registry(home.path());
-        assert!(daemon.list(false).is_empty());
-        let orphans = daemon.list(true);
-        assert_eq!(orphans.len(), 1);
-        assert!(orphans[0].orphaned);
-        assert!(orphans[0].processes >= 2);
-        let report = daemon.reconcile().await;
-        assert_eq!(report.reaped, vec![handle.clone()]);
-        assert_eq!(daemon.reaped_total(), 1);
-        assert!(child.wait().unwrap().code().is_none());
-        assert!(wait_for(|| tagged_processes(&handle).is_empty()).await);
-        assert!(!path.exists());
-        assert_eq!(daemon.reconcile().await, ReconcileReport::default());
-    }
-
-    #[tokio::test]
-    async fn an_abandoned_run_is_cleaned_up_when_its_guard_drops() {
-        let home = tempfile::tempdir().unwrap();
-        let registry = registry(home.path());
-        let pending = registry.begin("pi", "session", home.path(), None);
-        let environment = pending.environment.clone();
-        let mut child = spawn_tagged("sleep 30", &environment);
-        let guard = registry.register(pending, child.id()).unwrap();
-        let path = registry
-            .record_dir()
-            .join(format!("{}.json", guard.handle()));
-        drop(guard);
-        assert!(child.wait().unwrap().code().is_none());
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
-        let home = tempfile::tempdir().unwrap();
-        let registry = DelegationRegistry::new(home.path());
-        let dir = registry.record_dir().to_owned();
-        let record = DelegationRecord {
-            handle: "codex-abcdef".into(),
-            agent: "codex".into(),
-            instance: "other".into(),
-            session: "s".into(),
-            owner: ProcessIdentity {
-                pid: 1,
-                start_time: 1,
-            },
-            process: ProcessIdentity {
-                pid: 1,
-                start_time: 1,
-            },
-            pgid: 1,
-            cwd: "/".into(),
-            started_unix: 0,
-            depth: 1,
-            conversation: None,
-            turn: None,
-        };
-        write_record(&dir, &record).unwrap();
-        std::fs::copy(
-            dir.join("codex-abcdef.json"),
-            dir.join("codex-renamed.json"),
-        )
-        .unwrap();
-        assert!(registry.list(true).is_empty());
-    }
-}
+mod tests;
