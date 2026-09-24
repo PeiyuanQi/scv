@@ -17,7 +17,7 @@ and provides a responsive Rust TUI for coding work.
 - Configurable, bounded context selection and deterministic compaction
 - Server-enforced approvals, timeouts, output caps, and cancellation
 - A Unix-socket daemon with a Ratatui client, plus a stdio server for one-shot clients
-- Daemon-supervised chat channels (WeChat) with persistent enablement and live health
+- Daemon-supervised chat channels (WeChat, Feishu/Lark) with persistent enablement and live health
 - Interactive TUI plus a headless `scv exec` mode
 - Linux and macOS support on ARM64 and x86-64
 
@@ -75,6 +75,7 @@ cargo publish --locked -p scv-provider-openai
 cargo publish --locked -p scv-tools
 cargo publish --locked -p scv-channels
 cargo publish --locked -p scv-clawbot
+cargo publish --locked -p scv-feishu
 cargo publish --locked -p scv-server
 cargo publish --locked -p scv-tui
 cargo publish --locked -p scv-cli
@@ -89,7 +90,7 @@ scv server --stdio
 
 The stdio protocol is intentionally local and one-session-per-connection.
 
-## Daemon and channels (WeChat)
+## Daemon and channels (WeChat, Feishu)
 
 SCV has one long-running daemon. Run it attached to the terminal with
 `scv run --workspace /path/to/workspace`, or let the user service supervise the
@@ -168,7 +169,18 @@ mean connected. `scv channels logout wechat --account NAME` requires a live
 daemon and joins the component before deleting credentials, delivery state, and
 settings.
 
-Account settings live at `$SCV_HOME/channels/wechat/settings/<account>.json`, with
+Feishu (and Lark, its international edition) works the same way:
+`scv channels login feishu` shows a QR code; scanning it with the Feishu app
+creates a bot app in your own account, with no developer console or public URL,
+and records you as its owner. `scv channels login feishu --app-id cli_...
+--owner-open-id ou_...` instead adds an app you already have, reading its
+secret from a hidden prompt or stdin. The bot connects over Feishu's event long
+connection and, after any disconnection, catches up on messages sent in the
+meantime from chat history. In groups it answers only messages that mention
+it. `scv channels run feishu --workspace PATH --remote-tools owner` then
+grants the owner's direct chats every SCV tool, exactly as for WeChat.
+
+Account settings live at `$SCV_HOME/channels/<channel>/settings/<account>.json`, with
 `enabled` defaulting to `true`, `remote_tools` defaulting to `"none"`, and an
 optional workspace defaulting to the daemon workspace. The daemon reconciles accounts and settings every two seconds
 or immediately on `scv reload`. To opt out while offline, set `enabled` to
@@ -286,8 +298,8 @@ Claude Code, Codex, and pi keep multi-turn conversations: a result's `session`
 handle continues the same conversation, and `scv agents gc` clears old
 transcripts. Any agent call may set `background: true` to return a job handle
 at once while the agent keeps working; `agent_wait` and `agent_status` observe
-jobs, and when one finishes SCV reports it in a turn of its own (over WeChat,
-as an unprompted message to the owner). A session runs at most
+jobs, and when one finishes SCV reports it in a turn of its own (over WeChat
+or Feishu, as an unprompted message to the owner). A session runs at most
 `agent.max_background` (default 2) jobs, and closing it cancels them. Claude Code, Codex, Grok Build, and DeepSeek Harness run over the
 Agent Client Protocol when its server is installed (`claude-agent-acp` and
 `codex-acp` from npm `@agentclientprotocol/*`, or the built-in `grok agent
@@ -308,14 +320,16 @@ SCV is a Cargo workspace with deliberately narrow packages:
 - `scv-channels`: the chat-channel bridge every channel shares: durable
   claims, delivery state, and remote sessions;
 - `scv-clawbot`: the WeChat channel's iLink login, polling, and sending;
+- `scv-feishu`: the Feishu/Lark channel's QR app registration, event long
+  connection with catch-up, and sending;
 - `scv-server`: configuration, sessions, permissions, component supervision,
   and protocol dispatch;
 - `scv-tui`: terminal client and headless protocol client.
 
 The TUI connects to the local Unix-socket daemon; `scv-server --stdio` exposes
 the same server library to one-shot local clients. Dependencies flow from
-server to the WeChat channel (`scv-clawbot`) to the channel core
-(`scv-channels`) to client to protocol; the TUI depends on client, not server.
+server to the channel crates (WeChat's `scv-clawbot`, Feishu's `scv-feishu`)
+to the channel core (`scv-channels`) to client to protocol; the TUI depends on client, not server.
 All long-running components must be supervised by the server. Start with the
 final v0.1
 [`architecture`](docs/architecture.md), then see the

@@ -1,0 +1,24 @@
+// Frame format of the Feishu/Lark event long connection, as used by the
+// official SDKs (oapi-sdk-go ws/pbbp2.pb.go). `src/frame.rs` mirrors it with
+// prost derives, so building SCV needs no protoc.
+syntax = "proto2";
+
+package pbbp2;
+
+message Header {
+  required string key = 1;
+  required string value = 2;
+}
+
+message Frame {
+  required uint64 SeqID = 1;
+  required uint64 LogID = 2;
+  required int32 service = 3;
+  // 0: control (ping, pong); 1: data (event, card).
+  required int32 method = 4;
+  repeated Header headers = 5;
+  optional string payload_encoding = 6;
+  optional string payload_type = 7;
+  optional bytes payload = 8;
+  optional string LogIDNew = 9;
+}

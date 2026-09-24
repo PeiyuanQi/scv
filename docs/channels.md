@@ -3,35 +3,44 @@
 Status: supported local bridges for the SCV daemon
 
 A channel connects chat accounts to a local workspace. One command manages
-every channel: `scv channels <command> <channel>`. WeChat, through its ClawBot
-iLink HTTP API, is the channel today; Feishu/Lark is planned in the
-[channels plan](channels-plan.md).
+every channel: `scv channels <command> <channel>`. The channels are WeChat,
+through its ClawBot iLink HTTP API, and Feishu with its international edition
+Lark, through a bot app and Feishu's event long connection (`lark` is accepted
+wherever `feishu` is).
 
 Each account runs as a supervised component inside the single SCV daemon,
 which remains authoritative for sessions, provider selection, policy, and turn
 execution. `scv-channels` holds the bridge every channel shares; a channel
-crate such as `scv-clawbot` supplies only its transport. `scv-server` depends
-on `scv-clawbot`, which uses `scv-channels` and, through it, `scv-client` and
-`scv-protocol`; no channel crate depends on the server crate.
+crate (`scv-clawbot` for WeChat, `scv-feishu` for Feishu) supplies only its
+transport. `scv-server` depends on the channel crates, which use
+`scv-channels` and, through it, `scv-client` and `scv-protocol`; no channel
+crate depends on the server crate.
 
 ## User workflow
 
 ```text
 scv channels login wechat [--account NAME] [--login-url URL]
-scv channels run wechat --workspace PATH [--account NAME] [--remote-tools none|owner]
-scv channels stop wechat [--account NAME]
-scv channels status [wechat] [--account NAME]
-scv channels logout wechat [--account NAME]
+scv channels login feishu|lark [--account NAME]
+scv channels login feishu|lark --app-id CLI_ID [--owner-open-id OPEN_ID] [--account NAME]
+scv channels run <channel> --workspace PATH [--account NAME] [--remote-tools none|owner]
+scv channels stop <channel> [--account NAME]
+scv channels status [<channel>] [--account NAME]
+scv channels logout <channel> [--account NAME]
 scv reload
 ```
 
 `--account` defaults to `default`, except for `status`, which lists every
 channel and account unless narrowed. `--login-url` is WeChat's iLink login
-origin (default `https://ilinkai.weixin.qq.com`). Daemon status names each
-account `<channel>:<account>`, such as `wechat:default`, with a `channel` field.
+origin (default `https://ilinkai.weixin.qq.com`); `--app-id` and
+`--owner-open-id` are Feishu's, and each channel refuses the other's options.
+Daemon status names each account `<channel>:<account>`, such as
+`wechat:default` or `feishu:default`, with a `channel` field, the bot's
+identity in `bot_id` (the iLink bot, or the Feishu app ID), and the owner in
+`user_id`.
 
 `login` is explicit: it renders the QR code and stores credentials without
-printing the token. Saved accounts autostart under the daemon by default;
+printing the token or secret. For Feishu, the scan creates a bot app in the
+user's own Feishu or Lark account (see [Feishu contract](#feishu-contract)). Saved accounts autostart under the daemon by default;
 logging in preserves any saved disabled setting. Changing the account identity
 or API origin requires explicit logout first, including replacing legacy
 credentials whose identity is unknown. Login requests a reload when
@@ -48,8 +57,9 @@ token-revocation operation.
 
 `status` queries the running daemon, showing its PID/version and each selected
 account's identity, enabled setting, effective `remote_tools` authority, health
-state, restart count, sanitized error, and last successful authenticated,
-validated `getupdates` timestamp.
+state, restart count, sanitized error, and last successful contact: an
+authenticated, validated WeChat `getupdates`, or for Feishu a connected long
+connection that finished its catch-up or its last wait without error.
 Saved credentials are not proof of a connection. If the daemon is unavailable,
 connectivity is unknown.
 
@@ -62,7 +72,7 @@ updated credentials or settings. Unexpected exits retry with exponential
 backoff from 1 to 60 seconds. SIGTERM and Ctrl+C cancel and join components and daemon sessions with
 bounded shutdown. All long-running integrations use server supervision.
 
-Settings live at `$SCV_HOME/channels/wechat/settings/<account>.json`
+Settings live at `$SCV_HOME/channels/<channel>/settings/<account>.json`
 (`SCV_HOME` defaults to `~/.scv`):
 
 ```json
@@ -81,6 +91,9 @@ A busy snapshot defers that account's reconciliation to a later pass without
 stopping its current instance.
 Discovery rejects more than 128 entries (including the legacy default account)
 and directory-entry errors rather than silently returning a partial account set.
+Each channel is discovered separately: one that fails stops only its own
+accounts and reports a `<channel>:discovery-error` component, while the other
+channel's accounts keep running.
 
 Stop any `0.1.9` standalone ClawBot process before enabling a supervised account.
 Those older processes do not honor the account locks.
@@ -88,7 +101,10 @@ Those older processes do not honor the account locks.
 ## Identity and durable state
 
 `credential_fingerprint` binds delivery state to a SHA-256 fingerprint of the
-normalized API origin and authenticated bot/user IDs. Token rotation for the
+account's identity. For WeChat that is the normalized API origin and
+authenticated bot/user IDs; for Feishu it is the brand, the app ID, and the
+owner's `open_id`, so a rotated app secret keeps the state while another app
+or owner needs a logout. Token rotation for the
 same known identity and origin preserves the cursor, pending replies, and
 per-chunk client IDs. If either ID is unavailable, the conservative fingerprint
 also includes the token and available identity fields. Legacy unbound state is
@@ -205,6 +221,93 @@ context token. A turn's answer is kept to 64 KiB, and a longer one is cut with
 a `[reply truncated]` note instead of failing the turn. Media, typing, and
 uploads are deferred.
 
+## Feishu contract
+
+Checked live with the owner on 2026-09-24; see the
+[channels plan](channels-plan.md#0-feishu-live-check).
+
+**Sign-in by scan.** `scv channels login feishu` runs the device flow that
+Lark's own CLI uses. It posts forms to
+`https://accounts.feishu.cn/oauth/v1/app/registration`: `action=init` must list
+`client_secret` in `supported_auth_methods`; `action=begin` with
+`archetype=PersonalAgent`, `auth_method=client_secret`, and
+`request_user_info=open_id tenant_brand` returns a device code, a user code,
+an interval, and an expiry (an hour live). SCV prints a terminal QR code for
+`https://open.feishu.cn/page/cli?user_code=…` (`open.larksuite.com` for
+`lark`) and polls with `action=poll`: `authorization_pending` keeps waiting,
+`slow_down` adds five seconds (at most 60 between polls), `access_denied` and
+`expired_token` stop, and other errors stop with only their code shown. When
+`user_info.tenant_brand` names Lark, polling moves once to
+`accounts.larksuite.com`, which issues the credentials. The result is the app
+ID and secret and the creator's `open_id`, recorded as the owner; Feishu issues
+`open_id` per app, so it is the sender ID of the owner's messages to this bot.
+The app works at once, with no developer console, administrator approval, or
+public URL. It is named after its creator ("…的飞书 CLI"); login prints the
+developer-console link for renaming it, which needs a new app version.
+Registration ignores unknown fields, so whether it can take a name is unknown.
+An account that is already signed in must log out first.
+
+**Sign-in with an existing app.** `--app-id` adds an app the user already has,
+such as one a company administrator approved. The secret is read from a
+hidden prompt or stdin, never an argument, and checked against
+`/open-apis/auth/v3/tenant_access_token/internal` before anything is written.
+`--owner-open-id` names the owner; without it the account grants tools to
+nobody.
+
+**Receiving.** Each connection starts with
+`POST {open}/callback/ws/endpoint` (`AppID`, `AppSecret`), which returns a
+`wss` URL and client settings. The URL must be on the brand's domain
+(`feishu.cn` or `larksuite.com`) over TLS on port 443; any other host is
+refused before dialing, and connection errors never include the URL, which
+carries one-time keys. Frames are protobuf `pbbp2.Frame`
+(`crates/scv-feishu/proto/pbbp2.proto`). SCV pings the connection's
+`service_id` at once and then at the server's `PingInterval` (90 seconds
+live), applies intervals a pong reports, and treats two intervals plus 30
+seconds of silence as a lost connection. Events split by the `sum` and `seq`
+headers are reassembled within 30 seconds, 64 parts, and 8 MiB. Only `event`
+data frames are handled; `im.message.receive_v1` becomes a message and every
+other event, such as `im.message.message_read_v1`, is acknowledged at once and
+ignored. A message event is acknowledged, with the same frame, a `biz_rt`
+header, and a `{"code":200}` payload, only when the bridge asks for the next
+batch, which it does after the event's claim and checkpoint are durable.
+
+**Catch-up.** Feishu does not redeliver messages sent while SCV was
+disconnected. The checkpoint records, for up to 64 chats, whether each is a
+group and the newest message time handed to the bridge. On every connection,
+before reading the socket, SCV lists each of the 32 most recently active
+chats' messages since that time, reaching back at most 24 hours, through
+`GET /open-apis/im/v1/messages` (`container_id_type=chat`, oldest first, up to
+four pages of 50), and hands them over like socket events. The bot's own and
+other apps' messages and deleted ones are skipped. A chat whose history Feishu
+refuses is skipped with a warning; a transport failure fails the catch-up so
+it runs again. Deduplication by message ID drops anything already claimed or
+answered, including a late socket redelivery. Messages from chats SCV has not
+yet seen are not caught up.
+
+**Messages.** Text and rich-text (`post`) messages from users are answered;
+rich text becomes plain text, one paragraph per line. Other types are only
+marked seen. In a group (any `chat_type` other than `p2p`) the bot answers
+only messages that mention it, identified by its own `open_id` from
+`/open-apis/bot/v3/info`; without that ID, group messages go unanswered.
+Mention placeholders become `@name`, and the bot's own mention is dropped.
+
+**Sending.** Calls use a tenant token cached until ten minutes before it
+expires and dropped whenever Feishu reports it invalid. A reply goes to
+`POST /open-apis/im/v1/messages/{message_id}/reply`; a message that answers
+nothing, such as a background report, goes to
+`POST /open-apis/im/v1/messages?receive_id_type=open_id`. Both send `text`
+with the part's stable client ID as `uuid`, which Feishu uses to deliver a
+resent part once within an hour. Feishu has no single-reply limit, so every
+part of a long answer replies to its message. `<at` in outgoing text gets a
+zero-width space, so model output can never mention anyone, including `@all`.
+Transport failures, HTTP 5xx, 408, and 429, invalid-token codes, and rate-limit
+codes (99991400, 230020, 11232, 11233) retry with the same `uuid`; any other
+error code is a final refusal, logged by code only, and the reply is held as
+for WeChat.
+
+**Untested:** group chats, and sign-in from company accounts whose
+administrators must approve apps.
+
 ## Background reports
 
 When the owner's session starts a background delegation (an `agent_*` call
@@ -213,9 +316,10 @@ notes the job from the tool result and keeps that conversation's session open,
 without the 30-minute idle limit, until the job is reported. When the server
 starts a turn reporting it (`turn.started` with an `origin`), the bridge
 answers that turn's approval requests like the owner's own, collects its
-answer, and sends it to the owner as an unprompted message: recorded as a
-pending delivery before sending, retried with the same client ID, and moved to
-the held-reply store if iLink refuses it outright. A report that finishes
+answer, and sends it to the owner as an unprompted message (for Feishu, a
+message to the owner's `open_id`): recorded as a pending delivery before
+sending, retried with the same client ID, and moved to the held-reply store if
+the platform refuses it outright. A report that finishes
 during one of the owner's turns follows that turn's reply. Only direct chats
 receive reports; group and non-owner sessions have no tools.
 
@@ -226,8 +330,8 @@ which would cancel the jobs; the owner still gets the failure reply.
 ## Sessions and safety
 
 Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A
-message carrying a non-empty `group_id` uses a separate session per group and
-sender, so group members never see the sender's direct-chat history. Sessions
+group message (a non-empty WeChat `group_id`, or a Feishu chat other than
+`p2p`) uses a separate session per group and sender, so group members never see the sender's direct-chat history. Sessions
 idle for 30 minutes after their last turn ends are dropped, and at most 32
 sessions are live; a new conversation closes the least recently used idle one.
 
@@ -249,7 +353,7 @@ Network failures use bounded exponential backoff. Retained duplicate message
 IDs and interrupted claims do not start another turn. Pending sends retain
 their client IDs across recovery; remote exactly-once delivery is not promised.
 Raw diagnostics, tool arguments, tool output, tokens, and host paths are not
-forwarded as failure details to WeChat.
+forwarded as failure details to the chat.
 
 Remote tool authority is a per-account setting, `remote_tools`, that only local
 CLI or daemon control can change:
@@ -258,10 +362,10 @@ CLI or daemon control can change:
   `no_tools: true`, enforced by the server, and the bridge denies any approval
   request.
 - `owner`: messages from the account's authenticated owner, the iLink
-  `user_id` recorded at QR login, start a full session with every configured
-  SCV tool, and the bridge approves that session's approval requests. Other
-  senders, and the owner writing in a group (any non-empty `group_id`), keep
-  `none` behavior. Accounts without a known owner ID grant tools to nobody.
+  `user_id` recorded at QR login or the Feishu `open_id` recorded at sign-in,
+  start a full session with every configured SCV tool, and the bridge approves
+  that session's approval requests. Other senders, and the owner writing in a
+  group, keep `none` behavior. Accounts without a known owner ID grant tools to nobody.
   Owner turns may run for the configured tool ceiling
   (`tools.max_timeout_seconds`, default four hours) plus five minutes, so four
   hours and five minutes by default and at least 30 minutes, instead of 5; the
@@ -269,7 +373,7 @@ CLI or daemon control can change:
   configuration when the component starts. Logout resets the setting
   to `none` before deleting credentials, so a later login never inherits it.
 
-`scv channels run wechat --remote-tools owner` reports whether the daemon
+`scv channels run <channel> --remote-tools owner` reports whether the daemon
 actually applied the grant; a login without an owner ID leaves it inactive with
 a warning. Delegated `agent_claude` and `agent_codex` calls need
 their CLIs signed in for SCV first; see `scv agents login` in the
@@ -277,9 +381,10 @@ their CLIs signed in for SCV first; see `scv agents login` in the
 
 The bridge never invokes `scv exec --yes`.
 
-Credentials are stored at `$SCV_HOME/channels/wechat/accounts/<account>.json`;
-cursor and message IDs, in-flight claims, pending replies, and held replies are
-stored at `$SCV_HOME/channels/wechat/state/<account>.json`. Claims and pending replies keep the
+Credentials are stored at `$SCV_HOME/channels/<channel>/accounts/<account>.json`;
+the checkpoint (WeChat's cursor, Feishu's per-chat times) and message IDs,
+in-flight claims, pending replies, and held replies are stored at
+`$SCV_HOME/channels/<channel>/state/<account>.json`. Claims and pending replies keep the
 single-object form older bridges wrote while at most one of each exists, and
 become lists when several do; a bridge older than `0.1.23` cannot read state
 that holds several. Credentials, settings, and delivery
@@ -289,6 +394,7 @@ Project configuration cannot select accounts, workspaces, or remote authority.
 
 `scv-channels` owns durable state, claims, sender sessions, held replies, and
 delivery retries; `scv-clawbot` owns iLink authentication, polling, message
-parsing, and sending. `scv-server::components` owns lifecycle and
+parsing, and sending; `scv-feishu` owns Feishu sign-in, the long connection,
+catch-up, message parsing, and sending. `scv-server::components` owns lifecycle and
 health. Account selection uses `--account` (default `default`), not project
 configuration. The [quality contract](quality.md) defines local-only verification.

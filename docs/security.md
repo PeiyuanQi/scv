@@ -23,8 +23,9 @@ interactive starts ask whether to continue and non-interactive starts fail.
   state remain within that profile; custom homes do not fall back to `~/.scv`.
 - Provider credentials are secrets. They remain server-side and are sent only
   to the configured provider endpoint, never to the TUI.
-- Channel tokens and delivery state are secrets. Inbound sender IDs, cursors,
-  and message content are untrusted remote input and are kept out of logs.
+- Channel tokens, Feishu app secrets, and delivery state are secrets. Inbound
+  sender IDs, cursors, and message content are untrusted remote input and are
+  kept out of logs.
 - Project configuration cannot select the provider endpoint, credential
   variable, user skill root, or native-agent executable/arguments. Those values
   require a user, explicit-config, environment, or CLI layer.
@@ -91,9 +92,9 @@ a delegated CLI its own full-autonomy switches (for example Claude Code's
 `--dangerously-bypass-approvals-and-sandbox`), turning off that CLI's approval
 prompts and sandbox and enabling web search where the CLI gates it. It is off
 by default, only user-level configuration can set it, and every approval
-summary for such an agent states `FULL PERMISSIONS`. Combined with the WeChat channel's
-owner tools, it lets the owner's WeChat account run unattended development
-work, equivalent to the owner running those agents unprompted in a terminal.
+summary for such an agent states `FULL PERMISSIONS`. Combined with a channel's
+owner tools, it lets the owner's WeChat or Feishu account run unattended
+development work, equivalent to the owner running those agents unprompted in a terminal.
 
 A session offers only agents whose executable resolves. SCV looks in the
 user's per-user install directories (`~/.local/bin`, and `~/.grok/bin` for
@@ -170,8 +171,8 @@ and a job whose agent needs approval for a step fails at that step. Jobs
 belong to their session and are cancelled, with their processes, when it
 closes. The turn the server starts to report a finished job has the session's
 own tools and approval policy, like any turn; its prompt quotes the job's
-bounded reply, which is untrusted delegated-agent output. Over WeChat the
-report goes only to the owner's direct chat, as an unprompted message.
+bounded reply, which is untrusted delegated-agent output. Over WeChat or Feishu
+the report goes only to the owner's direct chat, as an unprompted message.
 
 ## Web access
 
@@ -212,7 +213,8 @@ not mean silently execute them.
 ## Network and protocol
 
 Outbound network clients include the configured model provider, the WeChat
-channel's iLink adapter, and the web tools (`web_fetch` and a configured search
+channel's iLink adapter, the Feishu channel's Open Platform and long-connection
+clients, and the web tools (`web_fetch` and a configured search
 backend). The updater delegates registry downloads to Cargo. Project
 configuration cannot provide inline credentials or redirect these authorities.
 
@@ -226,7 +228,13 @@ support component management. Both transports require the versioned handshake.
 The opt-in WeChat channel is an outbound HTTPS client of iLink, not a server
 transport; it opens no listening port. It accepts only trusted iLink origins,
 validates response envelopes, persists state atomically, and never reports
-bearer tokens. Remote sessions are tool-free unless the account grants its owner
+bearer tokens. The opt-in Feishu channel is likewise outbound only: HTTPS to
+its brand's Open Platform and accounts hosts (`open.feishu.cn` and
+`accounts.feishu.cn`, or the `larksuite.com` equivalents), without following
+redirects, and one WebSocket whose host must be on the brand's domain over TLS
+on port 443, checked before dialing. Responses are capped at 4 MiB and events
+at 8 MiB; the app secret, tenant token, and the socket URL's one-time keys
+never reach logs, errors, or status. Remote sessions are tool-free unless the account grants its owner
 tools; see [Supervised remote bridge](#supervised-remote-bridge). Remote
 messages cannot bypass server policy.
 
@@ -247,7 +255,7 @@ QR login is explicit. Saved channel accounts are enabled by default and start
 under the daemon; login honors a saved opt-out. To opt out before daemon startup,
 set `enabled: false` in the private per-account settings file. Credentials,
 delivery state, and settings under
-`$SCV_HOME/channels/wechat/{accounts,state,settings}`
+`$SCV_HOME/channels/<channel>/{accounts,state,settings}`
 use mode `0600`, atomic writes, and mode `0700` parent directories. Project
 configuration cannot choose bridge accounts, workspaces, or remote authority.
 
@@ -255,9 +263,11 @@ By default, remote sessions request `no_tools: true`, enforced by the server,
 and the bridge denies any approval request, so remote messages do not authorize
 filesystem, shell, or delegated-agent tools. An account's `remote_tools =
 "owner"` setting, changeable only through local CLI or daemon control, grants
-the authenticated account owner (the iLink `user_id` from QR login) full tools
-with every approval request auto-approved. That makes the owner's WeChat
-account equivalent to local shell access as the daemon user: anyone who can
+the authenticated account owner (the iLink `user_id` from QR login, or the
+Feishu `open_id` of the app's creator, or the one named with
+`--owner-open-id`) full tools with every approval request auto-approved. That
+makes the owner's chat account equivalent to local shell access as the daemon
+user: anyone who can
 send messages from it can read and change files, run commands, and launch
 delegated agents without confirmation. Other senders, the owner's messages in
 group chats, and accounts without a known owner ID stay tool-free; group
@@ -266,17 +276,24 @@ grant before deleting credentials. Owner replies are ordinary assistant output a
 tool results the model chose to include; bridge failure details remain
 sanitized. Bridge failures produce short sanitized
 replies; raw diagnostics, credentials, tool output, and host paths are not
-forwarded as diagnostics to WeChat. Status reports identity and live health,
+forwarded as diagnostics to the chat. Status reports identity and live health,
 with sanitized errors and successful-contact timestamps, never bearer tokens.
 Saved credentials alone do not establish connectivity.
 
-Delivery state is bound to a SHA-256 fingerprint of the normalized API origin
-and authenticated bot/user IDs. Known-identity token rotation preserves state;
+Delivery state is bound to a SHA-256 fingerprint of the account's identity:
+for WeChat the normalized API origin and authenticated bot/user IDs, for
+Feishu the brand, app ID, and owner `open_id` (a rotated app secret keeps the
+binding). Known-identity token rotation preserves state;
 credentials without both IDs use a conservative token-based fingerprint.
 Legacy unbound state is bound before first use. A mismatch prevents polling,
 recovery, and delivery. Login refuses identity/origin replacement, including
 legacy-to-identified replacement, until explicit logout discards the old state.
 This prevents pending replies from leaking into a different account or origin.
+
+Feishu text turns `<at user_id=…>` into mentions, including `@all`, so SCV
+breaks every `<at` in outgoing text with a zero-width space: model output, which
+a group member can influence, never notifies anyone. In groups the bot answers
+only messages that mention it, and those sessions stay tool-free.
 
 A lifetime account lock excludes cooperating runners. A separate transaction
 file lock serializes login, settings/state writes, binding, migration, and
@@ -292,7 +309,9 @@ replay interrupted claimed work; pending replies retain their client IDs
 across retries. This protects against duplicate execution without promising
 exactly-once delivery by the remote service. Conversations run concurrently,
 at most four turns at a time and each conversation in order, and their
-sessions never share history. A reply iLink refuses is held in the private
+sessions never share history. Feishu socket events are acknowledged only once
+their claims are durable, and the catch-up that follows every reconnection is
+deduplicated like any batch. A reply the platform refuses is held in the private
 state file, bounded and for at most 7 days, and delivered only with the next
 reply to the same conversation; its content never enters logs.
 

@@ -44,8 +44,8 @@ a day.
 | 0 | Feishu live check with the owner (done, 2026-09-24) | — |
 | 1 | `scv channels` for WeChat; state moves to `channels/wechat` (done, 0.1.35) | — |
 | 2 | Shared bridge core crate `scv-channels`; `scv-clawbot` becomes the WeChat transport (done, 0.1.35) | 1 |
-| 3 | Feishu channel: QR sign-in, manual fallback, long connection with catch-up, owner tools | 0, 2 |
-| 4 | Feishu background reports as unprompted messages | 3 |
+| 3 | Feishu channel: QR sign-in, manual fallback, long connection with catch-up, owner tools (done, 0.1.35) | 0, 2 |
+| 4 | Feishu background reports as unprompted messages (done, 0.1.35) | 3 |
 | 5 | Feishu cards: streaming progress and a typing reaction (optional) | 3 |
 
 ### 0. Feishu live check
@@ -140,15 +140,24 @@ message parsing, and sending behind that trait. The dependency chain becomes
   are trusted, redirects are not followed, and response sizes are bounded.
   The app secret is stored in `$SCV_HOME/channels/feishu/accounts/<name>.json`
   with mode `0600` and never printed; status shows the app ID and owner only.
-- **Still to check** while implementing: group chats, and sign-in from a
-  company account whose administrators must approve apps.
+- **Still to check**: group chats, and sign-in from a company account whose
+  administrators must approve apps. A `begin` call with `app_name` and `name`
+  fields succeeded without echoing them, so registration ignores unknown
+  fields and whether it can name the app stays unknown without creating one;
+  login prints the rename hint.
+
+Landed in `0.1.35` as the `scv-feishu` crate; [channels](channels.md#feishu-contract)
+records the final contract, including catch-up bounds (32 chats, 24 hours,
+four pages of 50) and group handling (only messages that mention the bot).
 
 ### 4. Feishu background reports
 
 Finished background jobs reach the owner through
 `im/v1/messages?receive_id_type=open_id`, with the same durable pending
 delivery and stable `uuid` as replies. The live check confirmed such messages
-arrive even before the owner has written to the bot.
+arrive even before the owner has written to the bot. The shared bridge already
+sends reports without a reply handle, so the Feishu transport needed only to
+route those to the owner's `open_id` (landed with step 3).
 
 ### 5. Feishu cards
 

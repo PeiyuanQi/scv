@@ -50,8 +50,8 @@ an agent session. The `command` object is tagged by `action`:
 `status` reads live daemon health. `reload` reconciles saved accounts and
 settings immediately; periodic reconciliation also runs every two seconds.
 `channel_set` persists a channel account's enablement and an optional existing
-absolute workspace; `channel` names the channel (`wechat`), and an unknown one
-is a `component_error`;
+absolute workspace; `channel` names the channel (`wechat` or `feishu`), and an
+unknown one is a `component_error`;
 an omitted or null workspace leaves the saved workspace unchanged. The optional
 `remote_tools` (`none` or `owner`) likewise persists only when present.
 Component status reports the effective `remote_tools`, which is `owner` only
@@ -77,7 +77,7 @@ can wait for the component lock while reconciliation joins replacements. Many
 slow replacements can therefore make even a status query time out; a timeout
 does not prove the daemon is down or that a mutation failed. Query status again
 before deciding whether to retry a mutation; mutations are never automatically
-retried. Current WeChat channel cancellation drops its owned I/O and sessions
+retried. Current channel cancellation drops its owned I/O and sessions
 immediately, but future components with slower shutdown can expose this limit.
 
 ### `session.start`
@@ -194,9 +194,12 @@ entry that is a turn of a delegated conversation also carries `conversation`
 component contains `id` (`<channel>:<account>`), `channel`, `account`,
 `bot_id`, `user_id`, `enabled`, `state`, `last_success_unix_seconds`, `error`,
 and `restarts`; a daemon older than 0.1.35 omits `channel`, which parses as
-empty. For WeChat, successful contact means an authenticated, validated `getupdates`
-response. The state fingerprint, bearer token, and delivery state are private
-storage fields, not health fields.
+empty. `bot_id` is the WeChat iLink bot or the Feishu app ID, and `user_id`
+the account's owner. For WeChat, successful contact means an authenticated,
+validated `getupdates` response; for Feishu, a connected long connection that
+finished its catch-up or a wait for events without error. The state
+fingerprint, bearer token, app secret, and delivery state are private storage
+fields, not health fields.
 
 ### Turn and assistant output
 

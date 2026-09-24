@@ -334,7 +334,7 @@ agent, conversation, status, and bounded reply, and asks the model to tell the
 user. That turn's `turn.started` and final event carry
 `"origin":{"kind":"background","jobs":[...]}` (see
 [protocol](protocol.md#server-started-turns)); one turn reports up to four jobs.
-The WeChat channel sends the owner the answer as an unprompted message; `scv exec`
+A chat channel (WeChat or Feishu) sends the owner the answer as an unprompted message; `scv exec`
 prints it and stays open until every job it started has been reported; the
 TUI shows it like any turn.
 

@@ -17,7 +17,7 @@ case "${1:-}" in
 esac
 
 crates=(scv-core scv-protocol scv-client scv-provider-openai scv-tools
-        scv-channels scv-clawbot scv-server scv-tui scv-cli)
+        scv-channels scv-clawbot scv-feishu scv-server scv-tui scv-cli)
 
 cd "$(git rev-parse --show-toplevel)"
 version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
