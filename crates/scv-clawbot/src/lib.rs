@@ -14,6 +14,20 @@ pub use scv_channels::{ToolOwner, owner_turn_timeout};
 /// The channel name this crate serves: `scv channels <command> wechat`.
 pub const CHANNEL: &str = "wechat";
 
+/// iLink's `bot_type` for a ClawBot login QR code.
+const CLAWBOT_BOT_TYPE: u8 = 3;
+/// One ordinary iLink request: a QR code, a reply, an upload address.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// A long poll (`getupdates`, `get_qrcode_status`), which iLink holds open
+/// until there is news.
+const LONG_POLL_TIMEOUT: Duration = Duration::from_secs(50);
+/// How long a login QR code is worth waiting for.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+/// The pause between login status polls.
+const LOGIN_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Moving one file to or from the CDN, up to the media size limits.
+pub(crate) const CDN_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub mod bridge;
 pub mod media;
 pub mod state;
@@ -33,8 +47,10 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
     let base = normalize_base_url(base)?;
     let qr = response_json(
         client
-            .get(format!("{base}/ilink/bot/get_bot_qrcode?bot_type=3"))
-            .timeout(Duration::from_secs(20))
+            .get(format!(
+                "{base}/ilink/bot/get_bot_qrcode?bot_type={CLAWBOT_BOT_TYPE}"
+            ))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await?,
     )
@@ -50,7 +66,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or(code)
     );
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + LOGIN_TIMEOUT;
     loop {
         if Instant::now() >= deadline {
             bail!("WeChat QR login timed out; run `scv channels login wechat` again")
@@ -59,7 +75,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
             client
                 .get(format!("{base}/ilink/bot/get_qrcode_status"))
                 .query(&[("qrcode", code)])
-                .timeout(Duration::from_secs(50))
+                .timeout(LONG_POLL_TIMEOUT)
                 .send()
                 .await?,
         )
@@ -94,7 +110,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
             "expired" => bail!("WeChat QR code expired; run `scv channels login wechat` again"),
             _ => {}
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(LOGIN_POLL_INTERVAL).await;
     }
 }
 
@@ -127,7 +143,10 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
 /// remote tools; every other sender stays tool-free. `media` is where files
 /// go and how large they may be, and `link` connects the account to the
 /// daemon's hub.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 pub async fn run_supervised(
     token: &str,
     base_url: &str,
@@ -212,7 +231,10 @@ async fn response_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
 
 /// Bridge one account over iLink with the given running credentials.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 async fn run_loop(
     token: &str,
     base_url: &str,
@@ -240,7 +262,10 @@ async fn run_loop(
 }
 
 /// [`run_loop`] linked to the daemon's hub.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 async fn run_loop_linked(
     token: &str,
     base_url: &str,
@@ -300,7 +325,7 @@ impl Transport for Ilink<'_> {
                 u32::from_le_bytes(*Uuid::new_v4().as_bytes().first_chunk::<4>().unwrap()),
             ))
             .json(&serde_json::json!({"get_updates_buf":cursor,"base_info":{"channel_version":"1.0.0"}}))
-            .timeout(Duration::from_secs(50))
+            .timeout(LONG_POLL_TIMEOUT)
             .send()
             .await?;
         let value = response_json(response).await?;
@@ -556,139 +581,4 @@ pub fn check_send_ack(body: &[u8]) -> std::result::Result<(), String> {
 }
 
 #[cfg(test)]
-mod lifecycle_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn validates_origins() {
-        assert!(normalize_base_url("https://example.test").is_ok());
-        assert!(normalize_base_url("http://example.test").is_err());
-        assert!(normalize_base_url("https://user@example.test").is_err());
-    }
-    #[test]
-    fn validates_ret() {
-        assert!(check_envelope(&serde_json::json!({"ret":0})).is_ok());
-        assert!(check_envelope(&serde_json::json!({"ret":1})).is_err());
-    }
-
-    #[test]
-    fn accepts_live_send_ack_without_ret() {
-        for delivered in [
-            &b""[..],
-            b"{}",
-            br#"{"ret":0}"#,
-            br#"{"ret":null}"#,
-            b"ok",
-            b"[]",
-        ] {
-            assert!(check_send_ack(delivered).is_ok());
-        }
-        assert_eq!(
-            check_send_ack(br#"{"ret":-2,"errmsg":"prepare failed"}"#).unwrap_err(),
-            r#"ret=-2 errcode=- errmsg="prepare failed""#
-        );
-        assert!(check_send_ack(br#"{"errcode":40001}"#).is_err());
-        assert!(check_send_ack(br#"{"ret":"0"}"#).is_err());
-        assert_eq!(
-            check_send_ack(br#"{"ret":{"detail":"x"},"errcode":7}"#).unwrap_err(),
-            r#"ret=non-integer errcode=7 errmsg="""#
-        );
-    }
-
-    #[test]
-    fn accepts_live_getupdates_success_without_ret() {
-        assert!(
-            validate_updates(&serde_json::json!({
-                "msgs": [],
-                "sync_buf": "sync",
-                "get_updates_buf": "cursor"
-            }))
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn rejects_getupdates_error_without_ret() {
-        assert!(
-            validate_updates(&serde_json::json!({
-                "errcode": -14,
-                "errmsg": "session timeout"
-            }))
-            .is_err()
-        );
-    }
-
-    fn parsed(items: serde_json::Value) -> Option<Message> {
-        match inbound(&serde_json::json!({"message_id":"m", "message_type":1,
-            "from_user_id":"u", "context_token":"c", "item_list":items}))?
-        {
-            Inbound::Text(message) => Some(message),
-            Inbound::Ignored { .. } => None,
-        }
-    }
-
-    #[test]
-    fn voice_transcripts_quotes_and_files_come_through() {
-        use base64::Engine as _;
-        let key = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
-        let voice = parsed(serde_json::json!([{"type":3,"voice_item":{"encode_type":6,
-            "text":"call me","media":{"encrypt_query_param":"p","aes_key":key}}}]))
-        .unwrap();
-        assert_eq!(voice.text, "");
-        assert_eq!(voice.media.len(), 1);
-        assert_eq!(voice.media[0].transcript.as_deref(), Some("call me"));
-
-        let quote = parsed(
-            serde_json::json!([{"type":1,"text_item":{"text":"and this?"},
-            "ref_msg":{"title":"Alex","message_item":{"type":2,"image_item":{
-                "media":{"encrypt_query_param":"q","aes_key":key}}}}}]),
-        )
-        .unwrap();
-        assert_eq!(quote.text, "[Quoting: Alex | [image]]\nand this?");
-        // The quoted image is fetched like the message's own.
-        assert_eq!(quote.media.len(), 1);
-        assert_eq!(quote.media[0].kind, scv_channels::MediaKind::Image);
-
-        let quoted_text = parsed(serde_json::json!([{"type":1,"text_item":{"text":"yes"},
-            "ref_msg":{"message_item":{"type":1,"text_item":{"text":"ready?"}}}}]))
-        .unwrap();
-        assert_eq!(quoted_text.text, "[Quoting: ready?]\nyes");
-        assert!(quoted_text.media.is_empty());
-
-        // Items without text or a file leave nothing to answer.
-        assert!(parsed(serde_json::json!([{"type":11,"tool_call_start_item":{}}])).is_none());
-        assert!(parsed(serde_json::json!([{"type":2,"image_item":{"media":{}}}])).is_none());
-    }
-
-    #[test]
-    fn preserves_string_and_unsigned_numeric_message_ids() {
-        assert_eq!(
-            message_id(&serde_json::json!({"message_id": "string-id"})).as_deref(),
-            Some("string-id")
-        );
-        assert_eq!(
-            message_id(&serde_json::json!({"message_id": u64::MAX})).as_deref(),
-            Some("18446744073709551615")
-        );
-        assert_eq!(
-            message_id(&serde_json::json!({"msg_id": 42})).as_deref(),
-            Some("42")
-        );
-        assert!(message_id(&serde_json::json!({"message_id": null, "msg_id": 42})).is_none());
-        assert!(message_id(&serde_json::json!({"message_id": -1})).is_none());
-        assert!(message_id(&serde_json::json!({"message_id": 1.5})).is_none());
-        assert!(message_id(&serde_json::from_str(r#"{"message_id":1e3}"#).unwrap()).is_none());
-        assert!(
-            message_id(&serde_json::from_str(r#"{"message_id":18446744073709551616}"#).unwrap())
-                .is_none()
-        );
-        assert!(
-            message_id(&serde_json::json!({
-                "message_id": "x".repeat(MAX_MESSAGE_ID_BYTES + 1)
-            }))
-            .is_none()
-        );
-    }
-}
+mod tests;

@@ -44,20 +44,7 @@ fn every_spawned_scv_binary_is_isolated() {
 /// layout rule and move to their `tests.rs` one crate at a time; the list may
 /// only shrink.
 const INLINE_TEST_ALLOWLIST: &[&str] = &[
-    "crates/scv-channels/src/hub.rs",
-    "crates/scv-channels/src/media.rs",
-    "crates/scv-channels/src/session.rs",
-    "crates/scv-channels/src/state.rs",
-    "crates/scv-clawbot/src/bridge.rs",
-    "crates/scv-clawbot/src/lib.rs",
-    "crates/scv-clawbot/src/lifecycle_tests.rs",
-    "crates/scv-clawbot/src/media.rs",
-    "crates/scv-clawbot/src/state.rs",
     "crates/scv-core/src/lib.rs",
-    "crates/scv-feishu/src/api.rs",
-    "crates/scv-feishu/src/frame.rs",
-    "crates/scv-feishu/src/inbound.rs",
-    "crates/scv-feishu/src/state.rs",
     "crates/scv-protocol/src/lib.rs",
     "crates/scv-provider-openai/src/lib.rs",
     "crates/scv-tools/src/acp_agent.rs",

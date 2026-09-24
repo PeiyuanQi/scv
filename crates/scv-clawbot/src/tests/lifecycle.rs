@@ -1,3 +1,6 @@
+//! Lifecycle tests for `src/lib.rs`: the WeChat bridge against a fake iLink
+//! server and a fake SCV daemon.
+
 use super::*;
 use scv_channels::{
     BUSY_REPLY, FAILURE_REPLY, HELD_HEADER, LATEST_HEADER, MAX_CONCURRENT_TURNS,
@@ -5,6 +8,7 @@ use scv_channels::{
     recover_interrupted,
 };
 use serde_json::json;
+use std::os::fd::AsFd;
 use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
@@ -92,6 +96,90 @@ fn saved_store(directory: &Path, base_url: &str) -> state::Store {
     store
 }
 
+/// One bridge run against the test's fake iLink at `base` and fake daemon at
+/// `socket`, for the `default` account saved in `store`. Everything a test
+/// does not set takes the usual value: no tool owner, media
+/// under the test directory, no health reports, and no hub.
+struct Bridge<'a> {
+    directory: &'a Path,
+    base: &'a str,
+    socket: &'a Path,
+    store: &'a state::Store,
+    owner: Option<&'a ToolOwner>,
+    media: Option<scv_channels::MediaOptions>,
+    report: &'a (dyn Fn(bool) + Send + Sync),
+    link: Option<&'a scv_channels::hub::Link>,
+}
+
+impl<'a> Bridge<'a> {
+    fn new(directory: &'a Path, base: &'a str, socket: &'a Path, store: &'a state::Store) -> Self {
+        Self {
+            directory,
+            base,
+            socket,
+            store,
+            owner: None,
+            media: None,
+            report: &|_| {},
+            link: None,
+        }
+    }
+
+    fn owner(mut self, owner: impl Into<Option<&'a ToolOwner>>) -> Self {
+        self.owner = owner.into();
+        self
+    }
+
+    fn media(mut self, media: scv_channels::MediaOptions) -> Self {
+        self.media = Some(media);
+        self
+    }
+
+    fn report(mut self, report: &'a (dyn Fn(bool) + Send + Sync)) -> Self {
+        self.report = report;
+        self
+    }
+
+    fn link(mut self, link: &'a scv_channels::hub::Link) -> Self {
+        self.link = Some(link);
+        self
+    }
+
+    /// Run the bridge next to `peer`, which plays iLink and the daemon and
+    /// cancels the run through `cancel` when it is done. Both must finish
+    /// within `limit`, and the run must end cleanly; returns what `peer`
+    /// returned.
+    async fn run<T>(
+        self,
+        cancel: &CancellationToken,
+        limit: Duration,
+        peer: impl std::future::Future<Output = T>,
+    ) -> T {
+        let media = self.media.unwrap_or_else(|| media(self.directory));
+        let detached = scv_channels::hub::Link::detached();
+        let work = until_cancelled(
+            cancel.clone(),
+            run_loop_linked(
+                "token",
+                self.base,
+                "default",
+                self.directory,
+                self.socket,
+                self.owner,
+                media,
+                self.store,
+                self.report,
+                self.link.unwrap_or(&detached),
+            ),
+        );
+        let (result, output) = tokio::time::timeout(limit, async { tokio::join!(work, peer) })
+            .await
+            .expect("the bridge and the test finish in time");
+        result.unwrap();
+        output
+    }
+}
+
 #[tokio::test]
 async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
     let directory = tempfile::tempdir().unwrap();
@@ -117,20 +205,7 @@ async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
     let cancel = CancellationToken::new();
     let reports = Mutex::new(Vec::new());
     let report = |healthy| reports.lock().unwrap().push(healthy);
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &report,
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).report(&report);
     let peer = async {
         let (mut stream, route, body) = request(&listener).await;
         assert!(route.ends_with("sendmessage"));
@@ -161,11 +236,7 @@ async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
         assert_eq!(*reports.lock().unwrap(), vec![true]);
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(3), peer).await;
     assert!(store.lock("default").is_ok());
 }
 
@@ -191,31 +262,14 @@ async fn cancellation_drops_long_poll_and_pending_send() {
         let socket = directory.path().join("missing.sock");
         let cancel = CancellationToken::new();
         let report = |_| panic!("no completed authenticated poll");
-        let work = until_cancelled(
-            cancel.clone(),
-            run_loop(
-                "token",
-                &base,
-                "default",
-                directory.path(),
-                &socket,
-                None,
-                media(directory.path()),
-                &store,
-                &report,
-            ),
-        );
+        let bridge = Bridge::new(directory.path(), &base, &socket, &store).report(&report);
         let peer = async {
             let (mut stream, route, _) = request(&listener).await;
             assert!(route.ends_with(if sending { "sendmessage" } else { "getupdates" }));
             cancel.cancel();
             assert_eq!(stream.read(&mut [0; 1]).await.unwrap(), 0);
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(work, peer) })
-                .await
-                .unwrap();
-        result.unwrap();
+        bridge.run(&cancel, Duration::from_secs(3), peer).await;
         assert!(store.lock("default").is_ok());
         if sending {
             let saved = store.load_state("default").unwrap();
@@ -237,20 +291,7 @@ async fn cancellation_drops_handshake_and_active_turn_with_durable_marker() {
         let socket = directory.path().join("daemon.sock");
         let daemon = UnixListener::bind(&socket).unwrap();
         let cancel = CancellationToken::new();
-        let work = until_cancelled(
-            cancel.clone(),
-            run_loop(
-                "token",
-                &base,
-                "default",
-                directory.path(),
-                &socket,
-                None,
-                media(directory.path()),
-                &store,
-                &|_| {},
-            ),
-        );
+        let bridge = Bridge::new(directory.path(), &base, &socket, &store);
         let peer = async {
             let (mut stream, _, _) = request(&listener).await;
             let numeric_message_id = 7_445_729_589_862_608_648_u64;
@@ -304,11 +345,7 @@ async fn cancellation_drops_handshake_and_active_turn_with_durable_marker() {
             cancel.cancel();
             assert_eq!(reader.read(&mut [0; 1]).await.unwrap(), 0);
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(work, peer) })
-                .await
-                .unwrap();
-        result.unwrap();
+        bridge.run(&cancel, Duration::from_secs(3), peer).await;
         let mut saved = store.load_state("default").unwrap();
         recover_interrupted(&store, "default", &mut saved).unwrap();
         assert_eq!(saved.pending[0].reply, FAILURE_REPLY);
@@ -335,29 +372,12 @@ async fn failed_poll_reports_unhealthy_and_cancels_backoff() {
             reports.lock().unwrap().push(healthy);
             cancel.cancel();
         };
-        let work = until_cancelled(
-            cancel.clone(),
-            run_loop(
-                "token",
-                &base,
-                "default",
-                directory.path(),
-                &socket,
-                None,
-                media(directory.path()),
-                &store,
-                &report,
-            ),
-        );
+        let bridge = Bridge::new(directory.path(), &base, &socket, &store).report(&report);
         let peer = async {
             let (mut stream, _, _) = request(&listener).await;
             respond(&mut stream, status, body, "").await;
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(work, peer) })
-                .await
-                .unwrap();
-        result.unwrap();
+        bridge.run(&cancel, Duration::from_secs(3), peer).await;
         assert_eq!(*reports.lock().unwrap(), vec![false]);
     }
 }
@@ -387,20 +407,7 @@ async fn failed_send_retries_same_client_id_and_only_poll_restores_health() {
             cancel.cancel();
         }
     };
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &report,
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).report(&report);
     let peer = async {
         for status in ["503 Unavailable", "200 OK"] {
             let (mut stream, route, body) = request(&listener).await;
@@ -416,11 +423,7 @@ async fn failed_send_retries_same_client_id_and_only_poll_restores_health() {
         assert_eq!(*reports.lock().unwrap(), vec![false]);
         respond(&mut stream, "200 OK", r#"{"ret":0,"msgs":[]}"#, "").await;
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(5), peer).await;
     assert_eq!(*reports.lock().unwrap(), vec![false, true]);
     assert!(store.load_state("default").unwrap().pending.is_empty());
 }
@@ -452,20 +455,7 @@ async fn live_send_ack_without_ret_completes_pending_delivery_once() {
                 cancel.cancel();
             }
         };
-        let work = until_cancelled(
-            cancel.clone(),
-            run_loop(
-                "token",
-                &base,
-                "default",
-                directory.path(),
-                &socket,
-                None,
-                media(directory.path()),
-                &store,
-                &report,
-            ),
-        );
+        let bridge = Bridge::new(directory.path(), &base, &socket, &store).report(&report);
         let peer = async {
             let (mut stream, route, body) = request(&listener).await;
             assert!(route.ends_with("sendmessage"));
@@ -485,11 +475,7 @@ async fn live_send_ack_without_ret_completes_pending_delivery_once() {
             )
             .await;
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
-                .await
-                .unwrap();
-        result.unwrap();
+        bridge.run(&cancel, Duration::from_secs(5), peer).await;
         assert_eq!(*reports.lock().unwrap(), vec![true]);
     }
 }
@@ -510,20 +496,7 @@ async fn oversized_batch_never_executes_or_advances_cursor() {
         assert!(!healthy);
         cancel.cancel();
     };
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &report,
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).report(&report);
     let peer = async {
         let (mut stream, route, _) = request(&listener).await;
         assert!(route.ends_with("getupdates"));
@@ -535,20 +508,12 @@ async fn oversized_batch_never_executes_or_advances_cursor() {
         )
         .await;
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(3), peer).await;
     assert_eq!(
         serde_json::to_value(store.load_state("default").unwrap()).unwrap(),
         serde_json::to_value(state).unwrap()
     );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), daemon.accept())
-            .await
-            .is_err()
-    );
+    assert!(!session_waiting(&daemon));
     assert!(validate_updates(&json!({"ret":0,"msgs":vec![inbound(); 4096]})).is_ok());
 }
 
@@ -583,11 +548,7 @@ async fn mismatched_credentials_never_contact_poll_or_send() {
         result.unwrap_err().to_string(),
         "channel state does not match saved credentials"
     );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), listener.accept())
-            .await
-            .is_err()
-    );
+    assert!(!connection_waiting(&listener));
     assert_eq!(
         serde_json::to_value(store.load_state("default").unwrap()).unwrap(),
         serde_json::to_value(state).unwrap()
@@ -625,11 +586,7 @@ async fn redirects_are_not_followed() {
     tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(fetch, peer) })
         .await
         .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), target.accept())
-            .await
-            .is_err()
-    );
+    assert!(!connection_waiting(&target));
 }
 
 #[tokio::test]
@@ -728,20 +685,7 @@ async fn rejected_send_case(status: &str, rejection: &str) {
             cancel.cancel();
         }
     };
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &report,
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).report(&report);
     let peer = async {
         let (mut stream, route, _) = request(&listener).await;
         assert!(route.ends_with("sendmessage"));
@@ -764,11 +708,7 @@ async fn rejected_send_case(status: &str, rejection: &str) {
         )
         .await;
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(5), peer).await;
     assert_eq!(*reports.lock().unwrap(), vec![true]);
 }
 
@@ -961,10 +901,59 @@ async fn finish_turn(side: &mut BufReader<tokio::net::UnixStream>, content: &str
     send_frame(side, json!({"type":"turn.completed","request_id":"r","session_id":"s","turn_id":"t","seq":3,"steps":1,"usage":{}})).await;
 }
 
-async fn quiet(side: &mut BufReader<tokio::net::UnixStream>) -> bool {
-    tokio::time::timeout(Duration::from_millis(300), next_frame(side))
+/// Whether a session is already waiting on the fake daemon, checked without
+/// waiting. A session connects before its first turn starts, so tests check
+/// once the work that would have needed a new session is done, or once the
+/// run has ended.
+fn session_waiting(daemon: &UnixListener) -> bool {
+    let listener =
+        std::os::unix::net::UnixListener::from(daemon.as_fd().try_clone_to_owned().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    listener.accept().is_ok()
+}
+
+/// Whether anything connected to `listener`, checked without waiting once the
+/// run under test has ended: it spawns nothing, so any connection it made is
+/// already queued.
+fn connection_waiting(listener: &TcpListener) -> bool {
+    let listener = std::net::TcpListener::from(listener.as_fd().try_clone_to_owned().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    listener.accept().is_ok()
+}
+
+/// Whether the bridge wrote a frame the test has not read yet, checked
+/// without waiting.
+fn frame_waiting(side: &BufReader<tokio::net::UnixStream>) -> bool {
+    if !side.buffer().is_empty() {
+        return true;
+    }
+    let stream =
+        std::os::unix::net::UnixStream::from(side.get_ref().as_fd().try_clone_to_owned().unwrap());
+    stream.set_nonblocking(true).unwrap();
+    matches!(std::io::Read::read(&mut &stream, &mut [0; 1]), Ok(read) if read > 0)
+}
+
+#[tokio::test]
+async fn the_no_wait_checks_see_what_is_already_queued() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    assert!(!session_waiting(&daemon));
+    let _session = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    assert!(session_waiting(&daemon));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    assert!(!connection_waiting(&listener));
+    let _connection = TcpStream::connect(listener.local_addr().unwrap())
         .await
-        .is_err()
+        .unwrap();
+    assert!(connection_waiting(&listener));
+
+    let (bridge_side, mut daemon_side) = tokio::net::UnixStream::pair().unwrap();
+    let side = BufReader::new(bridge_side);
+    assert!(!frame_waiting(&side));
+    daemon_side.write_all(b"{}\n").await.unwrap();
+    assert!(frame_waiting(&side));
 }
 
 fn owner_of(user_id: &str) -> ToolOwner {
@@ -995,20 +984,7 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
         let cancel = CancellationToken::new();
         let owner = owner.map(owner_of);
         let base = ilink.base.clone();
-        let work = until_cancelled(
-            cancel.clone(),
-            run_loop(
-                "token",
-                &base,
-                "default",
-                directory.path(),
-                &socket,
-                owner.as_ref(),
-                media(directory.path()),
-                &store,
-                &|_| {},
-            ),
-        );
+        let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(owner.as_ref());
         let peer = async {
             ilink.push(vec![message]);
             let (mut side, start) = accept_session(&daemon).await;
@@ -1030,11 +1006,7 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
             wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
             cancel.cancel();
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-                .await
-                .unwrap();
-        result.unwrap();
+        bridge.run(&cancel, Duration::from_secs(10), peer).await;
     }
 }
 
@@ -1058,20 +1030,7 @@ async fn a_long_owner_turn_neither_blocks_other_senders_nor_reorders_the_owners_
     let cancel = CancellationToken::new();
     let owner = owner_of("owner");
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         ilink.push(vec![text_message("o1", "owner", "first")]);
         let (mut owner_side, start) = accept_session(&daemon).await;
@@ -1101,7 +1060,9 @@ async fn a_long_owner_turn_neither_blocks_other_senders_nor_reorders_the_owners_
             claimed == ["o1", "o2"]
         })
         .await;
-        assert!(quiet(&mut owner_side).await);
+        // The other sender's whole turn ran meanwhile, so an early start of
+        // the owner's second turn would already be on the session.
+        assert!(!frame_waiting(&owner_side));
         finish_turn(&mut owner_side, "done first").await;
         let body = ilink.sent().await;
         assert_eq!(body["msg"]["context_token"], "ctx-o1");
@@ -1121,18 +1082,10 @@ async fn a_long_owner_turn_neither_blocks_other_senders_nor_reorders_the_owners_
         })
         .await;
         // Both conversations reused their sessions.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), daemon.accept())
-                .await
-                .is_err()
-        );
+        assert!(!session_waiting(&daemon));
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
 }
 
 #[tokio::test]
@@ -1144,20 +1097,7 @@ async fn at_most_four_senders_run_turns_at_once() {
     let daemon = UnixListener::bind(&socket).unwrap();
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
     let peer = async {
         ilink.push(
             (0..=MAX_CONCURRENT_TURNS)
@@ -1175,11 +1115,7 @@ async fn at_most_four_senders_run_turns_at_once() {
             store.load_state("default").unwrap().in_flight.len() == MAX_CONCURRENT_TURNS + 1
         })
         .await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), daemon.accept())
-                .await
-                .is_err()
-        );
+        assert!(!session_waiting(&daemon));
         let (mut side, prompt) = running.remove(0);
         finish_turn(&mut side, &format!("re {prompt}")).await;
         assert_eq!(sent_text(&ilink.sent().await), format!("re {prompt}"));
@@ -1192,11 +1128,7 @@ async fn at_most_four_senders_run_turns_at_once() {
         assert_eq!(prompts, ["p0", "p1", "p2", "p3", "p4"]);
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
 }
 
 #[tokio::test]
@@ -1208,20 +1140,7 @@ async fn a_full_conversation_queue_gets_a_busy_reply_without_a_turn() {
     let daemon = UnixListener::bind(&socket).unwrap();
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
     let peer = async {
         ilink.push(
             (0..=MAX_QUEUED_PER_CONVERSATION)
@@ -1243,11 +1162,7 @@ async fn a_full_conversation_queue_gets_a_busy_reply_without_a_turn() {
         .await;
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
 }
 
 #[tokio::test]
@@ -1276,20 +1191,7 @@ async fn recovery_answers_every_claim_once_and_never_replays_it() {
     let daemon = UnixListener::bind(&socket).unwrap();
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
     let peer = async {
         let first = ilink.sent().await;
         assert_eq!(first["msg"]["client_id"], answered.client_ids[0]);
@@ -1315,18 +1217,10 @@ async fn recovery_answers_every_claim_once_and_never_replays_it() {
             .collect();
         assert_eq!(claimed, ["c"]);
         assert!(saved.pending.is_empty());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), daemon.accept())
-                .await
-                .is_err()
-        );
+        assert!(!session_waiting(&daemon));
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
 }
 
 #[tokio::test]
@@ -1338,20 +1232,7 @@ async fn shutdown_closes_every_running_turn_and_keeps_the_claims() {
     let daemon = UnixListener::bind(&socket).unwrap();
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
     let peer = async {
         ilink.push(vec![
             text_message("a", "first", "one"),
@@ -1368,11 +1249,7 @@ async fn shutdown_closes_every_running_turn_and_keeps_the_claims() {
             assert_eq!(side.read(&mut [0; 1]).await.unwrap(), 0);
         }
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
     assert!(store.lock("default").is_ok());
     let mut saved = store.load_state("default").unwrap();
     assert_eq!(saved.in_flight.len(), 2);
@@ -1399,6 +1276,12 @@ impl std::io::Write for Logs {
 async fn a_refused_reply_rides_ahead_of_the_senders_next_reply_and_never_reaches_logs() {
     let logs = Logs::default();
     let writer = logs.clone();
+    // With a single registered dispatcher, tracing sets a callsite's interest
+    // from the default of whichever thread reaches it first, so a log line
+    // that another test's thread reaches first would never reach this
+    // subscriber. While a second dispatcher is registered, every event asks
+    // the current thread's subscriber instead.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let _logging = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
@@ -1436,20 +1319,7 @@ async fn a_refused_reply_rides_ahead_of_the_senders_next_reply_and_never_reaches
     let daemon = UnixListener::bind(&socket).unwrap();
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
     let peer = async {
         assert_eq!(sent_text(&ilink.sent().await), "secret earlier answer");
         assert_eq!(sent_text(&ilink.sent().await), BUSY_REPLY);
@@ -1474,11 +1344,7 @@ async fn a_refused_reply_rides_ahead_of_the_senders_next_reply_and_never_reaches
         .await;
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
     let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("rejected by iLink"), "{logs}");
     assert!(!logs.contains("secret"), "{logs}");
@@ -1494,20 +1360,7 @@ async fn tool_progress_never_reaches_wechat() {
     let daemon = UnixListener::bind(&socket).unwrap();
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
     let peer = async {
         ilink.push(vec![text_message("m1", "sender", "hello")]);
         let (mut side, start) = accept_session(&daemon).await;
@@ -1524,19 +1377,15 @@ async fn tool_progress_never_reaches_wechat() {
         let body = ilink.sent().await;
         assert_eq!(sent_text(&body), "final answer");
         assert!(!body.to_string().contains("PROGRESS"));
-        // Nothing else is sent for this turn.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), ilink.sent())
-                .await
-                .is_err()
-        );
+        // Nothing else is sent for this turn: the next send is the next
+        // turn's reply, which queues behind anything this turn still sends.
+        ilink.push(vec![text_message("m2", "sender", "again")]);
+        assert_eq!(next_turn(&mut side).await, "again");
+        finish_turn(&mut side, "second answer").await;
+        assert_eq!(sent_text(&ilink.sent().await), "second answer");
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 #[tokio::test]
@@ -1548,20 +1397,7 @@ async fn a_failed_turn_replies_with_the_generic_failure_message() {
     let daemon = UnixListener::bind(&socket).unwrap();
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
     let peer = async {
         ilink.push(vec![text_message("m1", "sender", "hello")]);
         let (mut side, _) = accept_session(&daemon).await;
@@ -1574,11 +1410,7 @@ async fn a_failed_turn_replies_with_the_generic_failure_message() {
         wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 /// Frames of a server-started turn reporting finished background jobs.
@@ -1626,20 +1458,7 @@ async fn a_finished_background_job_reaches_the_owner_as_one_unprompted_message()
     let cancel = CancellationToken::new();
     let owner = owner_of("sender");
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         ilink.push(vec![text_message(
             "m1",
@@ -1673,19 +1492,14 @@ async fn a_finished_background_job_reaches_the_owner_as_one_unprompted_message()
         assert!(report["msg"].get("context_token").is_none(), "{report}");
         one_message_per_token(&[reply, report]);
         wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), ilink.sent())
-                .await
-                .is_err(),
-            "nothing else is sent"
-        );
+        // Nothing else is sent: the owner's next reply is the next send.
+        ilink.push(vec![text_message("m2", "sender", "anything else?")]);
+        assert_eq!(next_turn(&mut side).await, "anything else?");
+        finish_turn(&mut side, "no").await;
+        assert_eq!(sent_text(&ilink.sent().await), "no");
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 #[tokio::test]
@@ -1698,20 +1512,7 @@ async fn a_report_finishing_during_the_owners_turn_follows_that_turns_reply() {
     let cancel = CancellationToken::new();
     let owner = owner_of("sender");
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         ilink.push(vec![text_message("m1", "sender", "start it")]);
         let (mut side, _) = accept_session(&daemon).await;
@@ -1732,11 +1533,7 @@ async fn a_report_finishing_during_the_owners_turn_follows_that_turns_reply() {
         one_message_per_token(&[first, answer, report]);
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 #[tokio::test]
@@ -1752,20 +1549,7 @@ async fn a_long_reply_uses_its_context_token_once_and_the_rest_goes_unprompted()
         let daemon = UnixListener::bind(&socket).unwrap();
         let cancel = CancellationToken::new();
         let base = ilink.base.clone();
-        let work = until_cancelled(
-            cancel.clone(),
-            run_loop(
-                "token",
-                &base,
-                "default",
-                directory.path(),
-                &socket,
-                None,
-                media(directory.path()),
-                &store,
-                &|_| {},
-            ),
-        );
+        let bridge = Bridge::new(directory.path(), &base, &socket, &store);
         let content = "é".repeat(length / 2);
         let peer = async {
             ilink.push(vec![text_message("m1", "sender", "write a lot")]);
@@ -1773,9 +1557,16 @@ async fn a_long_reply_uses_its_context_token_once_and_the_rest_goes_unprompted()
             next_turn(&mut side).await;
             finish_turn(&mut side, &content).await;
             let mut sends = vec![ilink.sent().await];
-            while let Ok(body) =
-                tokio::time::timeout(Duration::from_millis(500), ilink.sent()).await
-            {
+            // A second message's reply queues behind every part of the first,
+            // so the parts end where it arrives.
+            ilink.push(vec![text_message("m2", "sender", "is that all?")]);
+            assert_eq!(next_turn(&mut side).await, "is that all?");
+            finish_turn(&mut side, "END").await;
+            loop {
+                let body = ilink.sent().await;
+                if sent_text(&body) == "END" {
+                    break;
+                }
                 sends.push(body);
             }
             assert!(sends.len() >= 2, "{} sends", sends.len());
@@ -1798,11 +1589,7 @@ async fn a_long_reply_uses_its_context_token_once_and_the_rest_goes_unprompted()
             }
             cancel.cancel();
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-                .await
-                .unwrap();
-        result.unwrap();
+        bridge.run(&cancel, Duration::from_secs(10), peer).await;
     }
 }
 
@@ -1816,20 +1603,7 @@ async fn a_refused_background_report_is_held_for_the_owners_next_reply() {
     let cancel = CancellationToken::new();
     let owner = owner_of("sender");
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         ilink.push(vec![text_message("m1", "sender", "start it")]);
         let (mut side, _) = accept_session(&daemon).await;
@@ -1859,11 +1633,7 @@ async fn a_refused_background_report_is_held_for_the_owners_next_reply() {
         );
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 #[tokio::test]
@@ -1879,20 +1649,7 @@ async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background
         turn_timeout: Duration::from_millis(500),
     };
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         ilink.push(vec![text_message("m1", "sender", "start it")]);
         let (mut side, _) = accept_session(&daemon).await;
@@ -1919,19 +1676,10 @@ async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background
         let report = ilink.sent().await;
         assert_eq!(sent_text(&report), "Job report.");
         assert!(report["msg"].get("context_token").is_none());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), daemon.accept())
-                .await
-                .is_err(),
-            "the session was replaced"
-        );
+        assert!(!session_waiting(&daemon), "the session was replaced");
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 /// Frames of an owner turn whose `agent_codex` call starts background job
@@ -1959,21 +1707,9 @@ async fn the_hub_sees_owner_work_until_its_report_is_stored_and_can_queue_notice
     let hub = Hub::new(None);
     let link = Link::new(Arc::clone(&hub), "wechat:default", Some("sender".into()));
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop_linked(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-            &link,
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store)
+        .owner(&owner)
+        .link(&link);
     let peer = async {
         wait_until(|| hub.owner("wechat:default").is_some()).await;
         ilink.push(vec![text_message("m1", "sender", "land it")]);
@@ -2022,11 +1758,7 @@ async fn the_hub_sees_owner_work_until_its_report_is_stored_and_can_queue_notice
         assert!(notice["msg"].get("context_token").is_none(), "{notice}");
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
     assert!(hub.owner("wechat:default").is_none(), "withdrawn on stop");
 }
 
@@ -2040,20 +1772,7 @@ async fn a_report_turn_starting_during_the_owners_turn_is_still_delivered() {
     let cancel = CancellationToken::new();
     let owner = owner_of("sender");
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         ilink.push(vec![text_message("m1", "sender", "land it")]);
         let (mut side, _) = accept_session(&daemon).await;
@@ -2073,11 +1792,7 @@ async fn a_report_turn_starting_during_the_owners_turn_is_still_delivered() {
         assert_eq!(sent_text(&ilink.sent().await), "job-1 landed.");
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
 }
 
 #[tokio::test]
@@ -2116,21 +1831,7 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
     let socket = directory.path().join("daemon.sock");
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop_linked(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            media(directory.path()),
-            &store,
-            &|_| {},
-            &link,
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).link(&link);
     let peer = async {
         let answer = ilink.sent().await;
         assert_eq!(answer["msg"]["context_token"], "ctx-m1");
@@ -2149,11 +1850,7 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
         .await;
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 /// An owner's message with an image and a file, as iLink delivers them: each
@@ -2191,20 +1888,7 @@ async fn an_owners_files_are_decrypted_saved_privately_and_attached_to_the_turn(
     let base = ilink.base.clone();
     let key = [7u8; 16];
     let (message, png) = media_message(&ilink, "m1", "owner", &key);
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         ilink.push(vec![message]);
         let (mut side, start) = accept_session(&daemon).await;
@@ -2239,11 +1923,7 @@ async fn an_owners_files_are_decrypted_saved_privately_and_attached_to_the_turn(
         assert_eq!(sent_text(&body), "a chart and a report");
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 #[tokio::test]
@@ -2256,20 +1936,7 @@ async fn files_from_other_senders_are_not_downloaded_and_failures_are_explained(
     let cancel = CancellationToken::new();
     let owner = owner_of("owner");
     let base = ilink.base.clone();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            media(directory.path()),
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
     let peer = async {
         let key = [3u8; 16];
         let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -2314,11 +1981,7 @@ async fn files_from_other_senders_are_not_downloaded_and_failures_are_explained(
         assert_eq!(sent_text(&ilink.sent().await), "I could not open it");
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 #[tokio::test]
@@ -2337,20 +2000,9 @@ async fn files_the_model_attaches_are_uploaded_encrypted_after_the_reply() {
     let chart = std::fs::canonicalize(chart).unwrap();
     let outside = directory.path().join("secret.txt");
     std::fs::write(&outside, "do not send").unwrap();
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            Some(&owner),
-            options,
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store)
+        .owner(&owner)
+        .media(options);
     let peer = async {
         ilink.push(vec![text_message("o1", "owner", "chart please")]);
         let (mut side, _) = accept_session(&daemon).await;
@@ -2395,11 +2047,7 @@ async fn files_the_model_attaches_are_uploaded_encrypted_after_the_reply() {
         assert_eq!(ilink.uploads.lock().unwrap().len(), 1);
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
 #[tokio::test]
@@ -2437,20 +2085,7 @@ async fn a_restart_resumes_sending_files_where_it_stopped_with_the_same_client_i
     let cancel = CancellationToken::new();
     let base = ilink.base.clone();
     let socket = directory.path().join("missing.sock");
-    let work = until_cancelled(
-        cancel.clone(),
-        run_loop(
-            "token",
-            &base,
-            "default",
-            directory.path(),
-            &socket,
-            None,
-            options,
-            &store,
-            &|_| {},
-        ),
-    );
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).media(options);
     let peer = async {
         let request = ilink.sent().await;
         assert_eq!(request["media_type"], 3);
@@ -2469,9 +2104,5 @@ async fn a_restart_resumes_sending_files_where_it_stopped_with_the_same_client_i
         assert_eq!(ilink.uploads.lock().unwrap().len(), 1);
         cancel.cancel();
     };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
-            .await
-            .unwrap();
-    result.unwrap();
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
