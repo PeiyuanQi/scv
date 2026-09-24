@@ -102,10 +102,10 @@ The end-to-end landing flow for this repository is the `feature-flow` agent
 skill at `.agents/skills/feature-flow/SKILL.md`. Codex reads it from
 `.agents/skills`, and Claude Code from the `.claude/skills` symlink to the same
 directory. The flow develops in a sibling worktree and passes the checks
-below. It rebases onto `origin/main`, through a `gh` pull request when `gh` is
-signed in or a fast-forward push otherwise, then publishes, installs the
-release, and restarts the local daemon. Its scripts cover the steps that are
-easy to get wrong:
+below. It lands each change on `origin/main` as one squashed commit, through a
+`gh` pull request when `gh` is signed in or a fast-forward push otherwise, then
+publishes, installs the release, and restarts the local daemon. Its scripts
+cover the steps that are easy to get wrong:
 
 - `publish.sh`: a resumable publish in dependency order;
 - `deploy.sh`: install, restart, and verify;
