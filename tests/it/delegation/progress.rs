@@ -1,16 +1,9 @@
 //! A delegated agent's structured events reach protocol v3 clients as
 //! bounded `tool.progress` events, and v2 clients are turned away.
 
-mod common;
-
-use common::Isolated;
+use crate::support::{Isolated, read_http_request, sse_response, write_private};
 use std::{
-    io::{Read as _, Write as _},
-    net::TcpListener,
-    os::unix::fs::PermissionsExt as _,
-    path::Path,
-    process::Stdio,
-    thread,
+    io::Write as _, net::TcpListener, os::unix::fs::PermissionsExt as _, process::Stdio, thread,
     time::Duration,
 };
 
@@ -20,11 +13,6 @@ use tokio::{
     process::Command,
     time::timeout,
 };
-
-fn write_private(path: &Path, contents: &str) {
-    std::fs::write(path, contents).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
 
 /// A provider that asks for one `agent_codex` call, then answers "done".
 fn serve_provider(listener: TcpListener) {
@@ -41,14 +29,13 @@ fn serve_provider(listener: TcpListener) {
             ),
         ];
         for body in bodies {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 65536];
-            let _ = stream.read(&mut request);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            read_http_request(&mut reader);
+            reader
+                .get_mut()
+                .write_all(sse_response(body).as_bytes())
+                .unwrap();
         }
     });
 }

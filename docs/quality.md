@@ -150,9 +150,13 @@ finds both by path and the source file holds only the implementation:
   `use super::*;`, so it can reach the module's private items without making
   them public.
 - Black-box tests that run the `scv` binaries or use only public APIs live in
-  the root `tests/` directory and spawn SCV through `common::Isolated`.
+  one test binary, the root `tests/it/`: `main.rs` declares one module per
+  area (such as `daemon.rs` or `delegation/background.rs`), and shared helpers
+  live in `tests/it/support.rs`. Every spawned SCV binary goes through
+  `support::Isolated`. One binary means one link step however many modules
+  there are.
 
-`tests/isolation_guard.rs` enforces the rule: a `#[test]` or
+`tests/it/guard.rs` enforces the rule: a `#[test]` or
 `#[tokio::test]` in any other source file fails it, and so does a test file
 that its parent module never declares (such a file would never run). Source
 files that held inline tests before the rule are listed in its
@@ -160,7 +164,8 @@ files that held inline tests before the rule are listed in its
 listed file no longer holds tests.
 
 Run one crate's unit tests with `cargo test -p <crate> [<name filter>]`, and
-one root black-box test file with `cargo test -p scv-cli --test <file stem>`.
+the black-box tests of one area with `cargo test -p scv-cli --test it <module>::`
+(such as `daemon::`).
 
 ## Lints and formatting
 

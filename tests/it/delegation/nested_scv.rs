@@ -3,13 +3,12 @@
 //! back to the parent's client, its events arrive as progress, a second turn
 //! continues the same nested session, and nothing outlives the parent.
 
-mod common;
-
-use common::Isolated;
+use crate::support::{
+    Isolated, alive, call, read_http_request, sse_response, tagged, text, write_private,
+};
 use std::{
-    io::{BufRead as _, BufReader as StdBufReader, Read as _, Write as _},
+    io::{BufReader as StdBufReader, Write as _},
     net::TcpListener,
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     process::Stdio,
     thread,
@@ -24,33 +23,6 @@ use tokio::{
     time::timeout,
 };
 
-fn write_private(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-fn call(name: &str, arguments: Value) -> String {
-    let delta = json!({
-        "type":"response.function_call_arguments.delta",
-        "output_index":0,
-        "delta":arguments.to_string(),
-    });
-    let done = json!({
-        "type":"response.output_item.done",
-        "output_index":0,
-        "item":{"type":"function_call","call_id":"call_1","name":name},
-    });
-    format!(
-        "data: {delta}\n\ndata: {done}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n"
-    )
-}
-
-fn text(content: &str) -> String {
-    let delta = json!({"type":"response.output_text.delta","delta":content});
-    format!("data: {delta}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n")
-}
-
 /// One provider for both SCVs, told apart by the model each asks for. The
 /// parent delegates twice; the nested SCV runs `bash` on its first turn and
 /// recalls the first turn's word on its second.
@@ -59,20 +31,7 @@ fn serve_provider(listener: TcpListener) {
         let mut parent_step = 0;
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
-            let mut reader = StdBufReader::new(stream.try_clone().unwrap());
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse().unwrap();
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
+            let body = read_http_request(&mut StdBufReader::new(stream.try_clone().unwrap()));
             let request: Value = serde_json::from_slice(&body).unwrap();
             let body = String::from_utf8_lossy(&body);
             let response = if request["model"] == "child-model" {
@@ -89,27 +48,27 @@ fn serve_provider(listener: TcpListener) {
                         "noted heron"
                     })
                 } else {
-                    call("bash", json!({"command":"echo child-ran"}))
+                    call("call_1", "bash", json!({"command":"echo child-ran"}))
                 }
             } else {
                 parent_step += 1;
                 match parent_step {
                     1 => call(
+                        "call_1",
                         "agent_scv",
                         json!({"prompt":"CHILD-ONE remember the word heron"}),
                     ),
                     3 => call(
+                        "call_1",
                         "agent_scv",
                         json!({"prompt":"CHILD-TWO which word?","session":"scv-1"}),
                     ),
                     _ => text("parent done"),
                 }
             };
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
-                response.len()
-            );
-            stream.write_all(reply.as_bytes()).unwrap();
+            stream
+                .write_all(sse_response(&response).as_bytes())
+                .unwrap();
         }
     });
 }
@@ -137,38 +96,7 @@ fn delegation_pid(home: &Path) -> Option<(u32, String)> {
     None
 }
 
-fn alive(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        // No procfs (macOS): ask the kernel.
-        return unsafe { libc::kill(pid as i32, 0) } == 0;
-    };
-    // A zombie has exited; only its parent's wait is missing.
-    !stat
-        .rsplit(')')
-        .next()
-        .is_some_and(|rest| rest.trim_start().starts_with('Z'))
-}
-
 /// Processes still carrying `handle` in their `SCV_PARENT` chain (Linux).
-fn tagged(handle: &str) -> Vec<u32> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| {
-            std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
-                environ.split(|byte| *byte == 0).any(|entry| {
-                    entry.starts_with(b"SCV_PARENT=")
-                        && String::from_utf8_lossy(entry).contains(handle)
-                })
-            })
-        })
-        .filter(|pid| alive(*pid))
-        .collect()
-}
-
 async fn delegate(approve_nested: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -342,14 +270,14 @@ async fn delegate(approve_nested: bool) {
         .expect("the parent did not exit")
         .unwrap();
     for _ in 0..100 {
-        if !alive(child) && tagged(&handle).is_empty() {
+        if !alive(child) && live_tagged(&handle).is_empty() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!(
         "the nested SCV {child} or its processes {:?} outlived the parent",
-        tagged(&handle)
+        live_tagged(&handle)
     );
 }
 
@@ -361,4 +289,12 @@ async fn a_nested_scv_serves_a_conversation_and_relays_approvals() {
 #[tokio::test]
 async fn a_denied_nested_approval_reaches_the_nested_agent() {
     delegate(false).await;
+}
+
+/// Tagged processes that are still running.
+fn live_tagged(handle: &str) -> Vec<u32> {
+    tagged(handle)
+        .into_iter()
+        .filter(|pid| alive(*pid))
+        .collect()
 }

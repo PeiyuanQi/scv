@@ -1,6 +1,4 @@
-mod common;
-
-use common::Isolated;
+use crate::support::{Isolated, write_private};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::fs::PermissionsExt as _,
@@ -60,15 +58,6 @@ fn session_model(home: &std::path::Path, workspace: &std::path::Path) -> String 
     child.kill().unwrap();
     child.wait().unwrap();
     model
-}
-
-fn write_private(path: &std::path::Path, contents: &str) {
-    std::fs::write(path, contents).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
 }
 
 fn provider(model: &str) -> String {
@@ -209,12 +198,12 @@ fn scv(home: &std::path::Path, args: &[&str], stdin: &str) -> std::process::Outp
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+        Ok(()) => {}
+        // scv may refuse the arguments and exit before reading stdin.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("write stdin: {error}"),
+    }
     let output = child.wait_with_output().unwrap();
     for stream in [&output.stdout, &output.stderr] {
         assert!(

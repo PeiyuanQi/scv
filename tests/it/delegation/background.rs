@@ -2,12 +2,10 @@
 //! a job at once, and when the job finishes the server reports it in a turn
 //! of its own unless the model already waited for it.
 
-mod common;
-
-use common::Isolated;
+use crate::support::{Isolated, call, read_http_request, sse_response, text, write_private};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead as _, BufReader as StdBufReader, Read as _, Write as _},
+    io::{BufReader as StdBufReader, Write as _},
     net::TcpListener,
     os::unix::fs::PermissionsExt as _,
     path::Path,
@@ -24,24 +22,6 @@ use tokio::{
     time::timeout,
 };
 
-fn write_private(path: &Path, contents: &str) {
-    std::fs::write(path, contents).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-fn call(call_id: &str, name: &str, arguments: Value) -> String {
-    let delta = json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":arguments.to_string()});
-    let done = json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":call_id,"name":name}});
-    format!(
-        "data: {delta}\n\ndata: {done}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n"
-    )
-}
-
-fn text(content: &str) -> String {
-    let delta = json!({"type":"response.output_text.delta","delta":content});
-    format!("data: {delta}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n")
-}
-
 /// A provider answering each request with the next body, passing on every
 /// request body it received.
 fn serve_provider(listener: TcpListener, bodies: Vec<String>) -> mpsc::Receiver<String> {
@@ -50,27 +30,12 @@ fn serve_provider(listener: TcpListener, bodies: Vec<String>) -> mpsc::Receiver<
         for body in bodies {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = StdBufReader::new(stream);
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-                if let Some((key, value)) = line.split_once(':')
-                    && key.eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap();
-                }
-            }
-            let mut request = vec![0; length];
-            reader.read_exact(&mut request).unwrap();
+            let request = read_http_request(&mut reader);
             let _ = requests.send(String::from_utf8_lossy(&request).into_owned());
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            reader.get_mut().write_all(response.as_bytes()).unwrap();
+            reader
+                .get_mut()
+                .write_all(sse_response(&body).as_bytes())
+                .unwrap();
         }
     });
     received

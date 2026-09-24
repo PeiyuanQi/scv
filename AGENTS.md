@@ -60,8 +60,9 @@
   dependency updates the diagram in `docs/architecture.md` in the same commit.
 - Put unit tests in the module's own test file (`src/foo.rs` declares
   `#[cfg(test)] mod tests;` and its tests live in `src/foo/tests.rs`), never
-  inline; black-box tests go in the root `tests/`. `docs/quality.md` ("Test
-  layout") has the details, and `tests/isolation_guard.rs` enforces them.
+  inline; black-box tests go in the root `tests/it/`, one module per area.
+  `docs/quality.md` ("Test layout") has the details, and `tests/it/guard.rs`
+  enforces them.
 - All current and future long-running components must implement the server's
   `Component::run(cancel, HealthReporter)` contract and run under its
   `Supervisor`. Keep starts idempotent per account, retries bounded, and

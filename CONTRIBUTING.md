@@ -43,9 +43,9 @@ sends stderr to the journal: `journalctl --user -u scv.service`, or
 `scv-<hash>.service` for an instance started with `--scv-home` (`systemctl
 --user list-units 'scv*'` lists them).
 
-Run one crate's tests with `cargo test -p <crate> [<name filter>]`, and one
-black-box test file from the root `tests/` directory with
-`cargo test -p scv-cli --test <file stem>`. [`docs/quality.md`](docs/quality.md)
+Run one crate's tests with `cargo test -p <crate> [<name filter>]`, and the
+black-box tests of one area from the root `tests/it/` with
+`cargo test -p scv-cli --test it <module>::` (such as `daemon::`). [`docs/quality.md`](docs/quality.md)
 says where new tests go, and [`docs/architecture.md`](docs/architecture.md)
 says where to start reading the code.
 

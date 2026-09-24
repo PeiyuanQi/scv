@@ -165,9 +165,22 @@ What lives where in the largest crates:
 | `scv-feishu` | `lib.rs`, `api.rs` | The Feishu transport and its Open Platform client |
 | | `socket.rs`, `frame.rs`, `inbound.rs` | The event long connection, its protobuf frames, and parsing events and catch-up history |
 | | `login.rs`, `state.rs` | Signing in, by QR scan (which creates the bot app) or with an existing app, and Feishu credentials |
+| `scv-core` | `message.rs`, `tool.rs` | History messages; the `Tool` trait, its context and output, and `ToolRegistry` |
+| | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` |
+| | `progress.rs` | Bounded, paced tool progress lines |
+| | `context.rs`, `history.rs` | Choosing the history that fits the context window, and trimming stored history |
+| | `runtime.rs` | `AgentRuntime` and its turn loop |
+| `scv-protocol` | `client.rs`, `server.rs` | `ClientMessage` and `ServerEvent` |
+| | `daemon.rs`, `attachment.rs`, `background.rs` | Daemon control and status, attached files, and background-job reporting |
+| `scv-provider-openai` | `request.rs` | `OpenAiProvider`: requests, retries, and error reporting |
+| | `stream.rs`, `wire.rs`, `encode.rs` | Assembling a response from its event stream, the wire shapes, and replaying history as input |
+| `scv-tui` | `app.rs`, `transcript.rs` | What the UI shows and how server events change it; bounded transcript and prompt history |
+| | `input.rs`, `render.rs`, `terminal.rs` | Keys and the composer, drawing, and terminal setup |
+| | `client.rs`, `exec.rs` | The server connection, and headless `scv exec` |
 
-`scv-core`, `scv-protocol`, `scv-provider-openai`, and `scv-tui` are one
-`lib.rs` each.
+Black-box tests of the binaries are one test program, `tests/it/`, with a
+module per area (`server`, `daemon`, `config`, `delegation`, `restart`,
+`update`) and shared helpers in `tests/it/support.rs`.
 
 Each channel account is a component hosted by the daemon's supervisor. A
 channel crate (WeChat's `scv-clawbot`, Feishu's `scv-feishu`) implements

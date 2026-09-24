@@ -114,10 +114,13 @@ harness = false
 [[bin]]
 name = "scv"
 path = "src/main.rs"
+# The binaries have no unit tests; tests/it drives them from outside.
+test = false
 
 [[bin]]
 name = "scv-server"
 path = "src/bin/scv-server.rs"
+test = false
 
 [profile.release]
 codegen-units = 1
