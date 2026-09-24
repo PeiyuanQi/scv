@@ -1,6 +1,6 @@
 ---
 name: feature-flow
-description: Standard landing flow for SCV changes on this machine. Develop in a sibling worktree, pass the AGENTS.md gates, rebase onto origin/main (gh PR when gh is authenticated, plain git otherwise), publish every crate to crates.io, install the release locally, and restart the SCV daemon. Use when asked to land, ship, release, deploy, or finish a feature or fix in the SCV repository.
+description: Standard landing flow for SCV changes on this machine. Develop in a sibling worktree, pass the AGENTS.md gates, land on origin/main as one squashed commit (gh PR squash merge when gh is authenticated, plain git otherwise), publish every crate to crates.io, install the release locally, and restart the SCV daemon. Use when asked to land, ship, release, deploy, or finish a feature or fix in the SCV repository.
 ---
 
 # SCV feature flow
@@ -93,9 +93,11 @@ host's login profile, which takes seconds on loaded CI runners.
   in the body.
 - End the message with the attribution trailer your harness requires.
 
-## 5. Land on origin/main by rebase
+## 5. Land on origin/main as one squashed commit
 
-Never create merge commits, and never force-push `main`. Use the `gh` path when
+Never create merge commits, and never force-push `main`. Each change lands as
+one squashed commit, which keeps `main` at one commit per change and the
+history small, so git stays fast. Use the `gh` path when
 `gh auth status --hostname github.com` succeeds (through `host.sh` when
 delegated). Otherwise use plain git.
 
@@ -105,9 +107,13 @@ delegated). Otherwise use plain git.
 git push -u origin HEAD
 gh pr create --base main --fill
 gh pr checks --watch --fail-fast
-gh pr merge --rebase
+gh pr merge --squash --subject "<type>: <summary> (#<pr>)" --body "<body>"
 git push origin --delete <type>/<topic>
 ```
+
+Pass the message explicitly. The subject is the PR title in conventional form
+with the PR number. The body is a short summary of the change that ends with
+the attribution trailer. Otherwise GitHub uses the whole PR description.
 
 Do not use `--delete-branch` here. After merging, gh tries to check out `main`
 locally, which fails because the main checkout already holds `main`, and the
@@ -125,16 +131,19 @@ remote branch is then left behind.
 ```sh
 git fetch origin
 git rebase origin/main   # resolve conflicts; rerun stage 3 if upstream moved
+git reset --soft origin/main && git commit   # only if the branch holds several commits
 git push origin HEAD:main
 ```
 
 That push is a fast-forward. A rejection means `main` moved: fetch, rebase,
 rerun the gates, and push again.
 
-**After landing:** a rebase merge on GitHub rewrites commit IDs, so release
-from the remote tip itself. Confirm your change is on it:
+**After landing:** a squash merge puts a new commit on `main` that is not in
+your branch, so release from the remote tip itself. Confirm your change is on
+it:
 
 ```sh
+gh pr view <pr> --json state,mergeCommit   # state MERGED; mergeCommit.oid is on main
 git fetch origin
 git switch --detach origin/main
 ```
@@ -174,16 +183,21 @@ scripts/deploy.sh <version>
 
 - Run `git worktree remove ../scv-<topic>`.
 - Delete the local branch with `git branch -D <branch>` once its change is on
-  `origin/main`. Also make sure the remote task branch is gone:
+  `origin/main`. After a squash, the branch's own commits are not on `main`, so
+  `git branch -d` and ancestry checks report it unmerged. Confirm from GitHub
+  instead: `gh pr view <pr> --json state,mergeCommit` shows `MERGED`, and
+  `git merge-base --is-ancestor <mergeCommit.oid> origin/main` succeeds. Also
+  make sure the remote task branch is gone:
   `git ls-remote --heads origin <branch>` should print nothing.
 - Prune stale remote branches. For each branch in
   `git branch -r | grep -v -e 'origin/main' -e HEAD`, delete it with
-  `git push origin --delete <branch>` when its PR is merged or closed
-  (`gh pr list --state all --head <branch>`) or it has none, and
-  `git rev-list --count origin/main..origin/<branch>` prints 0 or
-  `git cherry origin/main origin/<branch>` shows no `+` lines. Never delete
-  `main`, a branch with an open PR, or one with commits not on `main`: report
-  those instead. Finish with `git fetch --prune origin`.
+  `git push origin --delete <branch>` when its PR is `MERGED` or `CLOSED`
+  (`gh pr list --state all --head <branch> --json number,state`), or when it
+  has no PR and `git rev-list --count origin/main..origin/<branch>` prints 0.
+  Squashed branches never pass an ancestry check, so the PR state decides.
+  Never delete `main`, a branch with an open PR, or a branch with no PR and
+  commits not on `main`: report those instead. Finish with
+  `git fetch --prune origin`.
 - Report:
   - the commit(s) now on `main`;
   - the version published and the version installed;
