@@ -64,6 +64,21 @@ enum Command {
         /// Verify that the current user can authenticate with sudo before restarting.
         #[arg(long)]
         allow_sudo: bool,
+        /// Ask the running daemon to restart into the release installed at
+        /// its path once the delegation that asks (if any) has finished and
+        /// its report is stored and no owner message is being answered. The
+        /// new release announces itself in that chat, or through `[notify]`.
+        #[arg(long, conflicts_with_all = ["workspace", "allow_sudo"])]
+        when_idle: bool,
+        /// With --when-idle: the release you installed; the daemon checks it.
+        #[arg(long, requires = "when_idle")]
+        version: Option<String>,
+        /// With --when-idle: the commit it was built from, for the announcement.
+        #[arg(long, requires = "when_idle")]
+        commit: Option<String>,
+        /// With --when-idle: restart anyway after this many seconds [default: 600].
+        #[arg(long, value_name = "SECONDS", requires = "when_idle")]
+        max_wait: Option<u64>,
     },
     Status,
     /// Re-read component settings and saved accounts without restarting sessions.
@@ -95,6 +110,17 @@ enum Command {
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
+    },
+    /// Print this binary's version and config layout as JSON; the daemon
+    /// runs it on a newly installed release before restarting into it.
+    #[command(hide = true)]
+    BuildInfo,
+    /// Carry out a planned restart outside the daemon: restart its unit,
+    /// check the new release, and roll back when it fails.
+    #[command(hide = true)]
+    RestartWatchdog {
+        #[arg(long, value_name = "PATH")]
+        plan: PathBuf,
     },
 }
 #[derive(Subcommand)]
@@ -438,8 +464,16 @@ async fn main() -> Result<()> {
         ),
         Command::Stop => daemon_control("stop", None, None, None, None, None, false),
         Command::Restart {
+            when_idle: true,
+            version,
+            commit,
+            max_wait,
+            ..
+        } => restart_when_idle(version, commit, max_wait).await,
+        Command::Restart {
             workspace,
             allow_sudo,
+            ..
         } => daemon_control(
             "restart",
             Some(&workspace),
@@ -458,6 +492,14 @@ async fn main() -> Result<()> {
         Command::Update { index_url } => update_cli(&cwd, index_url),
         Command::Channels { command } => channels(command).await,
         Command::Agents { command } => agents(command).await,
+        Command::BuildInfo => {
+            println!("{}", serde_json::to_string(&scv_server::build_info())?);
+            Ok(())
+        }
+        Command::RestartWatchdog { plan } => {
+            init_tracing();
+            scv_server::restart_watchdog(&plan).await
+        }
     }
 }
 
@@ -470,7 +512,13 @@ fn refuse_nested_daemon_control(command: &Command) -> Result<()> {
         Command::Run { .. } => Some("run"),
         Command::Start { .. } => Some("start"),
         Command::Stop => Some("stop"),
+        // Asking the daemon to restart itself when idle is how a delegated
+        // release (the feature-flow deploy) hands over; the daemon decides.
+        Command::Restart {
+            when_idle: true, ..
+        } => None,
         Command::Restart { .. } => Some("restart"),
+        Command::RestartWatchdog { .. } => Some("restart-watchdog"),
         Command::Update { .. } => Some("update"),
         Command::Channels { .. } => Some("channels"),
         _ => None,
@@ -484,6 +532,71 @@ fn refuse_nested_daemon_control(command: &Command) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Exit status of `scv restart --when-idle` when the daemon is not running
+/// or predates it; the caller then restarts the unit itself.
+const RESTART_UNSUPPORTED: i32 = 3;
+
+async fn restart_when_idle(
+    version: Option<String>,
+    commit: Option<String>,
+    max_wait: Option<u64>,
+) -> Result<()> {
+    let parent = std::env::var(scv_server::delegation::PARENT_VARIABLE)
+        .ok()
+        .filter(|chain| !chain.trim().is_empty());
+    let status = match control(DaemonCommand::RestartWhenIdle {
+        version,
+        commit,
+        parent,
+        max_wait_seconds: max_wait,
+    })
+    .await
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("unknown variant") || message.contains("SCV daemon unavailable") {
+                eprintln!("{message}");
+                eprintln!(
+                    "The daemon is not running or cannot schedule its own restart; restart its unit instead."
+                );
+                std::process::exit(RESTART_UNSUPPORTED);
+            }
+            return Err(error);
+        }
+    };
+    let info = status
+        .restart
+        .context("the daemon did not report the scheduled restart")?;
+    println!("Restart into v{} scheduled.", info.to_version);
+    println!("{}", describe_restart(&info));
+    Ok(())
+}
+
+/// One line on a scheduled restart: what it waits for and until when.
+fn describe_restart(info: &scv_protocol::RestartInfo) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let left = info.deadline_unix_seconds.saturating_sub(now);
+    let waiting = match &info.waiting_for {
+        Some(what) => format!(
+            "waiting for {what}, restarting anyway in {}m{:02}s",
+            left / 60,
+            left % 60
+        ),
+        None => "restarting now".into(),
+    };
+    let target = match &info.origin {
+        Some(origin) => format!("the chat on {origin} that asked"),
+        None => "the [notify] accounts".into(),
+    };
+    format!(
+        "Restart into v{}: {waiting}; the outcome goes to {target}.",
+        info.to_version
+    )
 }
 
 fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<()> {
@@ -1254,6 +1367,9 @@ async fn show_status(channel: Option<&str>, account: Option<&str>) -> Result<()>
         "Delegations: {} running, {} orphaned runs stopped since the daemon started",
         status.delegations.active, status.delegations.reaped
     );
+    if let Some(restart) = &status.restart {
+        println!("{}", describe_restart(restart));
+    }
     let matching: Vec<_> = status
         .components
         .iter()
@@ -1279,8 +1395,11 @@ async fn show_status(channel: Option<&str>, account: Option<&str>) -> Result<()>
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // Colour only for a terminal: the user service sends stderr to the
+    // journal, where escape codes would hide `WARN`/`ERROR` from searches.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(io::stderr().is_terminal())
         .try_init();
 }

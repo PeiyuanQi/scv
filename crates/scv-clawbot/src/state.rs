@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use scv_channels::state::{
-    AccountSettings, BridgeState, HeldReply, InFlight, PendingDelivery, RemoteTools, validate_name,
+    AccountSettings, BridgeState, HeldReply, InFlight, PendingDelivery, RemoteTools, RunningJob,
+    validate_name,
 };
 
 /// The WeChat channel's account store.

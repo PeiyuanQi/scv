@@ -292,6 +292,7 @@ struct ChannelAccount {
     workspace: PathBuf,
     socket: PathBuf,
     tool_owner: Option<String>,
+    link: scv_channels::hub::Link,
 }
 
 #[async_trait]
@@ -322,6 +323,7 @@ impl Component for ChannelAccount {
                     tool_owner.as_ref(),
                     cancellation,
                     report,
+                    self.link.clone(),
                 )
                 .await
             }
@@ -334,6 +336,7 @@ impl Component for ChannelAccount {
                     tool_owner.as_ref(),
                     cancellation,
                     report,
+                    self.link.clone(),
                 )
                 .await
             }
@@ -348,17 +351,36 @@ pub(crate) struct Components {
     inactive: BTreeMap<String, ComponentHealth>,
     socket: PathBuf,
     workspace: PathBuf,
+    /// What the daemon shares with the channel bridges it runs.
+    hub: Arc<scv_channels::hub::Hub>,
+    /// Plans the daemon's own restarts; set only in the socket daemon.
+    restarter: Option<Arc<crate::restart::Restarter>>,
 }
 
 impl Components {
+    #[cfg(test)]
     pub fn new(socket: PathBuf, workspace: PathBuf) -> Self {
+        Self::with_hub(socket, workspace, scv_channels::hub::Hub::new(None))
+    }
+
+    pub fn with_hub(socket: PathBuf, workspace: PathBuf, hub: Arc<scv_channels::hub::Hub>) -> Self {
         Self {
             supervisor: Supervisor::default(),
             desired: BTreeMap::new(),
             inactive: BTreeMap::new(),
             socket,
             workspace,
+            hub,
+            restarter: None,
         }
+    }
+
+    pub(crate) fn set_restarter(&mut self, restarter: Arc<crate::restart::Restarter>) {
+        self.restarter = Some(restarter);
+    }
+
+    pub(crate) fn restarter(&self) -> Option<Arc<crate::restart::Restarter>> {
+        self.restarter.clone()
     }
 
     pub fn status(&self) -> DaemonStatus {
@@ -370,6 +392,7 @@ impl Components {
             pid: std::process::id(),
             components,
             delegations: Default::default(),
+            restart: None,
         }
     }
 
@@ -464,6 +487,11 @@ impl Components {
                     self.desired.remove(&id);
                     continue;
                 }
+                let link = scv_channels::hub::Link::new(
+                    Arc::clone(&self.hub),
+                    id.clone(),
+                    credentials.owner().map(str::to_owned),
+                );
                 self.supervisor.start(
                     Arc::new(ChannelAccount {
                         channel,
@@ -472,6 +500,7 @@ impl Components {
                         workspace,
                         socket: self.socket.clone(),
                         tool_owner,
+                        link,
                     }),
                     health,
                 );
@@ -505,7 +534,8 @@ impl Components {
             // Delegations belong to the connection handler, which adds them.
             DaemonCommand::Status
             | DaemonCommand::Delegations { .. }
-            | DaemonCommand::DelegationKill { .. } => return Ok(self.status()),
+            | DaemonCommand::DelegationKill { .. }
+            | DaemonCommand::RestartWhenIdle { .. } => return Ok(self.status()),
             DaemonCommand::Reload => {}
             DaemonCommand::ChannelSet {
                 channel,

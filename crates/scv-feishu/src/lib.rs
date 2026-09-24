@@ -43,7 +43,8 @@ const CATCH_UP_PAGES: usize = 4;
 /// Cancellation drops all owned I/O and sessions; no tasks are spawned.
 ///
 /// `tool_owner` is the authenticated owner when the account grants its owner
-/// remote tools; every other sender stays tool-free.
+/// remote tools; every other sender stays tool-free. `link` connects the
+/// account to the daemon's hub.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
     credentials: &state::Account,
@@ -53,13 +54,14 @@ pub async fn run_supervised(
     tool_owner: Option<&ToolOwner>,
     cancellation: CancellationToken,
     report: Arc<dyn Fn(bool) + Send + Sync>,
+    link: scv_channels::hub::Link,
 ) -> Result<()> {
     let work = async {
         state::validate_name(account)?;
         credentials.validate()?;
         let store = state::store()?;
         let transport = Feishu::new(Endpoints::for_brand(credentials.brand), credentials)?;
-        let result = scv_channels::run(
+        let result = scv_channels::run_linked(
             &transport,
             account,
             workspace,
@@ -68,6 +70,7 @@ pub async fn run_supervised(
             &store,
             |saved| Ok(saved == credentials),
             report.as_ref(),
+            &link,
         )
         .await;
         if result.is_err() {

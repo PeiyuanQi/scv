@@ -9,8 +9,9 @@ CLI uses: it prints a terminal QR code, waits for the user's scan, and saves
 the app ID and secret with the creator's `open_id` as the owner.
 `login::login_existing` adds an existing app after checking its secret with
 Feishu. `run_supervised(credentials, account, workspace, socket, tool_owner,
-cancellation, report)` runs one account until cancelled; `tool_owner` carries
-the owner's `open_id`.
+cancellation, report, link)` runs one account until cancelled; `tool_owner`
+carries the owner's `open_id`, and `link` connects the account to the
+daemon's hub (`scv_channels::hub`).
 
 The transport connects through `callback/ws/endpoint`, accepting only a `wss`
 host on the brand's domain, and speaks the `pbbp2.Frame` protobuf of

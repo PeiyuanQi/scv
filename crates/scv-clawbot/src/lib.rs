@@ -107,6 +107,7 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
         None,
         CancellationToken::new(),
         Arc::new(|_| {}),
+        scv_channels::hub::Link::detached(),
     )
     .await
 }
@@ -116,7 +117,8 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
 /// no adapter tasks are spawned. The caller supplies any external stop timeout.
 ///
 /// `tool_owner` is the authenticated owner when the account grants its owner
-/// remote tools; every other sender stays tool-free.
+/// remote tools; every other sender stays tool-free. `link` connects the
+/// account to the daemon's hub.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
     token: &str,
@@ -127,12 +129,13 @@ pub async fn run_supervised(
     tool_owner: Option<&ToolOwner>,
     cancellation: CancellationToken,
     report: Arc<dyn Fn(bool) + Send + Sync>,
+    link: scv_channels::hub::Link,
 ) -> Result<()> {
     until_cancelled(cancellation, async {
         state::validate_name(account)?;
         let base_url = normalize_base_url(base_url)?;
         let store = state::store()?;
-        let result = run_loop(
+        let result = run_loop_linked(
             token,
             &base_url,
             account,
@@ -141,6 +144,7 @@ pub async fn run_supervised(
             tool_owner,
             &store,
             report.as_ref(),
+            &link,
         )
         .await;
         if result.is_err() {
@@ -197,6 +201,7 @@ async fn response_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
 }
 
 /// Bridge one account over iLink with the given running credentials.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_loop(
     token: &str,
@@ -208,12 +213,39 @@ async fn run_loop(
     store: &state::Store,
     report: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<()> {
+    run_loop_linked(
+        token,
+        base_url,
+        account,
+        workspace,
+        socket,
+        tool_owner,
+        store,
+        report,
+        &scv_channels::hub::Link::detached(),
+    )
+    .await
+}
+
+/// [`run_loop`] linked to the daemon's hub.
+#[allow(clippy::too_many_arguments)]
+async fn run_loop_linked(
+    token: &str,
+    base_url: &str,
+    account: &str,
+    workspace: &Path,
+    socket: &Path,
+    tool_owner: Option<&ToolOwner>,
+    store: &state::Store,
+    report: &(dyn Fn(bool) + Send + Sync),
+    link: &scv_channels::hub::Link,
+) -> Result<()> {
     let transport = Ilink {
         client: http_client()?,
         token,
         base_url,
     };
-    scv_channels::run(
+    scv_channels::run_linked(
         &transport,
         account,
         workspace,
@@ -222,6 +254,7 @@ async fn run_loop(
         store,
         |saved| state::runs_as(saved, token, base_url),
         report,
+        link,
     )
     .await
 }

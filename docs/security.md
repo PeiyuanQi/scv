@@ -125,7 +125,12 @@ exited.
 Delegation depth is bounded by `agent.max_delegation_depth`, and at any depth
 above zero the `scv` CLI refuses to run, start, stop, restart, or update a
 daemon or manage channels, so an SCV started by a delegated agent cannot manage
-its parent. Conversation handles belong to one SCV session and are checked
+its parent. The one exception is `scv restart --when-idle`, which only asks
+the daemon to restart into the release already installed at its own path: the
+daemon decides when, refuses a binary that does not answer `scv build-info`,
+and keeps the previous binary for a rollback. It gives a delegated agent
+nothing it could not already do as the user (such as `systemctl --user
+restart`); it exists so a chat-driven release restarts after its report. Conversation handles belong to one SCV session and are checked
 against it, so the model cannot reach another session's conversation or pass a
 CLI session ID of its choosing; a continued conversation keeps its original
 `cwd`. `scv agents gc` removes only regular transcript files below each
@@ -307,6 +312,14 @@ Legacy unbound state is bound before first use. A mismatch prevents polling,
 recovery, and delivery. Login refuses identity/origin replacement, including
 legacy-to-identified replacement, until explicit logout discards the old state.
 This prevents pending replies from leaking into a different account or origin.
+
+Notices the daemon sends on its own (update outcomes, jobs a restart stopped,
+restarts after an unexpected stop, accounts that stay disconnected) go only
+to an account owner's direct chat: the chat that asked, the `[notify]`
+accounts' owners, or the chat the owner last wrote from. Their text is
+composed by SCV, not the model, and names versions, commits, job handles, and
+the first line of each stopped job's delegated prompt; the restart plan and
+the owner's last chat are private files under `$SCV_HOME/state`.
 
 Feishu text turns `<at user_id=…>` into mentions, including `@all`, so SCV
 breaks every `<at` in outgoing text with a zero-width space: model output, which

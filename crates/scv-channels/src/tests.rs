@@ -231,3 +231,82 @@ fn a_full_session_table_never_closes_a_conversation_with_background_work() {
     }
     assert_eq!(evictable(&conversations, waiting), None);
 }
+
+#[test]
+fn recovery_tells_each_chat_which_background_jobs_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = test_store(directory.path());
+    let job = |to: &str, job: &str, task: &str| state::RunningJob {
+        to_user_id: to.into(),
+        job: job.into(),
+        tool: "agent_codex".into(),
+        task: task.into(),
+        started_at: 1,
+    };
+    let mut saved = state::BridgeState {
+        in_flight: vec![state::InFlight {
+            message_id: "incoming".into(),
+            to_user_id: "alice".into(),
+            context_token: "context".into(),
+            key: "alice".into(),
+        }],
+        jobs: vec![
+            job("alice", "job-1", "Fix the build"),
+            job("bob", "job-1", ""),
+            job("alice", "job-2", "Publish"),
+        ],
+        ..Default::default()
+    };
+    // Without a planned restart: the generic failure and an unexpected stop.
+    recover_interrupted(&store, "default", &mut saved).unwrap();
+    let restarted = store.load_state("default").unwrap();
+    assert!(restarted.jobs.is_empty() && restarted.in_flight.is_empty());
+    let replies: Vec<_> = restarted
+        .pending
+        .iter()
+        .map(|pending| (pending.to_user_id.as_str(), pending.reply.as_str()))
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            ("alice", FAILURE_REPLY),
+            (
+                "alice",
+                "An unexpected interruption stopped background work that was still running:\n\
+                 - job-1 (codex): Fix the build\n- job-2 (codex): Publish\n\
+                 Ask again if you still need it."
+            ),
+            (
+                "bob",
+                "An unexpected interruption stopped background work that was still running:\n\
+                 - job-1 (codex)\nAsk again if you still need it."
+            ),
+        ]
+    );
+    // Notices answer no message: no reply handle, the chat's own key.
+    assert!(restarted.pending[1].context_token.is_empty());
+    assert_eq!(restarted.pending[2].key, "bob");
+}
+
+#[test]
+fn after_a_planned_restart_claims_are_told_why() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = test_store(directory.path());
+    let mut saved = state::BridgeState {
+        in_flight: vec![state::InFlight {
+            message_id: "incoming".into(),
+            to_user_id: "alice".into(),
+            context_token: "context".into(),
+            key: String::new(),
+        }],
+        ..Default::default()
+    };
+    let restart = hub::Restart {
+        to_version: "0.1.37".into(),
+    };
+    recover_interrupted_after(&store, "default", &mut saved, Some(&restart)).unwrap();
+    assert_eq!(
+        store.load_state("default").unwrap().pending[0].reply,
+        "SCV restarted to update to v0.1.37 before finishing this; ask again if you still need it."
+    );
+}

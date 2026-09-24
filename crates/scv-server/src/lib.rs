@@ -5,6 +5,7 @@ pub mod components;
 mod config;
 pub mod imports;
 pub mod overview;
+mod restart;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -32,6 +33,7 @@ pub fn update_index_url(workspace: &std::path::Path) -> anyhow::Result<Option<St
 }
 
 pub use agents::{Endpoint, PI_PROVIDER, WireApi, read_secret};
+pub use restart::{BuildInfo, CONFIG_LAYOUT, build_info, watchdog as restart_watchdog};
 pub use scv_tools::{adapters, delegation};
 
 /// Build a command for a native agent's CLI with the same private home and
@@ -435,9 +437,16 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .context("secure SCV socket")?;
     }
-    let components = Arc::new(Mutex::new(components::Components::new(
+    let home =
+        config::user_home_path().ok_or_else(|| anyhow!("cannot determine SCV instance home"))?;
+    let hub = scv_channels::hub::Hub::new(Some(restart::last_owner_path(&home)));
+    // Before any account starts: its recovery needs to know whether this
+    // start is a planned restart.
+    let startup = restart::startup(&home, &hub);
+    let components = Arc::new(Mutex::new(components::Components::with_hub(
         path.to_owned(),
         std::env::current_dir()?,
+        Arc::clone(&hub),
     )));
     let registry = instance_delegations()?;
     // Descendants a delegated agent leaves behind reparent to the daemon, not init.
@@ -445,6 +454,29 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         tracing::debug!("SCV daemon is not a child subreaper on this platform");
     }
     let cancellation = CancellationToken::new();
+    let restarter = restart::Restarter::new(
+        home.clone(),
+        hub,
+        Arc::clone(&registry),
+        &components,
+        cancellation.clone(),
+    );
+    components
+        .lock()
+        .await
+        .set_restarter(Arc::clone(&restarter));
+    let notices = tokio::spawn(restart::announce(
+        home.clone(),
+        startup,
+        restarter.notifier().clone(),
+        cancellation.clone(),
+    ));
+    let _notices_abort = AbortGuard(notices.abort_handle());
+    let monitor = tokio::spawn(restart::monitor(
+        restarter.notifier().clone(),
+        cancellation.clone(),
+    ));
+    let _monitor_abort = AbortGuard(monitor.abort_handle());
     let delegation_registry = Arc::clone(&registry);
     let delegation_cancel = cancellation.clone();
     let mut delegation_task = tokio::spawn(async move {
@@ -527,6 +559,7 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
     tasks.close();
     tasks.wait().await;
     let _ = tokio::fs::remove_file(path).await;
+    restart::clean_shutdown(&home);
     result
 }
 
@@ -567,6 +600,8 @@ async fn reconcile_delegations(registry: Arc<DelegationRegistry>) {
 enum ControlFailure {
     /// A delegation request the client can correct; the message is safe to show.
     Delegation(String),
+    /// A restart the daemon refused; the message is safe to show.
+    Restart(String),
     Component,
 }
 
@@ -577,6 +612,16 @@ async fn daemon_control(
     command: DaemonCommand,
 ) -> std::result::Result<DaemonStatus, ControlFailure> {
     let mut killed = Vec::new();
+    let restarter = components.lock().await.restarter();
+    if let DaemonCommand::RestartWhenIdle { .. } = &command {
+        let restarter = restarter.as_ref().ok_or_else(|| {
+            ControlFailure::Restart("only the SCV daemon can schedule its restart".into())
+        })?;
+        restarter
+            .request(command.clone())
+            .await
+            .map_err(ControlFailure::Restart)?;
+    }
     let listing = match &command {
         DaemonCommand::Delegations { all } => Some(*all),
         DaemonCommand::DelegationKill { handle, orphans } => {
@@ -633,6 +678,7 @@ async fn daemon_control(
         .collect(),
         killed,
     };
+    status.restart = restarter.and_then(|restarter| restarter.info());
     Ok(status)
 }
 
@@ -668,6 +714,9 @@ where
     let mut frames = FrameBuffer::default();
     let mut initialized = false;
     let mut session: Option<Session> = None;
+    // The session's turn and report activity, which a planned restart asked
+    // for from this session waits out.
+    let mut activity: Option<restart::SessionTracker> = None;
     let mut active: Option<ActiveTurn> = None;
     // Woken when a background job finishes; set until its report turn starts.
     let mut background_rx: Option<mpsc::UnboundedReceiver<()>> = None;
@@ -677,6 +726,9 @@ where
 
     let loop_result: Result<()> = async {
         loop {
+        if let Some(activity) = &activity {
+            activity.set_busy(active.is_some() || background_ready);
+        }
         let frame_limit = session.as_ref().map_or_else(
             || Config::default().protocol.max_client_frame_bytes,
             |value| value.config.protocol.max_client_frame_bytes,
@@ -737,6 +789,7 @@ where
                             match result {
                                 Ok(status) => send_event(&output_tx, ServerEvent::DaemonStatus { request_id, status }, server_frame_limit(&session)).await?,
                                 Err(ControlFailure::Delegation(message)) => send_error(&output_tx, &request_id, "delegation_error", &message, false, server_frame_limit(&session)).await?,
+                                Err(ControlFailure::Restart(message)) => send_error(&output_tx, &request_id, "restart_error", &message, false, server_frame_limit(&session)).await?,
                                 Err(ControlFailure::Component) => send_error(&output_tx, &request_id, "component_error", "Component operation failed; check account credentials, private file permissions and absolute workspace", false, server_frame_limit(&session)).await?,
                             }
                         } else {
@@ -786,6 +839,7 @@ where
                                     entries: new_session.queue.lock().await.iter().cloned().collect(),
                                     paused: new_session.paused.load(Ordering::Acquire),
                                 }, new_session.config.protocol.max_server_frame_bytes).await?;
+                                activity = Some(restart::SessionTracker::new(&new_session.id, new_session.background.as_ref()));
                                 session = Some(new_session);
                             }
                             Err(error) => {
@@ -1969,8 +2023,11 @@ fn discover_project_skills(
         let Ok(directory) = std::fs::canonicalize(workspace.join(&name)) else {
             continue;
         };
+        // A linked git worktree (its `.git` is a file) is another checkout of
+        // a project already listed; its skills would appear twice.
         if directory.is_dir()
             && directory.starts_with(workspace)
+            && !directory.join(".git").is_file()
             && !projects.iter().any(|(_, seen)| seen == &directory)
         {
             projects.push((Some(name), directory));
@@ -2668,6 +2725,16 @@ mod tests {
             &workspace.join("web/.claude/skills/deploy"),
             "Deploy the site",
         );
+        // A linked worktree of scv: its `.git` is a file naming the checkout.
+        write_skill(
+            &workspace.join("scv-topic/.agents/skills/feature-flow"),
+            "Land SCV from a worktree",
+        );
+        std::fs::write(
+            workspace.join("scv-topic/.git"),
+            "gitdir: ../scv/.git/worktrees/scv-topic\n",
+        )
+        .unwrap();
         write_skill(&workspace.join(".agents/skills/triage"), "Root triage");
         write_skill(&workspace.join(".agents/skills/notes"), "Root notes");
         write_skill(&workspace.join(".scv/skills/triage"), "SCV triage");

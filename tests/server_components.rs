@@ -476,3 +476,80 @@ async fn channel_login_options_stay_with_their_platform_and_ids_are_checked_firs
     }
     assert!(!home.path().join("credentials/feishu").exists());
 }
+
+#[tokio::test]
+async fn a_daemon_outside_its_unit_refuses_to_restart_itself_and_marks_clean_stops() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut child = start(home.path(), workspace.path());
+    status(home.path()).await;
+    let marker = home.path().join("state/daemon.json");
+    assert!(marker.is_file(), "the running daemon is recorded");
+    let refused = scv_client::control(
+        &home.path().join("state/server.sock"),
+        DaemonCommand::RestartWhenIdle {
+            version: None,
+            commit: None,
+            parent: None,
+            max_wait_seconds: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("cannot restart itself"),
+        "{refused:#}"
+    );
+    assert!(status(home.path()).await.restart.is_none());
+    // The CLI reports the refusal, not a daemon too old to ask.
+    let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
+        .args(["restart", "--when-idle"])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot restart itself"));
+    terminate(&mut child).await;
+    assert!(!marker.exists(), "a clean stop is not reported as a crash");
+}
+
+#[tokio::test]
+async fn daemon_logs_carry_no_colour_codes_outside_a_terminal() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    // An unreadable restart plan is logged as a warning at startup.
+    std::fs::create_dir_all(home.path().join("state")).unwrap();
+    std::fs::write(home.path().join("state/update.json"), "not a plan").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
+        .args(["run", "--workspace"])
+        .arg(workspace.path())
+        .env("OPENAI_API_KEY", "test-only")
+        .env("RUST_LOG", "warn")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let line = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert!(stderr.read_line(&mut line).await.unwrap() > 0, "log ended");
+            if line.contains("restart plan") {
+                return line;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // The journal keeps this text as is: `deploy.sh` finds warnings by it.
+    assert!(line.contains(" WARN "), "{line:?}");
+    assert!(!line.contains('\u{1b}'), "{line:?}");
+    status(home.path()).await;
+    assert!(!home.path().join("state/update.json").exists());
+    terminate(&mut child).await;
+}

@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 use uuid::Uuid;
 
 pub use scv_client::Layout;
+pub mod hub;
 pub mod session;
 pub mod state;
 
@@ -27,6 +28,38 @@ pub const MAX_REPLY_BYTES: usize = 16 * 1024;
 /// A turn's whole answer. Beyond one message it is sent in parts.
 pub const MAX_TOTAL_REPLY_BYTES: usize = 4 * MAX_REPLY_BYTES;
 pub const FAILURE_REPLY: &str = "SCV could not complete that request.";
+
+/// The reply to a message whose turn a planned restart interrupted.
+pub fn restarted_reply(restart: &hub::Restart) -> String {
+    format!(
+        "SCV restarted to update to v{} before finishing this; ask again if you still need it.",
+        restart.to_version
+    )
+}
+
+/// The notice telling a direct chat which of its background jobs stopped
+/// with the previous run: a planned restart when `restart` is set,
+/// otherwise an unexpected stop of the daemon or the account's bridge.
+pub fn stopped_jobs_notice(restart: Option<&hub::Restart>, jobs: &[state::RunningJob]) -> String {
+    let mut notice = match restart {
+        Some(restart) => format!(
+            "SCV restarted to update to v{}, which stopped background work that was still running:",
+            restart.to_version
+        ),
+        None => {
+            "An unexpected interruption stopped background work that was still running:".to_owned()
+        }
+    };
+    for job in jobs {
+        let agent = job.tool.strip_prefix("agent_").unwrap_or(&job.tool);
+        notice.push_str(&format!("\n- {} ({agent})", job.job));
+        if !job.task.is_empty() {
+            notice.push_str(&format!(": {}", job.task));
+        }
+    }
+    notice.push_str("\nAsk again if you still need it.");
+    notice
+}
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Owner turns may run tools and delegated agents, which take longer.
 pub const OWNER_TURN_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -184,9 +217,39 @@ pub async fn run<C: state::Credentials, T: Transport>(
     running: impl FnOnce(&C) -> Result<bool>,
     report: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<()> {
+    run_linked(
+        transport,
+        account,
+        workspace,
+        socket,
+        tool_owner,
+        store,
+        running,
+        report,
+        &hub::Link::detached(),
+    )
+    .await
+}
+
+/// [`run`] for an account the daemon runs, linked to its [`hub::Hub`]: the
+/// daemon then sees the account's owner work and chats and can queue
+/// notices, and recovery describes work a planned restart interrupted.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_linked<C: state::Credentials, T: Transport>(
+    transport: &T,
+    account: &str,
+    workspace: &Path,
+    socket: &Path,
+    tool_owner: Option<&ToolOwner>,
+    store: &state::Store<C>,
+    running: impl FnOnce(&C) -> Result<bool>,
+    report: &(dyn Fn(bool) + Send + Sync),
+    link: &hub::Link,
+) -> Result<()> {
     let _lock = store.lock(account)?;
     let mut state = store.bind_state(account, running)?;
-    recover_interrupted(store, account, &mut state)?;
+    recover_interrupted_after(store, account, &mut state, link.take_restart().as_ref())?;
+    let (registration, mut notices) = link.register();
     let bridge = Bridge {
         transport,
         account,
@@ -194,6 +257,9 @@ pub async fn run<C: state::Credentials, T: Transport>(
         socket,
         store,
         report,
+        link,
+        tool_owner: tool_owner.map(|owner| owner.user_id.as_str()),
+        registration,
         state: Mutex::new(state),
         turns: Semaphore::new(MAX_CONCURRENT_TURNS),
         replies: Notify::new(),
@@ -213,6 +279,10 @@ pub async fn run<C: state::Credentials, T: Transport>(
             result = &mut deliver => return result,
             Some((owner, recipient, jobs, watching)) = started.recv() => conversations.push(bridge.converse(owner, recipient, jobs, watching)),
             Some(result) = conversations.next(), if !conversations.is_empty() => result?,
+            Some(notice) = notices.recv() => {
+                bridge.queue_unprompted(&notice.to, &notice.text).await?;
+                notice.stored();
+            }
         }
     }
 }
@@ -271,6 +341,11 @@ struct Bridge<'a, C, T> {
     socket: &'a Path,
     store: &'a state::Store<C>,
     report: &'a (dyn Fn(bool) + Send + Sync),
+    link: &'a hub::Link,
+    /// The owner granted remote tools, whose claimed messages count as owner
+    /// work in the hub.
+    tool_owner: Option<&'a str>,
+    registration: hub::Registration,
     /// The only copy of delivery state. Every change is saved while held.
     state: Mutex<state::BridgeState>,
     /// Bounds how many senders' turns run at once.
@@ -283,14 +358,64 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     /// Save state, waiting out a daemon command's short transaction.
     async fn save(&self, state: &state::BridgeState) -> Result<()> {
         let deadline = tokio::time::Instant::now() + STATE_BUSY_RETRY;
-        loop {
+        let result = loop {
             match self.store.save_state(self.account, state) {
                 Err(error) if state::is_busy(&error) && tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                result => return result,
+                result => break result,
             }
+        };
+        if result.is_ok()
+            && let Some(owner) = self.tool_owner
+        {
+            let claims = state
+                .in_flight
+                .iter()
+                .filter(|claim| conversation_key(&claim.key, &claim.to_user_id) == owner)
+                .count();
+            self.registration.set_owner_claims(claims);
         }
+        result
+    }
+
+    /// Keep the durable record of `recipient`'s running background jobs in
+    /// step with its session, saving only when it changed.
+    async fn record_jobs(&self, recipient: &str, session: Option<&session::Session>) -> Result<()> {
+        let current = session.map(session::Session::jobs).unwrap_or_default();
+        let mut state = self.state.lock().await;
+        let recorded: Vec<&str> = state
+            .jobs
+            .iter()
+            .filter(|job| job.to_user_id == recipient)
+            .map(|job| job.job.as_str())
+            .collect();
+        if recorded.len() == current.len()
+            && current
+                .iter()
+                .all(|(job, _)| recorded.contains(&job.as_str()))
+        {
+            return Ok(());
+        }
+        let now = unix_now();
+        let mut kept = Vec::new();
+        for (job, info) in current {
+            let started_at = state
+                .jobs
+                .iter()
+                .find(|recorded| recorded.to_user_id == recipient && recorded.job == job)
+                .map_or(now, |recorded| recorded.started_at);
+            kept.push(state::RunningJob {
+                to_user_id: recipient.to_owned(),
+                job,
+                tool: info.tool,
+                task: info.task,
+                started_at,
+            });
+        }
+        state.jobs.retain(|job| job.to_user_id != recipient);
+        state.jobs.extend(kept);
+        self.save(&state).await
     }
 
     /// Receive messages, durably claim accepted ones, and queue each on its
@@ -367,6 +492,9 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             .map_or_else(|| sender.to_owned(), |group| format!("{group}\0{sender}"));
         let owner =
             group.is_none() && tool_owner.is_some_and(|tool_owner| tool_owner.user_id == sender);
+        if group.is_none() && self.link.owner() == Some(sender) {
+            self.registration.owner_wrote(sender);
+        }
         let limit = match tool_owner {
             Some(tool_owner) if owner => tool_owner.turn_timeout,
             _ => TURN_TIMEOUT,
@@ -474,11 +602,27 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             Report(Result<String>),
         }
         let mut session: Option<session::Session> = None;
+        // The daemon sees which session a direct chat runs on and its
+        // unreported background work, so a planned restart can wait for it.
+        let tracker = recipient
+            .as_deref()
+            .map(|peer| self.registration.conversation(peer));
         loop {
+            if let Some(recipient) = &recipient {
+                self.record_jobs(recipient, session.as_ref()).await?;
+            }
+            if let Some(tracker) = &tracker {
+                tracker.update(
+                    session.as_ref().map(|session| session.session_id.as_str()),
+                    session.as_ref().map_or(0, session::Session::pending_work),
+                );
+            }
+            // A running report turn is watched too, or its answer would wait
+            // unread until the chat's next message.
             let watching = recipient.is_some()
-                && session
-                    .as_ref()
-                    .is_some_and(|session| session.background_jobs() > 0 || session.has_reports());
+                && session.as_ref().is_some_and(|session| {
+                    session.background_jobs() > 0 || session.has_reports() || session.reporting()
+                });
             // Tell the poller, so a full session table never closes this
             // conversation while it has work in flight.
             watching_flag.store(
@@ -511,7 +655,13 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 }
             };
             let job = match next {
-                Next::Idle | Next::Job(None) => return Ok(()),
+                Next::Idle | Next::Job(None) => {
+                    // Closing the session stops its jobs; no restart will.
+                    if let Some(recipient) = &recipient {
+                        self.record_jobs(recipient, None).await?;
+                    }
+                    return Ok(());
+                }
                 Next::Report(Ok(report)) => {
                     if let Some(recipient) = &recipient {
                         self.queue_unprompted(recipient, &report).await?;
@@ -860,12 +1010,44 @@ pub fn recover_interrupted<C: state::Credentials>(
     account: &str,
     state: &mut state::BridgeState,
 ) -> Result<()> {
-    if state.in_flight.is_empty() {
+    recover_interrupted_after(store, account, state, None)
+}
+
+/// [`recover_interrupted`], describing the interruption: after a planned
+/// `restart`, claims get [`restarted_reply`] instead of [`FAILURE_REPLY`].
+/// Each direct chat whose background jobs the previous run left running is
+/// told which stopped. Everything is saved in one write.
+pub fn recover_interrupted_after<C: state::Credentials>(
+    store: &state::Store<C>,
+    account: &str,
+    state: &mut state::BridgeState,
+    restart: Option<&hub::Restart>,
+) -> Result<()> {
+    if state.in_flight.is_empty() && state.jobs.is_empty() {
         return Ok(());
     }
     let now = unix_now();
+    let reply = restart.map_or_else(|| FAILURE_REPLY.to_owned(), restarted_reply);
     for claim in std::mem::take(&mut state.in_flight) {
-        let pending = compose_pending(state, &claim, FAILURE_REPLY, now);
+        let pending = compose_pending(state, &claim, &reply, now);
+        state.pending.push(pending);
+    }
+    let jobs = std::mem::take(&mut state.jobs);
+    let mut recipients: Vec<&str> = Vec::new();
+    for job in &jobs {
+        if !recipients.contains(&job.to_user_id.as_str()) {
+            recipients.push(&job.to_user_id);
+        }
+    }
+    for recipient in recipients {
+        let stopped: Vec<_> = jobs
+            .iter()
+            .filter(|job| job.to_user_id == recipient)
+            .cloned()
+            .collect();
+        let notice = stopped_jobs_notice(restart, &stopped);
+        let mut pending = new_pending("", recipient, "", &notice, MAX_REPLY_BYTES);
+        pending.key = recipient.to_owned();
         state.pending.push(pending);
     }
     store.save_state(account, state)

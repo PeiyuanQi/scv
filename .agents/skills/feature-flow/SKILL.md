@@ -167,17 +167,28 @@ crates.io, so a partial run can be resumed. It needs the `cargo login` token in 
 scripts/deploy.sh <version>
 ```
 
-- Installs `scv-cli@<version>` from crates.io, retrying while the index catches
-  up.
-- Restarts `scv.service` with `systemctl --user`. Do not use `scv restart`: it
-  demands sudo verification. Never pass `--allow-sudo` without the user's
-  consent. Set `SCV_UNIT` for a custom-profile unit.
-- Waits for the daemon to report the new version and for enabled channel
-  accounts to reconnect, then prints recent journal warnings.
-- **Delegated by SCV:** restarting the daemon would kill this agent mid-turn.
-  The script instead schedules the restart 60 seconds out, via a transient
-  `systemd-run` timer outside the daemon, and skips verification. Tell the
-  user to check `scv status` and `scv channels status` afterwards.
+- Keeps the running binary as `scv.prev` beside it, then installs
+  `scv-cli@<version>` from crates.io, retrying while the index catches up.
+- Asks the daemon to restart into it with `scv restart --when-idle`. The
+  daemon restarts once no owner message is being answered and, when this
+  flow runs as its delegated agent, once your job has finished and its report
+  is stored, or after `SCV_RESTART_MAX_WAIT` seconds (600) at the latest. A
+  watchdog outside the daemon then checks that the new version comes up with
+  its channel accounts connected, and puts `scv.prev` back if it does not
+  (only between releases with the same config layout). Never pass
+  `--allow-sudo` to `scv restart`/`start` without the user's consent. Set
+  `SCV_UNIT` for a custom-profile unit.
+- **From a terminal:** the script then waits for the new version and for
+  enabled channel accounts to reconnect, and prints recent journal warnings.
+- **Delegated by SCV** (for example, the owner asked from WeChat or Feishu):
+  the script returns as soon as the restart is scheduled. Finish stage 8 and
+  write your report; the restart waits for them, and the new daemon announces
+  the outcome (new version, or the rollback) in the chat that asked. Do not
+  restart the unit yourself or wait for the restart.
+- A daemon older than `restart --when-idle` makes the script restart the unit
+  itself: from a terminal at once, with verification; from inside the daemon
+  60 seconds later through a transient `systemd-run` timer, without it. Then
+  tell the user to check `scv status` and `scv channels status` afterwards.
 
 ## 8. Clean up and report
 
@@ -201,7 +212,8 @@ scripts/deploy.sh <version>
 - Report:
   - the commit(s) now on `main`;
   - the version published and the version installed;
-  - daemon and channel status;
+  - daemon and channel status, or, when delegated, that the restart is
+    scheduled and will be announced in chat;
   - gates run or skipped;
   - the CI result;
   - remote branches pruned, and any kept with the reason.

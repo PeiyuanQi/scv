@@ -655,6 +655,7 @@ async fn pre_cancelled_public_runner_does_not_touch_state() {
         None,
         cancellation,
         Arc::new(|_| panic!("cancelled before startup")),
+        scv_channels::hub::Link::detached(),
     )
     .await
     .unwrap();
@@ -1828,6 +1829,225 @@ async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background
                 .is_err(),
             "the session was replaced"
         );
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+/// Frames of an owner turn whose `agent_codex` call starts background job
+/// `job` for `prompt`.
+async fn start_described_job(
+    side: &mut BufReader<tokio::net::UnixStream>,
+    job: &str,
+    prompt: &str,
+    reply: &str,
+) {
+    send_frame(side, json!({"type":"tool.proposed","request_id":"r","session_id":"s","turn_id":"t","seq":0,"call_id":"c","name":"agent_codex","arguments":{"prompt":prompt,"background":true}})).await;
+    start_background_job(side, job, reply).await;
+}
+
+#[tokio::test]
+async fn the_hub_sees_owner_work_until_its_report_is_stored_and_can_queue_notices() {
+    use scv_channels::hub::{Hub, Link, Origin};
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let hub = Hub::new(None);
+    let link = Link::new(Arc::clone(&hub), "wechat:default", Some("sender".into()));
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop_linked(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            &store,
+            &|_| {},
+            &link,
+        ),
+    );
+    let peer = async {
+        wait_until(|| hub.owner("wechat:default").is_some()).await;
+        ilink.push(vec![text_message("m1", "sender", "land it")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        next_turn(&mut side).await;
+        // The owner's message is claimed and not yet answered.
+        assert_eq!(hub.owner_claims(), 1);
+        assert_eq!(hub.last_owner().unwrap().component, "wechat:default");
+        start_described_job(
+            &mut side,
+            "job-1",
+            "Land the fix\nthen publish",
+            "Started job-1.",
+        )
+        .await;
+        assert_eq!(sent_text(&ilink.sent().await), "Started job-1.");
+        wait_until(|| hub.owner_claims() == 0).await;
+        wait_until(|| hub.session_work("s") == 1).await;
+        assert_eq!(
+            hub.origin("s"),
+            Some(Origin {
+                component: "wechat:default".into(),
+                peer: "sender".into()
+            })
+        );
+        let jobs = store.load_state("default").unwrap().jobs;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            (
+                jobs[0].job.as_str(),
+                jobs[0].tool.as_str(),
+                jobs[0].task.as_str()
+            ),
+            ("job-1", "agent_codex", "Land the fix")
+        );
+        report_turn(&mut side, "background:1", &["job-1"], "job-1 landed.").await;
+        assert_eq!(sent_text(&ilink.sent().await), "job-1 landed.");
+        wait_until(|| hub.session_work("s") == 0).await;
+        wait_until(|| store.load_state("default").unwrap().jobs.is_empty()).await;
+        // The daemon queues a notice; it goes out like a report.
+        hub.notify("wechat:default", "sender", "SCV updated.")
+            .await
+            .unwrap();
+        let notice = ilink.sent().await;
+        assert_eq!(sent_text(&notice), "SCV updated.");
+        assert!(notice["msg"].get("context_token").is_none(), "{notice}");
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+    assert!(hub.owner("wechat:default").is_none(), "withdrawn on stop");
+}
+
+#[tokio::test]
+async fn a_report_turn_starting_during_the_owners_turn_is_still_delivered() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message("m1", "sender", "land it")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        next_turn(&mut side).await;
+        start_background_job(&mut side, "job-1", "Started job-1.").await;
+        assert_eq!(sent_text(&ilink.sent().await), "Started job-1.");
+        ilink.push(vec![text_message("m2", "sender", "status?")]);
+        next_turn(&mut side).await;
+        // The report turn starts while the owner's turn runs, and finishes
+        // after it: the chat must keep reading it.
+        let origin = json!({"kind":"background","jobs":["job-1"]});
+        send_frame(&mut side, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+        finish_turn(&mut side, "Still working.").await;
+        assert_eq!(sent_text(&ilink.sent().await), "Still working.");
+        send_frame(&mut side, json!({"type":"assistant.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":11,"content":"job-1 landed."})).await;
+        send_frame(&mut side, json!({"type":"turn.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":12,"steps":1,"usage":{},"origin":origin})).await;
+        assert_eq!(sent_text(&ilink.sent().await), "job-1 landed.");
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
+    use scv_channels::hub::{Hub, Link, Restart};
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    store
+        .save_state(
+            "default",
+            &state::BridgeState {
+                in_flight: vec![state::InFlight {
+                    message_id: "m1".into(),
+                    to_user_id: "sender".into(),
+                    context_token: "ctx-m1".into(),
+                    key: "sender".into(),
+                }],
+                jobs: vec![state::RunningJob {
+                    to_user_id: "sender".into(),
+                    job: "job-2".into(),
+                    tool: "agent_claude".into(),
+                    task: "Review the PR".into(),
+                    started_at: 1,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let hub = Hub::new(None);
+    let restart = Restart {
+        to_version: "0.1.37".into(),
+    };
+    hub.set_restart(Some(restart.clone()));
+    let link = Link::new(Arc::clone(&hub), "wechat:default", Some("sender".into()));
+    let socket = directory.path().join("daemon.sock");
+    let cancel = CancellationToken::new();
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop_linked(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            None,
+            &store,
+            &|_| {},
+            &link,
+        ),
+    );
+    let peer = async {
+        let answer = ilink.sent().await;
+        assert_eq!(answer["msg"]["context_token"], "ctx-m1");
+        assert_eq!(sent_text(&answer), scv_channels::restarted_reply(&restart));
+        let jobs = ilink.sent().await;
+        assert_eq!(
+            sent_text(&jobs),
+            "SCV restarted to update to v0.1.37, which stopped background work that was \
+             still running:\n- job-2 (claude): Review the PR\nAsk again if you still need it."
+        );
+        assert!(jobs["msg"].get("context_token").is_none());
+        wait_until(|| {
+            let saved = store.load_state("default").unwrap();
+            saved.pending.is_empty() && saved.jobs.is_empty()
+        })
+        .await;
         cancel.cancel();
     };
     let (result, ()) =

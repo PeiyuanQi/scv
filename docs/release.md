@@ -2,8 +2,8 @@
 
 Status: final design for v0.1
 
-The current workspace release is `0.2.0`. All crates share that version, and
-dependencies between workspace packages use exact `=0.2.0` pins.
+The current workspace release is `0.2.1`. All crates share that version, and
+dependencies between workspace packages use exact `=0.2.1` pins.
 
 SCV v0.1 supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -108,7 +108,11 @@ publishes, installs the release, and restarts the local daemon. Its scripts
 cover the steps that are easy to get wrong:
 
 - `publish.sh`: a resumable publish in dependency order;
-- `deploy.sh`: install, restart, and verify;
+- `deploy.sh`: keep the running binary as `<binary>.prev`, install, and ask
+  the daemon to restart when idle (`scv restart --when-idle`), which checks
+  and, on failure, rolls back the release; from a terminal it then waits for
+  the new version and connected accounts. A daemon older than that (0.2.0
+  and earlier) is restarted by the script itself, without the watchdog;
 - `host.sh`: run landing commands from agents that SCV started with a private
   home.
 

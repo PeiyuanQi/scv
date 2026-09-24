@@ -43,6 +43,7 @@ pub struct Config {
     pub protocol: ProtocolConfig,
     pub tui: TuiConfig,
     pub update: UpdateConfig,
+    pub notify: NotifyConfig,
     pub provider_limits: ProviderLimitsFile,
     pub skills: SkillsConfig,
     pub agents: AgentsConfig,
@@ -75,6 +76,17 @@ pub struct ProviderConfig {
 pub struct UpdateConfig {
     /// Optional Cargo registry index URL used by `scv update`.
     pub index_url: Option<String>,
+}
+
+/// Where SCV sends notices nobody asked for: an update started from a
+/// terminal, a rollback, a restart after a crash, or a disconnected account.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotifyConfig {
+    /// Accounts as `<channel>:<account>`, such as `feishu:default`. A notice
+    /// goes to the owner of the first one that is connected, on that one
+    /// account only. Empty: the chat the owner last wrote from.
+    pub owner: Vec<String>,
 }
 
 impl Default for ProviderConfig {
@@ -954,6 +966,20 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        for account in &self.notify.owner {
+            let valid = account.split_once(':').is_some_and(|(channel, name)| {
+                !channel.is_empty()
+                    && !name.is_empty()
+                    && account
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.'))
+            });
+            if !valid {
+                bail!(
+                    "notify.owner entries must look like \"feishu:default\" (<channel>:<account>)"
+                );
+            }
+        }
         if self.provider.kind != "openai-compatible" {
             bail!("provider.kind must be openai-compatible in v0.1");
         }
@@ -1422,6 +1448,7 @@ fn validate_project_keys(value: &toml::Value) -> Result<()> {
         "agents",
         "update",
         "channels",
+        "notify",
     ] {
         if table.contains_key(forbidden) {
             bail!("project configuration cannot set [{forbidden}]");

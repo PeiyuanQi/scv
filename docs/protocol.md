@@ -28,7 +28,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.2.0"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.2.1"}}
 ```
 
 ### `daemon.control`
@@ -45,6 +45,7 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d6","command":{"action":"delegations","all":false}}
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
+{"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
 ```
 
 `status` reads live daemon health. `reload` reconciles saved accounts and
@@ -67,6 +68,20 @@ one run by handle, every orphan with `orphans`, or both; naming neither, or an
 unknown handle, is a `delegation_error`. Both return `daemon.status` with
 `delegations.entries`, and `delegation_kill` also lists the handles it stopped
 in `delegations.killed`.
+
+`restart_when_idle` asks the daemon to restart into the release installed at
+its own executable path, as `scv restart --when-idle` does after `cargo
+install`; every field is optional. The daemon refuses with a `restart_error`
+when it does not run as its systemd user unit, when the installed binary does
+not answer `scv build-info`, or when that reports a version other than
+`version`. Otherwise it saves a plan and replies at once with
+`daemon.status`, whose `restart` shows what it waits for: the delegation that
+`parent` (the caller's `SCV_PARENT` chain) names until it has finished and its
+report is stored, then any owner message a chat bridge has claimed but not
+answered. At `max_wait_seconds` (default 600, at most 3600) it restarts
+anyway. A second request for the same version returns the scheduled restart.
+The restart itself runs in a watchdog unit outside the daemon; see
+[architecture.md](architecture.md#planned-restarts).
 
 Component management is unsupported on stdio. The client helper bounds its
 exchange and never automatically retries a mutation after an ambiguous failure;
@@ -182,15 +197,15 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.2.0"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.2.1"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.2.0","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.2.0","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.2.1","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.2.1","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -202,8 +217,11 @@ connectivity. Errors are sanitized; credentials never appear in status.
 Loading credentials alone cannot produce `connected`. Management responses
 carry the request ID but no session or sequence number.
 
-`status` contains `version`, `pid`, `components`, and `delegations`; a status
-from a daemon older than 0.1.26 has no `delegations` and parses as zero.
+`status` contains `version`, `pid`, `components`, and `delegations`, and
+`restart` while a planned restart is scheduled: `to_version`, `waiting_for`
+(omitted once it restarts), `requester`, `origin` (`<channel>:<account>` of
+the chat that asked), and `deadline_unix_seconds`. A status from a daemon older
+than 0.1.26 has no `delegations` and parses as zero.
 `delegations.active` counts running delegated runs of the instance and
 `reaped` the orphans this daemon has stopped since it started; `entries` and
 `killed` appear only in `delegations` and `delegation_kill` responses. An

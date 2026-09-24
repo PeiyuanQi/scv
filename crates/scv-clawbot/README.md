@@ -5,8 +5,9 @@ shared bridge in `scv-channels`.
 
 `login(base_url, account)` renders the QR code and saves credentials without
 printing the token. `run_supervised(token, base_url, account, workspace, socket,
-tool_owner, cancellation, report)` runs one account until cancelled; `tool_owner`
-carries the owner's iLink `user_id`, recorded at QR login. Health turns true
+tool_owner, cancellation, report, link)` runs one account until cancelled;
+`tool_owner` carries the owner's iLink `user_id`, recorded at QR login, and
+`link` connects the account to the daemon's hub (`scv_channels::hub`). Health turns true
 only after an authenticated, validated `getupdates` response. HTTP redirects are
 disabled, including during login, and responses are bounded before parsing.
 
