@@ -1,3 +1,6 @@
+//! Lifecycle tests for `src/lib.rs`: the WeChat bridge against a fake iLink
+//! server and a fake SCV daemon.
+
 use super::*;
 use scv_channels::{
     BUSY_REPLY, FAILURE_REPLY, HELD_HEADER, LATEST_HEADER, MAX_CONCURRENT_TURNS,
