@@ -24,6 +24,8 @@ const MAX_TOOL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 const MAX_PROVIDER_RETRIES: usize = 10;
 /// The most background agent jobs `agent.max_background` may allow.
 const MAX_BACKGROUND_JOBS: usize = 16;
+/// Longest `[agents.<name>] use_for` note.
+const MAX_USE_FOR_BYTES: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -155,6 +157,9 @@ pub struct AgentConfig {
     /// Background agent jobs (`background: true`) a session may run at once;
     /// 0 turns background delegation off.
     pub max_background: usize,
+    /// Agents the user prefers, in order (such as `["codex", "claude"]`);
+    /// the system prompt names the installed ones. Empty states no preference.
+    pub prefer: Vec<String>,
 }
 
 impl Default for AgentConfig {
@@ -164,7 +169,10 @@ impl Default for AgentConfig {
             max_delegation_depth: 2,
             max_conversations: 8,
             conversation_idle_seconds: 86400,
-            max_background: 2,
+            // The main agent hands most work to background jobs and stays
+            // available, so a few may run at once.
+            max_background: 4,
+            prefer: Vec::new(),
             system_prompt: "You are SCV, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
         }
     }
@@ -427,6 +435,9 @@ pub struct AdapterConfig {
     pub effort_args: Vec<String>,
     /// How SCV talks to the agent: its ACP server or one process per turn.
     pub transport: AgentTransport,
+    /// When to choose this agent, in the user's words; added to its tool
+    /// description so the model can pick between agents.
+    pub use_for: Option<String>,
 }
 
 /// How SCV talks to a delegated agent that has an ACP server.
@@ -476,6 +487,7 @@ impl Default for AgentsConfig {
                             model_args: strings(adapter.model_args),
                             effort_args: strings(adapter.effort_args),
                             transport: AgentTransport::Auto,
+                            use_for: None,
                         },
                     )
                 })
@@ -795,6 +807,7 @@ impl Config {
                                     .collect(),
                                 required: config.transport == AgentTransport::Acp,
                             }),
+                        use_for: config.use_for.clone(),
                     },
                 ))
             })
@@ -855,6 +868,16 @@ impl Config {
             let name = format!("agents.{agent}.command");
             if adapter.command.trim().is_empty() {
                 bail!("{name} must be non-empty");
+            }
+            if let Some(use_for) = &adapter.use_for
+                && (use_for.trim().is_empty()
+                    || use_for.len() > MAX_USE_FOR_BYTES
+                    || use_for.chars().any(char::is_control))
+            {
+                bail!(
+                    "agents.{agent}.use_for must be one non-empty line of at most \
+                     {MAX_USE_FOR_BYTES} bytes"
+                );
             }
             if adapter.transport == AgentTransport::Acp
                 && scv_tools::adapters::adapter(agent)
@@ -1013,6 +1036,11 @@ impl Config {
         }
         if self.agent.max_background > MAX_BACKGROUND_JOBS {
             bail!("agent.max_background must be at most {MAX_BACKGROUND_JOBS}");
+        }
+        for agent in &self.agent.prefer {
+            if scv_tools::adapters::adapter(agent).is_none() {
+                bail!("agent.prefer names unknown agent {agent:?}");
+            }
         }
         if self.provider_limits.max_retries > MAX_PROVIDER_RETRIES {
             bail!("provider_limits.max_retries must be at most {MAX_PROVIDER_RETRIES}");
@@ -1211,6 +1239,13 @@ fn validate_project_keys(value: &toml::Value) -> Result<()> {
         .is_some_and(|agent| agent.contains_key("system_prompt"))
     {
         bail!("project configuration cannot replace agent.system_prompt");
+    }
+    if table
+        .get("agent")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|agent| agent.contains_key("prefer"))
+    {
+        bail!("project configuration cannot set agent.prefer");
     }
     if let Some(web) = table.get("web").and_then(toml::Value::as_table) {
         for key in [
@@ -1602,10 +1637,35 @@ command = "/tmp/fake"
     }
 
     #[test]
+    fn agent_choice_settings_are_validated_and_user_only() {
+        let mut config = Config::default();
+        config.agent.prefer = vec!["codex".into(), "claude".into()];
+        config.agents.0.get_mut("grok").unwrap().use_for =
+            Some("current events and X posts".into());
+        assert!(config.validate().is_ok());
+        let adapters = config.adapters();
+        assert_eq!(
+            adapters["agent_grok"].use_for.as_deref(),
+            Some("current events and X posts")
+        );
+        assert_eq!(adapters["agent_codex"].use_for, None);
+        let mut unknown = Config::default();
+        unknown.agent.prefer = vec!["zcode".into()];
+        assert!(unknown.validate().is_err());
+        for bad in ["", "two\nlines", &"x".repeat(MAX_USE_FOR_BYTES + 1)] {
+            let mut config = Config::default();
+            config.agents.0.get_mut("codex").unwrap().use_for = Some(bad.to_owned());
+            assert!(config.validate().is_err(), "{bad:?}");
+        }
+        let project: toml::Value = toml::from_str("[agent]\nprefer = [\"pi\"]\n").unwrap();
+        assert!(validate_project_keys(&project).is_err());
+    }
+
+    #[test]
     fn background_jobs_are_bounded_and_projects_may_only_lower_them() {
         let user = Config::default();
-        assert_eq!(user.agent.max_background, 2);
-        assert_eq!(user.tools().max_background, 2);
+        assert_eq!(user.agent.max_background, 4);
+        assert_eq!(user.tools().max_background, 4);
         let mut off = Config::default();
         off.agent.max_background = 0;
         assert!(off.validate().is_ok(), "0 turns background delegation off");
@@ -1616,7 +1676,7 @@ command = "/tmp/fake"
         lower.agent.max_background = 1;
         assert!(validate_project_not_weaker(&user, &lower).is_ok());
         let mut higher = user.clone();
-        higher.agent.max_background = 3;
+        higher.agent.max_background = 5;
         assert!(validate_project_not_weaker(&user, &higher).is_err());
     }
 

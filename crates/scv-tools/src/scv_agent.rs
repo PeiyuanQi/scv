@@ -194,6 +194,8 @@ impl ScvAgentTool {
                 base_url: None,
                 no_tools: None,
                 delegation_depth: Some(depth),
+                channel: None,
+                auto_approve: None,
             })
             .await?;
             loop {
@@ -567,10 +569,10 @@ impl Tool for ScvAgentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name.clone(),
-            description: "Delegate to a nested SCV: a separate SCV session, in its own private \
-                home, working with its own context and tools while you keep yours. Use it for \
-                a self-contained sub-task you want kept out of this conversation's context, or \
-                to run SCV's own tools in another project directory. Its tool approvals come \
+            description: "Runs in its own private home, working with its own context and tools \
+                while you keep yours, and does not see this conversation, so give it a \
+                self-contained brief. It can also run SCV's own tools in another project \
+                directory. Its tool approvals come \
                 back to this session, so the same policy and user decide them. Each result \
                 carries a `session` handle: pass it back to continue the same nested session \
                 with its context."
@@ -1220,6 +1222,7 @@ done
             home: None,
             transport: crate::adapters::Transport::ScvProtocol,
             acp: None,
+            use_for: None,
         };
         let home = tempfile::tempdir().unwrap();
         for (depth, offered) in [(0, true), (1, true), (2, false)] {

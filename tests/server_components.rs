@@ -103,6 +103,8 @@ async fn session(
             base_url: None,
             no_tools: Some(true),
             delegation_depth: None,
+            channel: None,
+            auto_approve: None,
         },
     ] {
         write

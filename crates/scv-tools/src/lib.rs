@@ -2,6 +2,7 @@
 
 mod acp_agent;
 pub mod adapters;
+pub mod agent_choice;
 mod agent_output;
 mod agent_progress;
 pub mod background;
@@ -66,7 +67,8 @@ pub struct ToolsConfig {
     /// Records delegated runs for listing and cleanup; `None` runs them untracked.
     pub delegation: Option<DelegationContext>,
     /// Background jobs an agent call may start at once (`background: true`);
-    /// 0 turns background calls and `agent_wait` / `agent_status` off.
+    /// 0 turns background calls and `agent_wait` / `agent_status` /
+    /// `agent_cancel` off.
     pub max_background: usize,
     /// The session's background job store, when the server reports finished
     /// jobs; otherwise the registry makes its own.
@@ -144,6 +146,9 @@ pub struct AgentAdapterConfig {
     /// The agent's ACP server, when `[agents.<name>] transport` allows it and
     /// the adapter table has one.
     pub acp: Option<AcpAgentLaunch>,
+    /// The user's note on when to choose this agent (`[agents.<name>]
+    /// use_for`), added to its tool description.
+    pub use_for: Option<String>,
 }
 
 /// An agent's Agent Client Protocol server, resolved from its adapter-table
@@ -207,17 +212,9 @@ pub fn builtin_registry(
             Arc::new(background::BackgroundJobs::new(config.max_background, None))
         })
     });
-    let mut agents = 0;
-    let mut register_agent = |registry: &mut ToolRegistry, tool: Arc<dyn Tool>| {
-        agents += 1;
-        match &jobs {
-            Some(jobs) => registry.register(Arc::new(background::BackgroundCapable {
-                inner: tool,
-                jobs: Arc::clone(jobs),
-            })),
-            None => registry.register(tool),
-        }
-    };
+    // Agents are registered together once all are known, so each can name
+    // the others as fallbacks.
+    let mut found: Vec<(String, Arc<dyn Tool>, Option<String>)> = Vec::new();
     // One store per session, shared by its agent tools and dropped with it.
     let conversations = Arc::new(ConversationStore::new(
         config.conversations,
@@ -227,6 +224,11 @@ pub fn builtin_registry(
             .map(|context| context.registry.conversation_dir()),
     ));
     for (name, adapter) in adapters {
+        let (tool_name, use_for) = (name.clone(), adapter.use_for.clone());
+        let mut register_agent = |_: &mut ToolRegistry, tool: Arc<dyn Tool>| {
+            found.push((tool_name.clone(), tool, use_for.clone()));
+            Ok::<(), ToolError>(())
+        };
         if adapter.transport == Transport::ScvProtocol {
             let resolved =
                 adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs);
@@ -295,6 +297,27 @@ pub fn builtin_registry(
             register_agent(&mut registry, Arc::new(tool))?;
         }
     }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    let names: Vec<String> = found.iter().map(|(name, ..)| name.clone()).collect();
+    let agents = found.len();
+    for (name, tool, use_for) in found {
+        let tool: Arc<dyn Tool> = Arc::new(agent_choice::ChosenAgent {
+            inner: tool,
+            use_for,
+            alternatives: names
+                .iter()
+                .filter(|other| **other != name)
+                .cloned()
+                .collect(),
+        });
+        match &jobs {
+            Some(jobs) => registry.register(Arc::new(background::BackgroundCapable {
+                inner: tool,
+                jobs: Arc::clone(jobs),
+            }))?,
+            None => registry.register(tool)?,
+        }
+    }
     if let Some(jobs) = jobs.filter(|_| agents > 0) {
         registry.register(Arc::new(background::WaitTool {
             jobs: Arc::clone(&jobs),
@@ -303,7 +326,10 @@ pub fn builtin_registry(
                 max: config.max_timeout,
             },
         }))?;
-        registry.register(Arc::new(background::StatusTool { jobs }))?;
+        registry.register(Arc::new(background::StatusTool {
+            jobs: Arc::clone(&jobs),
+        }))?;
+        registry.register(Arc::new(background::CancelTool { jobs }))?;
     }
     Ok(registry)
 }
@@ -1033,12 +1059,12 @@ impl Tool for NativeAgentTool {
         ToolSpec {
             name: self.name.clone(),
             description: format!(
-                "Launch the configured {} CLI as a nested coding agent (not sandboxed). \
-                 Delegate substantial work here rather than doing it step by step with \
-                 bash: research and web lookups, multi-file coding, and running tools, \
-                 builds, and tests. Set cwd to the project the work is in so the agent \
-                 follows that project's instructions and skills.{}",
-                self.name,
+                "Runs its CLI as a nested coding agent (not sandboxed). Delegate substantial \
+                 work here rather than doing it step by step with bash: research and web \
+                 lookups, multi-file coding, and running tools, builds, and tests. Give it a \
+                 self-contained brief, since it does not see this conversation, and set cwd \
+                 to the project the work is in so it follows that project's instructions \
+                 and skills.{}",
                 if self.resume.is_supported() {
                     " Each result carries a `session` handle: pass it back to follow up on the \
                      same work (answers, fixes, next steps) instead of repeating the context."
@@ -2036,6 +2062,7 @@ mod tests {
                 home: None,
                 transport: Transport::Process,
                 acp: None,
+                use_for: None,
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -2131,6 +2158,7 @@ mod tests {
                 home: None,
                 transport: Transport::Process,
                 acp: None,
+                use_for: None,
             },
             Timeouts {
                 default: Duration::from_secs(2),
@@ -2388,6 +2416,7 @@ mod tests {
             home: None,
             transport: Transport::Process,
             acp: None,
+            use_for: None,
         };
         let registry = builtin_registry(
             ToolsConfig::default(),
@@ -2611,6 +2640,7 @@ mod tests {
                 home,
                 transport: Transport::Process,
                 acp: None,
+                use_for: None,
             },
             Timeouts {
                 default: timeout,
@@ -3044,6 +3074,7 @@ exit 1
             home: None,
             transport: Transport::Process,
             acp: None,
+            use_for: None,
         };
         let home = tempfile::tempdir().unwrap();
         for (max_depth, offered) in [(0, false), (1, true)] {

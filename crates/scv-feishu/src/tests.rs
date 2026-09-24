@@ -749,3 +749,19 @@ async fn non_token_and_oversized_responses_are_refused() {
     let error = api.validate().await.err().unwrap();
     assert!(error.to_string().contains("exceeds limit"));
 }
+
+#[test]
+fn the_model_is_told_the_brand_its_users_know() {
+    let origin = "http://127.0.0.1:9";
+    let feishu = Feishu::new(Endpoints::local(origin), &account()).unwrap();
+    assert_eq!(scv_channels::Transport::channel(&feishu), "Feishu");
+    let lark = Feishu::new(
+        Endpoints::local(origin),
+        &Account {
+            brand: Brand::Lark,
+            ..account()
+        },
+    )
+    .unwrap();
+    assert_eq!(scv_channels::Transport::channel(&lark), "Lark");
+}

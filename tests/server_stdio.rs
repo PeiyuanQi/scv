@@ -142,6 +142,8 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             base_url: None,
             no_tools: None,
             delegation_depth: None,
+            channel: None,
+            auto_approve: None,
         },
     )
     .await;
@@ -246,6 +248,8 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
             base_url: None,
             no_tools: None,
             delegation_depth: None,
+            channel: None,
+            auto_approve: None,
         },
     )
     .await;
@@ -363,6 +367,8 @@ async fn tool_results_are_replayed_after_their_calls() {
             base_url: None,
             no_tools: None,
             delegation_depth: None,
+            channel: None,
+            auto_approve: None,
         },
     )
     .await;
@@ -544,6 +550,8 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
             base_url: None,
             no_tools: None,
             delegation_depth: None,
+            channel: None,
+            auto_approve: None,
         },
     )
     .await;
@@ -696,6 +704,8 @@ async fn tool_free_sessions_get_no_web_access() {
             base_url: None,
             no_tools: Some(true),
             delegation_depth: None,
+            channel: None,
+            auto_approve: None,
         },
     )
     .await;

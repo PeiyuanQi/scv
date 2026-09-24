@@ -234,6 +234,8 @@ async fn delegate(approve_nested: bool) {
         base_url: None,
         no_tools: None,
         delegation_depth: None,
+        channel: None,
+        auto_approve: None,
     })
     .await;
     let session_id = loop {

@@ -42,10 +42,17 @@ pub struct Session {
 
 impl Session {
     pub async fn spawn(workspace: &Path) -> Result<Self> {
-        Self::connect(&scv_client::default_socket_path()?, workspace, false).await
+        Self::connect(&scv_client::default_socket_path()?, workspace, false, None).await
     }
 
-    pub async fn connect(socket: &Path, workspace: &Path, tools: bool) -> Result<Self> {
+    /// Start a session for a conversation on `channel` (its user-facing
+    /// name, such as `WeChat`), so the model knows it is answering a chat.
+    pub async fn connect(
+        socket: &Path,
+        workspace: &Path,
+        tools: bool,
+        channel: Option<&str>,
+    ) -> Result<Self> {
         let stream = UnixStream::connect(socket).await.with_context(|| {
             format!(
                 "SCV server not started or not found at {}. Start it with `scv start` or `scv run`",
@@ -98,6 +105,11 @@ impl Session {
                 base_url: None,
                 no_tools: Some(!tools),
                 delegation_depth: None,
+                channel: channel.map(str::to_owned),
+                // This client approves every request of an owner session
+                // (and a tool-free one makes none), so background jobs may
+                // get the same answer without a turn to carry it.
+                auto_approve: Some(tools),
             },
         )
         .await?;

@@ -323,6 +323,13 @@ the platform refuses it outright. A report that finishes
 during one of the owner's turns follows that turn's reply. Only direct chats
 receive reports; group and non-owner sessions have no tools.
 
+This is what lets the owner keep chatting while work runs: an owner session
+starts with `auto_approve: true`, so the background agents it starts get the
+approvals the owner's own turns get, and its system prompt tells the model to
+hand real work to background agents and answer at once with the job handle
+(see [Delegate first](tools.md#delegate-first)). The owner can ask how a job
+is going or have it stopped at any time.
+
 If an owner turn runs out of time while jobs are running, the bridge cancels
 that turn (`turn.cancel`) and keeps the session, rather than replacing it,
 which would cancel the jobs; the owner still gets the failure reply.
@@ -333,7 +340,14 @@ Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A
 group message (a non-empty WeChat `group_id`, or a Feishu chat other than
 `p2p`) uses a separate session per group and sender, so group members never see the sender's direct-chat history. Sessions
 idle for 30 minutes after their last turn ends are dropped, and at most 32
-sessions are live; a new conversation closes the least recently used idle one.
+sessions are live; a new conversation closes the least recently used idle one
+that has no background jobs running or reports to send, and gets the busy
+notice when every live conversation is busy that way.
+
+Every session starts with `channel` set to the channel's name as its users know
+it (`WeChat`, or `Feishu`/`Lark` by the account's brand), so the model knows it
+is writing chat messages: short plain text, one message per turn, with no tool
+output visible to the user (see [protocol](protocol.md#sessionstart)).
 
 Polling continues while turns run. Each conversation runs its own messages in
 order, one turn at a time, so a sender's later messages wait behind its current

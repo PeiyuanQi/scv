@@ -112,6 +112,16 @@ struct Server {
 
 impl Server {
     async fn start(home: &Path, address: std::net::SocketAddr, workspace: &Path) -> Self {
+        Self::start_on(home, address, workspace, None).await
+    }
+
+    /// A session a chat bridge would start for `channel`.
+    async fn start_on(
+        home: &Path,
+        address: std::net::SocketAddr,
+        workspace: &Path,
+        channel: Option<&str>,
+    ) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_scv"))
             .isolated(home)
             .arg("--scv-home")
@@ -158,6 +168,8 @@ impl Server {
                 base_url: None,
                 no_tools: None,
                 delegation_depth: None,
+                channel: channel.map(str::to_owned),
+                auto_approve: channel.map(|_| true),
             })
             .await;
         loop {
@@ -399,4 +411,37 @@ async fn scv_exec_stays_until_its_background_jobs_are_reported() {
         "{stderr}"
     );
     assert!(stderr.contains("[background report: job-1]"), "{stderr}");
+}
+
+#[tokio::test]
+async fn a_chat_session_is_told_its_channel_and_to_delegate_in_the_background() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = serve_provider(listener, vec![text("Hi.")]);
+    let (_home, home) = home_with_fake_codex();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut server = Server::start_on(&home, address, workspace.path(), Some("WeChat")).await;
+    server.turn("hello").await;
+    loop {
+        match server.next().await.expect("server went quiet") {
+            ServerEvent::TurnCompleted { origin: None, .. } => break,
+            ServerEvent::TurnFailed { message, .. } => panic!("turn failed: {message}"),
+            _ => {}
+        }
+    }
+    let body: Value = serde_json::from_str(&requests.recv().unwrap()).unwrap();
+    let text = body.to_string();
+    assert!(text.contains("takes place on WeChat"), "{text}");
+    assert!(text.contains("# Delegating work"), "{text}");
+    assert!(text.contains("agent_codex (Codex)"), "{text}");
+    assert!(text.contains("background set to true"), "{text}");
+    let tools: Vec<&str> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for tool in ["agent_codex", "agent_status", "agent_wait", "agent_cancel"] {
+        assert!(tools.contains(&tool), "{tool} missing from {tools:?}");
+    }
 }

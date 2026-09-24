@@ -101,8 +101,26 @@ delegated prompt as a `turn.start` on that session, answers the nested
 session's approval gate, and sends `turn.cancel` when its call is cancelled or
 times out (see [Nested SCV](tools.md#nested-scv-agent_scv)).
 
+`channel` is optional and set by a chat bridge: the channel's name as its
+users know it (`WeChat`, `Feishu`, or `Lark`), at most 32 bytes without control
+characters; anything else is rejected with `invalid_request`. The server then
+adds a *Chat channel* section to the system prompt: the user reads short
+plain-text chat messages there, only the last message of each turn reaches
+them, and they never see tool calls or their output. A client that is not a
+chat omits it.
+
+`auto_approve` is optional: `true` declares that this client answers every
+approval request of the session with an approval, without asking anyone. A
+chat bridge sets it for an owner session, which it auto-approves (and `false`
+otherwise). The server still sends `approval.requested` for the client's own
+turns; the declaration only lets background jobs, which outlive the turn that
+could carry their requests, get the same answer (see
+[Background jobs](tools.md#background-jobs)). It grants nothing the client
+could not grant itself. Both fields are additive and keep protocol version 3.
+
 ```json
 {"type":"session.start","request_id":"2","cwd":"/workspace/project"}
+{"type":"session.start","request_id":"channel-session","cwd":"/workspace","no_tools":false,"channel":"WeChat","auto_approve":true}
 ```
 
 ### `turn.start`

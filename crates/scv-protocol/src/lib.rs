@@ -5,6 +5,9 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 3;
 
+/// The longest `session.start` channel name.
+pub const MAX_CHANNEL_NAME_BYTES: usize = 32;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentState {
@@ -242,6 +245,19 @@ pub enum ClientMessage {
         /// from it, so the depth limit holds across processes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delegation_depth: Option<u32>,
+        /// The chat channel this session answers on, as its users name it
+        /// (such as `WeChat` or `Feishu`). The user reads short plain-text
+        /// replies there and never sees tool calls, so the server tells the
+        /// model. At most [`MAX_CHANNEL_NAME_BYTES`], without control
+        /// characters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        /// The client approves every approval request of this session
+        /// without asking anyone. Background jobs, which outlive the turn
+        /// that could carry their requests, then get the same answer;
+        /// otherwise they get only what the approval policy grants unasked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_approve: Option<bool>,
     },
     #[serde(rename = "session.attach")]
     SessionAttach {
@@ -622,6 +638,8 @@ mod tests {
             base_url: None,
             no_tools: None,
             delegation_depth: depth,
+            channel: None,
+            auto_approve: None,
         };
         let nested = serde_json::to_string(&start(Some(2))).unwrap();
         assert!(nested.contains(r#""delegation_depth":2"#));
@@ -638,6 +656,35 @@ mod tests {
             start(None)
         );
         assert_eq!(PROTOCOL_VERSION, 3);
+    }
+
+    #[test]
+    fn chat_sessions_name_their_channel_and_approval_mode() {
+        let chat = ClientMessage::SessionStart {
+            request_id: "1".into(),
+            cwd: "/w".into(),
+            provider: None,
+            model: None,
+            base_url: None,
+            no_tools: Some(false),
+            delegation_depth: None,
+            channel: Some("WeChat".into()),
+            auto_approve: Some(true),
+        };
+        let wire = serde_json::to_string(&chat).unwrap();
+        assert!(wire.contains(r#""channel":"WeChat""#), "{wire}");
+        assert!(wire.contains(r#""auto_approve":true"#), "{wire}");
+        assert_eq!(serde_json::from_str::<ClientMessage>(&wire).unwrap(), chat);
+        // Frames from older clients omit both.
+        let older = r#"{"type":"session.start","request_id":"1","cwd":"/w"}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(older).unwrap(),
+            ClientMessage::SessionStart {
+                channel: None,
+                auto_approve: None,
+                ..
+            }
+        ));
     }
 
     #[test]

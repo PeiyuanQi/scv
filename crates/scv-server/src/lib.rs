@@ -668,11 +668,16 @@ where
                             send_error(&output_tx, &request_id, "unsupported", "Component management requires the daemon socket", false, server_frame_limit(&session)).await?;
                         }
                     }
-                    ClientMessage::SessionStart { request_id, cwd, provider, model, base_url, no_tools, delegation_depth } => {
+                    ClientMessage::SessionStart { request_id, cwd, provider, model, base_url, no_tools, delegation_depth, channel, auto_approve } => {
                         if session.is_some() {
                             send_error(&output_tx, &request_id, "invalid_request", "this connection already has a session", false, server_frame_limit(&session)).await?;
                             continue;
                         }
+                        if channel.as_deref().is_some_and(|name| !valid_channel_name(name)) {
+                            send_error(&output_tx, &request_id, "invalid_request", "channel must be a short name without control characters", false, server_frame_limit(&session)).await?;
+                            continue;
+                        }
+                        let client = SessionClient { channel, auto_approve: auto_approve.unwrap_or(false) };
                         let session_overrides = ConfigOverrides {
                             provider: provider.or_else(|| overrides.provider.clone()),
                             model: model.or_else(|| overrides.model.clone()),
@@ -680,7 +685,7 @@ where
                             approval_policy: overrides.approval_policy,
                             no_tools: no_tools.unwrap_or(overrides.no_tools),
                         };
-                        match build_session(&cwd, session_overrides, delegation_depth.unwrap_or(0), &registry).await {
+                        match build_session(&cwd, session_overrides, delegation_depth.unwrap_or(0), &registry, client).await {
                             Ok((new_session, finished)) => {
                                 background_rx = finished;
                                 output_tx.ensure_capacity(output_queue_bytes(
@@ -1466,6 +1471,58 @@ fn next_seq(sequence: &AtomicU64) -> u64 {
     sequence.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// What a client declared about itself in `session.start`.
+#[derive(Debug, Default)]
+struct SessionClient {
+    /// The chat channel the session answers on, such as `WeChat`.
+    channel: Option<String>,
+    /// The client approves every approval request without asking anyone.
+    auto_approve: bool,
+}
+
+fn valid_channel_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= scv_protocol::MAX_CHANNEL_NAME_BYTES
+        && !name.chars().any(char::is_control)
+}
+
+/// The configured agents to offer: signed-out ones are left out when their
+/// sign-in state is a local file SCV can check cheaply; the rest are offered
+/// and fail with a sign-in hint if they turn out to be signed out.
+fn offered_adapters(config: &Config) -> HashMap<String, scv_tools::AgentAdapterConfig> {
+    let mut adapters = config.adapters();
+    adapters.retain(|tool, adapter| {
+        let descriptor = tool
+            .strip_prefix("agent_")
+            .and_then(scv_tools::adapters::adapter);
+        match (
+            descriptor.map(|descriptor| descriptor.status),
+            &adapter.home,
+        ) {
+            (Some(scv_tools::adapters::Status::Stored(store)), Some(home)) => {
+                !matches!(agents::stored_status(store, home), Ok((false, _)))
+            }
+            _ => true,
+        }
+    });
+    adapters
+}
+
+/// Agent tools that delegate work, as opposed to observing or stopping jobs.
+fn agent_tool_names(tools: &ToolRegistry) -> Vec<String> {
+    let mut names: Vec<String> = tools
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .filter(|name| {
+            name.starts_with("agent_")
+                && !["agent_wait", "agent_status", "agent_cancel"].contains(&name.as_str())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// `delegation_depth` is the depth the client declared in `session.start`
 /// (0 for a direct client); the session's delegated runs count from it.
 async fn build_session(
@@ -1473,6 +1530,7 @@ async fn build_session(
     overrides: ConfigOverrides,
     delegation_depth: u32,
     registry: &Arc<DelegationRegistry>,
+    client: SessionClient,
 ) -> Result<(Session, Option<mpsc::UnboundedReceiver<()>>)> {
     let id = Uuid::new_v4().to_string();
     let workspace = std::fs::canonicalize(cwd).with_context(|| format!("resolve cwd {cwd}"))?;
@@ -1489,7 +1547,10 @@ async fn build_session(
         provider_config.api_key_env.as_deref().and_then(|name| std::env::var(name).ok())
     }).filter(|key| !key.trim().is_empty()).ok_or_else(|| anyhow!("provider credential is not configured; set provider.api_key or provider.api_key_env"))?;
     let skills = discover_skills(&workspace, &config, !no_tools)?;
-    let system_prompt = build_system_prompt(&workspace, &config, &skills)?;
+    let listings = SkillListings {
+        listing: skills.listing,
+        project_listing: skills.project_listing,
+    };
     let mut provider = OpenAiProvider::new(
         provider_config.model.clone(),
         provider_config.base_url.clone(),
@@ -1504,11 +1565,15 @@ async fn build_session(
     let provider = Arc::new(provider);
     let (background, finished) = if !no_tools && config.agent.max_background > 0 {
         let (finished_tx, finished_rx) = mpsc::unbounded_channel();
+        let unattended: Arc<dyn ApprovalGate> = Arc::new(UnattendedGate {
+            policy: config.tools.approval_policy,
+            client_approves_all: client.auto_approve,
+        });
         (
-            Some(Arc::new(BackgroundJobs::new(
-                config.agent.max_background,
-                Some(finished_tx),
-            ))),
+            Some(Arc::new(
+                BackgroundJobs::new(config.agent.max_background, Some(finished_tx))
+                    .with_approvals(unattended),
+            )),
             Some(finished_rx),
         )
     } else {
@@ -1529,13 +1594,24 @@ async fn build_session(
             skills.map,
             skills.roots,
             config.skills.max_skill_bytes,
-            config.adapters(),
+            offered_adapters(&config),
         )?;
         if let Some(web) = config.web_tools() {
             scv_tools::web::register(&mut registry, web)?;
         }
         Arc::new(registry)
     };
+    let agents = agent_tool_names(&tools);
+    let system_prompt = build_system_prompt(
+        &workspace,
+        &config,
+        &listings,
+        &PromptContext {
+            agents: &agents,
+            background: tools.get("agent_status").is_some(),
+            channel: client.channel.as_deref(),
+        },
+    )?;
     let context = Arc::new(BudgetContextPolicy::new((&config.context).into())?);
     let runtime = Arc::new(AgentRuntime::new(
         provider,
@@ -1560,10 +1636,27 @@ async fn build_session(
     ))
 }
 
+/// The skill listings a session's system prompt carries.
+struct SkillListings {
+    listing: String,
+    project_listing: String,
+}
+
+/// What the system prompt tells the model about its situation.
+struct PromptContext<'a> {
+    /// Agent tools this session offers, such as `agent_codex`, sorted.
+    agents: &'a [String],
+    /// Whether agent calls can run in the background.
+    background: bool,
+    /// The chat channel the session answers on.
+    channel: Option<&'a str>,
+}
+
 fn build_system_prompt(
     workspace: &Path,
     config: &Config,
-    skills: &DiscoveredSkills,
+    skills: &SkillListings,
+    context: &PromptContext<'_>,
 ) -> Result<String> {
     let mut prompt = config.agent.system_prompt.clone();
     prompt.push_str(&format!(
@@ -1596,14 +1689,92 @@ fn build_system_prompt(
             "Projects in this workspace provide these skills to agents working in them:\n",
         );
         prompt.push_str(&skills.project_listing);
-        prompt.push_str(
-            "\nTo use one, delegate with an agent_* tool such as agent_codex or agent_claude, \
-             set its cwd to the skill's project, and name the skill in the prompt: that agent \
-             then loads the project's instructions and skills itself. read_skill loads a \
-             skill for reference.\n",
-        );
+        match context.agents {
+            [] => prompt.push_str("\nread_skill loads one for reference.\n"),
+            agents => prompt.push_str(&format!(
+                "\nTo use one, delegate with an agent tool such as {}, set its cwd to the \
+                 skill's project, and name the skill in the prompt: that agent then loads the \
+                 project's instructions and skills itself. read_skill loads a skill for \
+                 reference.\n",
+                agents
+                    .iter()
+                    .take(2)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )),
+        }
+    }
+    if !context.agents.is_empty() {
+        prompt.push_str(&delegation_guidance(config, context));
+    }
+    if let Some(channel) = context.channel {
+        prompt.push_str(&format!(
+            "\n# Chat channel\n\
+             This conversation takes place on {channel}. The user reads your replies there as \
+             chat messages, so keep them short and in plain text, without tables, headings, \
+             or code blocks unless the user asks for them. Only the last message of each turn \
+             reaches the user, and they never see your tool calls or their output, so put what \
+             you did and what you found into that message in words.\n"
+        ));
     }
     Ok(prompt)
+}
+
+/// How the main agent works with delegated agents. Written to explain why,
+/// since the model follows guidance it understands more reliably.
+fn delegation_guidance(config: &Config, context: &PromptContext<'_>) -> String {
+    let named: Vec<String> = context
+        .agents
+        .iter()
+        .map(|tool| format!("{tool} ({})", scv_tools::agent_choice::product(tool)))
+        .collect();
+    let mut text = format!(
+        "\n# Delegating work\n\
+         You can hand work to these agents: {}. Each tool's description says what that agent \
+         offers.",
+        named.join(", ")
+    );
+    let preferred: Vec<String> = config
+        .agent
+        .prefer
+        .iter()
+        .map(|agent| format!("agent_{agent}"))
+        .filter(|tool| context.agents.contains(tool))
+        .collect();
+    if !preferred.is_empty() {
+        text.push_str(&format!(
+            " The user prefers {}, in that order; choose another when the work needs \
+             something only it offers, or when a preferred one fails.",
+            preferred.join(", ")
+        ));
+    }
+    if context.background {
+        text.push_str(
+            "\n\nStay available to the user: while one of your turns runs, they cannot reach \
+             you. Handle quick things yourself, such as short reads, lookups, status checks, \
+             and answers you can give in a step or two. Hand real work to an agent with \
+             background set to true: changes to code or files, multi-step investigation, \
+             builds, tests, releases, and anything else likely to take more than about a \
+             minute. Then reply right away with what you started and its job handle.\n\n\
+             The agent does not see this conversation, so write a brief that stands on its \
+             own: the goal, the project directory (cwd), what you already know, constraints, \
+             and what to report back.\n\n\
+             When a job finishes, SCV starts a turn with an [SCV background report]; tell the \
+             user what happened and the key result. agent_status shows how jobs are going, \
+             and agent_cancel stops one the user no longer wants. agent_wait, foreground \
+             agent calls, and long bash commands keep the user waiting, so use them only for \
+             results you need within this turn that arrive quickly.\n",
+        );
+    } else {
+        text.push_str(
+            "\n\nHand substantial work to an agent rather than doing it step by step with \
+             bash. The agent does not see this conversation, so write a brief that stands on \
+             its own: the goal, the project directory (cwd), what you already know, \
+             constraints, and what to report back.\n",
+        );
+    }
+    text
 }
 
 /// Skills found at session start: the names `read_skill` serves, the roots it
@@ -1960,11 +2131,42 @@ impl ApprovalBroker {
     }
 }
 
+/// The decision `policy` makes for `risk` on its own, or `None` when it
+/// asks the client.
+fn policy_decision(policy: ApprovalPolicy, risk: ToolRisk) -> Option<bool> {
+    match policy {
+        ApprovalPolicy::OnRisk if risk == ToolRisk::ReadOnly => Some(true),
+        ApprovalPolicy::Never => Some(risk == ToolRisk::ReadOnly),
+        ApprovalPolicy::Always | ApprovalPolicy::OnRisk => None,
+    }
+}
+
 struct ProtocolApprovalGate {
     policy: ApprovalPolicy,
     broker: Arc<ApprovalBroker>,
     meta: TurnMeta,
     output: OutboundSender,
+}
+
+/// Decides a background job's nested approval requests, which outlive the
+/// turn that could carry them to the client. Each gets the answer the
+/// session would give without asking a person: the policy's own decision,
+/// else the client's declared blanket answer (`auto_approve`), else a denial.
+/// It never grants more than the same request would get in the foreground.
+struct UnattendedGate {
+    policy: ApprovalPolicy,
+    client_approves_all: bool,
+}
+
+#[async_trait]
+impl ApprovalGate for UnattendedGate {
+    async fn approve(
+        &self,
+        request: ApprovalRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<bool, AgentError> {
+        Ok(policy_decision(self.policy, request.risk).unwrap_or(self.client_approves_all))
+    }
 }
 
 #[async_trait]
@@ -1974,10 +2176,8 @@ impl ApprovalGate for ProtocolApprovalGate {
         request: ApprovalRequest,
         cancellation: CancellationToken,
     ) -> Result<bool, AgentError> {
-        match self.policy {
-            ApprovalPolicy::OnRisk if request.risk == ToolRisk::ReadOnly => return Ok(true),
-            ApprovalPolicy::Never => return Ok(request.risk == ToolRisk::ReadOnly),
-            ApprovalPolicy::Always | ApprovalPolicy::OnRisk => {}
+        if let Some(decision) = policy_decision(self.policy, request.risk) {
+            return Ok(decision);
         }
         let approval_id = Uuid::new_v4().to_string();
         let (sender, receiver) = oneshot::channel();
@@ -2414,9 +2614,44 @@ mod tests {
              - scv:feature-flow (project scv): Land SCV\n\
              - web:deploy (project web): Deploy the site\n"
         );
-        let prompt = build_system_prompt(&workspace, &config, &skills).unwrap();
+        let listings = SkillListings {
+            listing: skills.listing.clone(),
+            project_listing: skills.project_listing.clone(),
+        };
+        let agents = ["agent_claude".to_owned(), "agent_pi".to_owned()];
+        let prompt = build_system_prompt(
+            &workspace,
+            &config,
+            &listings,
+            &PromptContext {
+                agents: &agents,
+                background: true,
+                channel: None,
+            },
+        )
+        .unwrap();
         assert!(prompt.contains("# Project skills"));
-        assert!(prompt.contains("set its cwd to the skill's project"));
+        assert!(
+            prompt.contains("such as agent_claude or agent_pi, set its cwd to the skill's project")
+        );
+        // Only agents this session offers are named.
+        assert!(!prompt.contains("agent_codex"), "{prompt}");
+        let without_agents = build_system_prompt(
+            &workspace,
+            &config,
+            &listings,
+            &PromptContext {
+                agents: &[],
+                background: false,
+                channel: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            !without_agents.contains("delegate with"),
+            "{without_agents}"
+        );
+        assert!(without_agents.contains("read_skill loads one for reference"));
 
         let registry = builtin_registry(
             config.tools(),
@@ -2448,6 +2683,174 @@ mod tests {
         assert_eq!(capped.map.len(), 3);
         assert!(capped.map.contains_key("scv:feature-flow"));
         assert!(!capped.map.contains_key("web:deploy"));
+    }
+
+    fn prompt_for(config: &Config, context: &PromptContext<'_>) -> String {
+        let workspace = tempfile::tempdir().unwrap();
+        let listings = SkillListings {
+            listing: String::new(),
+            project_listing: String::new(),
+        };
+        build_system_prompt(workspace.path(), config, &listings, context).unwrap()
+    }
+
+    #[test]
+    fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background() {
+        let mut config = Config::default();
+        config.agent.prefer = vec!["pi".into(), "codex".into(), "grok".into()];
+        let agents = ["agent_codex".to_owned(), "agent_grok".to_owned()];
+        let prompt = prompt_for(
+            &config,
+            &PromptContext {
+                agents: &agents,
+                background: true,
+                channel: None,
+            },
+        );
+        assert!(prompt.starts_with(&config.agent.system_prompt), "{prompt}");
+        assert!(
+            prompt.contains("agent_codex (Codex), agent_grok (Grok Build)"),
+            "{prompt}"
+        );
+        // Preferences name only offered agents, in the user's order.
+        assert!(
+            prompt.contains("The user prefers agent_codex, agent_grok, in that order"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("background set to true"), "{prompt}");
+        assert!(prompt.contains("job handle"), "{prompt}");
+        assert!(prompt.contains("agent_cancel"), "{prompt}");
+        assert!(prompt.contains("[SCV background report]"), "{prompt}");
+        assert!(!prompt.contains("# Chat channel"), "{prompt}");
+        // Calm guidance: no shouted rules.
+        for loud in ["CRITICAL", "MUST", "IMPORTANT", "NEVER"] {
+            assert!(!prompt.contains(loud), "{loud} in {prompt}");
+        }
+
+        let foreground = prompt_for(
+            &Config::default(),
+            &PromptContext {
+                agents: &agents,
+                background: false,
+                channel: None,
+            },
+        );
+        assert!(foreground.contains("Hand substantial work to an agent"));
+        assert!(!foreground.contains("background set to true"));
+        assert!(!foreground.contains("prefers"));
+
+        let tool_free = prompt_for(
+            &Config::default(),
+            &PromptContext {
+                agents: &[],
+                background: false,
+                channel: None,
+            },
+        );
+        assert!(!tool_free.contains("# Delegating work"), "{tool_free}");
+    }
+
+    #[test]
+    fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
+        let agents = ["agent_claude".to_owned()];
+        let owner = prompt_for(
+            &Config::default(),
+            &PromptContext {
+                agents: &agents,
+                background: true,
+                channel: Some("WeChat"),
+            },
+        );
+        assert!(owner.contains("# Chat channel"), "{owner}");
+        assert!(owner.contains("takes place on WeChat"), "{owner}");
+        assert!(owner.contains("plain text"), "{owner}");
+        assert!(owner.contains("never see your tool calls"), "{owner}");
+        assert!(owner.contains("# Delegating work"), "{owner}");
+        // A tool-free chat session still learns how its replies are read.
+        let guest = prompt_for(
+            &Config::default(),
+            &PromptContext {
+                agents: &[],
+                background: false,
+                channel: Some("Feishu"),
+            },
+        );
+        assert!(guest.contains("takes place on Feishu"), "{guest}");
+        assert!(!guest.contains("# Delegating work"), "{guest}");
+        assert!(valid_channel_name("Lark"));
+        for bad in [
+            "",
+            "  ",
+            "We\nChat",
+            &"x".repeat(scv_protocol::MAX_CHANNEL_NAME_BYTES + 1),
+        ] {
+            assert!(!valid_channel_name(bad), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_requests_get_only_the_unattended_answer() {
+        let request = |risk| ApprovalRequest {
+            call_id: "job-1".into(),
+            name: "agent_codex".into(),
+            risk,
+            cwd: PathBuf::from("/"),
+            summary: "nested".into(),
+        };
+        let decide = |policy, client_approves_all, risk| async move {
+            UnattendedGate {
+                policy,
+                client_approves_all,
+            }
+            .approve(request(risk), CancellationToken::new())
+            .await
+            .unwrap()
+        };
+        use ApprovalPolicy::{Always, Never, OnRisk};
+        use ToolRisk::{Process, ReadOnly};
+        // An owner chat session's client approves everything, so background
+        // requests get that answer, within the policy.
+        assert!(decide(OnRisk, true, Process).await);
+        assert!(decide(Always, true, Process).await);
+        assert!(decide(Always, true, ReadOnly).await);
+        assert!(
+            !decide(Never, true, Process).await,
+            "never beyond the policy"
+        );
+        assert!(decide(Never, true, ReadOnly).await);
+        // A client that asks a person (the TUI) or a tool-free guest: only
+        // what the policy grants on its own.
+        assert!(!decide(OnRisk, false, Process).await);
+        assert!(decide(OnRisk, false, ReadOnly).await);
+        assert!(!decide(Always, false, ReadOnly).await);
+        assert!(!decide(Never, false, Process).await);
+    }
+
+    #[test]
+    fn signed_out_agents_with_a_local_sign_in_check_are_not_offered() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config {
+            instance_home: home.path().to_owned(),
+            ..Config::default()
+        };
+        let offered = offered_adapters(&config);
+        // Nothing stored for dsh, pi, grok, or the nested SCV: all hidden.
+        for hidden in ["agent_dsh", "agent_pi", "agent_grok", "agent_scv"] {
+            assert!(!offered.contains_key(hidden), "{hidden} offered");
+        }
+        // Claude and Codex report sign-in through their own CLI, which is
+        // too slow to run at every session start, so they stay offered.
+        assert!(offered.contains_key("agent_claude"));
+        assert!(offered.contains_key("agent_codex"));
+        // A stored dsh key makes it available.
+        let dsh = home.path().join("adapters/dsh/.dsh");
+        std::fs::create_dir_all(&dsh).unwrap();
+        std::fs::write(
+            dsh.join(".credentials.yaml"),
+            "version: 1\n\nrefs:\n  DEEPSEEK_API_KEY: test-only\n",
+        )
+        .unwrap();
+        assert!(offered_adapters(&config).contains_key("agent_dsh"));
     }
 
     #[tokio::test]

@@ -985,17 +985,16 @@ impl Tool for AcpAgentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name.clone(),
-            description: format!(
-                "Launch the {} coding agent over the Agent Client Protocol (not sandboxed). \
-                 Delegate substantial work here rather than doing it step by step with bash: \
-                 research and web lookups, multi-file coding, and running tools, builds, and \
-                 tests. Set cwd to the project the work is in so the agent follows that \
+            description: "Runs as a nested coding agent over the Agent Client Protocol (not \
+                 sandboxed). Delegate substantial work here rather than doing it step by step \
+                 with bash: research and web lookups, multi-file coding, and running tools, \
+                 builds, and tests. Give it a self-contained brief, since it does not see this \
+                 conversation, and set cwd to the project the work is in so it follows that \
                  project's instructions and skills. Its permission requests come back to \
                  this session for approval. Each result carries a `session` handle: pass it \
                  back to follow up on the same work (answers, fixes, next steps) instead of \
-                 repeating the context.",
-                self.agent
-            ),
+                 repeating the context."
+                .into(),
             parameters: json!({
                 "type":"object",
                 "properties":{
@@ -1350,6 +1349,7 @@ for line in sys.stdin:
             send({"id": 901, "method": "fs/read_text_file", "params": {"sessionId": session, "path": "/etc/hosts"}})
             send({"id": 902, "method": "terminal/create", "params": {"sessionId": session, "command": "ls"}})
         elif text == "hang":
+            log("hang")
             pending = (rid, session)
         elif text == "die":
             sys.stderr.write("boom: out of memory\n"); sys.stderr.flush()
@@ -1410,6 +1410,7 @@ for line in sys.stdin:
             home: None,
             transport: Transport::Process,
             acp: None,
+            use_for: None,
         }
     }
 
@@ -1965,7 +1966,112 @@ for line in sys.stdin:
         assert!(installed.contains("Agent Client Protocol"), "{installed}");
         let missing = dir.path().join("no-such-acp-server").display().to_string();
         let fallback = description(with_acp(&missing, false)).unwrap();
-        assert!(fallback.starts_with("Launch the configured"), "{fallback}");
+        assert!(
+            fallback.starts_with("Claude Code: ") && fallback.contains("Runs its CLI"),
+            "{fallback}"
+        );
         assert!(description(with_acp(&missing, true)).is_none());
+    }
+
+    /// Whether `pid` is an uncollected zombie.
+    fn zombie(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| Some(stat.rsplit_once(") ")?.1.starts_with('Z')))
+            .unwrap_or(false)
+    }
+
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("condition within 20 seconds");
+    }
+
+    fn delegation(registry: &Arc<DelegationRegistry>) -> DelegationContext {
+        DelegationContext {
+            registry: Arc::clone(registry),
+            session: "parent".into(),
+            depth: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_conversation_whose_agent_dies_is_collected_and_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let script = fake_agent(dir.path(), "normal");
+        let registry = Arc::new(DelegationRegistry::new(home.path()));
+        let tool = acp_tool(
+            &script,
+            store(Duration::from_secs(3600)),
+            Some(delegation(&registry)),
+            None,
+        );
+        let first = tool
+            .execute(json!({"prompt":"hello"}), context(dir.path(), None))
+            .await
+            .unwrap();
+        let handle = json(&first)["session"].as_str().unwrap().to_owned();
+        // Between turns the conversation keeps its agent, recorded as running.
+        assert_eq!(registry.list(true).len(), 1);
+        let agent = pid(dir.path());
+        // The agent dies while nothing reads from it, as a crash would.
+        crate::delegation::signal_group(agent, libc::SIGKILL);
+        until(|| registry.list(true).is_empty()).await;
+        assert!(!zombie(agent), "the dead agent was left a zombie");
+        let next = tool
+            .execute(
+                json!({"prompt":"recall","session":handle}),
+                context(dir.path(), None),
+            )
+            .await
+            .unwrap_err();
+        assert!(next.0.contains("ACP server exited"), "{next}");
+    }
+
+    #[tokio::test]
+    async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let script = fake_agent(dir.path(), "normal");
+        let registry = Arc::new(DelegationRegistry::new(home.path()));
+        let (finished_tx, mut finished) = tokio::sync::mpsc::unbounded_channel();
+        let jobs = Arc::new(crate::background::BackgroundJobs::new(1, Some(finished_tx)));
+        let tool = crate::background::BackgroundCapable {
+            inner: Arc::new(acp_tool(
+                &script,
+                store(Duration::from_secs(3600)),
+                Some(delegation(&registry)),
+                None,
+            )),
+            jobs: Arc::clone(&jobs),
+        };
+        tool.execute(
+            json!({"prompt":"hang","background":true}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+        // Wait until the agent is inside the prompt turn, not its handshake.
+        until(|| calls(dir.path()).contains("hang")).await;
+        let agent = pid(dir.path());
+        let handle = registry.list(true)[0].record.handle.clone();
+        // `scv agents kill` of the running turn's agent.
+        registry.kill(&handle).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), finished.recv())
+            .await
+            .expect("the job finished")
+            .unwrap();
+        let reports = jobs.take_unreported();
+        assert_eq!(reports.len(), 1, "a report turn follows");
+        assert_eq!(reports[0].status, "failed");
+        assert!(reports[0].reply.contains("exited"), "{}", reports[0].reply);
+        until(|| registry.list(true).is_empty()).await;
+        assert!(!zombie(agent));
+        assert_eq!(jobs.running(), 0, "the slot is free");
     }
 }
