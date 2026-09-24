@@ -83,6 +83,7 @@ cargo publish --locked -p scv-protocol
 cargo publish --locked -p scv-client
 cargo publish --locked -p scv-provider-openai
 cargo publish --locked -p scv-tools
+cargo publish --locked -p scv-channels
 cargo publish --locked -p scv-clawbot
 cargo publish --locked -p scv-server
 cargo publish --locked -p scv-tui

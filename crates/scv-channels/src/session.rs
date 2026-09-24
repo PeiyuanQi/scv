@@ -1,4 +1,4 @@
-//! Protocol client for the single SCV Unix-socket daemon.
+//! A channel conversation's session on the single SCV Unix-socket daemon.
 
 use anyhow::{Context, Result, anyhow, bail};
 use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
@@ -70,10 +70,10 @@ impl Session {
         write(
             &mut session.stdin,
             &ClientMessage::Initialize {
-                request_id: "clawbot-init".into(),
+                request_id: "channel-init".into(),
                 protocol_version: PROTOCOL_VERSION,
                 client: PeerInfo {
-                    name: "scv-clawbot".into(),
+                    name: "scv-channels".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                 },
             },
@@ -84,14 +84,14 @@ impl Session {
                 protocol_version, ..
             } if protocol_version == PROTOCOL_VERSION => {}
             ServerEvent::Error { message, .. } => {
-                bail!("ClawBot protocol initialization failed: {message}")
+                bail!("channel protocol initialization failed: {message}")
             }
-            _ => bail!("ClawBot protocol initialization failed"),
+            _ => bail!("channel protocol initialization failed"),
         }
         write(
             &mut session.stdin,
             &ClientMessage::SessionStart {
-                request_id: "clawbot-session".into(),
+                request_id: "channel-session".into(),
                 cwd: workspace.display().to_string(),
                 provider: None,
                 model: None,
@@ -108,7 +108,7 @@ impl Session {
                     break;
                 }
                 ServerEvent::Error { message, .. } => {
-                    bail!("ClawBot protocol session failed: {message}")
+                    bail!("channel protocol session failed: {message}")
                 }
                 _ => {}
             }
@@ -130,14 +130,14 @@ impl Session {
         loop {
             let buf = self.stdout.fill_buf().await?;
             if buf.is_empty() {
-                bail!("SCV server closed the ClawBot session")
+                bail!("SCV server closed the channel session")
             }
             let take = buf
                 .iter()
                 .position(|byte| *byte == b'\n')
                 .map_or(buf.len(), |index| index + 1);
             if self.partial.len() + take > 8 * 1024 * 1024 {
-                bail!("ClawBot protocol frame exceeds limit")
+                bail!("channel protocol frame exceeds limit")
             }
             self.partial.extend_from_slice(&buf[..take]);
             self.stdout.consume(take);
@@ -371,7 +371,7 @@ impl Session {
                     self.current = None;
                     bail!("turn cancelled")
                 }
-                // Tool status lines are for local displays; WeChat gets only
+                // Tool status lines are for local displays; channels get only
                 // the final answer.
                 ServerEvent::ToolProgress { .. } => {}
                 _ => {}

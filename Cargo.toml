@@ -53,6 +53,7 @@ which = "8.0.0"
 
 scv-core = { version = "=0.1.35", path = "crates/scv-core" }
 scv-client = { version = "=0.1.35", path = "crates/scv-client" }
+scv-channels = { version = "=0.1.35", path = "crates/scv-channels" }
 scv-clawbot = { version = "=0.1.35", path = "crates/scv-clawbot" }
 scv-protocol = { version = "=0.1.35", path = "crates/scv-protocol" }
 scv-provider-openai = { version = "=0.1.35", path = "crates/scv-provider-openai" }
