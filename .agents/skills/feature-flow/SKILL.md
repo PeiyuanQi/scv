@@ -174,9 +174,18 @@ scripts/deploy.sh <version>
 - Delete the local branch with `git branch -D <branch>` once its change is on
   `origin/main`. Also make sure the remote task branch is gone:
   `git ls-remote --heads origin <branch>` should print nothing.
+- Prune stale remote branches. For each branch in
+  `git branch -r | grep -v -e 'origin/main' -e HEAD`, delete it with
+  `git push origin --delete <branch>` when its PR is merged or closed
+  (`gh pr list --state all --head <branch>`) or it has none, and
+  `git rev-list --count origin/main..origin/<branch>` prints 0 or
+  `git cherry origin/main origin/<branch>` shows no `+` lines. Never delete
+  `main`, a branch with an open PR, or one with commits not on `main`: report
+  those instead. Finish with `git fetch --prune origin`.
 - Report:
   - the commit(s) now on `main`;
   - the version published and the version installed;
   - daemon and channel status;
   - gates run or skipped;
-  - the CI result.
+  - the CI result;
+  - remote branches pruned, and any kept with the reason.
