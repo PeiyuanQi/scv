@@ -106,6 +106,26 @@ pub struct BridgeState {
     pub in_flight: Vec<InFlight>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held: Vec<HeldReply>,
+    /// Background jobs direct-chat sessions are running, so the next run can
+    /// tell each chat which of its jobs a restart stopped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<RunningJob>,
+}
+
+/// A background job a direct chat's session started and has not reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningJob {
+    /// The chat partner it reports to.
+    pub to_user_id: String,
+    /// The session's job handle, such as `job-1`.
+    pub job: String,
+    /// The delegating tool, such as `agent_codex`.
+    pub tool: String,
+    /// The first line of the delegated prompt, shortened.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task: String,
+    /// Unix seconds when it was first recorded.
+    pub started_at: u64,
 }
 
 /// Older bridges stored at most one pending reply and one claim as a single

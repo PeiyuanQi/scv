@@ -58,6 +58,28 @@ pub struct DaemonStatus {
     pub components: Vec<ComponentHealth>,
     #[serde(default)]
     pub delegations: DelegationSummary,
+    /// A restart the daemon has scheduled, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RestartInfo>,
+}
+
+/// A restart into a newly installed release, waiting for owner work to end.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestartInfo {
+    /// The release it restarts into.
+    pub to_version: String,
+    /// What it still waits for, such as the requesting delegation or an
+    /// owner's message; `None` once it restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+    /// The delegation that asked, whose report goes out first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
+    /// The chat the announcement goes to, as `<channel>:<account>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// When it restarts even if work is still running.
+    pub deadline_unix_seconds: u64,
 }
 
 /// Delegated agent runs of the daemon's SCV instance.
@@ -129,6 +151,22 @@ pub enum DaemonCommand {
         handle: Option<String>,
         #[serde(default)]
         orphans: bool,
+    },
+    /// Restart into the release installed at the daemon's own path once the
+    /// requesting delegation has finished and its report is stored and no
+    /// owner message is being answered, or at `max_wait_seconds` anyway.
+    RestartWhenIdle {
+        /// The release the caller installed; the daemon checks it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        /// The commit it was built from, for the announcement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+        /// The caller's `SCV_PARENT` chain, naming the delegation to wait for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_wait_seconds: Option<u64>,
     },
 }
 
@@ -685,6 +723,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn restart_requests_and_scheduled_restarts_round_trip() {
+        let request = DaemonCommand::RestartWhenIdle {
+            version: Some("0.1.37".into()),
+            commit: Some("abc1234".into()),
+            parent: Some("0a1b2c3d/session/codex-3f9a2c".into()),
+            max_wait_seconds: Some(600),
+        };
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(wire.contains(r#""action":"restart_when_idle""#), "{wire}");
+        assert_eq!(
+            serde_json::from_str::<DaemonCommand>(&wire).unwrap(),
+            request
+        );
+        assert_eq!(
+            serde_json::from_str::<DaemonCommand>(r#"{"action":"restart_when_idle"}"#).unwrap(),
+            DaemonCommand::RestartWhenIdle {
+                version: None,
+                commit: None,
+                parent: None,
+                max_wait_seconds: None,
+            }
+        );
+        // Status from a daemon without a scheduled restart omits it, and
+        // older status frames parse.
+        let status: DaemonStatus =
+            serde_json::from_str(r#"{"version":"0.1.0","pid":1,"components":[]}"#).unwrap();
+        assert!(status.restart.is_none());
+        assert!(!serde_json::to_string(&status).unwrap().contains("restart"));
     }
 
     #[test]

@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.2.0`, with exact `=0.2.0` pins for dependencies
+All packages use version `0.2.1`, with exact `=0.2.1` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -101,8 +101,14 @@ scv start --workspace /path/to/workspace
 scv status
 scv reload
 scv restart --workspace /path/to/workspace
+scv restart --when-idle   # into a newly installed release, once owner work is done
 scv stop
 ```
+
+`scv restart --when-idle` lets a chat-driven update finish its report before
+the daemon restarts, checks the new release, and rolls back to the previous
+binary if it does not come up; the new daemon announces the outcome in chat
+(see [configuration](docs/configuration.md#daemon-and-component-settings)).
 
 Each SCV instance owns an explicit profile root. Use `--scv-home PATH` (or
 `SCV_HOME`) to run independent daemons with separate provider/model settings,

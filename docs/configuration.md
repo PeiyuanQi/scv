@@ -42,7 +42,8 @@ five places:
 ```text
 ~/.scv/
 ├── config.toml        settings you edit: provider and key, limits, tools,
-│                      [agents.<name>], and [channels.<channel>.<account>]
+│                      [agents.<name>], [channels.<channel>.<account>], and
+│                      [notify]
 ├── credentials/       sign-ins SCV writes itself (0700)
 │   ├── wechat/<account>.json
 │   └── feishu/<account>.json
@@ -55,6 +56,9 @@ five places:
     ├── delegations/<handle>.json
     ├── conversations/
     ├── imports/<agent>.json
+    ├── daemon.json    the running daemon, removed on a clean stop
+    ├── update.json    a planned restart, until its outcome is announced
+    ├── last-owner.json  the chat the owner last wrote from
     └── channels/<channel>/<account>.json, .lock, .transaction
 ```
 
@@ -521,6 +525,25 @@ value in that order. Project configuration cannot select an update registry.
 SCV passes the URL to Cargo, which remains responsible for registry
 authentication and downloads.
 
+The daemon sends some notices nobody asked for: an update started from a
+terminal or the TUI, a rollback of a failed update, a restart after the daemon
+stopped unexpectedly, and an enabled chat account disconnected for ten
+minutes. `[notify].owner` lists the accounts that may carry them, as
+`<channel>:<account>`:
+
+```toml
+[notify]
+owner = ["feishu:default", "wechat:default"]
+```
+
+A notice goes to the account owner's direct chat on the first listed account
+that is connected, and only there; an account still connecting keeps its place
+for two minutes. A notice about an account never goes through that account.
+Without a list, notices go to the chat the owner last wrote from, and with no
+such chat only to the log. Updates asked for from a chat are answered in that
+chat, falling back to this list when it does not connect in time. Project
+configuration cannot set `[notify]`.
+
 Project configuration may make policy stricter but not weaker than user
 configuration. A command-line flag may weaken policy because it is an explicit
 choice for that invocation.
@@ -642,3 +665,15 @@ authority. See [channels](channels.md) for the lifecycle and status contract.
 `scv update` installs the published binary and restarts an active systemd user
 daemon. A foreground daemon requires an explicit restart; its in-memory code
 does not change when the executable is replaced.
+
+`scv restart --when-idle [--version V] [--commit C] [--max-wait SECONDS]` asks
+a daemon running as its systemd user unit to restart into the binary now
+installed at its own path once the delegated agent running the command (if
+any) has finished and its report is stored, and no owner message is being
+answered; after `--max-wait` (default 600 seconds) it restarts anyway. A
+watchdog outside the daemon checks the new release and rolls back to the
+previous binary (kept as `<binary>.prev`) when it fails to start or reconnect
+its accounts, unless the releases differ in config layout. It is the one daemon
+lifecycle command a delegated agent may run; it exits 3 when no daemon answers
+or the daemon predates it. See
+[architecture](architecture.md#planned-restarts).

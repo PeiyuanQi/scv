@@ -75,7 +75,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
-| `scv-channels` | The bridge every chat channel shares: the `Transport` trait, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, and background reports. |
+| `scv-channels` | The bridge every chat channel shares: the `Transport` trait, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, restart context). |
 | `scv-clawbot` | The WeChat channel: iLink authentication, polling, and sending behind `Transport`, and its credentials. |
 | `scv-feishu` | The Feishu/Lark channel: app registration by QR scan, the event long connection with catch-up from chat history, and sending behind `Transport`, and its credentials. |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. |
@@ -86,7 +86,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.2.0` and exact workspace dependency pins.
+`0.2.1` and exact workspace dependency pins.
 
 Each channel account is a component hosted by the daemon's supervisor. A
 channel crate (WeChat's `scv-clawbot`, Feishu's `scv-feishu`) implements
@@ -129,12 +129,64 @@ authorization is confirmed interactively, or rejected when no terminal is
 available.
 
 `scv update` installs the latest CLI from the configured Cargo index and
-restarts an active user daemon through systemd. The socket closes as the old
+restarts an active user daemon through systemd; a release landed through the
+feature flow restarts through a planned restart instead (below). The socket closes as the old
 process exits; TUI clients retry the socket and establish a new session after
 the replacement daemon is ready. Canonical history and the queue belong to the
 old server session and are not restored. The TUI never automatically replays
 submitted work. A foreground `scv run` daemon requires an explicit restart
 after installing the published binary.
+
+## Planned restarts
+
+`scv-server::restart` lets a daemon restart into a release installed at its
+own executable path without cutting off the work that asked for it, such as
+an owner's chat request to change, publish, and deploy SCV itself.
+
+1. `scv restart --when-idle` (the feature-flow `deploy.sh`, after `cargo
+   install`) sends `restart_when_idle`. The daemon must run in its systemd
+   unit's cgroup, and the installed binary must answer `scv build-info`
+   (version and `CONFIG_LAYOUT`); otherwise nothing is scheduled.
+2. The daemon saves a plan in `$SCV_HOME/state/update.json` (mode 0600) and
+   waits, checking every second. It goes ahead after two clear checks in a
+   row: the delegation named by the request's `SCV_PARENT` chain has no live
+   processes, its daemon session has no running turn, running or unreported
+   background job, and (through the channel hub) no unstored report; and no
+   chat bridge holds an owner message it has not answered durably. At the
+   request's deadline it goes ahead anyway and the plan says so.
+3. It records the accounts connected at that moment, copies its own image
+   (`/proc/self/exe`) to `<binary>.prev`, and starts `scv restart-watchdog`
+   from that copy as a transient unit (`systemd-run --user`), outside its own
+   cgroup.
+4. The watchdog restarts the unit and waits up to 180 seconds for the daemon
+   to report the new version with every recorded account connected. When it
+   does not, and both releases declare the same `CONFIG_LAYOUT`, it puts
+   `<binary>.prev` back over the binary and restarts again (a binary-only
+   rollback); across layouts it refuses. It records `verified`,
+   `rolled_back`, or `failed` in the plan.
+5. The next daemon reads the plan before any account starts. Each account's
+   first recovery then answers messages the restart interrupted with "SCV
+   restarted to update to vX before finishing this" and tells each direct chat
+   which of its background jobs stopped. Once the watchdog's outcome is in the
+   plan, the daemon announces it to the chat that asked, or through the notify
+   targets when that chat does not connect within two minutes, then removes
+   the plan.
+
+`CONFIG_LAYOUT` names how configuration and state are laid out; a release that
+changes them so the previous release cannot read them bumps it. The daemon
+also keeps `$SCV_HOME/state/daemon.json` while it runs; finding one left by
+another process at startup means the previous daemon stopped without shutting
+down, which the owner is told through the notify targets.
+
+Notices nobody asked for (an update started from a terminal, a rollback, a
+restart after a crash, an account disconnected for ten minutes) go to the
+owner of the first connected account in the user configuration's
+`notify.owner` list, on that account only; with no list, to the chat the owner
+last wrote from (`$SCV_HOME/state/last-owner.json`), and otherwise only to the
+log. `scv_channels::hub::Hub` carries what the daemon and its bridges share:
+each running account's owner and outbox, which daemon session each direct chat
+runs on and its unreported background work, claimed owner messages, the
+owner's last chat, and whether this start is a planned restart.
 
 ## Component lifecycle
 

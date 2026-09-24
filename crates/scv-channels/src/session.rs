@@ -35,7 +35,10 @@ pub struct Session {
     /// Finished server-started turns' answers, waiting to be sent.
     reports: VecDeque<String>,
     /// Background jobs this session started that have not been reported.
-    background: HashSet<String>,
+    background: HashMap<String, JobInfo>,
+    /// What this turn's agent calls were asked to do, by call ID, until they
+    /// return.
+    tasks: HashMap<String, String>,
     /// A read or write failed, so the session cannot be reused.
     broken: bool,
 }
@@ -71,7 +74,8 @@ impl Session {
             server_turns: HashMap::new(),
             stale: HashSet::new(),
             reports: VecDeque::new(),
-            background: HashSet::new(),
+            background: HashMap::new(),
+            tasks: HashMap::new(),
             broken: false,
         };
         write(
@@ -184,6 +188,28 @@ impl Session {
         !self.reports.is_empty()
     }
 
+    /// Whether a turn the server started (a background report) is running.
+    pub fn reporting(&self) -> bool {
+        !self.server_turns.is_empty()
+    }
+
+    /// Background work whose report has not been handed over yet: running
+    /// or unreported jobs, report turns, and finished reports.
+    pub fn pending_work(&self) -> usize {
+        self.background.len() + self.server_turns.len() + self.reports.len()
+    }
+
+    /// The background jobs this session runs and has not reported, by handle.
+    pub fn jobs(&self) -> Vec<(String, JobInfo)> {
+        let mut jobs: Vec<_> = self
+            .background
+            .iter()
+            .map(|(job, info)| (job.clone(), info.clone()))
+            .collect();
+        jobs.sort();
+        jobs
+    }
+
     /// Answers of background reports that finished during `turn`.
     pub fn take_reports(&mut self) -> Vec<String> {
         self.reports.drain(..).collect()
@@ -205,9 +231,37 @@ impl Session {
     /// Track background jobs and server-started turns in any event.
     fn observe(&mut self, event: &ServerEvent) {
         match event {
-            ServerEvent::ToolCompleted { output, .. } => {
+            ServerEvent::ToolProposed {
+                call_id,
+                name,
+                arguments,
+                ..
+            } if name.starts_with("agent_") => {
+                let prompt = arguments
+                    .get("prompt")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if self.tasks.len() < MAX_TRACKED_CALLS {
+                    self.tasks.insert(call_id.clone(), task_line(prompt));
+                }
+            }
+            ServerEvent::ToolCompleted {
+                call_id,
+                name,
+                output,
+                ..
+            } => {
+                let task = self.tasks.remove(call_id).unwrap_or_default();
                 let update = scv_protocol::background_job_update(output);
-                self.background.extend(update.started);
+                for job in update.started {
+                    self.background.insert(
+                        job,
+                        JobInfo {
+                            tool: name.clone(),
+                            task: task.clone(),
+                        },
+                    );
+                }
                 for job in update.settled {
                     self.background.remove(&job);
                 }
@@ -358,6 +412,7 @@ impl Session {
                 }
                 ServerEvent::TurnCompleted { .. } => {
                     self.current = None;
+                    self.tasks.clear();
                     // Idle expiry counts from the end of long turns too.
                     self.last_used = Instant::now();
                     return Ok(answer);
@@ -390,6 +445,38 @@ impl Session {
             }
         }
     }
+}
+
+/// A background job this session started, as a restart describes it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct JobInfo {
+    /// The delegating tool, such as `agent_codex`.
+    pub tool: String,
+    /// The first line of the delegated prompt, shortened.
+    pub task: String,
+}
+
+/// Agent calls of one turn whose task line is kept until they return.
+const MAX_TRACKED_CALLS: usize = 64;
+/// Characters of a delegated prompt's first line kept as its task.
+const TASK_CHARS: usize = 80;
+
+/// The first non-empty line of `prompt`, at most [`TASK_CHARS`] characters.
+fn task_line(prompt: &str) -> String {
+    let line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut task: String = line
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(TASK_CHARS)
+        .collect();
+    if line.chars().count() > TASK_CHARS {
+        task.push('…');
+    }
+    task
 }
 
 /// Answers from a background report turn, like any reply, are bounded.
@@ -440,5 +527,15 @@ mod tests {
         let cut = answer.clone();
         append_capped(&mut answer, "more", limit);
         assert_eq!(answer, cut, "nothing follows the truncation note");
+    }
+
+    #[test]
+    fn a_task_is_the_first_line_of_the_prompt_shortened() {
+        assert_eq!(task_line("\n  Fix the build\nthen test"), "Fix the build");
+        let long = "x".repeat(200);
+        let task = task_line(&long);
+        assert_eq!(task.chars().count(), TASK_CHARS + 1);
+        assert!(task.ends_with('…'));
+        assert_eq!(task_line(""), "");
     }
 }

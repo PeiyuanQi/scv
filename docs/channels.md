@@ -328,6 +328,42 @@ If an owner turn runs out of time while jobs are running, the bridge cancels
 that turn (`turn.cancel`) and keeps the session, rather than replacing it,
 which would cancel the jobs; the owner still gets the failure reply.
 
+The bridge keeps reading a report turn that starts during one of the owner's
+turns and finishes after it, so its answer goes out without waiting for the
+owner's next message. It also records each running job in the account's
+delivery state (`jobs`: the chat, job handle, delegating tool, and the first
+line of the delegated prompt) until the job is reported or its session closes.
+A restart ends every session and so every job: on the account's next run, each
+chat whose jobs were recorded gets one message listing the jobs that stopped.
+
+## Restarts and notices
+
+An owner can ask SCV from a chat to change, publish, and deploy SCV itself:
+the delegated agent runs the feature flow, whose `deploy.sh` ends with `scv
+restart --when-idle`. The daemon then restarts only once that agent has
+finished, its report is stored in the chat's outbox, and no owner message is
+being answered, or after ten minutes at the latest (see
+[architecture](architecture.md#planned-restarts)). Across the restart:
+
+- Messages whose turns the restart interrupted are answered with "SCV
+  restarted to update to vX before finishing this; ask again if you still need
+  it." instead of the generic failure reply, on each account's first run after
+  a planned restart only.
+- Each chat is told which of its background jobs stopped, as above.
+- When the watchdog has checked the new release, the daemon announces "SCV
+  updated: now running vX (commit)." in the chat that asked, or that the
+  update failed and was rolled back, or failed and was not rolled back. If that
+  chat does not connect within two minutes, the announcement goes to the
+  `[notify]` accounts, saying which chat asked.
+
+Notices nobody asked for (an update started from a terminal, a restart after
+the daemon stopped unexpectedly, an enabled account disconnected for ten
+minutes, which may mean its sign-in expired) go to the owner of the first
+connected account in `[notify].owner`, or else to the chat the owner last
+wrote from, and never through the account the notice is about. Each is queued
+in that account's outbox like a background report. See
+[configuration](configuration.md#daemon-and-component-settings).
+
 ## Sessions and safety
 
 Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A

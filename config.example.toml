@@ -22,3 +22,10 @@ timeout_seconds = 600
 # enabled = true
 # workspace = "/absolute/path/to/workspace"
 # remote_tools = "none" # "owner" gives the account's owner every tool
+
+# Notices nobody asked for (an update started from a terminal, a rollback, a
+# restart after a crash, an account disconnected for ten minutes) go to the
+# owner of the first connected account listed. Without a list they go to the
+# chat the owner last wrote from.
+# [notify]
+# owner = ["feishu:default", "wechat:default"]

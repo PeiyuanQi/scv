@@ -9,6 +9,14 @@ spawns no tasks: cancelling the future drops active requests and protocol
 sessions, and callers enforce an external bounded stop timeout. `report(true)`
 follows only a successful `receive`; receive and send failures report false.
 
+`run_linked` adds a `hub::Link` for accounts the daemon runs. Through the
+daemon's `hub::Hub` it sees which direct chat each daemon session answers,
+how many owner messages are claimed but unanswered, each chat's background
+work not yet reported, and the chat the account owner last wrote from; it can
+queue a notice into an account's durable outbox. Each account's first
+recovery after a planned restart answers interrupted claims with
+`restarted_reply` instead of the failure reply.
+
 `tool_owner` is the authenticated owner when the account grants remote tools;
 only that sender's direct-chat sessions get tools and auto-approval, and every
 other session, including the owner's group messages, stays tool-free.
@@ -16,7 +24,9 @@ other session, including the owner's group messages, stays tool-free.
 Before any inbound turn, the bridge durably records its message identity,
 sender, reply handle, and conversation, and saves the batch's checkpoint only
 after every claim in it is durable. On restart, each claim becomes a sanitized
-failure reply without repeating the turn. Pending replies and stable per-part
+failure reply without repeating the turn, and each direct chat whose
+background jobs were still running (recorded in state as they start) is told
+which ones stopped. Pending replies and stable per-part
 client IDs are durable before delivery; retries reuse the IDs. A refusal is
 final for that reply, which is held and delivered ahead of the conversation's
 next reply within count, byte, and age limits. Deduplication retains the
