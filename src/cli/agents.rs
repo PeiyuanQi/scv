@@ -134,7 +134,8 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                     }
                     Status::Command(_) => {}
                     Status::Stored(store) => {
-                        let (ready, lines) = scv_server::agent_stored_status(name, store)?;
+                        let scv_server::StoredStatus { ready, lines } =
+                            scv_server::agent_stored_status(name, store)?;
                         for line in lines {
                             println!("  {line}");
                         }

@@ -126,10 +126,18 @@ pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Resul
         "\nChannels ([channels.<channel>.<account>] in config.toml)"
     )?;
     let mut any = false;
+    // The raw file shows which media limits an account sets; the rest are
+    // defaults SCV leaves out of it.
+    let raw = crate::config::read_layer(&layout.config()).ok();
+    let listing = Listing {
+        home: layout.home(),
+        raw: raw.as_ref(),
+        all,
+    };
     let wechat = scv_clawbot::state::Store::new(&layout, scv_clawbot::CHANNEL);
-    any |= channel(&mut out, layout.home(), &wechat, scv_clawbot::CHANNEL)?;
+    any |= channel(&mut out, &listing, &wechat, scv_clawbot::CHANNEL)?;
     let feishu = scv_feishu::state::Store::new(&layout, scv_feishu::CHANNEL);
-    any |= channel(&mut out, layout.home(), &feishu, scv_feishu::CHANNEL)?;
+    any |= channel(&mut out, &listing, &feishu, scv_feishu::CHANNEL)?;
     if !any {
         writeln!(out, "  none signed in; see `scv channels login`")?;
     }
@@ -178,10 +186,19 @@ pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Resul
     Ok(out)
 }
 
+/// What the channel listing needs besides each channel's store.
+struct Listing<'a> {
+    home: &'a Path,
+    /// The instance's `config.toml` as written, when it is readable.
+    raw: Option<&'a toml::Value>,
+    /// List settings left at their defaults too.
+    all: bool,
+}
+
 /// The accounts of one channel; whether there were any.
 fn channel<C: scv_channels::state::Credentials>(
     out: &mut String,
-    home: &Path,
+    listing: &Listing<'_>,
     store: &scv_channels::state::Store<C>,
     name: &str,
 ) -> Result<bool> {
@@ -194,6 +211,14 @@ fn channel<C: scv_channels::state::Credentials>(
     accounts.dedup();
     for account in &accounts {
         let (credentials, settings) = store.inspect(account);
+        let media = settings.as_ref().ok().and_then(|settings| {
+            let table = listing
+                .raw
+                .and_then(|raw| raw.get("channels")?.get(name)?.get(account)?.get("media"));
+            let set = |key: &str| table.is_some_and(|table| table.get(key).is_some());
+            let line = media_line(&settings.media, &set);
+            (listing.all || line.contains("[config.toml]")).then_some(line)
+        });
         let settings = match settings {
             Ok(settings) => {
                 let workspace = settings
@@ -220,15 +245,36 @@ fn channel<C: scv_channels::state::Credentials>(
             Ok(None) => "missing: not signed in".into(),
             Err(_) => format!("{} but unreadable; log in again", describe(&path)),
         };
-        let shown = path.strip_prefix(home).unwrap_or(&path);
+        let shown = path.strip_prefix(listing.home).unwrap_or(&path);
         writeln!(
             out,
             "  {:<32} credentials {} {credentials}",
             "",
             shown.display()
         )?;
+        if let Some(media) = media {
+            writeln!(out, "  {:<32} {media}", "")?;
+        }
     }
     Ok(!accounts.is_empty())
+}
+
+/// An account's media limits (`[channels.<channel>.<account>.media]`), each
+/// with where it was set: `config.toml` when `set` says the file names it.
+fn media_line(media: &scv_channels::media::MediaSettings, set: &dyn Fn(&str) -> bool) -> String {
+    let limits = [
+        ("owner_max_mib", media.owner_max_mib),
+        ("others_image_max_mib", media.others_image_max_mib),
+        ("keep_days", media.keep_days),
+    ];
+    let limits: Vec<String> = limits
+        .iter()
+        .map(|(key, value)| {
+            let origin = if set(key) { "config.toml" } else { "default" };
+            format!("{key} = {value} [{origin}]")
+        })
+        .collect();
+    format!("media {}", limits.join(", "))
 }
 
 fn row(out: &mut String, left: &str, right: &str) -> std::fmt::Result {
@@ -270,19 +316,4 @@ fn safe_error(error: &anyhow::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn modes_and_missing_files_are_described() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("file");
-        std::fs::write(&file, "").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(describe(&file), "0600");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(describe(&file), "0644, readable by others");
-        assert_eq!(describe(&dir.path().join("missing")), "missing");
-    }
-}
+mod tests;

@@ -109,15 +109,17 @@ Start reading in this order:
    the server say to each other.
 2. `scv-core`: the `Tool` and `Provider` traits and `AgentRuntime::run_turn`,
    the loop described under [Agent loop](#agent-loop).
-3. `scv-server` (`lib.rs`): `run_managed`, one connection's message loop, and
-   `TurnStarter::start`, which runs a queued turn.
+3. `scv-server`: `connection::run_managed`, one connection's message loop
+   with a handler per `ClientMessage`, and `session::turn::TurnStarter::start`,
+   which runs a turn.
 4. `scv-tools` (`lib.rs`): `builtin_registry`, which decides the tools a
    session gets.
 5. `scv-channels` (`lib.rs`): the `Transport` trait and `run`, the bridge
    every chat account runs.
 
 A TUI turn: `scv-tui` sends `turn.start` over the daemon socket; the server's
-`run_managed` queues it and `TurnStarter::start` runs `AgentRuntime::run_turn`
+`run_managed` hands it to `Connection::turn_start`, which queues it or has
+`TurnStarter::start` run `AgentRuntime::run_turn`
 with `OpenAiProvider` and the session's `ToolRegistry`. A tool that needs
 approval becomes an `approval.requested` event through `ProtocolApprovalGate`,
 and the client's `approval.resolve` answers it. Core events become
@@ -135,8 +137,15 @@ What lives where in the largest crates:
 
 | Crate | Module | Contents |
 | --- | --- | --- |
-| `scv-server` | `lib.rs` | Daemon socket and stdio entry points, the connection loop, sessions and their turn queue, the system prompt and skill discovery, approval gates, the event sink, and helpers the CLI calls for `scv agents` |
-| | `config.rs` | Configuration schema, layered loading, and validation |
+| `scv-server` | `lib.rs` | Module list, public re-exports, and helpers the CLI calls for `scv agents` |
+| | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs |
+| | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
+| | `control.rs` | `daemon.control`: status, components, delegations, and scheduled restarts |
+| | `outbound.rs` | The byte- and frame-bounded outbound queue and event encoding |
+| | `session/` | A session (`mod.rs`), building one (`build.rs`), its turn queue (`queue.rs`), and running a turn (`turn.rs`) |
+| | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`) |
+| | `approval.rs`, `events.rs` | Approval gates, and `CoreEvent` to `ServerEvent` |
+| | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
 | | `components.rs` | `Component`, `HealthReporter`, `Supervisor`, and the channel accounts they run |
 | | `restart.rs` | [Planned restarts](#planned-restarts) and the watchdog |
 | | `attachments.rs` | Files attached to a turn, such as chat media |
