@@ -341,6 +341,8 @@ impl Client {
             base_url: options.base_url.clone(),
             no_tools: None,
             delegation_depth: scv_client::inherited_delegation_depth(),
+            channel: None,
+            auto_approve: None,
         })
         .await?;
         let session = match self.read_event().await? {

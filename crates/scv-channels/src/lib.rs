@@ -9,6 +9,10 @@ use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use std::{
     collections::HashMap,
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
@@ -136,6 +140,10 @@ pub trait Transport: Send + Sync {
     /// Names the channel in logs and errors, such as `ClawBot`.
     fn label(&self) -> &'static str;
 
+    /// The channel's name as its users know it, such as `WeChat`, which the
+    /// model is told so it writes for a chat.
+    fn channel(&self) -> &'static str;
+
     /// Wait for the next batch after `checkpoint`. Success is authenticated
     /// contact with the platform and reports the account healthy; an error
     /// reports it disconnected and is retried with backoff.
@@ -202,7 +210,7 @@ pub async fn run<C: state::Credentials, T: Transport>(
         tokio::select! {
             result = &mut poll => return result,
             result = &mut deliver => return result,
-            Some((owner, recipient, jobs)) = started.recv() => conversations.push(bridge.converse(owner, recipient, jobs)),
+            Some((owner, recipient, jobs, watching)) = started.recv() => conversations.push(bridge.converse(owner, recipient, jobs, watching)),
             Some(result) = conversations.next(), if !conversations.is_empty() => result?,
         }
     }
@@ -219,6 +227,25 @@ struct Job {
 struct Conversation {
     jobs: mpsc::UnboundedSender<Job>,
     last_used: Instant,
+    /// Set by the conversation while its session has background jobs
+    /// running or reports to send: closing it then would cancel them.
+    watching: Arc<AtomicBool>,
+}
+
+/// The conversation a full session table closes to make room: the least
+/// recently used one with no claimed messages waiting and no background
+/// work in flight, or none.
+fn evictable(
+    conversations: &HashMap<String, Conversation>,
+    waiting: impl Fn(&str) -> usize,
+) -> Option<String> {
+    conversations
+        .iter()
+        .filter(|(key, conversation)| {
+            waiting(key) == 0 && !conversation.watching.load(Ordering::Acquire)
+        })
+        .min_by_key(|(_, conversation)| conversation.last_used)
+        .map(|(key, _)| key.clone())
 }
 
 enum Step {
@@ -227,7 +254,14 @@ enum Step {
     Retry,
 }
 
-type Starter = mpsc::UnboundedSender<(bool, Option<String>, mpsc::UnboundedReceiver<Job>)>;
+/// A new conversation: whether its sender is the owner, who receives its
+/// unprompted reports, its queue, and its `watching` flag.
+type Starter = mpsc::UnboundedSender<(
+    bool,
+    Option<String>,
+    mpsc::UnboundedReceiver<Job>,
+    Arc<AtomicBool>,
+)>;
 
 struct Bridge<'a, C, T> {
     transport: &'a T,
@@ -344,15 +378,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 .count()
         };
         // A full session table makes room by closing the least recently used
-        // conversation that has nothing waiting.
+        // conversation that has nothing waiting and no background work.
         let evict = if conversations.contains_key(&key) || conversations.len() < MAX_SESSIONS {
             None
         } else {
-            conversations
-                .iter()
-                .filter(|(key, _)| waiting(key) == 0)
-                .min_by_key(|(_, conversation)| conversation.last_used)
-                .map(|(key, _)| key.clone())
+            evictable(conversations, waiting)
         };
         let room = state.in_flight.len() < MAX_CLAIMS
             && waiting(&key) < MAX_QUEUED_PER_CONVERSATION
@@ -407,14 +437,18 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 let (jobs, queue) = mpsc::unbounded_channel();
                 // Only a direct chat can receive unprompted background reports.
                 let recipient = group.is_none().then(|| sender.to_owned());
-                start.send((owner, recipient, queue)).map_err(|_| {
-                    anyhow!("{} conversation runner stopped", self.transport.label())
-                })?;
+                let watching = Arc::new(AtomicBool::new(false));
+                start
+                    .send((owner, recipient, queue, Arc::clone(&watching)))
+                    .map_err(|_| {
+                        anyhow!("{} conversation runner stopped", self.transport.label())
+                    })?;
                 conversations.insert(
                     key.clone(),
                     Conversation {
                         jobs,
                         last_used: Instant::now(),
+                        watching,
                     },
                 );
             }
@@ -431,6 +465,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         owner: bool,
         recipient: Option<String>,
         mut jobs: mpsc::UnboundedReceiver<Job>,
+        watching_flag: Arc<AtomicBool>,
     ) -> Result<()> {
         enum Next {
             Job(Option<Job>),
@@ -443,6 +478,15 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 && session
                     .as_ref()
                     .is_some_and(|session| session.background_jobs() > 0 || session.has_reports());
+            // Tell the poller, so a full session table never closes this
+            // conversation while it has work in flight.
+            watching_flag.store(
+                watching
+                    || session
+                        .as_ref()
+                        .is_some_and(|session| session.background_jobs() > 0),
+                Ordering::Release,
+            );
             let next = {
                 let message = async {
                     if watching {
@@ -494,7 +538,13 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                             );
                         }
                         session = Some(
-                            session::Session::connect(self.socket, self.workspace, owner).await?,
+                            session::Session::connect(
+                                self.socket,
+                                self.workspace,
+                                owner,
+                                Some(self.transport.channel()),
+                            )
+                            .await?,
                         );
                     }
                     session

@@ -929,6 +929,10 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
             ilink.push(vec![message]);
             let (mut side, start) = accept_session(&daemon).await;
             assert_eq!(start["no_tools"], !tools);
+            // The model learns it is on WeChat; background jobs of an owner
+            // session get the owner's blanket approval.
+            assert_eq!(start["channel"], "WeChat");
+            assert_eq!(start["auto_approve"], tools);
             assert_eq!(next_turn(&mut side).await, "hello");
             send_frame(&mut side, json!({"type":"approval.requested","request_id":"r","session_id":"s","turn_id":"t","seq":1,"approval_id":"a1","call_id":"c1","name":"agent_claude","risk":"delegate","cwd":"/","summary":"Launch claude"})).await;
             let resolved = next_frame(&mut side).await;

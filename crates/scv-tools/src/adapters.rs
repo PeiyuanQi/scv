@@ -202,8 +202,11 @@ pub enum KeyStore {
 pub struct AdapterDescriptor {
     /// Short name: the tool is `agent_<name>` and the home `adapters/<name>`.
     pub name: &'static str,
-    /// Product name for messages.
+    /// Product name for messages and the tool description.
     pub product: &'static str,
+    /// What this harness offers, as one factual clause for the tool
+    /// description, so the model can choose between agents.
+    pub offers: &'static str,
     pub command: &'static str,
     pub args: &'static [&'static str],
     /// Placed immediately before the prompt, for CLIs whose prompt is a flag
@@ -283,6 +286,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         name: "claude",
         product: "Claude Code",
+        offers: "Anthropic's coding agent; it reads, edits, and runs code in a project and can search and fetch the web",
         command: "claude",
         args: &["-p"],
         prompt_args: &[],
@@ -332,6 +336,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         name: "codex",
         product: "Codex",
+        offers: "OpenAI's coding agent; it reads, edits, and runs code in a project, with live web search under full permissions",
         command: "codex",
         args: &["exec"],
         prompt_args: &[],
@@ -391,6 +396,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         name: "grok",
         product: "Grok Build",
+        offers: "xAI's coding agent; it reads, edits, and runs code in a project and has live web and X search",
         command: "grok",
         args: &[],
         prompt_args: &["-p"],
@@ -430,6 +436,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         name: "dsh",
         product: "DeepSeek Harness",
+        offers: "a coding agent on DeepSeek models; it reads, edits, and runs code in a project",
         command: "dsh",
         args: &["--profile", "headless"],
         prompt_args: &[],
@@ -465,6 +472,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         name: "pi",
         product: "pi",
+        offers: "a minimal coding agent (read, write, edit, bash) that can run on SCV's own model endpoint; it has no web search",
         command: "pi",
         args: &["-p"],
         prompt_args: &[],
@@ -504,6 +512,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         name: "scv",
         product: "SCV",
+        offers: "a nested SCV session with its own context and tools; suited to a self-contained sub-task kept out of this conversation's context, or work in another project",
         command: "scv",
         args: &["server", "--stdio"],
         prompt_args: &[],

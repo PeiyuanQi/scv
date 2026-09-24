@@ -88,6 +88,8 @@ pub struct Feishu {
     link: Mutex<Connection>,
     /// How long one receive waits on the socket.
     window: Duration,
+    /// Feishu or Lark, as the users of this account know it.
+    brand: state::Brand,
 }
 
 #[derive(Default)]
@@ -107,6 +109,7 @@ impl Feishu {
             api: Api::new(endpoints, &credentials.app_id, &credentials.app_secret)?,
             link: Mutex::new(Connection::default()),
             window: RECEIVE_WINDOW,
+            brand: credentials.brand,
         })
     }
 
@@ -158,6 +161,10 @@ impl Feishu {
 impl Transport for Feishu {
     fn label(&self) -> &'static str {
         "Feishu"
+    }
+
+    fn channel(&self) -> &'static str {
+        self.brand.title()
     }
 
     /// Acknowledge the previous batch, (re)connect and catch up when needed,

@@ -239,6 +239,10 @@ impl Transport for Ilink<'_> {
         "ClawBot"
     }
 
+    fn channel(&self) -> &'static str {
+        "WeChat"
+    }
+
     /// Long-poll `getupdates` after the opaque cursor.
     async fn receive(&self, cursor: &str) -> Result<Batch> {
         let response = self

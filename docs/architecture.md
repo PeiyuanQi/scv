@@ -210,13 +210,28 @@ Background delegations live in `scv_tools::background`. Each session owns one
 which cancels the jobs still running. When `agent.max_background` is positive
 the registry wraps every agent tool in `BackgroundCapable`: a call with
 `background: true` starts the wrapped tool's `execute` in a detached task with
-its own cancellation token, a buffered progress sink, and no approval gate,
-and returns a job handle; `agent_wait` and `agent_status` read the store. A
+its own cancellation token, a buffered progress sink, and the session's
+unattended approval gate (the policy's own decision, else the client's
+declared `auto_approve`, else a denial), and returns a job handle;
+`agent_wait` and `agent_status` read the store and `agent_cancel` cancels one
+job's token. Beneath it, `scv_tools::agent_choice::ChosenAgent` prefixes each
+agent tool's description with its product and what it offers, appends the
+user's `use_for`, and names the other offered agents on availability
+failures. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a
-`TurnOrigin`. The WeChat channel routes such turns by `request_id`, keeps a session with
-running jobs open, and sends their answers as unprompted messages.
+`TurnOrigin`. The channel bridge routes such turns by `request_id`, keeps a session with
+running jobs open (and exempt from eviction), and sends their answers as
+unprompted messages. The system prompt's delegation and chat-channel sections
+are built after the registry, from the agent tools it actually offers and the
+`channel` the client declared.
+
+A live child (`scv_tools::live::LiveChild`, behind the ACP and nested-SCV
+transports) is owned by a reaper task that waits on the process from the
+start, so a child that exits between turns, by itself or through `scv agents
+kill`, is collected at once, its group stopped, and its delegation record
+removed.
 
 ## Agent loop
 

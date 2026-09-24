@@ -133,7 +133,49 @@ server is installed. Each is one descriptor in `scv_tools::adapters` holding
 its default command line, where its state lives inside the private home, the
 variables it must not inherit, and how it signs in; adding an agent is one
 more entry. A session offers only the agents whose executable resolves when
-the session starts, so an agent installed later appears in new sessions.
+the session starts, so an agent installed later appears in new sessions. An
+agent whose sign-in SCV checks by reading a local file (Grok, DeepSeek
+Harness, pi, and the nested SCV; see [Signing in](#signing-in-delegated-agents))
+is also left out while that check says it is signed out. Claude Code and Codex
+report sign-in only through their own CLI, which is too slow to run at every
+session start, so they stay offered and a signed-out call fails with the
+sign-in hint.
+
+### Choosing an agent
+
+Each tool description starts with the product name and one factual line on
+what that harness offers, so the model can choose between them:
+
+| Tool | Description starts with |
+| --- | --- |
+| `agent_claude` | Claude Code: Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
+| `agent_codex` | Codex: OpenAI's coding agent; reads, edits, and runs code, with live web search under full permissions |
+| `agent_grok` | Grok Build: xAI's coding agent; reads, edits, and runs code, with live web and X search |
+| `agent_dsh` | DeepSeek Harness: a coding agent on DeepSeek models |
+| `agent_pi` | pi: a minimal coding agent that can run on SCV's own model endpoint; no web search |
+| `agent_scv` | SCV: a nested session for a self-contained sub-task kept out of this context, or work in another project |
+
+The user steers the choice in their own configuration (projects cannot set
+either key):
+
+```toml
+[agent]
+prefer = ["codex", "claude"]   # named in the system prompt, in order; no default
+
+[agents.grok]
+use_for = "current events, and anything that needs posts on X"
+```
+
+`use_for` (one line, at most 500 bytes) is appended to that tool's
+description; `prefer` names only agents the session offers, and an unknown
+name fails configuration validation. When a call fails in a way another agent
+could avoid (the executable is missing or exits, it reads as signed out, or
+its provider refuses with an HTTP 401, 403, 404, 429, or 5xx, a quota, or an
+unknown model), the result gains a `fallback` field naming the other agents
+this session offers, such as `"This agent could not do the work. Other agents
+are available: agent_claude, agent_codex."`; an error message gets the same
+sentence. Other failures, such as failing tests, are returned unchanged.
+
 They share this schema:
 
 ```json
@@ -308,11 +350,13 @@ kept, and symlinks are never followed.
 
 Any `agent_*` call may set `"background": true`. The call then returns at once
 with a job handle, `{"job":"job-1","tool":"agent_codex","status":"running",
-"background":true}`, while the agent keeps working, so a long task (landing or
-releasing a change, say) no longer holds the turn open. The job runs exactly
-as a foreground call would, in its conversation (`session`, `cwd`, model, and
-timeout apply as usual) and tracked like any delegation, and its final result
-is the structured result above. Two read-only tools observe a session's jobs:
+"background":true}`, while the agent keeps working, so the turn ends and the
+user can keep talking to the main agent. The system prompt makes this the
+default way to work (see [Delegate first](#delegate-first)). The job runs
+exactly as a foreground call would, in its conversation (`session`, `cwd`,
+model, and timeout apply as usual) and tracked like any delegation, and its
+final result is the structured result above. Three tools manage a session's
+jobs:
 
 - `agent_wait {job, timeout_seconds?}` blocks until the job finishes or the
   timeout passes (default `tools.agent_timeout_seconds`, at most
@@ -320,11 +364,18 @@ is the structured result above. Two read-only tools observe a session's jobs:
   "result"}`, or `"status":"running"` with its latest progress line;
 - `agent_status {job?}` describes one job, or `{"jobs":[...]}` for every job
   the session remembers: running ones with their latest progress, finished
-  ones with their result.
+  ones with their result;
+- `agent_cancel {job}` stops a running job: its call is cancelled, which stops
+  the agent's process group and anything tagged with it, exactly as closing the
+  session would. It waits up to 10 seconds for the job to settle and returns it
+  with `"status":"cancelled"`; no report turn follows, since the model asked
+  for the stop. A job that already finished is described with a note. It has
+  process risk, so the approval policy decides it like `bash`.
 
-A session runs at most `agent.max_background` jobs at once (default 2; 0 turns
-background calls and both tools off), and a start beyond that is refused with
-an error naming the limit. It remembers its 16 newest finished jobs.
+`agent_wait` and `agent_status` are read-only. A session runs at most
+`agent.max_background` jobs at once (default 4; 0 turns background calls and
+all three tools off), and a start beyond that is refused with an error naming
+the limit and `agent_cancel`. It remembers its 16 newest finished jobs.
 
 When a job finishes and the model has not already seen its result through
 `agent_wait` or `agent_status`, the server reports it: once the session is idle
@@ -338,12 +389,45 @@ A chat channel (WeChat or Feishu) sends the owner the answer as an unprompted me
 prints it and stays open until every job it started has been reported; the
 TUI shows it like any turn.
 
-A job cannot ask for approval: approval requests a nested agent relays (over
-ACP or from a nested SCV) are denied, so background work relies on the
-agent's own permissions, such as `permissions = "full"`. Jobs belong to their
-session: closing it (a TUI or `scv exec` exiting, an idle channel conversation
-ending) cancels every job still running and kills its processes. A channel
-conversation stays open while its jobs run.
+A job has no turn to carry an approval request to a person, so each request a
+nested agent relays (over ACP or from a nested SCV) gets the answer the
+session would give without asking anyone, and never more than the same
+request would get in the foreground:
+
+1. what `tools.approval_policy` decides on its own: `on-risk` approves
+   read-only requests, `never` approves read-only requests and denies the rest;
+2. otherwise, when the client declared in `session.start` that it approves
+   every request unasked (`auto_approve`, which a chat bridge sets for its
+   owner's session), that approval;
+3. otherwise a denial.
+
+So a WeChat or Feishu owner's background agents get the approvals the owner's
+foreground turns get, while in the TUI, which asks a person, a background
+job's non-read-only requests are denied and it relies on the agent's own
+permissions, such as `permissions = "full"`. Jobs belong to their session:
+closing it (a TUI or `scv exec` exiting, an idle channel conversation ending)
+cancels every job still running and kills its processes. A channel
+conversation stays open while its jobs run, and a full channel session table
+never closes it to make room.
+
+### Delegate first
+
+When a session offers agent tools, the system prompt adds a *Delegating work*
+section, generated from the tools actually offered (so it applies even when
+`agent.system_prompt` is replaced). It names each offered agent with its
+product, adds `agent.prefer`, and, when background jobs are on, asks the main
+agent to stay available: answer quick things (short reads, lookups, status
+checks) itself, and hand real work (changes, multi-step investigation, builds,
+tests, releases, anything likely to take more than about a minute) to a
+background job with a self-contained brief, then reply at once with what it
+started and the job handle. It relays each `[SCV background report]`, uses
+`agent_status` and `agent_cancel` when the user asks, and keeps `agent_wait`,
+foreground agent calls, and long `bash` commands for quick results it needs
+within the turn, since those hold the turn open and the user cannot reach it
+meanwhile. The wording explains why rather than issuing capitalised rules.
+Without background jobs the section only asks for self-contained briefs.
+A session started for a chat channel also gets a *Chat channel* section (see
+[protocol](protocol.md#sessionstart)).
 
 ### Tracking and cleanup
 
@@ -446,7 +530,11 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   reconcile reaps it if its parent dies. It ends when its conversation is
   forgotten, expires, or its session ends: SCV closes its stdin (the server
   exits on EOF), waits 2 seconds, then kills its process group and anything
-  still tagged with it.
+  still tagged with it. A reaper task waits on the process from the start, so
+  when it exits between turns, by itself or through `scv agents kill`, it is
+  collected at once (no zombie), the rest of its group is stopped, and its
+  record leaves `scv agents ps`; the next turn of that conversation fails with
+  "its server exited" and a new conversation starts cleanly.
 - The nested SCV runs one delegation level deeper and declares that depth in
   `session.start`, so `agent.max_delegation_depth` applies on both sides: the
   default of 2 lets it delegate once more, and it cannot start, restart, or
@@ -535,6 +623,8 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   exits mid-turn fails the call with its stderr tail. The server is recorded
   like any delegation for `scv agents ps`, `kill`, and orphan reaping, and it
   ends like the nested SCV: stdin closed, 2 seconds' grace, then a group kill.
+  Like the nested SCV, a server that exits between turns (or is killed there)
+  is collected at once and drops out of `scv agents ps`.
 
 The ACP servers read the same private homes and sign-ins as the CLIs, so
 `scv agents login` and `import` cover both transports.

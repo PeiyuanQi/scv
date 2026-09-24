@@ -7,6 +7,12 @@
 //! bounded lines, and shuts it down: closing stdin, a grace period, then a
 //! group kill. A protocol client such as the SCV one in `scv_agent` (or an
 //! ACP JSON-RPC client) runs on top of it.
+//!
+//! A conversation keeps its child between turns, when no turn is reading
+//! from it. A reaper task therefore owns the process and waits for it from
+//! the start: whenever the child exits, whether it ends by itself or `scv
+//! agents kill` stops it, the reaper collects it at once, stops what is left
+//! of its group, and removes its delegation record.
 
 use std::{
     ffi::OsString,
@@ -24,7 +30,7 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, watch},
 };
 
 use crate::{
@@ -62,6 +68,16 @@ pub(crate) enum LiveLine {
     TooLong,
 }
 
+/// Where a live child's process is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Life {
+    Running,
+    /// The leader exited and was collected; cleanup is under way.
+    Exited,
+    /// Its group is stopped and its delegation record removed.
+    Finished,
+}
+
 /// A running live child. Dropping the last reference shuts it down in the
 /// background; [`LiveChild::close`] does the same and waits for it.
 pub(crate) struct LiveChild {
@@ -69,8 +85,9 @@ pub(crate) struct LiveChild {
     stdin: Mutex<Option<ChildStdin>>,
     lines: Mutex<mpsc::Receiver<LiveLine>>,
     stderr: Arc<Mutex<TailBuffer>>,
-    child: StdMutex<Option<Child>>,
-    guard: StdMutex<Option<DelegationGuard>>,
+    /// Shared with the reaper, which finishes it when the child exits.
+    guard: Arc<StdMutex<Option<DelegationGuard>>>,
+    life: watch::Receiver<Life>,
     closed: AtomicBool,
 }
 
@@ -109,8 +126,9 @@ impl LiveChild {
             .id()
             .ok_or_else(|| ToolError("child process has no pid".into()))?;
         delegation::track_spawned(pid);
-        let guard =
-            registration.and_then(|(registry, pending)| registry.register(pending, pid).ok());
+        let guard = Arc::new(StdMutex::new(
+            registration.and_then(|(registry, pending)| registry.register(pending, pid).ok()),
+        ));
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = Arc::new(Mutex::new(TailBuffer::new(STDERR_TAIL_BYTES)));
@@ -121,13 +139,15 @@ impl LiveChild {
         if let Some(stdout) = stdout {
             tokio::spawn(read_lines(stdout, sender, spec.max_line_bytes));
         }
+        let (life_tx, life) = watch::channel(Life::Running);
+        tokio::spawn(reap(pid, child, Arc::clone(&guard), life_tx));
         Ok(Arc::new(Self {
             pid,
             stdin: Mutex::new(stdin),
             lines: Mutex::new(receiver),
             stderr,
-            child: StdMutex::new(Some(child)),
-            guard: StdMutex::new(guard),
+            guard,
+            life,
             closed: AtomicBool::new(false),
         }))
     }
@@ -163,16 +183,7 @@ impl LiveChild {
 
     /// Whether the child process is still running.
     pub(crate) fn is_running(&self) -> bool {
-        if self.closed.load(Ordering::Acquire) {
-            return false;
-        }
-        let mut child = self
-            .child
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        child
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        !self.closed.load(Ordering::Acquire) && *self.life.borrow() == Life::Running
     }
 
     /// Record the conversation turn this child is serving.
@@ -195,17 +206,7 @@ impl LiveChild {
             return;
         }
         let stdin = self.stdin.lock().await.take();
-        let child = self
-            .child
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take();
-        let guard = self
-            .guard
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take();
-        shut_down(self.pid, stdin, child, guard).await;
+        shut_down(self.pid, stdin, self.life.clone()).await;
     }
 }
 
@@ -215,53 +216,70 @@ impl Drop for LiveChild {
             return;
         }
         let stdin = self.stdin.get_mut().take();
-        let child = self
-            .child
-            .get_mut()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take();
-        let guard = self
-            .guard
-            .get_mut()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take();
         let pid = self.pid;
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
-                runtime.spawn(shut_down(pid, stdin, child, guard));
+                runtime.spawn(shut_down(pid, stdin, self.life.clone()));
             }
             Err(_) => {
-                // No runtime to wait in: kill at once. The guard's drop
-                // sweeps tagged leftovers.
+                // No runtime to wait in, so the reaper is gone too: kill at
+                // once. The guard's drop sweeps tagged leftovers.
                 signal_group(pid, libc::SIGKILL);
                 delegation::untrack_spawned(pid);
-                drop(guard);
+                drop(
+                    self.guard
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .take(),
+                );
             }
         }
     }
 }
 
-async fn shut_down(
-    pid: u32,
-    stdin: Option<ChildStdin>,
-    child: Option<Child>,
-    guard: Option<DelegationGuard>,
-) {
+/// Close the child's input, give it [`STOP_GRACE`] to exit, then kill its
+/// group, and wait for the reaper to finish cleaning up.
+async fn shut_down(pid: u32, stdin: Option<ChildStdin>, mut life: watch::Receiver<Life>) {
     // Closing input asks the child to finish; an SCV server exits on EOF.
     drop(stdin);
-    if let Some(mut child) = child {
-        let deadline = tokio::time::Instant::now() + STOP_GRACE;
-        let _ = tokio::time::timeout_at(deadline, child.wait()).await;
-        // Descendants may outlive the leader, so the group always goes.
+    if tokio::time::timeout(STOP_GRACE, life.wait_for(|state| *state != Life::Running))
+        .await
+        .is_err()
+    {
         signal_group(pid, libc::SIGKILL);
-        let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-    } else if group_exists(pid) {
+    }
+    // The reaper then stops leftovers, giving tagged ones their own grace.
+    let _ = tokio::time::timeout(
+        STOP_GRACE * 2 + Duration::from_millis(500),
+        life.wait_for(|state| *state == Life::Finished),
+    )
+    .await;
+}
+
+/// Own the child for its whole life: collect it the moment it exits, then
+/// stop the rest of its group and forget its delegation, so an exit between
+/// turns leaves neither a zombie nor a stale `scv agents ps` entry.
+async fn reap(
+    pid: u32,
+    mut child: Child,
+    guard: Arc<StdMutex<Option<DelegationGuard>>>,
+    life: watch::Sender<Life>,
+) {
+    let _ = child.wait().await;
+    let _ = life.send(Life::Exited);
+    // Descendants may outlive the leader, so the group always goes.
+    if group_exists(pid) {
         signal_group(pid, libc::SIGKILL);
     }
     delegation::untrack_spawned(pid);
+    let guard = guard
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
     if let Some(guard) = guard {
         guard.finish().await;
     }
+    let _ = life.send(Life::Finished);
 }
 
 /// Split `stdout` into lines of at most `max_bytes` for the protocol client.
@@ -296,5 +314,86 @@ async fn read_lines(stdout: ChildStdout, sender: mpsc::Sender<LiveLine>, max_byt
         if sender.send(LiveLine::Line(line)).await.is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delegation::DelegationRegistry;
+
+    /// A live `sh -c script` recorded under a fresh registry in `home`.
+    fn spawn(home: &std::path::Path, script: &str) -> (Arc<DelegationRegistry>, Arc<LiveChild>) {
+        let registry = Arc::new(DelegationRegistry::new(home));
+        let pending = registry.begin("fake", "session", home, Some(("fake-1", 1)));
+        let child = LiveChild::spawn(
+            LiveSpec {
+                executable: "sh".into(),
+                args: vec!["-c".into(), script.into()],
+                cwd: home.to_owned(),
+                environment: pending.environment.clone(),
+                max_line_bytes: 1024,
+            },
+            Some((Arc::clone(&registry), pending)),
+        )
+        .unwrap();
+        (registry, child)
+    }
+
+    /// Whether `pid` is an uncollected zombie.
+    fn zombie(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let state = stat.rsplit_once(") ")?.1.chars().next()?;
+                Some(state == 'Z')
+            })
+            .unwrap_or(false)
+    }
+
+    /// Wait until the child is collected and its record is gone.
+    async fn settles(registry: &DelegationRegistry, child: &LiveChild) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while child.is_running() || !registry.list(true).is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the exited child was collected and forgotten");
+        assert!(!zombie(child.pid), "the exited child was left a zombie");
+    }
+
+    #[tokio::test]
+    async fn a_child_exiting_between_turns_is_collected_and_forgotten() {
+        let home = tempfile::tempdir().unwrap();
+        // Idle between turns: nothing reads its output when it exits.
+        let (registry, child) = spawn(home.path(), "sleep 0.2");
+        assert!(child.is_running());
+        assert_eq!(registry.list(true).len(), 1);
+        settles(&registry, &child).await;
+        // Closing afterwards is a quick no-op.
+        tokio::time::timeout(Duration::from_secs(5), child.close())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn killing_an_idle_child_frees_it_at_once() {
+        let home = tempfile::tempdir().unwrap();
+        let (registry, child) = spawn(home.path(), "exec sleep 30");
+        let handle = registry.list(true)[0].record.handle.clone();
+        registry.kill(&handle).await.unwrap();
+        settles(&registry, &child).await;
+    }
+
+    #[tokio::test]
+    async fn close_stops_a_running_child_and_its_record() {
+        let home = tempfile::tempdir().unwrap();
+        // Ignores the closed input, so the group kill ends it.
+        let (registry, child) = spawn(home.path(), "trap '' TERM; sleep 30");
+        child.close().await;
+        assert!(!child.is_running());
+        assert!(registry.list(true).is_empty());
+        assert!(!zombie(child.pid));
     }
 }

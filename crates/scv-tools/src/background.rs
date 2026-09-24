@@ -1,7 +1,7 @@
 //! Background delegations: an `agent_*` call with `background: true` returns a
-//! job handle at once while the agent keeps working; `agent_wait` and
-//! `agent_status` observe the job, and the session is told when it finishes
-//! so the server can report it in a turn of its own.
+//! job handle at once while the agent keeps working; `agent_status` and
+//! `agent_wait` observe the job, `agent_cancel` stops it, and the session is
+//! told when it finishes so the server can report it in a turn of its own.
 
 use std::{
     path::PathBuf,
@@ -10,7 +10,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use scv_core::{ProgressSink, Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
+use scv_core::{
+    ApprovalGate, ProgressSink, Tool, ToolApprovals, ToolContext, ToolError, ToolOutput, ToolRisk,
+    ToolSpec,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
@@ -24,6 +27,8 @@ const MAX_FINISHED: usize = 16;
 const REPORT_REPLY_CHARS: usize = 6000;
 /// Jobs one report turn covers; any more wait for the next.
 const REPORT_MAX_JOBS: usize = 4;
+/// How long `agent_cancel` waits for a stopped job to settle.
+const CANCEL_SETTLE: Duration = Duration::from_secs(10);
 
 /// One session's background jobs. Dropping the store (with the session's
 /// tools) cancels every job still running.
@@ -33,6 +38,9 @@ pub struct BackgroundJobs {
     cancellation: CancellationToken,
     /// Woken whenever a job finishes, so the session can report it.
     finished: Option<mpsc::UnboundedSender<()>>,
+    /// Decides a running job's nested approval requests, since no turn is
+    /// left to carry them to a person. Without it they are denied.
+    approvals: Option<Arc<dyn ApprovalGate>>,
 }
 
 impl std::fmt::Debug for BackgroundJobs {
@@ -56,6 +64,10 @@ struct Job {
     started: Instant,
     progress: ProgressSink,
     last_progress: Option<String>,
+    /// Stops this job alone.
+    cancel: CancellationToken,
+    /// `agent_cancel` stopped it.
+    cancelled: bool,
     outcome: Option<Outcome>,
     /// The model has seen the result (through `agent_wait`, `agent_status`,
     /// or a report turn), so it needs no report turn.
@@ -92,7 +104,15 @@ impl BackgroundJobs {
             state: Mutex::default(),
             cancellation: CancellationToken::new(),
             finished,
+            approvals: None,
         }
+    }
+
+    /// Decide running jobs' nested approval requests with `gate`, which must
+    /// never grant more than the session's foreground would.
+    pub fn with_approvals(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.approvals = Some(gate);
+        self
     }
 
     pub fn limit(&self) -> usize {
@@ -122,32 +142,40 @@ impl BackgroundJobs {
             if running >= self.limit {
                 return Err(ToolError(format!(
                     "{running} background jobs are already running, the limit \
-                     (agent.max_background); wait for one with agent_wait first"
+                     (agent.max_background). Start this one after a job finishes, or \
+                     stop one with agent_cancel if the user no longer needs it."
                 )));
             }
             state.next += 1;
             let id = format!("job-{}", state.next);
             let progress = ProgressSink::buffered();
             let (done_tx, done) = watch::channel(false);
+            let cancel = self.cancellation.child_token();
             state.jobs.push(Job {
                 id: id.clone(),
                 tool: name.to_owned(),
                 started: Instant::now(),
                 progress: progress.clone(),
                 last_progress: None,
+                cancel: cancel.clone(),
+                cancelled: false,
                 outcome: None,
                 reported: false,
                 done,
             });
-            (id, progress, done_tx, self.cancellation.child_token())
+            (id, progress, done_tx, cancel)
         };
         let jobs = Arc::downgrade(self);
         let job = id.clone();
+        let approvals = self.approvals.clone();
         tokio::spawn(async move {
             let started = Instant::now();
             let mut context = ToolContext::new(workspace, cancellation);
-            // A background job cannot ask anyone: nested approval requests
-            // are denied, so it runs on the agent's own permissions.
+            // No turn is left to ask a person, so nested approval requests
+            // get the session's unattended answer, or are denied.
+            if let Some(gate) = &approvals {
+                context.approvals = ToolApprovals::new(Arc::clone(gate), job.clone());
+            }
             context.progress = progress;
             let output = tool
                 .execute(arguments, context)
@@ -161,9 +189,33 @@ impl BackgroundJobs {
             "tool": name,
             "status": "running",
             "background": true,
-            "note": "The agent is working in the background. SCV reports the result when it \
-                     finishes; agent_wait blocks for it and agent_status shows its progress."
+            "note": "The agent is working in the background. SCV reports the result in a new \
+                     turn when it finishes. agent_status shows its progress and agent_cancel \
+                     stops it."
         }))
+    }
+
+    /// Stop `job` and wait briefly for it to settle, then describe it. A
+    /// stopped job needs no report turn: the model asked for the stop.
+    async fn cancel(&self, job: &str) -> Result<Value, ToolError> {
+        let mut done = {
+            let mut state = self.state();
+            let entry = state
+                .jobs
+                .iter_mut()
+                .find(|candidate| candidate.id == job)
+                .ok_or_else(|| unknown_job(job))?;
+            if entry.outcome.is_some() {
+                let mut value = entry.describe();
+                value["note"] = "The job had already finished.".into();
+                return Ok(value);
+            }
+            entry.cancelled = true;
+            entry.cancel.cancel();
+            entry.done.clone()
+        };
+        let _ = tokio::time::timeout(CANCEL_SETTLE, done.wait_for(|finished| *finished)).await;
+        self.describe(Some(job))
     }
 
     /// Wait up to `limit` for `job` and describe it; a finished job is then
@@ -257,6 +309,8 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
         if let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) {
             job.last_progress = job.progress.take().or(job.last_progress.take());
             job.outcome = Some(Outcome { output, elapsed });
+            // Stopped on request: the model already knows.
+            job.reported |= job.cancelled;
         }
         // Keep every running job and the newest finished ones.
         let finished = state
@@ -301,7 +355,12 @@ impl Job {
             Some(outcome) => {
                 self.reported = true;
                 let result = result_value(&outcome.output);
-                value.insert("status".into(), job_status(&outcome.output, &result).into());
+                let status = if self.cancelled {
+                    "cancelled".to_owned()
+                } else {
+                    job_status(&outcome.output, &result)
+                };
+                value.insert("status".into(), status.into());
                 value.insert("elapsed_seconds".into(), outcome.elapsed.as_secs().into());
                 value.insert("result".into(), result);
             }
@@ -391,16 +450,20 @@ impl Tool for BackgroundCapable {
                 "background".into(),
                 json!({
                     "type":"boolean",
-                    "description":"Run in the background: return a job handle at once and keep \
-                        working with the user while the agent runs. SCV reports the result when \
-                        it finishes. Use it for long work such as landing or releasing a change."
+                    "description":"Run in the background: the call returns a job handle at once, \
+                        the user can keep talking to you while the agent works, and SCV reports \
+                        the result in a new turn when it finishes. Use it for any substantial \
+                        task; run in the foreground only for quick work whose result you need \
+                        within this turn."
                 }),
             );
         }
         spec.description.push_str(&format!(
-            " Set background to true for long work: the call returns a job handle at once \
-             (at most {} running per session), SCV reports the result when the job finishes, \
-             and agent_wait / agent_status observe it meanwhile.",
+            " Set background to true for anything beyond a quick task: the call returns a job \
+             handle at once (at most {} running per session), SCV reports the result when the \
+             job finishes, agent_status shows progress, and agent_cancel stops it. A background \
+             job's own approval requests get only the answer this session would give without \
+             asking a person.",
             self.jobs.limit()
         ));
         spec
@@ -474,7 +537,8 @@ impl Tool for WaitTool {
             name: "agent_wait".into(),
             description: "Wait for a background agent job (the `job` handle an agent_* call with \
                 background: true returned) to finish, and return its result. Returns early with \
-                status running when the timeout passes."
+                status running when the timeout passes. Waiting holds your turn open, so the \
+                user cannot reach you meanwhile; usually let SCV report the result instead."
                 .into(),
             parameters: json!({
                 "type":"object",
@@ -555,6 +619,57 @@ impl Tool for StatusTool {
     ) -> Result<ToolOutput, ToolError> {
         let args: StatusArgs = parse_args(&arguments)?;
         let value = self.jobs.describe(args.job.as_deref())?;
+        Ok(ToolOutput::success(value.to_string()))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelArgs {
+    job: String,
+}
+
+/// `agent_cancel`: stop one running background job.
+pub(crate) struct CancelTool {
+    pub(crate) jobs: Arc<BackgroundJobs>,
+}
+
+#[async_trait]
+impl Tool for CancelTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "agent_cancel".into(),
+            description: "Stop a running background agent job (the `job` handle an agent_* call \
+                with background: true returned), for example when the user no longer wants \
+                it. The agent and every process it started are stopped; work it already wrote \
+                stays. Returns the job with status cancelled, and no report turn follows."
+                .into(),
+            parameters: json!({
+                "type":"object",
+                "properties":{"job":{"type":"string"}},
+                "required":["job"],
+                "additionalProperties":false
+            }),
+        }
+    }
+
+    fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
+        let _: CancelArgs = parse_args(arguments)?;
+        Ok(ToolRisk::Process)
+    }
+
+    fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
+        let args: CancelArgs = parse_args(arguments)?;
+        Ok(format!("Stop background job {}", bounded(&args.job, 64)))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let args: CancelArgs = parse_args(&arguments)?;
+        let value = self.jobs.cancel(&args.job).await?;
         Ok(ToolOutput::success(value.to_string()))
     }
 }
@@ -830,6 +945,159 @@ mod tests {
         assert!(output.content.contains("all done"));
         assert_eq!(fixture.jobs.running(), 0);
         assert!(fixture.jobs.describe(Some("job-1")).is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_cancel_stops_a_running_job_without_a_report() {
+        let mut fixture = fixture(2);
+        start(&fixture.tool).await;
+        let cancel = CancelTool {
+            jobs: Arc::clone(&fixture.jobs),
+        };
+        assert_eq!(
+            cancel.risk(&json!({"job":"job-1"})).unwrap(),
+            ToolRisk::Process
+        );
+        assert!(cancel.risk(&json!({})).is_err());
+        let output = cancel
+            .execute(json!({"job":"job-1"}), context())
+            .await
+            .unwrap();
+        let stopped: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(stopped["status"], "cancelled");
+        assert!(fixture.cancelled.load(Ordering::SeqCst), "the agent saw it");
+        assert_eq!(
+            scv_protocol::background_job_update(&output.content).settled,
+            vec!["job-1".to_owned()]
+        );
+        // The session is woken, but the model asked for the stop.
+        fixture.finished.recv().await.unwrap();
+        assert!(fixture.jobs.take_unreported().is_empty());
+        assert_eq!(fixture.jobs.running(), 0);
+        let again = cancel
+            .execute(json!({"job":"job-1"}), context())
+            .await
+            .unwrap();
+        assert!(
+            again.content.contains("already finished"),
+            "{}",
+            again.content
+        );
+        let unknown = cancel
+            .execute(json!({"job":"job-9"}), context())
+            .await
+            .unwrap_err();
+        assert!(unknown.0.contains("unknown background job"), "{unknown}");
+        // The freed slot takes a new job.
+        assert_eq!(start(&fixture.tool).await["job"], "job-2");
+    }
+
+    /// An agent that asks its session to approve one nested command and
+    /// replies with the answer.
+    struct AskingAgent;
+
+    #[async_trait]
+    impl Tool for AskingAgent {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "agent_asking".into(),
+                description: "Asking agent.".into(),
+                parameters: json!({"type":"object","properties":{}}),
+            }
+        }
+
+        fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
+            Ok(ToolRisk::Delegate)
+        }
+
+        fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
+            Ok("Launch the asking agent.".into())
+        }
+
+        async fn execute(
+            &self,
+            _arguments: Value,
+            context: ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            let approved = context
+                .approvals
+                .request(
+                    "bash",
+                    ToolRisk::Process,
+                    context.workspace.clone(),
+                    "cargo test",
+                    context.cancellation.clone(),
+                )
+                .await
+                .map_err(|error| ToolError(error.to_string()))?;
+            Ok(ToolOutput::success(
+                json!({"status":"completed","reply":if approved {"approved"} else {"denied"}})
+                    .to_string(),
+            ))
+        }
+    }
+
+    struct FixedGate {
+        approve: bool,
+        seen: Mutex<Vec<(String, ToolRisk)>>,
+    }
+
+    #[async_trait]
+    impl ApprovalGate for FixedGate {
+        async fn approve(
+            &self,
+            request: scv_core::ApprovalRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<bool, scv_core::AgentError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.call_id, request.risk));
+            Ok(self.approve)
+        }
+    }
+
+    async fn nested_answer(gate: Option<Arc<dyn ApprovalGate>>) -> String {
+        let (finished_tx, mut finished) = mpsc::unbounded_channel();
+        let mut jobs = BackgroundJobs::new(2, Some(finished_tx));
+        if let Some(gate) = gate {
+            jobs = jobs.with_approvals(gate);
+        }
+        let jobs = Arc::new(jobs);
+        let tool = BackgroundCapable {
+            inner: Arc::new(AskingAgent),
+            jobs: Arc::clone(&jobs),
+        };
+        tool.execute(json!({"background":true}), context())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), finished.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        jobs.take_unreported().remove(0).reply
+    }
+
+    #[tokio::test]
+    async fn background_approvals_follow_the_session_gate_or_are_denied() {
+        // Without a gate nobody can answer, so the request is denied.
+        assert_eq!(nested_answer(None).await, "denied");
+        for approve in [true, false] {
+            let gate = Arc::new(FixedGate {
+                approve,
+                seen: Mutex::default(),
+            });
+            let expected = if approve { "approved" } else { "denied" };
+            assert_eq!(
+                nested_answer(Some(Arc::clone(&gate) as Arc<dyn ApprovalGate>)).await,
+                expected
+            );
+            // The gate saw the nested call's risk, filed under the job.
+            assert_eq!(
+                *gate.seen.lock().unwrap(),
+                [("job-1".to_owned(), ToolRisk::Process)]
+            );
+        }
     }
 
     #[tokio::test]

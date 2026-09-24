@@ -167,12 +167,14 @@ approval summary. The built-in default stays `default`.
   minutes late, but silently drops a second send on one `context_token` while
   answering it exactly like a success. See [channels](channels.md#wechat-ilink-contract).
 - `agent_* {background: true}` returns `{"job","status":"running"}` at once;
-  the job runs the same call in its conversation, detached from the turn and
-  with relayed approvals denied. `agent_wait {job, timeout_seconds?}` and
-  `agent_status {job?}` observe jobs (the handle is a job, not a conversation:
-  a job may continue a conversation, and some agents have none).
+  the job runs the same call in its conversation, detached from the turn, and
+  its relayed approvals get the session's unattended answer (see
+  [tools](tools.md#background-jobs)). `agent_wait {job, timeout_seconds?}` and
+  `agent_status {job?}` observe jobs and `agent_cancel {job}` stops one (the
+  handle is a job, not a conversation: a job may continue a conversation, and
+  some agents have none).
 - `agent.max_background` (not `agents.*`, which holds per-agent tables)
-  defaults to 2 per session; 0 turns it off. Closing the session cancels its
+  defaults to 4 per session; 0 turns it off. Closing the session cancels its
   jobs.
 - A finished job the model has not seen is reported in a turn the server
   starts once the session is idle, marked by `origin` on `turn.started` and

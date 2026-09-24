@@ -60,7 +60,8 @@ system_prompt = "You are SCV, a concise and careful coding agent."
 max_delegation_depth = 2
 max_conversations = 8
 conversation_idle_seconds = 86400
-max_background = 2
+max_background = 4
+prefer = []
 
 [session]
 max_history_bytes = 16777216
@@ -160,8 +161,11 @@ args = ["server", "--stdio"]
 ```
 
 Every table also accepts `prompt_args` (default `[]` except Grok),
-`permissions` (default `"default"`; see [Agent permissions](#agent-permissions)), and
-`transport` (default `"auto"`; see [Agent transport](#agent-transport)). The agent
+`permissions` (default `"default"`; see [Agent permissions](#agent-permissions)),
+`transport` (default `"auto"`; see [Agent transport](#agent-transport)), and
+`use_for`, an optional one-line note (at most 500 bytes) on when to choose that
+agent, added to its tool description (see
+[Choosing an agent](tools.md#choosing-an-agent)). The agent
 names are fixed; an unknown `[agents.<name>]` is a startup error that lists the
 known ones.
 
@@ -224,10 +228,15 @@ cannot set. `agent.max_conversations` (default 8) and
 `agent.conversation_idle_seconds` (default 86400) bound how many delegated
 conversations a session remembers and for how long; see
 [Conversations](tools.md#conversations). Both must be positive, and project
-configuration may only lower them. `agent.max_background` (default 2, at most
+configuration may only lower them. `agent.max_background` (default 4, at most
 16) bounds how many background agent jobs (`background: true`) a session runs
 at once; `0` turns background delegation off, and project configuration may
-only lower it. See [Background jobs](tools.md#background-jobs).
+only lower it. The default leaves room for a main agent that hands most work to
+background jobs; see [Background jobs](tools.md#background-jobs).
+`agent.prefer` (default empty) lists the agents the user prefers, in order,
+such as `["codex", "claude"]`; the system prompt names the ones a session
+offers. Unknown names fail validation, and project configuration cannot set
+it.
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,
 including its streamed response, not just idle time, so it must cover the
 longest single response. Project configuration may lower all of these but not

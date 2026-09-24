@@ -298,9 +298,13 @@ Claude Code, Codex, and pi keep multi-turn conversations: a result's `session`
 handle continues the same conversation, and `scv agents gc` clears old
 transcripts. Any agent call may set `background: true` to return a job handle
 at once while the agent keeps working; `agent_wait` and `agent_status` observe
-jobs, and when one finishes SCV reports it in a turn of its own (over WeChat
-or Feishu, as an unprompted message to the owner). A session runs at most
-`agent.max_background` (default 2) jobs, and closing it cancels them. Claude Code, Codex, Grok Build, and DeepSeek Harness run over the
+jobs, `agent_cancel` stops one, and when one finishes SCV reports it in a turn
+of its own (over WeChat or Feishu, as an unprompted message to the owner). The
+main agent is told to work this way by default: it answers quick questions
+itself and hands real work to background agents, so it stays available to
+chat. A session runs at most `agent.max_background` (default 4) jobs, and
+closing it cancels them. `agent.prefer` and `[agents.<name>] use_for` steer
+which agent it picks. Claude Code, Codex, Grok Build, and DeepSeek Harness run over the
 Agent Client Protocol when its server is installed (`claude-agent-acp` and
 `codex-acp` from npm `@agentclientprotocol/*`, or the built-in `grok agent
 stdio` and `dsh --profile acp`): one server per conversation whose permission

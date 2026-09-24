@@ -199,3 +199,35 @@ fn owner_turns_outlast_the_longest_tool_call() {
     );
     assert_eq!(owner_turn_timeout(Duration::MAX), Duration::MAX);
 }
+
+#[test]
+fn a_full_session_table_never_closes_a_conversation_with_background_work() {
+    let now = Instant::now();
+    let conversation = |age: u64, watching: bool| {
+        let (jobs, _queue) = mpsc::unbounded_channel();
+        Conversation {
+            jobs,
+            last_used: now - Duration::from_secs(age),
+            watching: Arc::new(AtomicBool::new(watching)),
+        }
+    };
+    let conversations = HashMap::from([
+        // The oldest runs background jobs; the next has a message waiting.
+        ("jobs".to_owned(), conversation(300, true)),
+        ("queued".to_owned(), conversation(200, false)),
+        ("idle".to_owned(), conversation(100, false)),
+        ("recent".to_owned(), conversation(10, false)),
+    ]);
+    let waiting = |key: &str| usize::from(key == "queued");
+    assert_eq!(evictable(&conversations, waiting).as_deref(), Some("idle"));
+    // Its jobs finish: it is the least recently used idle one again.
+    conversations["jobs"]
+        .watching
+        .store(false, Ordering::Release);
+    assert_eq!(evictable(&conversations, waiting).as_deref(), Some("jobs"));
+    // Nothing is closable while every conversation is busy.
+    for conversation in conversations.values() {
+        conversation.watching.store(true, Ordering::Release);
+    }
+    assert_eq!(evictable(&conversations, waiting), None);
+}
