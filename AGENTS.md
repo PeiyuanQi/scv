@@ -56,7 +56,12 @@
   `scv-channels` and each platform's transport in its own crate (WeChat in
   `scv-clawbot`, Feishu/Lark in `scv-feishu`). Preserve
   `server -> clawbot|feishu -> channels -> client -> protocol`;
-  TUI and channel crates must not depend on server.
+  TUI and channel crates must not depend on server. A change to an internal
+  dependency updates the diagram in `docs/architecture.md` in the same commit.
+- Put unit tests in the module's own test file (`src/foo.rs` declares
+  `#[cfg(test)] mod tests;` and its tests live in `src/foo/tests.rs`), never
+  inline; black-box tests go in the root `tests/`. `docs/quality.md` ("Test
+  layout") has the details, and `tests/isolation_guard.rs` enforces them.
 - All current and future long-running components must implement the server's
   `Component::run(cancel, HealthReporter)` contract and run under its
   `Supervisor`. Keep starts idempotent per account, retries bounded, and
@@ -95,8 +100,10 @@
 - Run `git diff --check` for every documentation or code change.
 - Setup/build: `cargo build --workspace --locked`.
 - Local daemon: set `OPENAI_API_KEY`, then run
-  `cargo run --bin scv -- run --workspace /absolute/path/to/workspace`.
-- Local TUI: run `cargo run --bin scv` in another terminal.
+  `cargo run --bin scv -- --scv-home <dir> run --workspace /absolute/path/to/workspace`
+  with a scratch `<dir>` so the real `~/.scv` stays untouched
+  (`CONTRIBUTING.md`, "Local development").
+- Local TUI: run `cargo run --bin scv -- --scv-home <dir>` in another terminal.
 - Tests: `cargo test --workspace --locked`.
 - Format: `cargo fmt --check`.
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`.

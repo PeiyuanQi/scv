@@ -20,6 +20,37 @@ cargo test --workspace --locked
 git diff --check
 ```
 
+## Local development
+
+Run a development daemon in an instance of its own, so it never touches your
+real `~/.scv` (its config, credentials, socket, and running daemon):
+
+```bash
+home="$(mktemp -d)"
+cargo run --bin scv -- --scv-home "$home" config init    # starter config.toml
+OPENAI_API_KEY=... RUST_LOG=scv_server=debug,scv_channels=debug \
+  cargo run --bin scv -- --scv-home "$home" run --workspace "$PWD"
+```
+
+In another terminal, pass the same `--scv-home` to reach that daemon:
+`cargo run --bin scv -- --scv-home "$home"` opens the TUI, `... status`
+shows its components, and `... config show` lists every path and setting it
+uses, with secrets hidden.
+
+Logs go to the process's stderr. Without `RUST_LOG` the daemon logs warnings
+and errors; the systemd unit that `scv start` writes sets `RUST_LOG=info` and
+sends stderr to the journal: `journalctl --user -u scv.service`, or
+`scv-<hash>.service` for an instance started with `--scv-home` (`systemctl
+--user list-units 'scv*'` lists them).
+
+Run one crate's tests with `cargo test -p <crate> [<name filter>]`, and one
+black-box test file from the root `tests/` directory with
+`cargo test -p scv-cli --test <file stem>`. [`docs/quality.md`](docs/quality.md)
+says where new tests go, and [`docs/architecture.md`](docs/architecture.md)
+says where to start reading the code.
+
+## How changes are made
+
 Read `AGENTS.md` before using a coding agent. Prefer a sibling git worktree for
 parallel or unrelated work so concurrent changes do not collide. Treat commits
 as delivery boundaries and prefer one complete end-to-end implementation of a

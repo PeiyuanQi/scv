@@ -219,8 +219,25 @@ not sent.
 
 ## Feishu contract
 
-Checked live with the owner on 2026-09-24; see the
-[channels plan](channels-plan.md#0-feishu-live-check).
+Checked live with the owner on 2026-09-24:
+
+- The app works as soon as the scan completes, with no developer console,
+  administrator approval, or public URL. It is named "<user name>的飞书 CLI";
+  renaming it needs the developer console and a new app version, and no
+  registration field or API that sets the name was found.
+- Its availability range is the scanner alone: other members of the tenant
+  cannot find or message the bot until a new app version (or the tenant's
+  admin console) widens it.
+- Messages SCV starts reach the owner before the owner has ever written to the
+  bot and after long silences; there is no reply-token limit.
+- Resending a reply with the same `uuid` returns the same message ID without a
+  duplicate.
+- Messages sent while SCV is disconnected are not redelivered over the socket,
+  but the chat's message list returns them, which is why catch-up exists.
+- The app is also subscribed to `im.message.message_read_v1`, which SCV
+  acknowledges and ignores.
+- Not yet checked: group chats, and company tenants whose administrators must
+  approve apps.
 
 **Sign-in by scan.** `scv channels login feishu` runs the device flow that
 Lark's own CLI uses. It posts forms to

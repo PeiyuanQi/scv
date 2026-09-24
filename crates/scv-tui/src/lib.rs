@@ -1,4 +1,9 @@
-//! SCV's terminal client.
+//! SCV's clients for people: the terminal UI ([`run_tui`]), which attaches to
+//! the daemon socket, and the headless one-prompt client behind `scv exec`
+//! ([`run_exec`]), which starts its own `scv server --stdio`. Both render
+//! server events and keep no authoritative conversation state.
+
+#![forbid(unsafe_code)]
 
 use std::{
     collections::{HashSet, VecDeque},

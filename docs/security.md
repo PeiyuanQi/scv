@@ -1,8 +1,8 @@
 # Security Model
 
-Status: final design for v0.1
+Status: final design
 
-SCV is a local agent running with the user's operating-system account. v0.1
+SCV is a local agent running with the user's operating-system account. It
 provides workspace path containment, bounded I/O, transparent side effects, and
 interactive approval. It does not provide an OS security boundary.
 

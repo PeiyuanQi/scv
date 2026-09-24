@@ -1,4 +1,11 @@
 //! SCV's bounded, workspace-aware built-in tools.
+//!
+//! [`builtin_registry`] builds a session's tools: files (`read`,
+//! `read_skill`, `write`), the shell (`bash`), the web (`web_fetch`,
+//! `web_search`), delegation to other agent CLIs and to a nested SCV
+//! (`agent_*`, with background jobs), and `chat_attach` for chat sessions.
+//! [`delegation`] records every delegated process so SCV can list, stop, and
+//! clean them up.
 
 mod acp_agent;
 pub mod adapters;

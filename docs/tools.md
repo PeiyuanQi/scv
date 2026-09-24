@@ -1,6 +1,6 @@
 # Built-in Tools
 
-Status: final design for v0.1
+Status: final design
 
 All tool inputs are validated JSON objects. Tools execute serially and receive a
 cancellation token, workspace root, timeout, and output limits from the server.
@@ -14,7 +14,7 @@ cancellation token, workspace root, timeout, and output limits from the server.
 `path` is a required workspace-relative UTF-8 path. `offset` and `limit` are
 optional byte values. The result reports the selected content, total byte
 length, and whether it was truncated. The selected byte range must be UTF-8 or
-the tool returns a clear error in v0.1. Workspace reads are read-only risk;
+the tool returns a clear error. Workspace reads are read-only risk;
 lexically secret-like paths are elevated to filesystem risk and require
 approval. This name heuristic improves visibility but is not a confidentiality
 boundary; an OS sandbox is still required for isolation.

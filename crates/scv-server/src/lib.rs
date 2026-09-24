@@ -1,4 +1,13 @@
-//! SCV's authoritative stdio server.
+//! The SCV server: the authority over sessions, policy, and approvals, served
+//! over the daemon's Unix socket ([`run_socket`]) or one stdio connection
+//! ([`run_stdio`]).
+//!
+//! Each connection gets its own session with an ordered turn queue; turns run
+//! `scv_core::AgentRuntime` with the configured provider and the tools
+//! `scv_tools` offers. The daemon also supervises long-running components
+//! ([`components`]), such as chat channel accounts, and plans restarts into a
+//! newly installed release. It also holds the helpers `scv agents` and
+//! `scv config` call.
 
 mod agents;
 mod attachments;

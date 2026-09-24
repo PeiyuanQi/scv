@@ -1,4 +1,14 @@
-//! SCV's provider-independent agent loop and extension traits.
+//! SCV's provider-independent agent loop and the traits it is built from.
+//!
+//! [`AgentRuntime::run_turn`] runs one user turn: it selects the history the
+//! model sees, asks the [`Provider`] for a response, runs the requested
+//! [`Tool`]s in order through the [`ApprovalGate`], and repeats until the model
+//! answers without tool calls, reporting everything to an [`EventSink`].
+//! [`ContextPolicy`] decides what history fits. This crate knows no concrete
+//! provider, tool, transport, or user interface; those live in the crates
+//! that depend on it.
+
+#![forbid(unsafe_code)]
 
 use std::{
     collections::{HashMap, VecDeque},

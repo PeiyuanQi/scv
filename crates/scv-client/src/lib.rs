@@ -1,5 +1,9 @@
-//! Shared local transport interfaces and the instance layout, without server
-//! policy or bridge dependencies.
+//! What every local client of the SCV daemon needs, without depending on the
+//! server: the instance [`Layout`] (every path under `SCV_HOME`), the
+//! [`default_socket_path`], the delegation-depth variable a delegated SCV
+//! inherits, and [`control`] for daemon management requests.
+
+#![forbid(unsafe_code)]
 
 pub mod layout;
 pub use layout::Layout;
@@ -100,15 +104,4 @@ pub async fn control(path: &Path, command: DaemonCommand) -> Result<DaemonStatus
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_a_positive_inherited_depth_is_declared() {
-        assert_eq!(parse_delegation_depth(Some("2")), Some(2));
-        assert_eq!(parse_delegation_depth(Some(" 1\n")), Some(1));
-        assert_eq!(parse_delegation_depth(Some("0")), None);
-        assert_eq!(parse_delegation_depth(Some("deep")), None);
-        assert_eq!(parse_delegation_depth(None), None);
-    }
-}
+mod tests;

@@ -4,7 +4,7 @@ SCV is a small, fast, extensible agent runtime for the terminal. It keeps the
 agent loop simple, puts model and tool authority in a separate server process,
 and provides a responsive Rust TUI for coding work.
 
-> **Project status:** SCV is an early v0.1 implementation. Its protocol and
+> **Project status:** SCV is an early implementation. Its protocol and
 > configuration may change before 1.0. Run it in version-controlled workspaces
 > and review every approval.
 
@@ -363,7 +363,6 @@ the same server library to one-shot local clients. Dependencies flow from
 server to the channel crates (WeChat's `scv-clawbot`, Feishu's `scv-feishu`)
 to the channel core (`scv-channels`) to client to protocol; the TUI depends on client, not server.
 All long-running components must be supervised by the server. Start with the
-final v0.1
 [`architecture`](docs/architecture.md), then see the
 [`protocol`](docs/protocol.md), [`context`](docs/context-management.md),
 [`tools`](docs/tools.md), [`TUI`](docs/tui.md), and
