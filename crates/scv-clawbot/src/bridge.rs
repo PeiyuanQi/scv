@@ -1,4 +1,5 @@
-//! iLink bridge primitives shared by the CLI adapter and integration tests.
+//! iLink requests: authentication headers, checks on login results and
+//! origins, and sending replies and uploading files with retries.
 
 use anyhow::{Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};

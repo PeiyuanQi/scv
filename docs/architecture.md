@@ -159,6 +159,12 @@ What lives where in the largest crates:
 | | `web.rs`, `chat_attach.rs` | `web_fetch`/`web_search` and `chat_attach` |
 | `scv-channels` | `lib.rs`, `session.rs` | The bridge and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs` | Durable account state, what the daemon shares with running bridges, and chat media |
+| | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
+| `scv-clawbot` | `lib.rs`, `bridge.rs` | WeChat login, polling `getupdates`, and sending through iLink |
+| | `state.rs`, `media.rs` | WeChat credentials, and CDN files (AES-encrypted uploads and downloads) |
+| `scv-feishu` | `lib.rs`, `api.rs` | The Feishu transport and its Open Platform client |
+| | `socket.rs`, `frame.rs`, `inbound.rs` | The event long connection, its protobuf frames, and parsing events and catch-up history |
+| | `login.rs`, `state.rs` | Signing in, by QR scan (which creates the bot app) or with an existing app, and Feishu credentials |
 
 `scv-core`, `scv-protocol`, `scv-provider-openai`, and `scv-tui` are one
 `lib.rs` each.
