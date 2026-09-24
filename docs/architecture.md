@@ -165,7 +165,6 @@ What lives where in the largest crates:
 | `scv-feishu` | `lib.rs`, `api.rs` | The Feishu transport and its Open Platform client |
 | | `socket.rs`, `frame.rs`, `inbound.rs` | The event long connection, its protobuf frames, and parsing events and catch-up history |
 | | `login.rs`, `state.rs` | Signing in, by QR scan (which creates the bot app) or with an existing app, and Feishu credentials |
-
 | `scv-core` | `message.rs`, `tool.rs` | History messages; the `Tool` trait, its context and output, and `ToolRegistry` |
 | | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` |
 | | `progress.rs` | Bounded, paced tool progress lines |
