@@ -13,9 +13,20 @@ homepage = "https://github.com/PeiyuanQi/scv"
 # Agent skills are repository tooling, not part of the published crate.
 exclude = [".agents/", ".claude/"]
 
+[lints]
+workspace = true
+
 [workspace]
 members = ["crates/*"]
 resolver = "2"
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
 
 [workspace.package]
 version = "0.2.1"

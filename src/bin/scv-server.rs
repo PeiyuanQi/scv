@@ -1,12 +1,22 @@
+//! `scv-server`: the stdio agent server on its own, for clients that spawn
+//! it directly (`scv server` is the same endpoint inside the main binary).
+
+#[path = "../cli/common.rs"]
+mod common;
+
 use anyhow::Result;
-use clap::{Parser, ValueEnum};
-use scv_server::{ApprovalPolicy, ConfigOverrides};
-use std::path::{Path, PathBuf};
+use clap::Parser;
+use scv_server::ConfigOverrides;
+use std::path::PathBuf;
+
+use common::ApprovalArg;
 
 #[derive(Parser)]
 #[command(name = "scv-server", version, about = "SCV stdio agent server")]
 struct Cli {
-    #[arg(long, default_value_t = true)]
+    /// Newline-delimited JSON over stdin/stdout is the only mode; the flag
+    /// is still accepted for the callers that pass it.
+    #[arg(long, hide = true)]
     stdio: bool,
     #[arg(long, value_name = "PATH", env = "SCV_HOME")]
     scv_home: Option<PathBuf>,
@@ -22,38 +32,19 @@ struct Cli {
     approval_policy: Option<ApprovalArg>,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum ApprovalArg {
-    OnRisk,
-    Always,
-    Never,
-}
-
-impl From<ApprovalArg> for ApprovalPolicy {
-    fn from(value: ApprovalArg) -> Self {
-        match value {
-            ApprovalArg::OnRisk => Self::OnRisk,
-            ApprovalArg::Always => Self::Always,
-            ApprovalArg::Never => Self::Never,
-        }
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
-    if let Some(home) = cli.scv_home.as_deref() {
-        let home = absolute_path(home, &cwd);
-        std::fs::create_dir_all(&home)?;
-        unsafe { std::env::set_var("SCV_HOME", std::fs::canonicalize(home)?) };
+    // SAFETY: nothing but this thread exists yet. The tokio runtime is built
+    // below, after the instance is selected, and no child process has been
+    // started, so no one can read the environment while it is being set.
+    unsafe {
+        common::apply_process_config(cli.scv_home.as_deref(), cli.config_path.as_deref(), &cwd)?;
     }
-    if let Some(config) = cli.config_path.as_deref() {
-        unsafe { std::env::set_var("SCV_CONFIG", absolute_path(config, &cwd)) };
-    }
-    if !cli.stdio {
-        anyhow::bail!("v0.1 supports only --stdio");
-    }
+    tokio::runtime::Runtime::new()?.block_on(serve(cli))
+}
+
+async fn serve(cli: Cli) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
@@ -68,12 +59,4 @@ async fn main() -> Result<()> {
         no_tools: false,
     })
     .await
-}
-
-fn absolute_path(path: &Path, cwd: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
 }

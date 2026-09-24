@@ -1,0 +1,4 @@
+# Stable options only: CI formats with the stable toolchain.
+style_edition = "2024"
+use_field_init_shorthand = true
+use_try_shorthand = true

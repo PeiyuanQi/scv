@@ -1,4 +1,9 @@
-//! Streaming OpenAI-compatible Responses provider.
+//! Streaming OpenAI-compatible Responses provider: [`OpenAiProvider`]
+//! implements `scv_core::Provider` over a `/responses` endpoint, shaping each
+//! request from the conversation and assembling streamed text and tool calls
+//! into one assistant message.
+
+#![forbid(unsafe_code)]
 
 use std::{
     collections::BTreeMap,

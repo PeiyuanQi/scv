@@ -136,7 +136,52 @@ Tests also run on macOS and under the declared Rust 1.88 MSRV. The tagged-releas
 workflow builds release archives and smoke-tests them on their native Linux and
 macOS runners.
 
-The v0.1 suite is a foundation, not a claim of exhaustive terminal or provider
+## Test layout
+
+Unit tests sit next to the code they test, in a file of their own, so a reader
+finds both by path and the source file holds only the implementation:
+
+- `src/foo.rs` ends with `#[cfg(test)] mod tests;`, and its tests live in
+  `src/foo/tests.rs`. The tests of `src/lib.rs`, `src/main.rs`, or a
+  `mod.rs` live in `tests.rs` beside it.
+- A large suite may split by topic into `src/foo/tests/<topic>.rs`, declared
+  with `mod <topic>;` in `src/foo/tests.rs`.
+- A test file starts with a `//!` line naming the source file it tests, then
+  `use super::*;`, so it can reach the module's private items without making
+  them public.
+- Black-box tests that run the `scv` binaries or use only public APIs live in
+  the root `tests/` directory and spawn SCV through `common::Isolated`.
+
+`tests/isolation_guard.rs` enforces the rule: a `#[test]` or
+`#[tokio::test]` in any other source file fails it, and so does a test file
+that its parent module never declares (such a file would never run). Source
+files that held inline tests before the rule are listed in its
+`INLINE_TEST_ALLOWLIST`; the list only shrinks, and the guard fails when a
+listed file no longer holds tests.
+
+Run one crate's unit tests with `cargo test -p <crate> [<name filter>]`, and
+one root black-box test file with `cargo test -p scv-cli --test <file stem>`.
+
+## Lints and formatting
+
+`rustfmt.toml` and `clippy.toml` hold the repository's settings, and every
+package opts into the workspace `[workspace.lints]` table with
+`[lints] workspace = true`. Crates with no `unsafe` code declare
+`#![forbid(unsafe_code)]`, and every `unsafe` block carries a `SAFETY:`
+comment.
+
+The workspace lints are a ratchet: a lint joins the table only once it has no
+findings, so CI's `-D warnings` stays green. The next lints to adopt, each
+after the cleanup that clears it, are Clippy's `pedantic` group (without its
+`missing_errors_doc`, `missing_panics_doc`, `must_use_candidate`,
+`module_name_repetitions`, `similar_names`, `unreadable_literal`,
+`struct_field_names`, and `doc_markdown` lints), `too_many_lines` at the
+`clippy.toml` threshold, `undocumented_unsafe_blocks`,
+`allow_attributes_without_reason`, `unwrap_used` outside tests, and
+`unreachable_pub`; `missing_docs` follows crate by crate as each crate's public
+items are documented.
+
+The suite is a foundation, not a claim of exhaustive terminal or provider
 compatibility. Snapshot coverage for every TUI state, randomized protocol
 fuzzing, every malformed SSE variant, and sustained backpressure/load tests are
 release-expansion work.
@@ -160,7 +205,7 @@ scripts are machine-specific evaluation aids rather than CI gates.
 
 Reference-machine targets are:
 
-| Measurement | v0.1 target |
+| Measurement | Target |
 | --- | --- |
 | Protocol encode/decode | p95 under 100 us/message |
 | Context selection, 10,000 small messages | p95 under 20 ms |

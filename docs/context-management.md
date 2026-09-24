@@ -1,6 +1,6 @@
 # Context Management
 
-Status: final design for v0.1
+Status: final design
 
 SCV keeps canonical session history separate from the model-visible context.
 Context selection is deterministic, configurable, and replaceable through the

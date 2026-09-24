@@ -2,9 +2,13 @@
 name = "scv-feishu"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Feishu and Lark chat channel for the SCV daemon"
 repository.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true

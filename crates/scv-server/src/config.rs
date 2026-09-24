@@ -987,7 +987,7 @@ impl Config {
             }
         }
         if self.provider.kind != "openai-compatible" {
-            bail!("provider.kind must be openai-compatible in v0.1");
+            bail!("provider.kind must be openai-compatible");
         }
         if self.provider.model.trim().is_empty()
             || self.provider.base_url.trim().is_empty()

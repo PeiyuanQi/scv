@@ -1,6 +1,6 @@
 # Configuration
 
-Status: final design for v0.1
+Status: final design
 
 Run `scv config init` on first use to create the user file from `config.example.toml`. Select a profile with `provider.active` or `--provider`.
 
@@ -558,7 +558,7 @@ choice for that invocation.
 
 ## Environment variables
 
-SCV v0.1 reads:
+SCV reads:
 
 - `SCV_HOME` for the instance home (default `~/.scv`); see
   [Instance layout](#instance-layout);

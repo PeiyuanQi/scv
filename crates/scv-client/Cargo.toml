@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Local daemon discovery and management client for SCV"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 dirs.workspace = true

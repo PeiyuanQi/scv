@@ -2,9 +2,13 @@
 name = "scv-clawbot"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "WeChat ClawBot bridge for the SCV daemon"
 repository.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 aes.workspace = true

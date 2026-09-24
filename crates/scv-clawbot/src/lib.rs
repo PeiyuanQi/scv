@@ -1,6 +1,8 @@
 //! The WeChat channel: a transport for the shared channel bridge over the
 //! iLink ClawBot HTTP API.
 
+#![forbid(unsafe_code)]
+
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use scv_channels::{

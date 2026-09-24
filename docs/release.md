@@ -1,11 +1,11 @@
 # Release and Compatibility
 
-Status: final design for v0.1
+Status: final design
 
 The current workspace release is `0.2.1`. All crates share that version, and
 dependencies between workspace packages use exact `=0.2.1` pins.
 
-SCV v0.1 supports the latest patch release of stable Rust 1.88 or newer on:
+SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
 - macOS 13 or newer on Apple Silicon and x86-64;
 - glibc-based Linux on x86-64 and ARM64.
@@ -19,7 +19,7 @@ The release workflow builds and tests four target archives:
 
 Each archive contains `scv`, `scv-server`, `README.md`, `LICENSE`, and
 `NOTICE`. Checksums are published beside the archives. Release builds use Cargo
-locked mode. The project does not ship a curl-to-shell installer in v0.1.
+locked mode. The project does not ship a curl-to-shell installer.
 
 SCV is licensed under the Apache License 2.0. The root `LICENSE` contains the
 unmodified Apache 2.0 license text, `NOTICE` identifies SCV and any required

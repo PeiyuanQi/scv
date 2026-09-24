@@ -7,6 +7,8 @@
 //! socket events are acknowledged only once the bridge has made their claims
 //! durable, which is when it asks for the next batch.
 
+#![forbid(unsafe_code)]
+
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use scv_channels::{

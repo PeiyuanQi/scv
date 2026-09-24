@@ -1,0 +1,5 @@
+# Functions over this many lines get `clippy::too_many_lines` once the
+# pedantic group is enabled (see docs/quality.md, "Lint ratchet").
+too-many-lines-threshold = 150
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

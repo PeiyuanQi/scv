@@ -1,16 +1,16 @@
 # SCV Architecture
 
-Status: current v0.1 architecture
-
 SCV is a small Rust agent runtime with a terminal client. Its core is useful for
 coding work, while its provider, context, tool, approval, and event interfaces
 are general enough to host other kinds of agents.
 
 ## Dependency diagram
 
-Arrows show compile-time dependencies from a crate to the crate it uses.
-Runtime socket connections are described below and do not add a client-to-server
-crate dependency.
+Arrows show compile-time dependencies from a crate to the crate it uses, as
+`cargo metadata` reports them (development-only dependencies are left out).
+Runtime socket connections are described below and do not add a
+client-to-server crate dependency. Any change to an internal dependency
+updates this diagram in the same commit.
 
 ```mermaid
 flowchart LR
@@ -22,12 +22,14 @@ flowchart LR
     cli --> protocol["scv-protocol"]
     server --> clawbot
     server --> feishu
+    server --> channels["scv-channels"]
     server --> client
     server --> protocol
     server --> core["scv-core"]
     server --> tools["scv-tools"]
     server --> provider["scv-provider-openai"]
-    clawbot --> channels["scv-channels"]
+    clawbot --> channels
+    clawbot --> client
     feishu --> channels
     channels --> client
     channels --> protocol
@@ -41,26 +43,32 @@ flowchart LR
 
 ## Product boundary
 
-SCV v0.1 provides:
+SCV provides:
 
 - a provider-independent agent loop with bounded tool iterations;
-- an OpenAI-compatible Responses API provider;
+- an OpenAI-compatible Responses API provider, with image input when the
+  provider configuration allows it;
 - configurable, deterministic context budgeting and compaction;
-- built-in `read`, `read_skill`, `write`, `bash`, `web_fetch`, `web_search`,
-  `agent_claude`, `agent_codex`, `agent_grok`, `agent_dsh`, and `agent_pi`
-  tools, plus the provider's hosted web search when configured;
+- built-in `read`, `read_skill`, `write`, `bash`, `web_fetch`, and
+  `web_search` tools, plus the provider's hosted web search when configured;
+- delegation to other agent CLIs (`agent_claude`, `agent_codex`,
+  `agent_grok`, `agent_dsh`, `agent_pi`) and to a nested SCV (`agent_scv`),
+  in the foreground or as background jobs (`agent_wait`, `agent_status`,
+  `agent_cancel`);
 - a versioned newline-delimited JSON protocol;
 - one Unix-socket daemon that owns agent state and per-connection sessions;
-- a TUI and chat channel bridges (WeChat) that attach to the daemon through the
-  same protocol;
+- a TUI and chat channel bridges (WeChat, Feishu/Lark) that attach to the
+  daemon through the same protocol, including media in both directions
+  (`chat_attach`);
 - interactive approval for tools with filesystem, shell, subprocess, or
   network side effects;
+- planned restarts into a newly installed release, with a binary rollback;
 - Linux and macOS source builds and release archives.
 
 The current release does not include dynamic library loading, OS-level
-sandboxing, session resume, provider login, image input, syntax-highlighted
-diffs, or feature parity with mature coding agents. Those features may be added
-without moving policy or model-provider code into the TUI.
+sandboxing, session resume, provider login, syntax-highlighted diffs, or
+feature parity with mature coding agents. Those features may be added without
+moving policy or model-provider code into the TUI.
 
 ## Workspace layout
 
@@ -78,7 +86,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-channels` | The bridge every chat channel shares: the `Transport` trait, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, restart context). |
 | `scv-clawbot` | The WeChat channel: iLink authentication, polling, and sending behind `Transport`, and its credentials. |
 | `scv-feishu` | The Feishu/Lark channel: app registration by QR scan, the event long connection with catch-up from chat history, and sending behind `Transport`, and its credentials. |
-| root `scv-cli` package | Installable `scv` and `scv-server` binaries. |
+| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`. |
 
 The integration dependency chain is
 `server -> clawbot|feishu -> channels -> client -> protocol`.
@@ -87,6 +95,64 @@ on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
 `0.2.1` and exact workspace dependency pins.
+
+The WeChat and Feishu transports are accepted to move into `scv-channels` as
+its `wechat` and `feishu` modules, retiring the `scv-clawbot` and
+`scv-feishu` crates; until that change lands, each platform keeps its own
+crate as described here.
+
+## Finding your way
+
+Start reading in this order:
+
+1. `scv-protocol`: `ClientMessage` and `ServerEvent`, everything a client and
+   the server say to each other.
+2. `scv-core`: the `Tool` and `Provider` traits and `AgentRuntime::run_turn`,
+   the loop described under [Agent loop](#agent-loop).
+3. `scv-server` (`lib.rs`): `run_managed`, one connection's message loop, and
+   `TurnStarter::start`, which runs a queued turn.
+4. `scv-tools` (`lib.rs`): `builtin_registry`, which decides the tools a
+   session gets.
+5. `scv-channels` (`lib.rs`): the `Transport` trait and `run`, the bridge
+   every chat account runs.
+
+A TUI turn: `scv-tui` sends `turn.start` over the daemon socket; the server's
+`run_managed` queues it and `TurnStarter::start` runs `AgentRuntime::run_turn`
+with `OpenAiProvider` and the session's `ToolRegistry`. A tool that needs
+approval becomes an `approval.requested` event through `ProtocolApprovalGate`,
+and the client's `approval.resolve` answers it. Core events become
+`ServerEvent`s in `ProtocolSink`, which the TUI applies in
+`App::handle_server_event` and draws.
+
+A WeChat message: the WeChat transport's `receive` returns it to
+`scv_channels::run`, which claims it durably and hands it to the
+conversation's `channels::session::Session`, a daemon session on the same
+socket. The turn then runs exactly like the TUI's, and the bridge sends the
+final answer back through the transport's `send`. Feishu differs only in its
+transport.
+
+What lives where in the largest crates:
+
+| Crate | Module | Contents |
+| --- | --- | --- |
+| `scv-server` | `lib.rs` | Daemon socket and stdio entry points, the connection loop, sessions and their turn queue, the system prompt and skill discovery, approval gates, the event sink, and helpers the CLI calls for `scv agents` |
+| | `config.rs` | Configuration schema, layered loading, and validation |
+| | `components.rs` | `Component`, `HealthReporter`, `Supervisor`, and the channel accounts they run |
+| | `restart.rs` | [Planned restarts](#planned-restarts) and the watchdog |
+| | `attachments.rs` | Files attached to a turn, such as chat media |
+| | `agents.rs`, `imports.rs`, `overview.rs` | Agent sign-ins, `scv agents import`, and `scv config show` |
+| `scv-tools` | `lib.rs` | Tool configuration, `builtin_registry`, `read`/`read_skill`/`write`/`bash`, the per-turn CLI agent tool, and process spawning |
+| | `adapters.rs` | One descriptor per delegated agent CLI |
+| | `acp_agent.rs`, `scv_agent.rs`, `live.rs` | Long-running delegations over ACP and the SCV protocol |
+| | `background.rs`, `agent_choice.rs` | Background jobs and how agent tools are described |
+| | `delegation.rs`, `conversation.rs` | Records of running delegations and multi-turn conversations |
+| | `agent_output.rs`, `agent_progress.rs` | Reading a delegated CLI's output and progress |
+| | `web.rs`, `chat_attach.rs` | `web_fetch`/`web_search` and `chat_attach` |
+| `scv-channels` | `lib.rs`, `session.rs` | The bridge and a conversation's daemon session |
+| | `state.rs`, `hub.rs`, `media.rs` | Durable account state, what the daemon shares with running bridges, and chat media |
+
+`scv-core`, `scv-protocol`, `scv-provider-openai`, and `scv-tui` are one
+`lib.rs` each.
 
 Each channel account is a component hosted by the daemon's supervisor. A
 channel crate (WeChat's `scv-clawbot`, Feishu's `scv-feishu`) implements
@@ -339,11 +405,11 @@ Process extensions use the same internal adapter behind `agent_claude`,
 declarative: one `scv_tools::adapters` descriptor per CLI holds its
 executable-plus-argument templates, its state location inside the private
 home, the variables it must not inherit, and how `scv agents` signs it in. SCV does not load third-party dynamic
-libraries in v0.1 because Rust has no stable dylib ABI and in-process plugins
+libraries because Rust has no stable dylib ABI and in-process plugins
 would share all of SCV's authority.
 
 Skills are Markdown instruction packages discovered from `.scv/skills/*/SKILL.md`
-and the configured user skill directory. The v0.1 loader exposes their name and
+and the configured user skill directory. The loader exposes their name and
 description in the system prompt. The model loads an applicable skill by name
 through `read_skill`, which resolves only the immutable discovery map and checks
 containment under the configured skill roots. A skill does not gain authority

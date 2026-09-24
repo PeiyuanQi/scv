@@ -196,7 +196,7 @@ cancellation point and produces `turn.cancelled`.
 
 An unknown or already-resolved `approval_id` is rejected. Approval IDs are
 server-generated UUIDs and never reused. Approval applies only to that call;
-v0.1 has no "always allow" protocol state.
+the protocol has no "always allow" state.
 
 ### `session.clear`
 

@@ -1,4 +1,11 @@
 //! Dependency-light wire types shared by SCV clients and the server.
+//!
+//! [`ClientMessage`] is everything a client sends and [`ServerEvent`]
+//! everything the server answers, one JSON object per line. Additive fields
+//! keep [`PROTOCOL_VERSION`]; a breaking change bumps it. This crate holds no
+//! runtime policy and does no I/O.
+
+#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
