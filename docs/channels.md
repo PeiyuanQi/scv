@@ -55,11 +55,14 @@ it persists disablement, cancels and joins the component, then removes local
 credentials, delivery state, and the account's `[channels]` table. The API has no documented remote
 token-revocation operation.
 
-`status` queries the running daemon, showing its PID/version and each selected
-account's identity, enabled setting, effective `remote_tools` authority, health
-state, restart count, sanitized error, and last successful contact: an
+`status` queries the running daemon, showing its PID/version, a
+`Channels: <connected> of <enabled> enabled accounts connected` line, and each
+selected account as an indented JSON object: its identity, enabled setting,
+effective `remote_tools` authority, health state, restart count, sanitized
+error, and last successful contact: an
 authenticated, validated WeChat `getupdates`, or for Feishu a connected long
-connection that finished its catch-up or its last wait without error.
+connection that finished its catch-up or its last wait without error. `scv
+status` prints the same for every account.
 Saved credentials are not proof of a connection. If the daemon is unavailable,
 connectivity is unknown.
 

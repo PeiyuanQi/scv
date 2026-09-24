@@ -154,6 +154,22 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
             .unwrap()
             .contains("test-secret")
     );
+    // `scv status` summarizes connections, then shows each account as
+    // indented JSON.
+    let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
+        .arg("status")
+        .output()
+        .await
+        .unwrap();
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        shown.contains(
+            "\nChannels: 0 of 1 enabled accounts connected\n{\n  \"id\": \"wechat:test\",\n"
+        ),
+        "{shown}"
+    );
+    assert!(!shown.contains("test-secret"), "{shown}");
     // A running bridge holds the transaction lock while it commits state.
     // Operator commands wait for the commit instead of failing.
     let commit = hold_transaction(home.path(), "test", Duration::from_millis(300));

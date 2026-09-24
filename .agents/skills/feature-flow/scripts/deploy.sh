@@ -65,10 +65,11 @@ if ! $daemon_ready; then
 fi
 
 # Enabled channel accounts need one long poll (up to ~35s) to connect.
+# `scv status` summarizes them as "Channels: <connected> of <enabled> ...".
 connected=false
 for _ in $(seq 1 40); do
-  waiting=$(status | grep '"enabled":true' | grep -cv '"state":"connected"' || true)
-  if [ "${waiting:-0}" = 0 ]; then
+  if [[ $(status) =~ Channels:\ ([0-9]+)\ of\ ([0-9]+)\  ]] &&
+    [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ]; then
     connected=true
     break
   fi
