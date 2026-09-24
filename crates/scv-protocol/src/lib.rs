@@ -7,6 +7,10 @@ pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The longest `session.start` channel name.
 pub const MAX_CHANNEL_NAME_BYTES: usize = 32;
+/// Files one `turn.start` may attach.
+pub const MAX_TURN_ATTACHMENTS: usize = 16;
+/// The tool a chat session's model calls to send a file with its reply.
+pub const CHAT_ATTACH_TOOL: &str = "chat_attach";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -176,6 +180,56 @@ pub struct QueueEntry {
     pub revision: u64,
     pub prompt: String,
     pub submitter: String,
+    /// Files the queued `turn.start` attached; they run with its prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file a client attaches to its turn, already saved on the daemon's host,
+/// such as a photo or document a chat user sent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Attachment {
+    /// `image`, `audio`, `video`, `file`, or `sticker`.
+    pub kind: String,
+    /// Absolute path of a regular file on the daemon's host.
+    pub path: String,
+    /// The name the sender gave it; empty when the platform has none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// MIME type, such as `image/png`; empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mime: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// What a voice message said, when the platform transcribed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+}
+
+/// A file the model attached to its reply with [`CHAT_ATTACH_TOOL`], as the
+/// tool's successful `tool.completed` output reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyAttachment {
+    /// Absolute, symlink-free path of the file the tool checked.
+    pub path: String,
+    /// The name to show the recipient.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mime: String,
+    pub size: u64,
+    /// Text sent with the file, if any.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub caption: String,
+}
+
+/// The attachment a successful [`CHAT_ATTACH_TOOL`] call reports: its output
+/// is `{"attached": {...}, ...}`. Anything else is `None`.
+pub fn reply_attachment(tool: &str, success: bool, output: &str) -> Option<ReplyAttachment> {
+    if tool != CHAT_ATTACH_TOOL || !success {
+        return None;
+    }
+    let value: Value = serde_json::from_str(output).ok()?;
+    serde_json::from_value(value.get("attached")?.clone()).ok()
 }
 
 /// Why the server started a turn on its own.
@@ -286,8 +340,9 @@ pub enum ClientMessage {
         /// The chat channel this session answers on, as its users name it
         /// (such as `WeChat` or `Feishu`). The user reads short plain-text
         /// replies there and never sees tool calls, so the server tells the
-        /// model. At most [`MAX_CHANNEL_NAME_BYTES`], without control
-        /// characters.
+        /// model; a chat client also delivers files the model attaches to
+        /// its reply, so a session with tools offers [`CHAT_ATTACH_TOOL`].
+        /// At most [`MAX_CHANNEL_NAME_BYTES`], without control characters.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<String>,
         /// The client approves every approval request of this session
@@ -308,6 +363,11 @@ pub enum ClientMessage {
         request_id: String,
         session_id: String,
         prompt: String,
+        /// Files that come with the prompt, at most [`MAX_TURN_ATTACHMENTS`].
+        /// The server lists them for the model and shows it images directly
+        /// when the model accepts image input.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
     },
     #[serde(rename = "queue.update")]
     QueueUpdate {
@@ -645,13 +705,56 @@ mod tests {
             request_id: "3".into(),
             session_id: "session".into(),
             prompt: "hello".into(),
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&message).unwrap();
         assert!(json.contains("\"type\":\"turn.start\""));
+        assert!(!json.contains("attachments"), "{json}");
         assert_eq!(
             serde_json::from_str::<ClientMessage>(&json).unwrap(),
             message
         );
+    }
+
+    #[test]
+    fn turns_carry_attachments_and_older_frames_have_none() {
+        let message = ClientMessage::TurnStart {
+            request_id: "3".into(),
+            session_id: "session".into(),
+            prompt: "what is this?".into(),
+            attachments: vec![Attachment {
+                kind: "image".into(),
+                path: "/media/photo.jpg".into(),
+                name: "photo.jpg".into(),
+                mime: "image/jpeg".into(),
+                size: 1234,
+                transcript: None,
+            }],
+        };
+        let wire = serde_json::to_string(&message).unwrap();
+        assert!(wire.contains(r#""kind":"image""#), "{wire}");
+        assert!(!wire.contains("transcript"), "{wire}");
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&wire).unwrap(),
+            message
+        );
+        let older = r#"{"type":"turn.start","request_id":"1","session_id":"s","prompt":"hi"}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(older).unwrap(),
+            ClientMessage::TurnStart { attachments, .. } if attachments.is_empty()
+        ));
+    }
+
+    #[test]
+    fn only_a_successful_chat_attach_reports_an_attachment() {
+        let output = r#"{"attached":{"path":"/w/report.pdf","name":"report.pdf","mime":"application/pdf","size":10},"note":"sent after your reply"}"#;
+        let attached = reply_attachment(CHAT_ATTACH_TOOL, true, output).unwrap();
+        assert_eq!(attached.name, "report.pdf");
+        assert_eq!(attached.size, 10);
+        assert!(attached.caption.is_empty());
+        assert_eq!(reply_attachment(CHAT_ATTACH_TOOL, false, output), None);
+        assert_eq!(reply_attachment("bash", true, output), None);
+        assert_eq!(reply_attachment(CHAT_ATTACH_TOOL, true, "not json"), None);
     }
 
     #[test]
@@ -804,6 +907,7 @@ mod tests {
                 revision: 1,
                 prompt: "hello".into(),
                 submitter: "cli".into(),
+                attachments: Vec::new(),
             }],
             paused: false,
         };

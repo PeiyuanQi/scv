@@ -293,6 +293,7 @@ struct ChannelAccount {
     socket: PathBuf,
     tool_owner: Option<String>,
     link: scv_channels::hub::Link,
+    media: scv_channels::MediaSettings,
 }
 
 #[async_trait]
@@ -314,6 +315,7 @@ impl Component for ChannelAccount {
         let report = Arc::new(move |connected| health.contact(connected));
         match &self.credentials {
             Credentials::Wechat(credentials) => {
+                let media = scv_clawbot::state::media_options(&self.account, self.media.clone())?;
                 scv_clawbot::run_supervised(
                     &credentials.token,
                     &credentials.base_url,
@@ -321,6 +323,7 @@ impl Component for ChannelAccount {
                     &self.workspace,
                     &self.socket,
                     tool_owner.as_ref(),
+                    &media,
                     cancellation,
                     report,
                     self.link.clone(),
@@ -328,12 +331,14 @@ impl Component for ChannelAccount {
                 .await
             }
             Credentials::Feishu(credentials) => {
+                let media = scv_feishu::state::media_options(&self.account, self.media.clone())?;
                 scv_feishu::run_supervised(
                     credentials,
                     &self.account,
                     &self.workspace,
                     &self.socket,
                     tool_owner.as_ref(),
+                    &media,
                     cancellation,
                     report,
                     self.link.clone(),
@@ -501,6 +506,7 @@ impl Components {
                         socket: self.socket.clone(),
                         tool_owner,
                         link,
+                        media: settings.media.clone(),
                     }),
                     health,
                 );

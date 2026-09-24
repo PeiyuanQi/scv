@@ -185,6 +185,14 @@ meantime from chat history. In groups it answers only messages that mention
 it. `scv channels run feishu --workspace PATH --remote-tools owner` then
 grants the owner's direct chats every SCV tool, exactly as for WeChat.
 
+Both channels take pictures, voice messages, videos, files, quoted messages,
+and (on Feishu) forwarded bundles. SCV downloads them privately under
+`$SCV_HOME/state/media`, shows images to the model when it accepts image input,
+and hands the owner's agent the file paths; other senders' files are limited
+to pictures. In the owner's chat the agent can send files and pictures back
+with its `chat_attach` tool. See [channel media](docs/channels.md#media).
+
+
 Account settings are `[channels.<channel>.<account>]` tables in
 `config.toml`, with
 `enabled` defaulting to `true`, `remote_tools` defaulting to `"none"`, and an

@@ -6,9 +6,10 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
+use scv_protocol::Attachment;
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -20,8 +21,11 @@ use uuid::Uuid;
 
 pub use scv_client::Layout;
 pub mod hub;
+pub mod media;
 pub mod session;
 pub mod state;
+
+pub use media::{MediaKind, MediaOptions, MediaSettings};
 
 /// Bytes in one outbound message; longer replies go out in parts.
 pub const MAX_REPLY_BYTES: usize = 16 * 1024;
@@ -88,6 +92,12 @@ const HELD_MAX_BYTES_PER_CONVERSATION: usize = 4 * MAX_HELD_REPLY_BYTES;
 const HELD_MAX_TOTAL: usize = 128;
 /// Half a message, so a held reply always fits beside a short new one.
 const MAX_HELD_REPLY_BYTES: usize = MAX_REPLY_BYTES / 2;
+/// How long fetching what one message refers to may take.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long downloading one file may take.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// How often old media files are removed.
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// The account owner granted remote tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,11 +127,10 @@ pub struct Batch {
 
 /// One received message with an ID.
 pub enum Inbound {
-    /// Not something to answer (not text, or missing a field a reply
-    /// needs); it is only recorded as seen.
-    Ignored {
-        id: String,
-    },
+    /// Not something to answer (a system message, or missing a field a
+    /// reply needs); it is only recorded as seen.
+    Ignored { id: String },
+    /// A message to answer: text, files, or both.
     Text(Message),
 }
 
@@ -134,16 +143,88 @@ impl Inbound {
     }
 }
 
-/// A text message to answer.
+/// A message to answer.
 pub struct Message {
     pub id: String,
     pub sender: String,
+    /// The text, with markers such as `[sticker]` for content that has no
+    /// file to fetch; may be empty when the message is only files.
     pub text: String,
     /// The transport's handle for replying to this message.
     pub reply_to: String,
     /// The group chat it was sent in. Group messages never carry owner
     /// authority and never share the sender's direct-chat session.
     pub group: Option<String>,
+    /// Files the message carries, fetched before its turn.
+    pub media: Vec<Media>,
+    /// What the message refers to, such as a quoted message, for the
+    /// transport to resolve before the turn; opaque to the bridge.
+    pub reference: Option<String>,
+}
+
+impl Message {
+    /// A text message with no files or references.
+    pub fn text(id: &str, sender: &str, text: &str, reply_to: &str, group: Option<&str>) -> Self {
+        Self {
+            id: id.into(),
+            sender: sender.into(),
+            text: text.into(),
+            reply_to: reply_to.into(),
+            group: group.map(str::to_owned),
+            media: Vec::new(),
+            reference: None,
+        }
+    }
+}
+
+/// A file a received message carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Media {
+    pub kind: MediaKind,
+    /// The sender's file name; empty when the platform gives none.
+    pub name: String,
+    /// The size the platform announced, when it did.
+    pub size: Option<u64>,
+    /// The type the platform declared, when it did.
+    pub mime: Option<String>,
+    /// What a voice message said, when the platform transcribed it.
+    pub transcript: Option<String>,
+    /// How the transport fetches it; opaque to the bridge.
+    pub source: String,
+}
+
+/// A downloaded file.
+#[derive(Debug)]
+pub struct Downloaded {
+    pub bytes: Vec<u8>,
+    /// The type the platform declared while serving it, if any.
+    pub mime: Option<String>,
+}
+
+/// What a message's reference resolved to.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Resolved {
+    /// Text shown to the model before the message, such as the quoted
+    /// message or the forwarded ones.
+    pub context: String,
+    /// Files the referenced messages carry.
+    pub media: Vec<Media>,
+}
+
+/// A file sent as its own message after a reply's text.
+pub struct OutboundFile<'a> {
+    pub to: &'a str,
+    /// The inbound message's reply handle; empty for a message that answers
+    /// nothing.
+    pub reply_to: &'a str,
+    /// Which message of the reply this is, counting its text parts first.
+    pub part: usize,
+    pub path: &'a Path,
+    pub name: &'a str,
+    pub mime: &'a str,
+    pub kind: MediaKind,
+    /// Stable across retries of this file, including after a restart.
+    pub client_id: &'a str,
 }
 
 /// One part of an outbound message.
@@ -197,6 +278,30 @@ pub trait Transport: Send + Sync {
         message: &Outbound<'_>,
         report: &(dyn Fn(bool) + Send + Sync),
     ) -> Result<SendOutcome>;
+
+    /// Download a received file, failing when it is larger than `max_bytes`.
+    /// Errors must not carry URLs, keys, or tokens.
+    async fn download(&self, media: &Media, max_bytes: u64) -> Result<Downloaded> {
+        let _ = (media, max_bytes);
+        bail!("{} cannot download files", self.label())
+    }
+
+    /// Resolve a message's reference, such as fetching the message it
+    /// quotes. `message_id` is the message that carries it.
+    async fn resolve(&self, message_id: &str, reference: &str) -> Result<Resolved> {
+        let _ = (message_id, reference);
+        Ok(Resolved::default())
+    }
+
+    /// Upload and send one file, as `send` does a text part.
+    async fn send_file(
+        &self,
+        file: &OutboundFile<'_>,
+        report: &(dyn Fn(bool) + Send + Sync),
+    ) -> Result<SendOutcome> {
+        let _ = (file, report);
+        bail!("{} cannot send files", self.label())
+    }
 }
 
 /// Run one account until the returned future is dropped or fails. It holds
@@ -205,7 +310,8 @@ pub trait Transport: Send + Sync {
 /// interrupted work, and delivers recovered replies before receiving.
 ///
 /// `tool_owner` is the authenticated owner when the account grants its owner
-/// remote tools; every other sender stays tool-free.
+/// remote tools; every other sender stays tool-free. `media` says where
+/// received and outgoing files live and how large they may be.
 #[allow(clippy::too_many_arguments)]
 pub async fn run<C: state::Credentials, T: Transport>(
     transport: &T,
@@ -213,6 +319,7 @@ pub async fn run<C: state::Credentials, T: Transport>(
     workspace: &Path,
     socket: &Path,
     tool_owner: Option<&ToolOwner>,
+    media: &MediaOptions,
     store: &state::Store<C>,
     running: impl FnOnce(&C) -> Result<bool>,
     report: &(dyn Fn(bool) + Send + Sync),
@@ -223,6 +330,7 @@ pub async fn run<C: state::Credentials, T: Transport>(
         workspace,
         socket,
         tool_owner,
+        media,
         store,
         running,
         report,
@@ -241,6 +349,7 @@ pub async fn run_linked<C: state::Credentials, T: Transport>(
     workspace: &Path,
     socket: &Path,
     tool_owner: Option<&ToolOwner>,
+    media: &MediaOptions,
     store: &state::Store<C>,
     running: impl FnOnce(&C) -> Result<bool>,
     report: &(dyn Fn(bool) + Send + Sync),
@@ -260,10 +369,12 @@ pub async fn run_linked<C: state::Credentials, T: Transport>(
         link,
         tool_owner: tool_owner.map(|owner| owner.user_id.as_str()),
         registration,
+        media,
         state: Mutex::new(state),
         turns: Semaphore::new(MAX_CONCURRENT_TURNS),
         replies: Notify::new(),
     };
+    bridge.prune_media();
     // Replies recovered from an earlier run go out before the first poll.
     bridge.deliver_backlog().await?;
     // Conversations run as futures owned by this one, never as spawned tasks,
@@ -280,7 +391,9 @@ pub async fn run_linked<C: state::Credentials, T: Transport>(
             Some((owner, recipient, jobs, watching)) = started.recv() => conversations.push(bridge.converse(owner, recipient, jobs, watching)),
             Some(result) = conversations.next(), if !conversations.is_empty() => result?,
             Some(notice) = notices.recv() => {
-                bridge.queue_unprompted(&notice.to, &notice.text).await?;
+                bridge
+                    .queue_unprompted(&notice.to, session::Reply::text(notice.text.clone()))
+                    .await?;
                 notice.stored();
             }
         }
@@ -291,7 +404,35 @@ pub async fn run_linked<C: state::Credentials, T: Transport>(
 struct Job {
     message_id: String,
     text: String,
+    media: Vec<Media>,
+    reference: Option<String>,
+    /// The conversation, which names the directory its files go to.
+    key: String,
     limit: Duration,
+}
+
+/// A turn's input after its message's files and references are fetched.
+struct Prepared {
+    text: String,
+    attachments: Vec<Attachment>,
+}
+
+/// Why a file was not brought into the turn: a note for the model, and a
+/// reply for the sender when the message has nothing else.
+struct Refusal {
+    note: String,
+    reply: String,
+}
+
+/// A conversation's media directory name: a digest of its key, so sender
+/// and group IDs never become paths.
+fn conversation_dir(key: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// A live conversation's job queue as seen by the poller.
@@ -346,6 +487,7 @@ struct Bridge<'a, C, T> {
     /// work in the hub.
     tool_owner: Option<&'a str>,
     registration: hub::Registration,
+    media: &'a MediaOptions,
     /// The only copy of delivery state. Every change is saved while held.
     state: Mutex<state::BridgeState>,
     /// Bounds how many senders' turns run at once.
@@ -423,7 +565,12 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     async fn poll(&self, tool_owner: Option<&ToolOwner>, start: &Starter) -> Result<()> {
         let mut conversations: HashMap<String, Conversation> = HashMap::new();
         let mut backoff = Duration::from_secs(1);
+        let mut pruned = Instant::now();
         loop {
+            if pruned.elapsed() >= PRUNE_EVERY {
+                pruned = Instant::now();
+                self.prune_media();
+            }
             let cursor = self.state.lock().await.cursor.clone();
             let batch = match self.transport.receive(&cursor).await {
                 Ok(batch) => {
@@ -547,6 +694,9 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         let mut job = Job {
             message_id: id.to_owned(),
             text: message.text.clone(),
+            media: message.media.clone(),
+            reference: message.reference.clone(),
+            key: key.clone(),
             limit,
         };
         loop {
@@ -599,7 +749,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         enum Next {
             Job(Option<Job>),
             Idle,
-            Report(Result<String>),
+            Report(Result<session::Reply>),
         }
         let mut session: Option<session::Session> = None;
         // The daemon sees which session a direct chat runs on and its
@@ -664,7 +814,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 }
                 Next::Report(Ok(report)) => {
                     if let Some(recipient) = &recipient {
-                        self.queue_unprompted(recipient, &report).await?;
+                        self.queue_unprompted(recipient, report).await?;
                     }
                     continue;
                 }
@@ -681,6 +831,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     .await
                     .map_err(|_| anyhow!("{} turn limiter closed", self.transport.label()))?;
                 let result = tokio::time::timeout(job.limit, async {
+                    let prepared = match self.prepare(&job, owner).await {
+                        Ok(prepared) => prepared,
+                        // Nothing the model could use: tell the sender why.
+                        Err(refusal) => return Ok(session::Reply::text(refusal)),
+                    };
                     if session.is_none() {
                         if owner {
                             tracing::info!(
@@ -701,7 +856,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     session
                         .as_mut()
                         .expect("session was just connected")
-                        .turn(&job.text, MAX_TOTAL_REPLY_BYTES)
+                        .turn(&prepared.text, prepared.attachments, MAX_TOTAL_REPLY_BYTES)
                         .await
                 })
                 .await;
@@ -713,7 +868,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                         if session.as_ref().is_none_or(session::Session::is_broken) {
                             session = None;
                         }
-                        FAILURE_REPLY.into()
+                        session::Reply::text(FAILURE_REPLY)
                     }
                     Err(_) => {
                         // Out of time: cancel the turn but keep a session
@@ -728,15 +883,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                         if !keep {
                             session = None;
                         }
-                        FAILURE_REPLY.into()
+                        session::Reply::text(FAILURE_REPLY)
                     }
                 }
             };
-            let reply = if reply.trim().is_empty() {
-                "SCV completed without a text response.".into()
-            } else {
-                reply
-            };
+            let (text, files) = self.outgoing(reply);
             // The claim becomes a durable pending reply in one state write.
             let mut state = self.state.lock().await;
             let index = state
@@ -745,7 +896,8 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 .position(|claim| claim.message_id == job.message_id)
                 .ok_or_else(|| anyhow!("{} lost a claimed message", self.transport.label()))?;
             let claim = state.in_flight.remove(index);
-            let pending = compose_pending(&mut state, &claim, &reply, unix_now());
+            let mut pending = compose_pending(&mut state, &claim, &text, unix_now());
+            pending.files = files;
             state.pending.push(pending);
             self.save(&state).await?;
             drop(state);
@@ -757,19 +909,279 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 .unwrap_or_default();
             if let Some(recipient) = &recipient {
                 for report in reports {
-                    self.queue_unprompted(recipient, &report).await?;
+                    self.queue_unprompted(recipient, report).await?;
                 }
             }
+        }
+    }
+
+    /// Fetch what a message refers to and the files it carries, as a turn's
+    /// text and attachments. When nothing usable is left, the error is a
+    /// short reply for the sender instead of a turn.
+    async fn prepare(&self, job: &Job, owner: bool) -> std::result::Result<Prepared, String> {
+        let mut context = String::new();
+        let mut media = job.media.clone();
+        if let Some(reference) = &job.reference {
+            match tokio::time::timeout(
+                RESOLVE_TIMEOUT,
+                self.transport.resolve(&job.message_id, reference),
+            )
+            .await
+            {
+                Ok(Ok(resolved)) => {
+                    context = resolved.context;
+                    media.extend(resolved.media);
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        "{} could not resolve a message reference: {error}",
+                        self.transport.label()
+                    );
+                    context = "[The message this refers to could not be loaded.]".into();
+                }
+                Err(_) => context = "[The message this refers to could not be loaded.]".into(),
+            }
+        }
+        let mut notes = Vec::new();
+        let mut attachments = Vec::new();
+        let mut refusals = Vec::new();
+        let mut heard = false;
+        let skipped = media.len().saturating_sub(media::MAX_MESSAGE_MEDIA);
+        let dir = self.media.inbox.join(conversation_dir(&job.key));
+        for item in media.iter().take(media::MAX_MESSAGE_MEDIA) {
+            match self.fetch(item, owner, &dir).await {
+                Ok(attachment) => attachments.push(attachment),
+                Err(Refusal { note, reply }) => {
+                    // A voice message's transcript is worth a turn by itself.
+                    if item
+                        .transcript
+                        .as_deref()
+                        .is_some_and(|transcript| !transcript.trim().is_empty())
+                    {
+                        heard = true;
+                    }
+                    notes.push(note);
+                    refusals.push(reply);
+                }
+            }
+        }
+        if skipped > 0 {
+            notes.push(format!("[{skipped} more files were not opened]"));
+        }
+        let mut text = String::new();
+        for part in [context.trim(), job.text.trim()] {
+            if !part.is_empty() {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(part);
+            }
+        }
+        for note in &notes {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(note);
+        }
+        if job.text.trim().is_empty()
+            && context.trim().is_empty()
+            && attachments.is_empty()
+            && !heard
+        {
+            return Err(refusals
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "SCV could not read that message.".into()));
+        }
+        Ok(Prepared { text, attachments })
+    }
+
+    /// Download one file under the sender's limits and save it privately.
+    async fn fetch(
+        &self,
+        item: &Media,
+        owner: bool,
+        dir: &Path,
+    ) -> std::result::Result<Attachment, Refusal> {
+        let noun = item.kind.noun();
+        let label = if item.name.is_empty() {
+            noun.to_owned()
+        } else {
+            format!("{noun} {}", media::safe_name(&item.name))
+        };
+        let transcript = item
+            .transcript
+            .as_deref()
+            .map(str::trim)
+            .filter(|transcript| !transcript.is_empty());
+        let said = transcript.map_or_else(String::new, |t| format!(" It says: \"{t}\""));
+        let Some(limit) = self.media.settings.limit(item.kind, owner) else {
+            let reply = if owner || self.media.settings.owner_max_mib == 0 {
+                "Receiving files is turned off for this SCV account.".to_owned()
+            } else if item.kind == MediaKind::Image {
+                "SCV cannot open pictures from you here; please send text.".to_owned()
+            } else {
+                format!("SCV can read text and pictures from you here, but not a {noun}.")
+            };
+            return Err(Refusal {
+                note: format!("[{label}: not opened for this sender]{said}"),
+                reply,
+            });
+        };
+        if item.size.is_some_and(|size| size > limit) {
+            return Err(Refusal {
+                note: format!(
+                    "[{label}: not downloaded, larger than the {} MB limit]{said}",
+                    limit / (1024 * 1024)
+                ),
+                reply: format!(
+                    "That {noun} is larger than SCV's {} MB limit.",
+                    limit / (1024 * 1024)
+                ),
+            });
+        }
+        let failed = || Refusal {
+            note: format!("[{label}: download failed]{said}"),
+            reply: format!("SCV could not download that {noun}. Please send it again."),
+        };
+        let downloaded = match tokio::time::timeout(
+            DOWNLOAD_TIMEOUT,
+            self.transport.download(item, limit),
+        )
+        .await
+        {
+            Ok(Ok(downloaded)) => downloaded,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "{} could not download a {noun}: {error}",
+                    self.transport.label()
+                );
+                return Err(failed());
+            }
+            Err(_) => {
+                tracing::warn!("{} timed out downloading a {noun}", self.transport.label());
+                return Err(failed());
+            }
+        };
+        if downloaded.bytes.len() as u64 > limit {
+            return Err(Refusal {
+                note: format!(
+                    "[{label}: not kept, larger than the {} MB limit]{said}",
+                    limit / (1024 * 1024)
+                ),
+                reply: format!(
+                    "That {noun} is larger than SCV's {} MB limit.",
+                    limit / (1024 * 1024)
+                ),
+            });
+        }
+        let mime = media::mime_type(
+            downloaded.mime.as_deref().or(item.mime.as_deref()),
+            &item.name,
+            &downloaded.bytes[..downloaded.bytes.len().min(64)],
+        );
+        let name = if item.name.trim().is_empty() {
+            format!("{}.{}", item.kind.as_str(), media::extension(&mime))
+        } else {
+            item.name.clone()
+        };
+        let dir = dir.to_path_buf();
+        let bytes = downloaded.bytes;
+        let size = bytes.len() as u64;
+        let saved = tokio::task::spawn_blocking(move || media::save(&dir, &name, &bytes))
+            .await
+            .map_err(|error| anyhow!(error))
+            .and_then(|result| result);
+        let path = match saved {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    "{} could not save a {noun}: {error}",
+                    self.transport.label()
+                );
+                return Err(failed());
+            }
+        };
+        Ok(Attachment {
+            kind: item.kind.as_str().into(),
+            path: path.display().to_string(),
+            name: media::safe_name(&item.name),
+            mime,
+            size,
+            transcript: transcript.map(str::to_owned),
+        })
+    }
+
+    /// A reply's text and the files it can send. A file that is not a
+    /// regular file in the outbox, or beyond the per-reply limit, is
+    /// dropped with a note; captions go into the text.
+    fn outgoing(&self, reply: session::Reply) -> (String, Vec<state::PendingFile>) {
+        let mut text = if reply.text.trim().is_empty() && reply.files.is_empty() {
+            "SCV completed without a text response.".to_owned()
+        } else {
+            reply.text
+        };
+        let mut files = Vec::new();
+        let mut dropped = 0;
+        for file in reply.files {
+            let path = PathBuf::from(&file.path);
+            if files.len() >= media::MAX_REPLY_FILES
+                || file.size > media::MAX_REPLY_FILE_BYTES
+                || !media::is_inside(&self.media.outbox, &path)
+            {
+                dropped += 1;
+                continue;
+            }
+            let name = match media::safe_name(&file.name) {
+                name if name.is_empty() => "file".to_owned(),
+                name => name,
+            };
+            let head = media::head(&path);
+            let mime = media::mime_type(Some(&file.mime), &name, &head);
+            if !file.caption.trim().is_empty() {
+                if !text.trim().is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&format!("{name}: {}", file.caption.trim()));
+            }
+            files.push(state::PendingFile {
+                path: file.path,
+                kind: MediaKind::for_mime(&mime),
+                name,
+                mime,
+                client_id: Uuid::new_v4().to_string(),
+            });
+        }
+        if dropped > 0 {
+            tracing::warn!(dropped, "{} dropped attached files", self.transport.label());
+            text.push_str(&format!("\n\n[{dropped} attached files could not be sent]"));
+        }
+        (text, files)
+    }
+
+    /// Remove received and sent files past their retention.
+    fn prune_media(&self) {
+        let keep = self.media.settings.keep();
+        let removed =
+            media::prune(&self.media.inbox, keep) + media::prune(&self.media.outbox, keep);
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                "{} removed old media files",
+                self.transport.label()
+            );
         }
     }
 
     /// Queue a message to `recipient` that answers no inbound message, such
     /// as a finished background job's report. It is sent without a reply
     /// handle, durably and with stable client IDs like any reply.
-    async fn queue_unprompted(&self, recipient: &str, text: &str) -> Result<()> {
+    async fn queue_unprompted(&self, recipient: &str, report: session::Reply) -> Result<()> {
+        let (text, files) = self.outgoing(report);
         let mut state = self.state.lock().await;
-        let mut pending = new_pending("", recipient, "", text, MAX_REPLY_BYTES);
+        let mut pending = new_pending("", recipient, "", &text, MAX_REPLY_BYTES);
         pending.key = recipient.to_owned();
+        pending.files = files;
         state.pending.push(pending);
         self.save(&state).await?;
         drop(state);
@@ -804,15 +1216,16 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         }
     }
 
-    /// Send the oldest pending reply. Only this path edits or removes pending
-    /// replies, so the first entry stays the same one between state locks.
+    /// Send the oldest pending reply: its text parts, then its files. Only
+    /// this path edits or removes pending replies, so the first entry stays
+    /// the same one between state locks.
     async fn deliver_next(&self) -> Result<Step> {
         let mut pending = {
             let mut state = self.state.lock().await;
             let Some(pending) = state.pending.first_mut() else {
                 return Ok(Step::Idle);
             };
-            let chunks = split_utf8(&pending.reply, MAX_REPLY_BYTES).len();
+            let chunks = text_chunks(pending).len();
             let mut changed = false;
             while pending.client_ids.len() < chunks {
                 pending.client_ids.push(Uuid::new_v4().to_string());
@@ -828,7 +1241,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             }
             pending
         };
-        let chunks = split_utf8(&pending.reply, MAX_REPLY_BYTES);
+        let chunks = text_chunks(&pending);
         let mut refused = false;
         while pending.next_chunk < chunks.len() {
             let index = pending.next_chunk;
@@ -852,16 +1265,76 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             state.pending[0].next_chunk = pending.next_chunk;
             self.save(&state).await?;
         }
+        // Files follow a delivered text; a refused text drops them.
+        while !refused && pending.next_file < pending.files.len() {
+            let index = pending.next_file;
+            let file = &pending.files[index];
+            let path = PathBuf::from(&file.path);
+            let outbound = OutboundFile {
+                to: &pending.to_user_id,
+                reply_to: &pending.context_token,
+                part: chunks.len() + index,
+                path: &path,
+                name: &file.name,
+                mime: &file.mime,
+                kind: file.kind,
+                client_id: &file.client_id,
+            };
+            if !media::is_inside(&self.media.outbox, &path) {
+                tracing::warn!(
+                    "{} skipped a file that left its outbox",
+                    self.transport.label()
+                );
+            } else {
+                match self.transport.send_file(&outbound, self.report).await {
+                    Ok(SendOutcome::Delivered) => {}
+                    Ok(SendOutcome::Rejected) => {
+                        tracing::warn!("{} refused an attached file", self.transport.label());
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "{} could not send an attached file: {error}",
+                            self.transport.label()
+                        );
+                        return Ok(Step::Retry);
+                    }
+                }
+            }
+            pending.next_file += 1;
+            let mut state = self.state.lock().await;
+            state.pending[0].next_file = pending.next_file;
+            self.save(&state).await?;
+        }
         let mut state = self.state.lock().await;
         state.pending.remove(0);
         if !pending.message_id.is_empty() {
             mark_seen(&mut state, &pending.message_id);
         }
         if refused {
+            if !pending.files.is_empty() {
+                tracing::warn!(
+                    files = pending.files.len(),
+                    "{} dropped the files of a refused reply",
+                    self.transport.label()
+                );
+            }
             hold_refused(&mut state, &pending, &chunks, unix_now());
         }
         self.save(&state).await?;
+        drop(state);
+        for file in &pending.files {
+            let _ = std::fs::remove_file(&file.path);
+        }
         Ok(Step::Progress)
+    }
+}
+
+/// A pending reply's text parts; none when it is only files.
+fn text_chunks(pending: &state::PendingDelivery) -> Vec<String> {
+    if pending.reply.is_empty() && !pending.files.is_empty() {
+        Vec::new()
+    } else {
+        split_utf8(&pending.reply, MAX_REPLY_BYTES)
     }
 }
 

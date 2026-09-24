@@ -57,6 +57,21 @@ pub fn store() -> Result<Store> {
     Store::from_env(crate::CHANNEL)
 }
 
+/// Where this account's received files go and files to send wait, under
+/// the instance's media directory.
+pub fn media_options(
+    account: &str,
+    settings: scv_channels::MediaSettings,
+) -> Result<scv_channels::MediaOptions> {
+    validate_name(account)?;
+    Ok(scv_channels::MediaOptions::new(
+        &scv_channels::Layout::from_env()?.media(),
+        crate::CHANNEL,
+        account,
+        settings,
+    ))
+}
+
 pub fn account(name: &str) -> Result<Option<Account>> {
     store()?.account(name)
 }

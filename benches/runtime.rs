@@ -22,6 +22,7 @@ fn protocol(c: &mut Criterion) {
         request_id: "request".into(),
         session_id: "session".into(),
         prompt: "hello".into(),
+        attachments: Vec::new(),
     };
     c.bench_function("client_round_trip", |b| {
         b.iter(|| {
@@ -35,9 +36,7 @@ fn context(c: &mut Criterion) {
     let history: Vec<Message> = (0..5_000)
         .flat_map(|index| {
             [
-                Message::User {
-                    content: format!("user message {index}"),
-                },
+                Message::user(format!("user message {index}")),
                 Message::Assistant {
                     content: format!("assistant response {index}"),
                     tool_calls: Vec::new(),

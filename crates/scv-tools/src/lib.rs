@@ -6,6 +6,7 @@ pub mod agent_choice;
 mod agent_output;
 mod agent_progress;
 pub mod background;
+pub mod chat_attach;
 pub mod conversation;
 pub mod delegation;
 mod live;
@@ -73,6 +74,8 @@ pub struct ToolsConfig {
     /// The session's background job store, when the server reports finished
     /// jobs; otherwise the registry makes its own.
     pub background: Option<Arc<background::BackgroundJobs>>,
+    /// Offers `chat_attach` when the session answers on a chat channel.
+    pub chat_attach: Option<chat_attach::ChatAttachConfig>,
 }
 
 impl Default for ToolsConfig {
@@ -92,6 +95,7 @@ impl Default for ToolsConfig {
             delegation: None,
             max_background: 2,
             background: None,
+            chat_attach: None,
         }
     }
 }
@@ -195,6 +199,9 @@ pub fn builtin_registry(
         max_timeout: config.max_timeout,
         output_limit: config.output_limit_bytes,
     }))?;
+    if let Some(chat) = config.chat_attach.clone() {
+        registry.register(Arc::new(chat_attach::ChatAttachTool { config: chat }))?;
+    }
     // A delegated SCV at the depth limit may not delegate further.
     let depth = config
         .delegation

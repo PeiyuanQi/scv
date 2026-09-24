@@ -145,6 +145,7 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
                         request_id: "turn".into(),
                         session_id: id.clone(),
                         prompt: "delegate".into(),
+                        attachments: Vec::new(),
                     })
                     .await;
                     session_id = Some(id);

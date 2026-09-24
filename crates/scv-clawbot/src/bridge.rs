@@ -86,12 +86,108 @@ pub(crate) fn reply_body(
     chunk: &str,
     client_id: &str,
 ) -> Value {
-    let mut body = serde_json::json!({"msg":{"from_user_id":"","to_user_id":to_user_id,"client_id":client_id,"message_type":2,"message_state":2,"item_list":[{"type":1,"text_item":{"text":chunk}}]},"base_info":{"channel_version":"1.0.0"}});
+    item_body(
+        to_user_id,
+        context_token,
+        serde_json::json!({"type":1,"text_item":{"text":chunk}}),
+        client_id,
+    )
+}
+
+/// A `sendmessage` body carrying one item: text, or a file on the CDN.
+pub(crate) fn item_body(
+    to_user_id: &str,
+    context_token: &str,
+    item: Value,
+    client_id: &str,
+) -> Value {
+    let mut body = serde_json::json!({"msg":{"from_user_id":"","to_user_id":to_user_id,"client_id":client_id,"message_type":2,"message_state":2,"item_list":[item]},"base_info":{"channel_version":"1.0.0"}});
     // Without a context token the message is unprompted: it answers nothing.
     if !context_token.is_empty() {
         body["msg"]["context_token"] = context_token.into();
     }
     body
+}
+
+/// Upload an encrypted file for `to_user_id`: ask `getuploadurl` where,
+/// then post it to the CDN. Returns the CDN's download parameter for the
+/// message, or `None` when iLink or the CDN refuses the file outright.
+/// Transient failures are retried, then fail.
+pub(crate) async fn upload(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    to_user_id: &str,
+    upload: &crate::media::Upload,
+    report: &(dyn Fn(bool) + Send + Sync),
+) -> Result<Option<String>> {
+    let mut delay = Duration::from_secs(1);
+    for attempt in 0..3 {
+        let result = async {
+            let response = client
+                .post(format!("{base_url}/ilink/bot/getuploadurl"))
+                .headers(auth_headers(token, rand_u32()))
+                .json(&upload.request(to_user_id))
+                .timeout(Duration::from_secs(20))
+                .send()
+                .await?;
+            let status = response.status();
+            if status.is_client_error() && !matches!(status.as_u16(), 401 | 408 | 429) {
+                return Ok(Err(format!(
+                    "upload address HTTP status {}",
+                    status.as_u16()
+                )));
+            }
+            let body = crate::response_body(response).await?;
+            if let Err(rejection) = crate::check_send_ack(&body) {
+                return Ok(Err(format!("upload address refused: {rejection}")));
+            }
+            let reply: Value = serde_json::from_slice(&body)
+                .map_err(|_| anyhow!("invalid upload address response"))?;
+            let target = match upload.target(&reply) {
+                Ok(target) => target,
+                Err(error) => return Ok(Err(error.to_string())),
+            };
+            let response = client
+                .post(target)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(upload.encrypted.clone())
+                .timeout(Duration::from_secs(120))
+                .send()
+                .await
+                .map_err(|_| anyhow!("CDN upload failed"))?;
+            let status = response.status();
+            if status.is_client_error() {
+                return Ok(Err(format!("CDN upload HTTP status {}", status.as_u16())));
+            }
+            if !status.is_success() {
+                bail!("CDN upload HTTP status {}", status.as_u16())
+            }
+            let param = response
+                .headers()
+                .get("x-encrypted-param")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("CDN upload reply omitted its download parameter"))?;
+            Ok::<_, anyhow::Error>(Ok(param.to_owned()))
+        }
+        .await;
+        match result {
+            Ok(Ok(param)) => return Ok(Some(param)),
+            Ok(Err(rejection)) => {
+                tracing::warn!("ClawBot file upload refused ({rejection}); not retrying");
+                return Ok(None);
+            }
+            Err(error) => tracing::warn!(attempt, "ClawBot file upload failed: {error}"),
+        }
+        report(false);
+        if attempt == 2 {
+            return Err(anyhow!("ClawBot could not upload the file"));
+        }
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+    }
+    unreachable!("upload loop returns after success or final attempt")
 }
 
 pub(crate) async fn send_reply_request(

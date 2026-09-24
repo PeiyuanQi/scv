@@ -256,6 +256,7 @@ async fn delegate(approve_nested: bool) {
             request_id: format!("turn-{index}"),
             session_id: session_id.clone(),
             prompt: prompt.into(),
+            attachments: Vec::new(),
         })
         .await;
         let mut turn = Turn::default();

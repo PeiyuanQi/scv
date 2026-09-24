@@ -69,6 +69,10 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     pub timeout_seconds: u64,
     pub headers: HashMap<String, String>,
+    /// Show images users attach to the model as image input. Turn it off
+    /// for a model without vision; SCV also stops for the session after the
+    /// provider rejects an image.
+    pub image_input: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -101,6 +105,7 @@ impl Default for ProviderConfig {
             api_key_env: Some("OPENAI_API_KEY".into()),
             timeout_seconds: 600,
             headers: HashMap::new(),
+            image_input: true,
         }
     }
 }
@@ -778,6 +783,7 @@ impl Config {
             delegation: None,
             max_background: self.agent.max_background,
             background: None,
+            chat_attach: None,
         }
     }
 

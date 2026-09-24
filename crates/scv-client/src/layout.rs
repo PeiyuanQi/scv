@@ -8,8 +8,8 @@
 //!   their own sign-ins and configuration there;
 //! - `skills/`: the user's SCV skills;
 //! - `state/`: runtime data SCV writes: the daemon socket and lock, delegated
-//!   run records, conversation markers, import records, and channel delivery
-//!   state and locks.
+//!   run records, conversation markers, import records, channel delivery
+//!   state and locks, and chat media.
 //!
 //! Anything else in the home is not read by SCV; [`Layout::strays`] lists it.
 
@@ -117,6 +117,12 @@ impl Layout {
     /// One channel's delivery state and account locks.
     pub fn channel_state(&self, channel: &str) -> PathBuf {
         self.state().join("channels").join(channel)
+    }
+
+    /// Files chat users sent, under `<channel>/<account>`, and copies of files
+    /// the model sends back, under `outbox`.
+    pub fn media(&self) -> PathBuf {
+        self.state().join("media")
     }
 
     /// Serializes SCV's own edits of `config.toml`.

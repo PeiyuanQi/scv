@@ -17,6 +17,10 @@ const TOKEN_MARGIN: Duration = Duration::from_secs(10 * 60);
 const TOKEN_CODES: [i64; 4] = [99991661, 99991663, 99991664, 99991668];
 /// Codes that mean "slow down": the same request can succeed later.
 const RATE_CODES: [i64; 4] = [99991400, 230020, 11232, 11233];
+/// The app lacks a permission scope; adding it needs the developer console.
+pub const SCOPE_CODE: i64 = 99991672;
+/// How long downloading or uploading one file may take.
+const FILE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Where one brand's services live, and which hosts its long connection may
 /// use.
@@ -141,8 +145,37 @@ pub struct Refusal(pub i64);
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Feishu refused the request (code {})", self.0)
+        if self.0 == SCOPE_CODE {
+            write!(
+                f,
+                "Feishu refused the request: the app lacks a permission (code {}); add \
+                 im:resource or im:message in its developer console and publish a version",
+                self.0
+            )
+        } else {
+            write!(f, "Feishu refused the request (code {})", self.0)
+        }
     }
+}
+
+/// Where a received file is: the message holding it, its key, and whether
+/// the resource API serves it as an `image` or a `file`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Resource {
+    pub message_id: String,
+    pub key: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+/// The outcome of one upload attempt.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Uploaded {
+    /// The key to send the file by.
+    Key(String),
+    /// Feishu refused the file; uploading it again cannot help.
+    Refused(String),
+    Retry(String),
 }
 
 impl std::error::Error for Refusal {}
@@ -273,9 +306,24 @@ impl Api {
     /// a new message to the user `to`. `uuid` makes resends of the same
     /// part idempotent for an hour.
     pub async fn send_text(&self, to: &str, reply_to: &str, text: &str, uuid: &str) -> Attempt {
+        let content = json!({"text": neutralize_mentions(text)});
+        self.send_message(to, reply_to, "text", &content, uuid)
+            .await
+    }
+
+    /// Send one message of `msg_type`, such as `image` or `file`, as
+    /// [`Api::send_text`] does text.
+    pub async fn send_message(
+        &self,
+        to: &str,
+        reply_to: &str,
+        msg_type: &str,
+        content: &Value,
+        uuid: &str,
+    ) -> Attempt {
         let body = json!({
-            "msg_type": "text",
-            "content": json!({"text": neutralize_mentions(text)}).to_string(),
+            "msg_type": msg_type,
+            "content": content.to_string(),
             "uuid": uuid,
         });
         let result = if reply_to.is_empty() {
@@ -297,6 +345,141 @@ impl Api {
                 .await
         };
         classify(result)
+    }
+
+    /// A message by ID: the message itself, or for a forwarded bundle
+    /// (`merge_forward`) the bundle followed by the messages it holds.
+    pub async fn message(&self, message_id: &str) -> Result<Vec<Value>> {
+        let path = format!("/open-apis/im/v1/messages/{}", encode_segment(message_id));
+        let (_, value) = self
+            .call(move |client, open| client.get(format!("{open}{path}")))
+            .await?;
+        match code(&value) {
+            Some(0) => Ok(value
+                .pointer("/data/items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()),
+            Some(code) => Err(Refusal(code).into()),
+            None => bail!("invalid Feishu message response"),
+        }
+    }
+
+    /// Download a file a message carries, failing beyond `max_bytes`.
+    /// Returns its bytes and the type Feishu served it as.
+    pub async fn download(
+        &self,
+        resource: &Resource,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>)> {
+        let token = self.tenant_token().await?;
+        let url = format!(
+            "{}/open-apis/im/v1/messages/{}/resources/{}",
+            self.endpoints.open,
+            encode_segment(&resource.message_id),
+            encode_segment(&resource.key)
+        );
+        let kind = if resource.kind == "image" {
+            "image"
+        } else {
+            "file"
+        };
+        let mut response = self
+            .client
+            .get(url)
+            .query(&[("type", kind)])
+            .bearer_auth(token)
+            .timeout(FILE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| anyhow!("Feishu download failed"))?;
+        let mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        // Errors come back as JSON, with a 4xx status or even a 200.
+        if !response.status().is_success()
+            || mime
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("application/json"))
+        {
+            let status = response.status().as_u16();
+            let value = read_json(response).await.unwrap_or_default();
+            if code(&value).is_some_and(|code| TOKEN_CODES.contains(&code)) {
+                self.forget_token().await;
+            }
+            return match code(&value) {
+                Some(code) if code != 0 => Err(Refusal(code).into()),
+                _ => bail!("Feishu download failed with status {status}"),
+            };
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes)
+        {
+            bail!("file is larger than the limit")
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| anyhow!("Feishu download was interrupted"))?
+        {
+            if (body.len() + chunk.len()) as u64 > max_bytes {
+                bail!("file is larger than the limit")
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok((body, mime))
+    }
+
+    /// Upload an image (`image`) or any other file (`file`, with Feishu's
+    /// `file_type`) for sending.
+    pub async fn upload(&self, kind: UploadKind<'_>, name: &str, bytes: Vec<u8>) -> Uploaded {
+        let (path, fields, part, key): (_, Vec<(&str, String)>, _, _) = match kind {
+            UploadKind::Image => (
+                "/open-apis/im/v1/images",
+                vec![("image_type", "message".to_owned())],
+                "image",
+                "/data/image_key",
+            ),
+            UploadKind::File(file_type) => (
+                "/open-apis/im/v1/files",
+                vec![
+                    ("file_type", file_type.to_owned()),
+                    ("file_name", name.to_owned()),
+                ],
+                "file",
+                "/data/file_key",
+            ),
+        };
+        let (boundary, body) = multipart(&fields, part, name, &bytes);
+        drop(bytes);
+        let result = self
+            .call(move |client, open| {
+                client
+                    .post(format!("{open}{path}"))
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(body.clone())
+                    .timeout(FILE_TIMEOUT)
+            })
+            .await;
+        let uploaded = result.as_ref().ok().and_then(|(_, value)| {
+            value
+                .pointer(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        match (classify(result), uploaded) {
+            (Attempt::Delivered, Some(key)) if !key.is_empty() => Uploaded::Key(key),
+            (Attempt::Delivered, _) => Uploaded::Retry("Feishu upload returned no key".into()),
+            (Attempt::Refused(reason), _) => Uploaded::Refused(reason),
+            (Attempt::Retry(reason), _) => Uploaded::Retry(reason),
+        }
     }
 
     /// One page of a chat's messages created from `start` to `end`, in
@@ -373,6 +556,48 @@ impl Api {
             .map(Duration::from_secs);
         Ok((self.endpoints.check_socket_url(url)?, ping))
     }
+}
+
+/// What an upload is for: a picture, or a file of Feishu's `file_type`
+/// (`pdf`, `doc`, `xls`, `ppt`, or `stream` for anything else).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadKind<'a> {
+    Image,
+    File(&'a str),
+}
+
+/// A `multipart/form-data` body of text `fields` and one file part.
+fn multipart(fields: &[(&str, String)], part: &str, name: &str, bytes: &[u8]) -> (String, Vec<u8>) {
+    let boundary = format!("scv{}", uuid::Uuid::new_v4().simple());
+    let mut body = Vec::with_capacity(bytes.len() + 512);
+    for (field, value) in fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    // Quotes and line breaks would end the header early.
+    let filename: String = name
+        .chars()
+        .map(|c| {
+            if c == '"' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{part}\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (boundary, body)
 }
 
 /// Decide what a send's response means for retrying it.

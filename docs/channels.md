@@ -156,8 +156,10 @@ and need not be JSON: any 2xx body without a non-zero `ret` or `errcode`
 acknowledges delivery.
 
 `POST /ilink/bot/getupdates` long-polls with the opaque `get_updates_buf`
-cursor. Only inbound user text messages with sender ID, message ID, context
-token, and non-empty text are accepted. iLink message IDs may be strings up to
+cursor. Only inbound user messages (`message_type = 1`) with sender ID,
+message ID, and context token are accepted, and only when they carry text or a
+file (see [WeChat media](#wechat-media)); anything else, such as tool-call
+items, is only marked seen. iLink message IDs may be strings up to
 256 bytes or unsigned 64-bit JSON integers; SCV preserves either form as an
 exact string for durable deduplication. Ignored messages are durably marked.
 Before queueing accepted work, the bridge persists an in-flight claim with the
@@ -212,8 +214,8 @@ carrying reply is refused too, the carried replies return to the store ahead
 of it. The busy notice described below is never held. Text replies are split at
 Unicode boundaries into messages of at most 16 KiB; only the first carries the
 context token. A turn's answer is kept to 64 KiB, and a longer one is cut with
-a `[reply truncated]` note instead of failing the turn. Media, typing, and
-uploads are deferred.
+a `[reply truncated]` note instead of failing the turn. Typing indicators are
+not sent.
 
 ## Feishu contract
 
@@ -278,9 +280,10 @@ it runs again. Deduplication by message ID drops anything already claimed or
 answered, including a late socket redelivery. Messages from chats SCV has not
 yet seen are not caught up.
 
-**Messages.** Text and rich-text (`post`) messages from users are answered;
-rich text becomes plain text, one paragraph per line. Other types are only
-marked seen. In a group (any `chat_type` other than `p2p`) the bot answers
+**Messages.** Every kind of user message is answered except `system`
+messages, which are only marked seen; see [Feishu media](#feishu-media) for
+files, quotes, and forwarded messages. Rich text (`post`) becomes plain text,
+one paragraph per line. In a group (any `chat_type` other than `p2p`) the bot answers
 only messages that mention it, identified by its own `open_id` from
 `/open-apis/bot/v3/info`; without that ID, group messages go unanswered.
 Mention placeholders become `@name`, and the bot's own mention is dropped.
@@ -301,6 +304,121 @@ for WeChat.
 
 **Untested:** group chats, and sign-in from company accounts whose
 administrators must approve apps.
+
+## Media
+
+Chat users can send pictures, voice messages, videos, and files, quote
+earlier messages, and forward bundles; the owner's agent can send files back.
+
+**Receiving.** The transport turns each message into text, with a marker for
+content that has no file (such as `[sticker]` or `[location: Office (31.2,
+121.5)]`), and a list of files. Before the message's turn, within its time
+limit and turn slot, the bridge fetches what the message refers to (a quoted
+message, or a forwarded bundle's messages, shown before the text) and
+downloads at most 16 files. Each download is bounded by the account's
+[media settings](configuration.md#daemon-and-component-settings): the owner's
+files up to `owner_max_mib` (50 MiB), other senders' images up to
+`others_image_max_mib` (5 MiB), and never other senders' other files. The
+platform's announced size is checked before downloading and the bytes while
+downloading. A file is saved under
+`$SCV_HOME/state/media/<channel>/<account>/<conversation>/` as
+`<random prefix>-<sender's name>`, with the name stripped of directories,
+control characters, and leading dots; files are mode `0600` and directories
+`0700`. The conversation directory is a digest of the conversation, so sender
+IDs never become paths. Nothing downloaded is ever executed. The type comes
+from the platform's declared type, then the file's magic bytes, then its name.
+
+The saved files go to the turn as `turn.start` attachments (see
+[protocol](protocol.md#turnstart)): the model sees images directly when it
+accepts image input, and the owner's model sees every file's path, so it can
+read it or hand it to an agent. A file that is not downloaded leaves a note
+for the model, such as `[file a.zip: not opened for this sender]`,
+`[image: download failed]`, or `[video clip.mp4: not downloaded, larger than
+the 50 MB limit]`; a voice message keeps its transcript in the note. A message
+with no text, no downloaded file, and no voice transcript gets a short reply
+instead of a turn, such as `SCV can read text and pictures from you here, but
+not a file.` Files
+and copies of sent files are removed after `keep_days` (7), checked when the
+account starts and hourly.
+
+**Sending.** In an owner's session the model can call
+[`chat_attach`](tools.md#sending-files-to-a-chat-chat_attach), which copies
+a checked file into `$SCV_HOME/state/media/outbox`. The bridge reads
+attachments from the turn's `tool.completed` events, keeps at most 8 regular
+files that are inside the outbox, and records them in the reply's durable
+pending delivery, each with its own stable client ID. It sends them after the
+text parts, in order, recording progress after each, so a restart resumes
+with the next file and resends an interrupted one with the same client ID. A
+file the platform refuses is skipped and logged; a refused text drops its
+files. Each copy is deleted once sent or skipped. Captions go into the reply
+text, and files beyond the limit, or outside the outbox, are dropped with a
+`[N attached files could not be sent]` note. Background report turns may
+attach files too.
+
+### WeChat media
+
+iLink message items have a type: 1 text, 2 image, 3 voice, 4 file, 5 video.
+Media items point at the CDN (`https://novac2c.cdn.weixin.qq.com/c2c`): a
+`full_url`, or an `encrypt_query_param` for `…/download?encrypted_query_param=`,
+and an AES-128 key, either `image_item.aeskey` (hex, preferred for images) or
+`media.aes_key` (base64 of the 16 raw bytes, or of their 32 hex digits). The
+CDN stores files encrypted with AES-128-ECB and PKCS#7 padding. SCV downloads
+only over HTTPS from `qq.com` hosts, decrypts, and checks the padding. Voice
+items give their encoding (`encode_type` 6 is SILK, 5 AMR, 7 MP3, 8 Ogg) and
+often iLink's transcript (`voice_item.text`); SCV keeps the audio as it is
+and passes the transcript. A quoted message (`ref_msg`) becomes
+`[Quoting: <title> | <text or [image]>]` before the text, and its file, if
+any, is downloaded like the message's own. File names come from
+`file_item.file_name`.
+
+To send, SCV reads the outbox copy, picks the upload type (1 image, 2 video,
+3 file), and asks `POST /ilink/bot/getuploadurl` for an address with a random
+file key and AES key, the file's MD5 and sizes, and `no_need_thumb`. It posts
+the encrypted bytes to the returned `upload_full_url` (or builds
+`…/upload?encrypted_query_param=…&filekey=…`), again only HTTPS on `qq.com`,
+and takes the CDN's `x-encrypted-param` reply header. Then `sendmessage`
+sends an `image_item`, `video_item`, or `file_item` pointing at it, with the
+key's hex digits in base64 as `aes_key`. Because iLink delivers one message
+per context token, only the reply's first message, text or file, carries the
+token; files after text go out unprompted. A 4xx from `getuploadurl` or the
+CDN, or a refusal code, is final; other failures retry up to three times with
+backoff, then again later with the same client ID.
+
+### Feishu media
+
+Message types map as follows. `image` (`image_key`), `file` (`file_key`,
+`file_name`), `audio` (`file_key`, Opus), and `media` (video, `file_key`,
+`file_name`) become files; a `post` keeps its embedded `img` and `media`
+elements as files and `emotion` elements as `[emoji]`. `sticker`,
+`share_chat`, `share_user`, `location`, and `interactive` cards become text:
+`[sticker]` (Feishu does not serve sticker files), `[shared a group chat]`,
+`[shared a contact card]`, `[location: …]`, and `[card]` with the card's
+titles and text, at most 2000 characters. `merge_forward` becomes
+`[Forwarded messages]`; other types become `[<type> message]`, and `system`
+messages are only marked seen. Files download through
+`GET /open-apis/im/v1/messages/{message_id}/resources/{key}?type=image|file`
+(`image` for images, `file` for the rest), from the message that holds them;
+Feishu reports errors as JSON, sometimes with status 200, which SCV treats as
+failures.
+
+A reply to an earlier message (`parent_id`) fetches that message through
+`GET /open-apis/im/v1/messages/{parent_id}` and shows it as
+`[Quoting: <text>]` (or `an image`, `a file`, …), with its files. A forwarded
+bundle fetches `GET /open-apis/im/v1/messages/{message_id}`, whose items after
+the bundle itself name it in `upper_message_id`: up to 50 of them, and 16 KiB
+of text, are listed under `[The forwarded messages:]`, with their files.
+
+To send, SCV uploads with a `multipart/form-data` request: images of at most
+10 MiB to `POST /open-apis/im/v1/images` (`image_type=message`), anything else,
+larger images included, to `POST /open-apis/im/v1/files` with `file_type`
+`pdf`, `doc`, `xls`, `ppt`, or `stream` and the file name. It then sends an
+`image` or `file` message like a text part: a reply to the message, or a new
+message to the owner's `open_id`, with the file's client ID as `uuid`. Checked
+live on 2026-09-24, the scan-created app may read message resources and
+upload images and files without any console change. An app that lacks a
+scope gets code 99991672; SCV then logs that `im:resource` or `im:message` must
+be added in the app's developer console and a version published, and the
+model sees `[… download failed]`.
 
 ## Background reports
 
@@ -436,9 +554,10 @@ state use atomic writes and mode `0600` on Unix; the directories between the
 SCV home and them are mode `0700`. Account names contain only ASCII letters, digits, `_`, and `-`.
 Project configuration cannot select accounts, workspaces, or remote authority.
 
-`scv-channels` owns durable state, claims, sender sessions, held replies, and
-delivery retries; `scv-clawbot` owns iLink authentication, polling, message
-parsing, and sending; `scv-feishu` owns Feishu sign-in, the long connection,
-catch-up, message parsing, and sending. `scv-server::components` owns lifecycle and
+`scv-channels` owns durable state, claims, sender sessions, held replies,
+media fetching, storage, and retention, and delivery retries; `scv-clawbot`
+owns iLink authentication, polling, message parsing, the CDN's encryption, and
+sending; `scv-feishu` owns Feishu sign-in, the long connection, catch-up,
+message parsing, resources, uploads, and sending. `scv-server::components` owns lifecycle and
 health. Account selection uses `--account` (default `default`), not project
 configuration. The [quality contract](quality.md) defines local-only verification.

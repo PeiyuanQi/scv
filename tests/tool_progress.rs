@@ -159,6 +159,7 @@ async fn delegated_agent_events_arrive_as_bounded_tool_progress() {
                     request_id: "turn".into(),
                     session_id: id.clone(),
                     prompt: "delegate".into(),
+                    attachments: Vec::new(),
                 })
                 .await;
                 session_id = Some(id);

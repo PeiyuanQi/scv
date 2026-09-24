@@ -54,6 +54,48 @@ deadline sends `KILL` immediately. SCV also cleans up descendants after the
 group leader exits and bounds output-pipe draining, so a background child cannot
 keep a tool call alive indefinitely.
 
+## Sending files to a chat (`chat_attach`)
+
+```json
+{"path":"out/chart.png","caption":"Sales by month"}
+```
+
+Offered only in a tool-enabled session whose client named a chat `channel`
+in `session.start`: an account owner's WeChat or Feishu session. It sends a
+file to the user after the reply text: PNG, JPEG, GIF, WebP, and BMP images
+arrive as pictures, video as video where the platform has it, and anything
+else as a file. `path` is absolute or relative to the workspace; `caption` is
+optional, at most 1 KiB, and goes into the reply text as `<name>: <caption>`.
+Call it once per file; a reply carries at most 8 files, and the rest are
+reported as not sent. The tool has network risk, since the file leaves the
+host; a chat owner's session approves it like any other call.
+
+The model's input can carry injected instructions, so the tool refuses, after
+resolving symlinks:
+
+- anything that is not a regular, non-empty file of at most 25 MiB;
+- the SCV instance directory (`SCV_HOME`: its settings, credentials, agent
+  homes, and state), except the media directory holding what chat users sent;
+- credential and key locations under the user's home: `.ssh`, `.gnupg`,
+  `.aws`, `.azure`, `.kube`, `.docker`, `.netrc`, `.git-credentials`,
+  `.npmrc`, `.pypirc`, `.cargo/credentials(.toml)`, `.config/gh`,
+  `.config/gcloud`, `.config/hub`, browser profiles, `.password-store`,
+  `.local/share/keyrings`, and the `.codex`, `.claude`, `.claude.json`,
+  `.grok`, and `.scv` directories;
+- host secrets: `/etc/shadow`, `/etc/gshadow`, `/etc/ssh`, `/etc/sudoers`,
+  `/root`, `/proc`, `/sys`, and `/dev`;
+- any path with a secret-like name: `.env` files, names containing
+  `credential` or `private_key`, `.pem`, `.key`, `.p12`, `.pfx`, `.kdbx`, and
+  SSH key names such as `id_ed25519`.
+
+It then opens the file without following a final symlink, checks it again
+through the open handle, and copies it into the channels' media outbox
+(`$SCV_HOME/state/media/outbox`, mode `0600`); the result reports that copy.
+The chat bridge sends only regular files inside the outbox, from a durable
+delivery record, and deletes each copy once it is sent or refused. This keeps
+a prompt from mailing out keys by path; it is not a sandbox, and a model with
+`bash` can still copy data elsewhere.
+
 ## `web_fetch`
 
 ```json

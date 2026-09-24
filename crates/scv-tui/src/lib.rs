@@ -77,6 +77,7 @@ pub async fn run_exec(
                 request_id: request_id.clone(),
                 session_id: session.id.clone(),
                 prompt,
+                attachments: Vec::new(),
             })
             .await?;
         let mut printed_delta = false;
@@ -1367,6 +1368,7 @@ async fn submit_input(client: &mut Client, app: &mut App) -> Result<()> {
                 request_id: new_id(),
                 session_id: app.session_id.clone(),
                 prompt: prompt.clone(),
+                attachments: Vec::new(),
             })
             .await?;
         if !app.running {
@@ -1897,6 +1899,7 @@ mod tests {
             revision: 1,
             prompt: "queued work".into(),
             submitter: "test".into(),
+            attachments: Vec::new(),
         });
         app.queue_paused = true;
         app.queue_selected = Some(0);

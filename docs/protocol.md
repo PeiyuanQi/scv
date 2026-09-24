@@ -121,8 +121,11 @@ users know it (`WeChat`, `Feishu`, or `Lark`), at most 32 bytes without control
 characters; anything else is rejected with `invalid_request`. The server then
 adds a *Chat channel* section to the system prompt: the user reads short
 plain-text chat messages there, only the last message of each turn reaches
-them, and they never see tool calls or their output. A client that is not a
-chat omits it.
+them, and they never see tool calls or their output. A chat client also
+delivers files the model attaches to its reply, so a tool-enabled session
+with a channel offers the model `chat_attach` (see
+[tools](tools.md#sending-files-to-a-chat-chat_attach)). A client that is not
+a chat omits it.
 
 `auto_approve` is optional: `true` declares that this client answers every
 approval request of the session with an approval, without asking anyone. A
@@ -142,11 +145,25 @@ could not grant itself. Both fields are additive and keep protocol version 3.
 
 ```json
 {"type":"turn.start","request_id":"3","session_id":"...","prompt":"Fix the failing test."}
+{"type":"turn.start","request_id":"4","session_id":"...","prompt":"what is this?","attachments":[{"kind":"image","path":"/home/u/.scv/state/media/wechat/default/1a2b/9f3e-photo.jpg","name":"photo.jpg","mime":"image/jpeg","size":48213}]}
 ```
 
 An idle session starts this prompt immediately. When another turn is active,
-the server appends it to the session queue and emits `queue.enqueued`. Empty
-prompts are rejected.
+the server appends it to the session queue, attachments included, and emits
+`queue.enqueued`. A prompt may be empty only when it has attachments.
+
+`attachments` is optional: at most 16 files already saved on the daemon's
+host, such as media a chat user sent. Each has a `kind` (`image`, `audio`,
+`video`, `file`, or `sticker`), an absolute `path` to a regular file (not a
+symlink), a byte `size`, and optionally the sender's `name`, a `mime` type,
+and for a voice message the platform's `transcript`; anything else is
+refused with `invalid_request`. The server adds a list of the files to the
+prompt (a tool-free session sees names, types, and sizes but no paths) and
+sends each PNG, JPEG, GIF, or WebP image of at most 8 MiB to the model as
+image input when `provider.image_input` allows (see
+[configuration](configuration.md)). History keeps image paths, not bytes: the
+newest eight images are read again for each request, and an image deleted
+since is replaced by a note.
 
 ### Queue operations
 
@@ -253,8 +270,8 @@ only requests tools.
 ### Shared queue
 
 On session start, the server emits a `queue.snapshot` containing the
-ordered queue entries, each with `queue_id`, `revision`, prompt, and submitter
-label. It emits `queue.enqueued`, `queue.updated`, `queue.moved`,
+ordered queue entries, each with `queue_id`, `revision`, prompt, submitter
+label, and the `attachments` of its `turn.start` when it had any. It emits `queue.enqueued`, `queue.updated`, `queue.moved`,
 `queue.removed`, and `queue.dequeued` on that connection. Queue events carry the
 session sequence and never reorder relative to terminal turn events. The server
 validates and assigns IDs, revisions, and positions; clients never infer queue
@@ -273,6 +290,13 @@ daemon socket does not imply cross-client queue broadcast or session attachment.
 
 Arguments and outputs are bounded by configuration before serialization. A
 denied call completes with `success: false` and a model-visible denial message.
+
+A successful `chat_attach` call's output is
+`{"attached":{"path":…,"name":…,"size":…,"caption":…},"note":…}`, where
+`path` is a private copy in the channels' media outbox. A chat client reads it
+from `tool.completed` (`scv_protocol::reply_attachment`) and sends the file
+after the turn's reply; the file belongs to the turn its `request_id` names,
+like assistant text.
 
 `tool.progress` carries short status lines a running tool reported: for a
 delegated agent, the commands it runs, files it changes, searches, and tools

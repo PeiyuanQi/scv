@@ -1,6 +1,7 @@
 //! SCV's authoritative stdio server.
 
 mod agents;
+mod attachments;
 pub mod components;
 mod config;
 pub mod imports;
@@ -330,10 +331,10 @@ pub fn service_unit_path() -> anyhow::Result<std::path::PathBuf> {
 }
 use scv_core::{
     AgentError, AgentRuntime, ApprovalGate, ApprovalRequest, BudgetContextPolicy, CoreEvent,
-    EventSink, Message, ToolRegistry, ToolRisk,
+    EventSink, Message, ToolRegistry, ToolRisk, TurnInput,
 };
 use scv_protocol::{
-    ClientMessage, DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary,
+    Attachment, ClientMessage, DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary,
     ORIGIN_BACKGROUND, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, TurnOrigin, Usage,
 };
 use scv_provider_openai::OpenAiProvider;
@@ -850,7 +851,7 @@ where
                     ClientMessage::SessionAttach { request_id, .. } => {
                         send_error(&output_tx, &request_id, "unsupported", "session attach requires the shared socket server", false, server_frame_limit(&session)).await?;
                     }
-                    ClientMessage::TurnStart { request_id, session_id, prompt } => {
+                    ClientMessage::TurnStart { request_id, session_id, prompt, attachments } => {
                         let Some(current) = session.as_ref() else {
                             send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?;
                             continue;
@@ -859,12 +860,16 @@ where
                             send_error(&output_tx, &request_id, "session_not_found", "session id does not match", false, server_frame_limit(&session)).await?;
                             continue;
                         }
-                        if prompt.trim().is_empty() || prompt.len() > PROMPT_LIMIT_BYTES {
+                        if (prompt.trim().is_empty() && attachments.is_empty()) || prompt.len() > PROMPT_LIMIT_BYTES {
                             send_error(&output_tx, &request_id, "invalid_request", "prompt must be non-empty and no larger than 256 KiB", false, server_frame_limit(&session)).await?;
                             continue;
                         }
+                        if let Err(message) = attachments::validate(&attachments) {
+                            send_error(&output_tx, &request_id, "invalid_request", &message, false, server_frame_limit(&session)).await?;
+                            continue;
+                        }
                         if active.is_some() {
-                            let entry = match current.enqueue(prompt, request_id.clone()).await {
+                            let entry = match current.enqueue(prompt, request_id.clone(), attachments).await {
                                 Ok(entry) => entry,
                                 Err(code) => { send_error(&output_tx, &request_id, code, "session queue limit reached", false, server_frame_limit(&session)).await?; continue; }
                             };
@@ -875,7 +880,8 @@ where
                             continue;
                         }
                         let starter = TurnStarter { output: &output_tx, approvals: &approvals, done: &done_tx, tasks: &tasks, cancellation: &cancellation };
-                        active = Some(starter.start(current, Uuid::new_v4().to_string(), request_id, prompt, None).await?);
+                        let input = current.turn_input(&prompt, &attachments);
+                        active = Some(starter.start(current, Uuid::new_v4().to_string(), request_id, input, None).await?);
                     }
                     ClientMessage::QueueUpdate { request_id, session_id, queue_id, revision, prompt } => {
                         let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
@@ -1007,7 +1013,8 @@ where
                             turn_id: turn_id.clone(),
                         }, current.config.protocol.max_server_frame_bytes).await?;
                         let starter = TurnStarter { output: &output_tx, approvals: &approvals, done: &done_tx, tasks: &tasks, cancellation: &cancellation };
-                        active = Some(starter.start(current, turn_id, entry.submitter, entry.prompt, None).await?);
+                        let input = current.turn_input(&entry.prompt, &entry.attachments);
+                        active = Some(starter.start(current, turn_id, entry.submitter, input, None).await?);
                     }
                     // Report finished background jobs once the user's own work is done.
                     if active.is_none() && background_ready
@@ -1301,19 +1308,28 @@ struct Session {
     paused: Arc<std::sync::atomic::AtomicBool>,
     /// Background agent jobs, shared with the session's tools.
     background: Option<Arc<BackgroundJobs>>,
+    /// Whether the model has tools, and so may see attachments' paths.
+    tools: bool,
 }
 
 impl Session {
+    /// The model's input for a client's prompt and attachments.
+    fn turn_input(&self, prompt: &str, attachments: &[Attachment]) -> TurnInput {
+        attachments::turn_input(prompt, attachments, self.tools)
+    }
+
     async fn enqueue(
         &self,
         prompt: String,
         submitter: String,
+        attachments: Vec<Attachment>,
     ) -> std::result::Result<QueueEntry, &'static str> {
         let entry = QueueEntry {
             queue_id: Uuid::new_v4().to_string(),
             revision: 1,
             prompt,
             submitter,
+            attachments,
         };
         let mut queue = self.queue.lock().await;
         let bytes: usize = queue.iter().map(|item| item.prompt.len()).sum();
@@ -1489,7 +1505,7 @@ impl TurnStarter<'_> {
         current: &Session,
         turn_id: String,
         request_id: String,
-        prompt: String,
+        prompt: TurnInput,
         origin: Option<TurnOrigin>,
     ) -> Result<ActiveTurn> {
         let cancellation = self.cancellation.child_token();
@@ -1571,7 +1587,7 @@ impl TurnStarter<'_> {
             current,
             Uuid::new_v4().to_string(),
             request_id,
-            prompt,
+            prompt.into(),
             Some(origin),
         )
         .await
@@ -1654,6 +1670,9 @@ fn agent_tool_names(tools: &ToolRegistry) -> Vec<String> {
 
 /// `delegation_depth` is the depth the client declared in `session.start`
 /// (0 for a direct client); the session's delegated runs count from it.
+///
+/// A chat client (one naming its `channel`) sends files the model attaches,
+/// so a session with tools then offers `chat_attach`.
 async fn build_session(
     cwd: &str,
     overrides: ConfigOverrides,
@@ -1687,7 +1706,8 @@ async fn build_session(
         Duration::from_secs(provider_config.timeout_seconds),
         config.provider_limits(),
         provider_config.headers.clone(),
-    )?;
+    )?
+    .with_image_input(provider_config.image_input);
     if !no_tools && config.hosted_web_search() {
         provider = provider.with_web_search();
     }
@@ -1718,6 +1738,9 @@ async fn build_session(
             depth: delegation_depth,
         });
         tools.background = background.clone();
+        if client.channel.is_some() {
+            tools.chat_attach = chat_attach_config();
+        }
         let mut registry = builtin_registry(
             tools,
             skills.map,
@@ -1760,8 +1783,24 @@ async fn build_session(
             queue: Arc::new(Mutex::new(VecDeque::new())),
             paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             background,
+            tools: !no_tools,
         },
         finished,
+    ))
+}
+
+/// `chat_attach` for a chat session: it copies checked files into the
+/// channels' media outbox, and refuses the SCV instance itself except its
+/// media, secret locations in the user's home, and host secrets.
+fn chat_attach_config() -> Option<scv_tools::chat_attach::ChatAttachConfig> {
+    let scv_home = config::user_home_path()?;
+    let media = scv_client::Layout::new(&scv_home).media();
+    Some(scv_tools::chat_attach::ChatAttachConfig::standard(
+        dirs::home_dir().as_deref(),
+        &scv_home,
+        scv_channels::media::outbox(&media),
+        vec![media],
+        scv_channels::media::MAX_REPLY_FILE_BYTES,
     ))
 }
 

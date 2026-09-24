@@ -1,7 +1,9 @@
 //! A channel conversation's session on the single SCV Unix-socket daemon.
 
 use anyhow::{Context, Result, anyhow, bail};
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_protocol::{
+    Attachment, ClientMessage, PROTOCOL_VERSION, PeerInfo, ReplyAttachment, ServerEvent,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::Instant;
@@ -11,6 +13,22 @@ use tokio::net::{
     unix::{OwnedReadHalf, OwnedWriteHalf},
 };
 use uuid::Uuid;
+
+/// A turn's answer: its text and the files the model attached to it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Reply {
+    pub text: String,
+    pub files: Vec<ReplyAttachment>,
+}
+
+impl Reply {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            files: Vec::new(),
+        }
+    }
+}
 
 pub struct Session {
     stdin: OwnedWriteHalf,
@@ -29,11 +47,13 @@ pub struct Session {
     current: Option<(String, Option<String>)>,
     /// Turns the server started itself (background reports), by request ID,
     /// with the answer so far.
-    server_turns: HashMap<String, String>,
+    server_turns: HashMap<String, Reply>,
     /// This client's abandoned turns, whose late events are ignored.
     stale: HashSet<String>,
     /// Finished server-started turns' answers, waiting to be sent.
-    reports: VecDeque<String>,
+    reports: VecDeque<Reply>,
+    /// Files the model attached during this client's current turn.
+    files: Vec<ReplyAttachment>,
     /// Background jobs this session started that have not been reported.
     background: HashMap<String, JobInfo>,
     /// What this turn's agent calls were asked to do, by call ID, until they
@@ -49,7 +69,8 @@ impl Session {
     }
 
     /// Start a session for a conversation on `channel` (its user-facing
-    /// name, such as `WeChat`), so the model knows it is answering a chat.
+    /// name, such as `WeChat`), so the model knows it is answering a chat
+    /// and, with tools, may attach files to its replies.
     pub async fn connect(
         socket: &Path,
         workspace: &Path,
@@ -74,6 +95,7 @@ impl Session {
             server_turns: HashMap::new(),
             stale: HashSet::new(),
             reports: VecDeque::new(),
+            files: Vec::new(),
             background: HashMap::new(),
             tasks: HashMap::new(),
             broken: false,
@@ -211,13 +233,13 @@ impl Session {
     }
 
     /// Answers of background reports that finished during `turn`.
-    pub fn take_reports(&mut self) -> Vec<String> {
+    pub fn take_reports(&mut self) -> Vec<Reply> {
         self.reports.drain(..).collect()
     }
 
     /// Wait for the next background report while no turn of ours runs.
     /// Cancel-safe.
-    pub async fn next_report(&mut self) -> Result<String> {
+    pub async fn next_report(&mut self) -> Result<Reply> {
         loop {
             if let Some(report) = self.reports.pop_front() {
                 return Ok(report);
@@ -246,8 +268,10 @@ impl Session {
                 }
             }
             ServerEvent::ToolCompleted {
+                request_id,
                 call_id,
                 name,
+                success,
                 output,
                 ..
             } => {
@@ -265,13 +289,23 @@ impl Session {
                 for job in update.settled {
                     self.background.remove(&job);
                 }
+                if let Some(file) = scv_protocol::reply_attachment(name, *success, output) {
+                    // Like its text, a file belongs to a server-started turn,
+                    // an abandoned one (dropped), or else the current turn.
+                    if let Some(report) = self.server_turns.get_mut(request_id) {
+                        report.files.push(file);
+                    } else if !self.stale.contains(request_id) && self.current.is_some() {
+                        self.files.push(file);
+                    }
+                }
             }
             ServerEvent::TurnStarted {
                 request_id,
                 origin: Some(origin),
                 ..
             } => {
-                self.server_turns.insert(request_id.clone(), String::new());
+                self.server_turns
+                    .insert(request_id.clone(), Reply::default());
                 for job in &origin.jobs {
                     self.background.remove(job);
                 }
@@ -320,19 +354,19 @@ impl Session {
             }
             ServerEvent::AssistantCompleted { content, .. } => {
                 if let Some(answer) = self.server_turns.get_mut(&request) {
-                    answer.clear();
-                    append_capped(answer, &content, MAX_REPORT_BYTES);
+                    answer.text.clear();
+                    append_capped(&mut answer.text, &content, MAX_REPORT_BYTES);
                 }
             }
             ServerEvent::AssistantDelta { content, .. } => {
                 if let Some(answer) = self.server_turns.get_mut(&request) {
-                    append_capped(answer, &content, MAX_REPORT_BYTES);
+                    append_capped(&mut answer.text, &content, MAX_REPORT_BYTES);
                 }
             }
             ServerEvent::TurnCompleted { .. } => {
                 self.stale.remove(&request);
                 if let Some(answer) = self.server_turns.remove(&request)
-                    && !answer.trim().is_empty()
+                    && (!answer.text.trim().is_empty() || !answer.files.is_empty())
                 {
                     self.reports.push_back(answer);
                 }
@@ -340,7 +374,7 @@ impl Session {
             ServerEvent::TurnFailed { .. } => {
                 self.stale.remove(&request);
                 if self.server_turns.remove(&request).is_some() {
-                    self.reports.push_back(REPORT_FAILURE.into());
+                    self.reports.push_back(Reply::text(REPORT_FAILURE));
                 }
             }
             ServerEvent::TurnCancelled { .. } => {
@@ -373,16 +407,23 @@ impl Session {
     }
 
     /// Run one turn and return its answer, at most `max_bytes` (a longer
-    /// answer is cut with a note). Background reports finishing meanwhile
-    /// wait in `take_reports`.
-    pub async fn turn(&mut self, prompt: &str, max_bytes: usize) -> Result<String> {
+    /// answer is cut with a note), and the files the model attached.
+    /// Background reports finishing meanwhile wait in `take_reports`.
+    pub async fn turn(
+        &mut self,
+        prompt: &str,
+        attachments: Vec<Attachment>,
+        max_bytes: usize,
+    ) -> Result<Reply> {
         self.last_used = Instant::now();
         let request_id = Uuid::new_v4().to_string();
         self.current = Some((request_id.clone(), None));
+        self.files.clear();
         self.send(&ClientMessage::TurnStart {
             request_id,
             session_id: self.session_id.clone(),
             prompt: prompt.to_owned(),
+            attachments,
         })
         .await?;
         let mut answer = String::new();
@@ -415,7 +456,10 @@ impl Session {
                     self.tasks.clear();
                     // Idle expiry counts from the end of long turns too.
                     self.last_used = Instant::now();
-                    return Ok(answer);
+                    return Ok(Reply {
+                        text: answer,
+                        files: std::mem::take(&mut self.files),
+                    });
                 }
                 ServerEvent::TurnFailed { message, .. } => {
                     self.current = None;
