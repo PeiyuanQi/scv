@@ -1,7 +1,5 @@
 //! Process-level lifecycle tests use an isolated home and no external services.
-mod common;
-
-use common::Isolated;
+use crate::support::Isolated;
 use scv_protocol::{
     ClientMessage, ComponentState, DaemonCommand, DaemonStatus, PROTOCOL_VERSION, PeerInfo,
     RemoteTools, ServerEvent,
@@ -297,7 +295,9 @@ fn write_config(home: &Path, contents: &str) {
 
 /// Writes a private file two levels below the instance home, creating its
 /// private parent directories.
-fn write_private(path: &Path, contents: &str) {
+/// Write an account file with mode 0600 and tighten its two parent
+/// directories to 0700, as SCV requires of its credential store.
+fn write_account_file(path: &Path, contents: &str) {
     let parent = path.parent().unwrap();
     std::fs::create_dir_all(parent).unwrap();
     for directory in [parent, parent.parent().unwrap()] {
@@ -313,11 +313,11 @@ async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_rea
     let workspace = tempfile::tempdir().unwrap();
     let account = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1","bot_id":"bot-test","user_id":"user-test"}"#;
     // An account saved in the layout before 0.2.0 is ignored, not moved.
-    write_private(
+    write_account_file(
         &home.path().join("channels/wechat/accounts/old.json"),
         account,
     );
-    write_private(&home.path().join("credentials/wechat/test.json"), account);
+    write_account_file(&home.path().join("credentials/wechat/test.json"), account);
     let config = home.path().join("config.toml");
     let text = "# Chat accounts\n[channels.wechat.test] # hand-written\nenabled = false\nremote_tools = \"owner\"\n";
     write_config(home.path(), text);
@@ -394,13 +394,13 @@ async fn feishu_accounts_run_beside_wechat_and_outlive_its_discovery_failure() {
     let workspace = tempfile::tempdir().unwrap();
     let account = r#"{"app_id":"cli_a1b2c3d4","app_secret":"test-secret-never-in-status","brand":"feishu","owner_open_id":"ou_owner"}"#;
     let settings = "[channels.feishu.default]\nenabled = false\nremote_tools = \"owner\"\n";
-    write_private(
+    write_account_file(
         &home.path().join("credentials/feishu/default.json"),
         account,
     );
     write_config(home.path(), settings);
     // Unreadable WeChat credentials fail WeChat discovery alone.
-    write_private(&home.path().join("credentials/wechat"), "not a directory");
+    write_account_file(&home.path().join("credentials/wechat"), "not a directory");
     let mut child = start(home.path(), workspace.path());
     status(home.path()).await;
     assert!(
@@ -462,10 +462,12 @@ async fn channel_login_options_stay_with_their_platform_and_ids_are_checked_firs
             .unwrap();
         // The secret arrives on stdin, never as an argument.
         let mut stdin = child.stdin.take().unwrap();
-        stdin
-            .write_all(b"test-secret-never-printed\n")
-            .await
-            .unwrap();
+        match stdin.write_all(b"test-secret-never-printed\n").await {
+            Ok(()) => {}
+            // scv may refuse the options and exit before reading stdin.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(error) => panic!("write the secret: {error}"),
+        }
         drop(stdin);
         let output = child.wait_with_output().await.unwrap();
         assert!(!output.status.success(), "{args:?}");

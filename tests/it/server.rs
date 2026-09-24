@@ -1,6 +1,4 @@
-mod common;
-
-use common::Isolated;
+use crate::support::Isolated;
 use std::{
     io::{Read, Write},
     net::TcpListener,

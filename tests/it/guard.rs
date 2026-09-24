@@ -1,4 +1,4 @@
-//! Repository guards that run with the tests: integration tests never read the
+//! Repository guards that run with the tests: black-box tests never read the
 //! developer's real SCV home, and unit tests live where docs/quality.md
 //! ("Test layout") puts them.
 
@@ -8,14 +8,11 @@ use std::path::{Path, PathBuf};
 #[test]
 fn every_spawned_scv_binary_is_isolated() {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut sources = Vec::new();
+    rust_files(&tests, &mut sources);
     let mut unisolated = Vec::new();
-    for entry in std::fs::read_dir(&tests).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_none_or(|extension| extension != "rs")
-            || path
-                .file_name()
-                .is_some_and(|name| name == "isolation_guard.rs")
-        {
+    for path in sources {
+        if path.ends_with("it/guard.rs") {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
@@ -36,7 +33,7 @@ fn every_spawned_scv_binary_is_isolated() {
     }
     assert!(
         unisolated.is_empty(),
-        "spawn SCV binaries with `common::Isolated::isolated(home)`: {unisolated:?}"
+        "spawn SCV binaries with `support::Isolated::isolated(home)`: {unisolated:?}"
     );
 }
 
@@ -44,9 +41,6 @@ fn every_spawned_scv_binary_is_isolated() {
 /// layout rule and move to their `tests.rs` one crate at a time; the list may
 /// only shrink.
 const INLINE_TEST_ALLOWLIST: &[&str] = &[
-    "crates/scv-core/src/lib.rs",
-    "crates/scv-protocol/src/lib.rs",
-    "crates/scv-provider-openai/src/lib.rs",
     "crates/scv-tools/src/acp_agent.rs",
     "crates/scv-tools/src/adapters.rs",
     "crates/scv-tools/src/agent_choice.rs",
@@ -60,7 +54,6 @@ const INLINE_TEST_ALLOWLIST: &[&str] = &[
     "crates/scv-tools/src/live.rs",
     "crates/scv-tools/src/scv_agent.rs",
     "crates/scv-tools/src/web.rs",
-    "crates/scv-tui/src/lib.rs",
 ];
 
 #[test]

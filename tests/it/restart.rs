@@ -1,9 +1,7 @@
 //! `scv restart-watchdog` against a fake `systemctl` and a fake daemon that
 //! reports the version written in the installed binary.
 
-mod common;
-
-use common::Isolated;
+use crate::support::Isolated;
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::PermissionsExt,

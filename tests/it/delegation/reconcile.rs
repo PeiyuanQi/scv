@@ -1,17 +1,12 @@
 //! Delegated runs outlive a killed SCV process only until the next reconcile.
-#![cfg(target_os = "linux")]
-
-mod common;
-
-use common::Isolated;
+use crate::support::{Isolated, read_http_request, sse_response, tagged, write_private};
 use std::{
-    io::{Read as _, Write as _},
+    io::Write as _,
     net::TcpListener,
     os::unix::fs::PermissionsExt as _,
-    path::Path,
     process::Stdio,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
@@ -22,32 +17,7 @@ use tokio::{
     time::timeout,
 };
 
-fn write_private(path: &Path, contents: &str) {
-    std::fs::write(path, contents).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
 /// Processes whose environment tags them with `handle`.
-fn tagged(handle: &str) -> Vec<u32> {
-    std::fs::read_dir("/proc")
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-            let environ = std::fs::read(entry.path().join("environ")).ok()?;
-            environ
-                .split(|byte| *byte == 0)
-                .filter_map(|entry| entry.strip_prefix(b"SCV_PARENT="))
-                .any(|chain| {
-                    String::from_utf8_lossy(chain)
-                        .split(';')
-                        .any(|entry| entry.rsplit('/').next() == Some(handle))
-                })
-                .then_some(pid)
-        })
-        .collect()
-}
-
 #[tokio::test]
 async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
     // A provider that asks for one agent_claude call.
@@ -59,14 +29,13 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
             "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"agent_claude\"}}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
         );
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0u8; 65536];
-        let _ = stream.read(&mut request);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(response.as_bytes()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        read_http_request(&mut reader);
+        reader
+            .get_mut()
+            .write_all(sse_response(body).as_bytes())
+            .unwrap();
     });
 
     let home = tempfile::tempdir().unwrap();
@@ -137,7 +106,10 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
     let mut approved = false;
     let registry = DelegationRegistry::new(&home_path);
     let mut record = None;
-    for _ in 0..400 {
+    // Poll for events and the record under one generous deadline: a busy
+    // machine may take a while to start the server and the agent.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
         if let Ok(Ok(Some(line))) = timeout(Duration::from_millis(25), lines.next_line()).await {
             match serde_json::from_str::<ServerEvent>(&line).unwrap() {
                 ServerEvent::SessionStarted { session_id: id, .. } => {
@@ -189,10 +161,8 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
 
     let report = registry.reconcile().await;
     assert_eq!(report.reaped, vec![record.handle.clone()]);
-    for _ in 0..100 {
-        if tagged(&record.handle).is_empty() {
-            break;
-        }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !tagged(&record.handle).is_empty() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(

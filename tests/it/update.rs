@@ -1,6 +1,4 @@
-mod common;
-
-use common::Isolated;
+use crate::support::Isolated;
 use std::{os::unix::fs::PermissionsExt, process::Command};
 
 fn update(install_succeeds: bool) -> (std::process::Output, String) {
