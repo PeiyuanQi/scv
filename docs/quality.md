@@ -158,10 +158,7 @@ finds both by path and the source file holds only the implementation:
 
 `tests/it/guard.rs` enforces the rule: a `#[test]` or
 `#[tokio::test]` in any other source file fails it, and so does a test file
-that its parent module never declares (such a file would never run). Source
-files that held inline tests before the rule are listed in its
-`INLINE_TEST_ALLOWLIST`; the list only shrinks, and the guard fails when a
-listed file no longer holds tests.
+that its parent module never declares (such a file would never run).
 
 Run one crate's unit tests with `cargo test -p <crate> [<name filter>]`, and
 the black-box tests of one area with `cargo test -p scv-cli --test it <module>::`

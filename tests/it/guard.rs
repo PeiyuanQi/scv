@@ -2,7 +2,6 @@
 //! developer's real SCV home, and unit tests live where docs/quality.md
 //! ("Test layout") puts them.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -37,25 +36,6 @@ fn every_spawned_scv_binary_is_isolated() {
     );
 }
 
-/// Source files that still hold inline unit tests. They predate the test
-/// layout rule and move to their `tests.rs` one crate at a time; the list may
-/// only shrink.
-const INLINE_TEST_ALLOWLIST: &[&str] = &[
-    "crates/scv-tools/src/acp_agent.rs",
-    "crates/scv-tools/src/adapters.rs",
-    "crates/scv-tools/src/agent_choice.rs",
-    "crates/scv-tools/src/agent_output.rs",
-    "crates/scv-tools/src/agent_progress.rs",
-    "crates/scv-tools/src/background.rs",
-    "crates/scv-tools/src/chat_attach.rs",
-    "crates/scv-tools/src/conversation.rs",
-    "crates/scv-tools/src/delegation.rs",
-    "crates/scv-tools/src/lib.rs",
-    "crates/scv-tools/src/live.rs",
-    "crates/scv-tools/src/scv_agent.rs",
-    "crates/scv-tools/src/web.rs",
-];
-
 #[test]
 fn unit_tests_live_in_tests_rs_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -66,7 +46,6 @@ fn unit_tests_live_in_tests_rs_files() {
     }
     let mut misplaced = Vec::new();
     let mut unused = Vec::new();
-    let mut allowed = BTreeSet::new();
     for path in &sources {
         let relative = relative(root, path);
         let source = std::fs::read_to_string(path).unwrap();
@@ -75,17 +54,9 @@ fn unit_tests_live_in_tests_rs_files() {
                 unused.push(relative);
             }
         } else if holds_tests(&source) {
-            if INLINE_TEST_ALLOWLIST.contains(&relative.as_str()) {
-                allowed.insert(relative);
-            } else {
-                misplaced.push(relative);
-            }
+            misplaced.push(relative);
         }
     }
-    let stale: Vec<_> = INLINE_TEST_ALLOWLIST
-        .iter()
-        .filter(|path| !allowed.contains(**path))
-        .collect();
     assert!(
         misplaced.is_empty(),
         "move these unit tests into the module's `tests.rs` (`#[cfg(test)] mod tests;`, see \
@@ -94,16 +65,6 @@ fn unit_tests_live_in_tests_rs_files() {
     assert!(
         unused.is_empty(),
         "these test files are not declared by their parent module, so they never run: {unused:?}"
-    );
-    assert!(
-        stale.is_empty(),
-        "these files no longer hold inline tests; remove them from INLINE_TEST_ALLOWLIST: {stale:?}"
-    );
-    assert!(
-        INLINE_TEST_ALLOWLIST
-            .windows(2)
-            .all(|pair| pair[0] < pair[1]),
-        "keep INLINE_TEST_ALLOWLIST sorted and free of duplicates"
     );
 }
 

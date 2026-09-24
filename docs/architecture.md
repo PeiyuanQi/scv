@@ -112,8 +112,8 @@ Start reading in this order:
 3. `scv-server`: `connection::run_managed`, one connection's message loop
    with a handler per `ClientMessage`, and `session::turn::TurnStarter::start`,
    which runs a turn.
-4. `scv-tools` (`lib.rs`): `builtin_registry`, which decides the tools a
-   session gets.
+4. `scv-tools` (`registry.rs`): `builtin_registry`, which decides the tools
+   a session gets.
 5. `scv-channels` (`lib.rs`): the `Transport` trait and `run`, the bridge
    every chat account runs.
 
@@ -150,13 +150,14 @@ What lives where in the largest crates:
 | | `restart.rs` | [Planned restarts](#planned-restarts) and the watchdog |
 | | `attachments.rs` | Files attached to a turn, such as chat media |
 | | `agents.rs`, `imports.rs`, `overview.rs` | Agent sign-ins, `scv agents import`, and `scv config show` |
-| `scv-tools` | `lib.rs` | Tool configuration, `builtin_registry`, `read`/`read_skill`/`write`/`bash`, the per-turn CLI agent tool, and process spawning |
-| | `adapters.rs` | One descriptor per delegated agent CLI |
-| | `acp_agent.rs`, `scv_agent.rs`, `live.rs` | Long-running delegations over ACP and the SCV protocol |
-| | `background.rs`, `agent_choice.rs` | Background jobs and how agent tools are described |
-| | `delegation.rs`, `conversation.rs` | Records of running delegations and multi-turn conversations |
-| | `agent_output.rs`, `agent_progress.rs` | Reading a delegated CLI's output and progress |
-| | `web.rs`, `chat_attach.rs` | `web_fetch`/`web_search` and `chat_attach` |
+| `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, the tools' settings, and the argument helpers every tool shares |
+| | `builtin/` | Tools that run inside SCV: `fs.rs` (`read`, `write`), `skill.rs` (`read_skill`), `shell.rs` (`bash`), `web.rs` (`web_fetch`, `web_search`), `chat_attach.rs` |
+| | `process.rs` | Spawning a child in its own process group, draining its output, and `ProcessGroup`, the only way SCV signals a group |
+| | `delegate/native.rs`, `delegate/request.rs` | The per-turn CLI agent tool and the arguments every `agent_*` call takes |
+| | `delegate/acp/`, `delegate/scv.rs`, `delegate/live.rs` | Long-running delegations over ACP (`rpc`, `session`, `permission`, `progress`, `tool`) and the SCV protocol, on one live-child runtime |
+| | `delegate/adapters.rs`, `delegate/choice.rs` | One descriptor per delegated agent CLI, and how agent tools are described and chosen |
+| | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
+| | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | `scv-channels` | `lib.rs`, `session.rs` | The bridge and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs` | Durable account state, what the daemon shares with running bridges, and chat media |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
@@ -335,15 +336,15 @@ control actions serve `scv agents ps` and `scv agents kill`. A session whose
 client declares `session.start.delegation_depth` (a delegated client) counts
 its runs from that depth when it exceeds the process's own.
 
-Live delegations keep one child for a whole conversation. `scv_tools::live`
+Live delegations keep one child for a whole conversation. `delegate/live.rs`
 holds the protocol-neutral part: `LiveChild` starts the child in its adapter
 environment and own process group, records it as a delegation, frames its
 stdout into bounded lines, and shuts it down (stdin closed, a 2-second grace,
 then a group kill and a sweep of tagged processes). The conversation store
 keeps the child as the conversation's attachment, so forgetting, expiring, or
-ending the conversation's session is what shuts it down. `scv_tools::scv_agent`
+ending the conversation's session is what shuts it down. `delegate/scv.rs`
 runs the SCV protocol client on top of it for `agent_scv`, and
-`scv_tools::acp_agent` runs an Agent Client Protocol (JSON-RPC 2.0) client on
+`delegate/acp/` runs an Agent Client Protocol (JSON-RPC 2.0) client on
 the same runtime for the agents whose adapter-table entry names an ACP server
 (`AcpLaunch`). The server resolves `[agents.<name>] transport` into an
 `AcpAgentLaunch`, and the registry registers the ACP tool when that server is
@@ -360,7 +361,7 @@ its own cancellation token, a buffered progress sink, and the session's
 unattended approval gate (the policy's own decision, else the client's
 declared `auto_approve`, else a denial), and returns a job handle;
 `agent_wait` and `agent_status` read the store and `agent_cancel` cancels one
-job's token. Beneath it, `scv_tools::agent_choice::ChosenAgent` prefixes each
+job's token. Beneath it, `ChosenAgent` (`delegate/choice.rs`) prefixes each
 agent tool's description with its product and what it offers, appends the
 user's `use_for`, and names the other offered agents on availability
 failures. A
@@ -373,7 +374,7 @@ unprompted messages. The system prompt's delegation and chat-channel sections
 are built after the registry, from the agent tools it actually offers and the
 `channel` the client declared.
 
-A live child (`scv_tools::live::LiveChild`, behind the ACP and nested-SCV
+A live child (`LiveChild` in `delegate/live.rs`, behind the ACP and nested-SCV
 transports) is owned by a reaper task that waits on the process from the
 start, so a child that exits between turns, by itself or through `scv agents
 kill`, is collected at once, its group stopped, and its delegation record
