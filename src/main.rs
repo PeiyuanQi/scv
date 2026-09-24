@@ -79,12 +79,11 @@ enum Command {
         #[arg(long, value_name = "URL")]
         index_url: Option<String>,
     },
-    /// Connect a SCV workspace to a WeChat ClawBot/iLink account.
-    Clawbot {
+    /// Connect chat channels (WeChat) to this SCV instance: sign accounts
+    /// in, run them under the daemon, and check their connections.
+    Channels {
         #[command(subcommand)]
-        command: Option<ClawbotCommand>,
-        #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
-        base_url: String,
+        command: ChannelsCommand,
     },
     /// Sign in the agent CLIs SCV delegates to (Claude Code, Codex, Grok
     /// Build, DeepSeek Harness, pi).
@@ -95,12 +94,6 @@ enum Command {
         #[command(subcommand)]
         command: AgentsCommand,
     },
-    /// Backwards-compatible alias for `clawbot login`.
-    ClawbotLogin {
-        /// Login API base URL.
-        #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
-        login_url: String,
-    },
 }
 #[derive(Subcommand)]
 enum ConfigCommand {
@@ -108,19 +101,26 @@ enum ConfigCommand {
 }
 
 #[derive(Subcommand)]
-enum ClawbotCommand {
+enum ChannelsCommand {
+    /// Sign a channel account in by scanning the QR code it shows.
     Login {
+        #[arg(value_enum)]
+        channel: ChannelArg,
         #[arg(long, default_value = "default")]
         account: String,
+        /// WeChat: the iLink login API origin.
         #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
         login_url: String,
     },
+    /// Enable a signed-in account under the SCV daemon.
     Run {
+        #[arg(value_enum)]
+        channel: ChannelArg,
         #[arg(long, default_value = "default")]
         account: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
-        /// Grant remote tools: `owner` gives the bot's own WeChat account full,
+        /// Grant remote tools: `owner` gives the account's own owner full,
         /// auto-approved tools; `none` keeps every remote session tool-free.
         /// Omitted keeps the saved setting.
         #[arg(long, value_enum)]
@@ -128,17 +128,47 @@ enum ClawbotCommand {
     },
     /// Persistently disable a supervised account (credentials are retained).
     Stop {
+        #[arg(value_enum)]
+        channel: ChannelArg,
         #[arg(long, default_value = "default")]
         account: String,
     },
+    /// Show channel accounts and their live connection state.
     Status {
-        #[arg(long, default_value = "default")]
-        account: String,
+        /// Only this channel [default: every channel].
+        #[arg(value_enum)]
+        channel: Option<ChannelArg>,
+        /// Only this account [default: every account].
+        #[arg(long)]
+        account: Option<String>,
     },
+    /// Stop an account and remove its local credentials and delivery state.
     Logout {
+        #[arg(value_enum)]
+        channel: ChannelArg,
         #[arg(long, default_value = "default")]
         account: String,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ChannelArg {
+    /// WeChat, through its ClawBot (iLink) bot.
+    Wechat,
+}
+
+impl ChannelArg {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Wechat => scv_clawbot::CHANNEL,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Wechat => "WeChat",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -374,45 +404,15 @@ async fn main() -> Result<()> {
             cli.base_url.as_deref(),
             allow_sudo,
         ),
-        Command::Status => show_status(None).await,
+        Command::Status => show_status(None, None).await,
         Command::Reload => {
             control(DaemonCommand::Reload).await?;
             println!("Component configuration reloaded.");
             Ok(())
         }
         Command::Update { index_url } => update_cli(&cwd, index_url),
-        Command::Clawbot { command, base_url } => match command.unwrap_or(ClawbotCommand::Login {
-            account: "default".into(),
-            login_url: base_url,
-        }) {
-            ClawbotCommand::Login { account, login_url } => {
-                clawbot_login(&login_url, &account).await
-            }
-            ClawbotCommand::Run {
-                account,
-                workspace,
-                remote_tools,
-            } => clawbot_run(&account, &workspace, remote_tools.map(Into::into)).await,
-            ClawbotCommand::Stop { account } => {
-                control(DaemonCommand::ClawbotSet {
-                    account,
-                    enabled: false,
-                    workspace: None,
-                    remote_tools: None,
-                })
-                .await?;
-                println!("ClawBot account disabled and stopped.");
-                Ok(())
-            }
-            ClawbotCommand::Status { account } => show_status(Some(&account)).await,
-            ClawbotCommand::Logout { account } => {
-                control(DaemonCommand::ClawbotLogout { account }).await?;
-                println!("ClawBot stopped; local credentials and delivery state removed.");
-                Ok(())
-            }
-        },
+        Command::Channels { command } => channels(command).await,
         Command::Agents { command } => agents(command).await,
-        Command::ClawbotLogin { login_url } => clawbot_login(&login_url, "default").await,
     }
 }
 
@@ -427,7 +427,7 @@ fn refuse_nested_daemon_control(command: &Command) -> Result<()> {
         Command::Stop => Some("stop"),
         Command::Restart { .. } => Some("restart"),
         Command::Update { .. } => Some("update"),
-        Command::Clawbot { .. } | Command::ClawbotLogin { .. } => Some("clawbot"),
+        Command::Channels { .. } => Some("channels"),
         _ => None,
     };
     if depth > 0
@@ -1012,13 +1012,70 @@ fn prompt_line(prompt: &str) -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
-async fn clawbot_run(
+async fn channels(command: ChannelsCommand) -> Result<()> {
+    // State saved before channels moves on first use. The daemon moves it
+    // too; this reports the move, or why it cannot happen, to the user.
+    match scv_clawbot::state::migrate() {
+        Ok(true) => println!(
+            "Moved saved WeChat state to {}.",
+            scv_clawbot::state::root()?.display()
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!("Warning: saved WeChat state was not moved: {error:#}"),
+    }
+    match command {
+        ChannelsCommand::Login {
+            channel,
+            account,
+            login_url,
+        } => match channel {
+            ChannelArg::Wechat => wechat_login(&login_url, &account).await,
+        },
+        ChannelsCommand::Run {
+            channel,
+            account,
+            workspace,
+            remote_tools,
+        } => channel_run(channel, &account, &workspace, remote_tools.map(Into::into)).await,
+        ChannelsCommand::Stop { channel, account } => {
+            control(DaemonCommand::ChannelSet {
+                channel: channel.name().into(),
+                account,
+                enabled: false,
+                workspace: None,
+                remote_tools: None,
+            })
+            .await?;
+            println!("{} account disabled and stopped.", channel.title());
+            Ok(())
+        }
+        ChannelsCommand::Status { channel, account } => {
+            show_status(channel.map(ChannelArg::name), account.as_deref()).await
+        }
+        ChannelsCommand::Logout { channel, account } => {
+            control(DaemonCommand::ChannelLogout {
+                channel: channel.name().into(),
+                account,
+            })
+            .await?;
+            println!(
+                "{} account stopped; local credentials and delivery state removed.",
+                channel.title()
+            );
+            Ok(())
+        }
+    }
+}
+
+async fn channel_run(
+    channel: ChannelArg,
     account: &str,
     workspace: &Path,
     remote_tools: Option<RemoteTools>,
 ) -> Result<()> {
-    let workspace = std::fs::canonicalize(workspace).context("resolve ClawBot workspace")?;
-    let status = control(DaemonCommand::ClawbotSet {
+    let workspace = std::fs::canonicalize(workspace).context("resolve channel workspace")?;
+    let status = control(DaemonCommand::ChannelSet {
+        channel: channel.name().into(),
         account: account.into(),
         enabled: true,
         workspace: Some(workspace.display().to_string()),
@@ -1026,22 +1083,26 @@ async fn clawbot_run(
     })
     .await?;
     println!(
-        "ClawBot enabled under the SCV daemon; use `scv clawbot status` for live connection state."
+        "{} account enabled under the SCV daemon; use `scv channels status {}` for live connection state.",
+        channel.title(),
+        channel.name()
     );
     if remote_tools == Some(RemoteTools::Owner) {
-        // Report what the daemon applied: an older daemon ignores the field
-        // and credentials without an owner ID grant tools to nobody.
-        let effective = status
-            .components
-            .iter()
-            .any(|health| health.account == account && health.remote_tools == RemoteTools::Owner);
+        // Report what the daemon applied: credentials without an owner ID
+        // grant tools to nobody.
+        let effective = status.components.iter().any(|health| {
+            health.channel == channel.name()
+                && health.account == account
+                && health.remote_tools == RemoteTools::Owner
+        });
         if effective {
             println!(
-                "Remote tools: the bot's own WeChat account now runs every SCV tool without approval prompts."
+                "Remote tools: the account's own {} owner now runs every SCV tool without approval prompts.",
+                channel.title()
             );
         } else {
             println!(
-                "Warning: owner remote tools are saved but not active; the daemon may predate them or the login lacks an owner ID. Remote sessions stay tool-free."
+                "Warning: owner remote tools are saved but not active; the login lacks an owner ID. Remote sessions stay tool-free."
             );
         }
     }
@@ -1091,7 +1152,7 @@ async fn control(command: DaemonCommand) -> Result<DaemonStatus> {
     scv_client::control(&scv_client::default_socket_path()?, command).await
 }
 
-async fn clawbot_login(login_url: &str, account: &str) -> Result<()> {
+async fn wechat_login(login_url: &str, account: &str) -> Result<()> {
     scv_clawbot::login(login_url, account).await?;
     match control(DaemonCommand::Reload).await {
         Ok(_) => println!("Daemon refreshed; enabled accounts start automatically."),
@@ -1102,7 +1163,7 @@ async fn clawbot_login(login_url: &str, account: &str) -> Result<()> {
     Ok(())
 }
 
-async fn show_status(account: Option<&str>) -> Result<()> {
+async fn show_status(channel: Option<&str>, account: Option<&str>) -> Result<()> {
     let status = match control(DaemonCommand::Status).await {
         Ok(status) => status,
         Err(error) => {
@@ -1118,19 +1179,17 @@ async fn show_status(account: Option<&str>) -> Result<()> {
         "Delegations: {} running, {} orphaned runs stopped since the daemon started",
         status.delegations.active, status.delegations.reaped
     );
-    for health in status
+    let matching: Vec<_> = status
         .components
         .iter()
+        .filter(|h| channel.is_none_or(|name| h.channel == name))
         .filter(|h| account.is_none_or(|name| h.account == name))
-    {
+        .collect();
+    for health in &matching {
         // JSON escaping makes account identity and other untrusted strings terminal-safe.
         println!("{}", serde_json::to_string(health)?);
     }
-    if status
-        .components
-        .iter()
-        .all(|h| account.is_some_and(|name| h.account != name))
-    {
+    if matching.is_empty() {
         println!("No matching supervised components.");
     }
     Ok(())

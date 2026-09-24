@@ -47,7 +47,8 @@ SCV v0.1 provides:
   tools, plus the provider's hosted web search when configured;
 - a versioned newline-delimited JSON protocol;
 - one Unix-socket daemon that owns agent state and per-connection sessions;
-- a TUI and ClawBot bridge that attach to the daemon through the same protocol;
+- a TUI and chat channel bridges (WeChat) that attach to the daemon through the
+  same protocol;
 - interactive approval for tools with filesystem, shell, subprocess, or
   network side effects;
 - Linux and macOS source builds and release archives.
@@ -86,13 +87,13 @@ session per remote sender (and per group and sender in group chats). Sessions
 are tool-free unless the account's `remote_tools = "owner"` setting grants the
 authenticated owner's direct chats full, auto-approved tools.
 Session policy, history, queueing, cancellation, and approvals remain
-authoritative in `scv-server`. See [`clawbot.md`](clawbot.md) for its API,
+authoritative in `scv-server`. See [`channels.md`](channels.md) for its API,
 storage, delivery, and safety contract.
 
 The daemon and stdio endpoint share the same server implementation. The
 Unix-socket daemon is the normal long-running backend; the stdio endpoint is a
 one-session local transport for embedding and headless commands. TUI and
-ClawBot connections create independent sessions, so provider and model
+channel connections create independent sessions, so provider and model
 overrides are resolved at `session.start` without restarting the daemon.
 
 ## Runtime topology
@@ -132,8 +133,10 @@ retries unexpected exits with exponential backoff from 1 to 60 seconds, and
 cancels, aborts if necessary, and joins work within bounded shutdown.
 All future long-running components must use this server-owned lifecycle.
 
-The daemon discovers saved ClawBot accounts on startup and reconciles every
-two seconds or immediately on `scv reload`. Login is explicit; saved accounts
+The daemon discovers saved channel accounts on startup and reconciles every
+two seconds or immediately on `scv reload`, first moving WeChat state saved
+before channels into `channels/wechat`. Each account is the component
+`<channel>:<account>`. Login is explicit; saved accounts
 autostart unless their private settings disable them. Each account's optional
 workspace defaults to the daemon workspace. Credential or settings replacement
 stops and joins the old instance before starting its replacement. Logout
@@ -200,7 +203,7 @@ and returns a job handle; `agent_wait` and `agent_status` read the store. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a
-`TurnOrigin`. ClawBot routes such turns by `request_id`, keeps a session with
+`TurnOrigin`. The WeChat channel routes such turns by `request_id`, keeps a session with
 running jobs open, and sends their answers as unprompted messages.
 
 ## Agent loop
@@ -281,7 +284,7 @@ and skills need no SCV registration.
 
 An SCV process owns one immutable instance root selected by `--scv-home` or
 `SCV_HOME` (default `~/.scv`). The root is the namespace for configuration,
-socket, service unit identity, skills, credentials, ClawBot state, and nested
+socket, service unit identity, skills, credentials, channel state, and nested
 adapter state. `--config`/`SCV_CONFIG` selects an explicit additional config
 layer for that instance. Custom roots never fall back to the default user
 configuration, allowing forked SCV processes to choose different providers and

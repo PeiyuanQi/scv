@@ -42,18 +42,20 @@ server history or automatically replaying submitted or queued work.
 
 Multiple SCV profiles may run concurrently. Select one with `--scv-home` or
 `SCV_HOME`; each profile has an independent socket, systemd user unit, provider
-configuration, model selection, credentials, ClawBot state, and nested-agent
+configuration, model selection, credentials, channel state, and nested-agent
 state. Custom profile selectors are persisted by `scv start`/`restart`, and
 `scv update` restarts only the selected daemon.
 
-Before enabling supervised ClawBot accounts, stop any `0.1.9` standalone bridge
+Before enabling supervised WeChat accounts, stop any `0.1.9` standalone bridge
 processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
-[ClawBot identity and durable state](clawbot.md#identity-and-durable-state).
+[channel identity and durable state](channels.md#identity-and-durable-state).
 Account settings saved with `remote_tools` by `0.1.16` or newer fail closed
 under older releases, which reject unknown settings keys; remove the key
-before downgrading.
+before downgrading. `0.1.35` replaces `scv clawbot` with `scv channels` and
+moves WeChat state from `$SCV_HOME/clawbot` to `$SCV_HOME/channels/wechat`
+on first use; before downgrading below `0.1.35`, move it back.
 
 ## Publication and checks
 

@@ -245,19 +245,27 @@ impl Components {
     }
 
     pub async fn reconcile(&mut self) -> Result<()> {
-        let names = match state::account_names() {
+        // State saved before channels moves first; the user resolves a
+        // failed move by hand, and `scv channels status` names the files.
+        let names = state::migrate()
+            .map_err(|_| {
+                "Saved WeChat state could not move to channels/wechat; run `scv channels status` for details"
+            })
+            .and_then(|_| {
+                state::account_names().map_err(|_| {
+                    "Account discovery failed; components stopped until configuration is readable"
+                })
+            });
+        let names = match names {
             Ok(names) => names,
-            Err(_) => {
+            Err(message) => {
                 self.supervisor.shutdown().await;
                 self.desired.clear();
                 self.inactive.clear();
                 let mut health = initial_health("discovery", None, false);
-                health.id = "clawbot:discovery-error".into();
+                health.id = component_id("discovery-error");
                 health.state = ComponentState::Failed;
-                health.error = Some(
-                    "Account discovery failed; components stopped until configuration is readable"
-                        .into(),
-                );
+                health.error = Some(message.into());
                 self.inactive.insert("discovery-error".into(), health);
                 bail!("Account discovery failed");
             }
@@ -270,7 +278,7 @@ impl Components {
             .collect::<Vec<_>>()
         {
             if !names.contains(&name) {
-                self.supervisor.stop(&format!("clawbot:{name}")).await;
+                self.supervisor.stop(&component_id(&name)).await;
                 self.desired.remove(&name);
                 self.inactive.remove(&name);
             }
@@ -293,7 +301,7 @@ impl Components {
             if self.desired.get(&name) == Some(&(credentials.clone(), settings.clone())) {
                 continue;
             }
-            self.supervisor.stop(&format!("clawbot:{name}")).await;
+            self.supervisor.stop(&component_id(&name)).await;
             self.inactive.remove(&name);
             let mut health = initial_health(&name, Some(&credentials), settings.enabled);
             let tool_owner = tool_owner(&credentials, &settings);
@@ -338,7 +346,7 @@ impl Components {
         if is_busy(&error) {
             return;
         }
-        self.supervisor.stop(&format!("clawbot:{name}")).await;
+        self.supervisor.stop(&component_id(&name)).await;
         self.desired.remove(&name);
         let mut health = initial_health(&name, None, true);
         health.state = ComponentState::Failed;
@@ -353,12 +361,14 @@ impl Components {
             | DaemonCommand::Delegations { .. }
             | DaemonCommand::DelegationKill { .. } => return Ok(self.status()),
             DaemonCommand::Reload => {}
-            DaemonCommand::ClawbotSet {
+            DaemonCommand::ChannelSet {
+                channel,
                 account,
                 enabled,
                 workspace,
                 remote_tools,
             } => {
+                known_channel(&channel)?;
                 state::validate_name(&account)?;
                 let workspace = match workspace {
                     Some(path) => {
@@ -386,7 +396,8 @@ impl Components {
                 })
                 .await?;
             }
-            DaemonCommand::ClawbotLogout { account } => {
+            DaemonCommand::ChannelLogout { channel, account } => {
+                known_channel(&channel)?;
                 state::validate_name(&account)?;
                 // Persist disabled and tool-free first, so failed deletion can
                 // neither resurrect a live account nor hand a later login the grant.
@@ -397,7 +408,7 @@ impl Components {
                     state::save_settings(&account, &settings)
                 })
                 .await?;
-                self.supervisor.stop(&format!("clawbot:{account}")).await;
+                self.supervisor.stop(&component_id(&account)).await;
                 self.desired.remove(&account);
                 self.inactive.remove(&account);
                 retry_while_busy(|| state::remove(&account)).await?;
@@ -454,9 +465,22 @@ fn tool_owner(credentials: &Account, settings: &AccountSettings) -> Option<Strin
         .filter(|owner| !owner.is_empty())
 }
 
+/// Only the WeChat channel exists so far.
+fn known_channel(channel: &str) -> Result<()> {
+    if channel != scv_clawbot::CHANNEL {
+        bail!("Unknown channel {channel:?}");
+    }
+    Ok(())
+}
+
+fn component_id(account: &str) -> String {
+    format!("{}:{account}", scv_clawbot::CHANNEL)
+}
+
 fn initial_health(account: &str, credentials: Option<&Account>, enabled: bool) -> ComponentHealth {
     ComponentHealth {
-        id: format!("clawbot:{account}"),
+        id: component_id(account),
+        channel: scv_clawbot::CHANNEL.into(),
         account: account.into(),
         bot_id: credentials.and_then(|a| a.bot_id.clone()),
         user_id: credentials.and_then(|a| a.user_id.clone()),

@@ -6,7 +6,7 @@ Run `scv config init` on first use to create the user file from `config.example.
 
 An SCV instance is identified by its home root. Use `--scv-home PATH` or
 `SCV_HOME` to isolate a daemon and its configuration from other SCV processes;
-the root owns the config file, socket, skills, ClawBot state, adapter state, and
+the root owns the config file, socket, skills, channel state, adapter state, and
 systemd unit identity. Use `--config PATH` or `SCV_CONFIG` for an additional
 explicit file. Both selectors are captured before SCV starts its server or
 TUI child. A custom home never merges or falls back to the default `~/.scv`
@@ -211,7 +211,7 @@ Both defaults must not exceed the ceiling, and the ceiling is at most 86400
 max_timeout_seconds = 28800
 ```
 
-A ClawBot owner turn may run for the ceiling plus five minutes of model time,
+A WeChat channel owner turn may run for the ceiling plus five minutes of model time,
 and never less than 30 minutes, so four hours and five minutes by default; the
 component reads the ceiling from the workspace configuration each time it
 starts. `agent.max_steps` (default 128) bounds model/tool rounds per turn.
@@ -344,7 +344,7 @@ then loads that project's instructions and skills natively, so a repository
 adds skills without any SCV registration. `read_skill` can load a listed skill
 for reference. At most 256 child projects and `skills.max_skills` skills in
 total are considered; entries that resolve outside the workspace, or that
-cannot be read, are skipped. Tool-free sessions, such as ClawBot senders
+cannot be read, are skipped. Tool-free sessions, such as WeChat senders
 without remote tools, never list project skills.
 
 ### Web tools
@@ -423,7 +423,7 @@ choice for that invocation.
 
 SCV v0.1 reads:
 
-- `SCV_HOME` for the user configuration, skills, daemon socket, and ClawBot state
+- `SCV_HOME` for the user configuration, skills, daemon socket, and channel state
   root (default `~/.scv`);
 - `SCV_CONFIG` for one additional explicit configuration file;
 - `SCV_MODEL`;
@@ -481,10 +481,10 @@ process has died, at startup and every 60 seconds; `scv agents ps` and
 `scv agents kill` list and stop runs. See
 [Tracking and cleanup](tools.md#tracking-and-cleanup).
 
-ClawBot credentials live in `clawbot/accounts/<account>.json` and durable
-delivery state in `clawbot/state/<account>.json` under the same root. Per-account
-settings are separate from project TOML, at
-`$SCV_HOME/clawbot/settings/<account>.json`:
+WeChat channel credentials live in `channels/wechat/accounts/<account>.json`
+and durable delivery state in `channels/wechat/state/<account>.json` under the
+same root. Per-account settings are separate from project TOML, at
+`$SCV_HOME/channels/wechat/settings/<account>.json`:
 
 ```json
 {"enabled":true,"workspace":"/absolute/path/to/workspace","remote_tools":"none"}
@@ -504,23 +504,23 @@ require logout before replacement with an identified account.
 A busy transaction during the snapshot defers reconciliation; the current
 instance keeps running until a later pass can read the account.
 
-`scv clawbot run --account NAME --workspace PATH` persists enablement and the
+`scv channels run wechat --account NAME --workspace PATH` persists enablement and the
 resolved workspace through the live daemon, then returns. Adding
 `--remote-tools owner` grants the account's authenticated owner full,
 auto-approved tools from WeChat; `--remote-tools none` revokes it. The value is
 saved as `remote_tools` (`"none"` by default) in the account settings; see the
-[security model](security.md#supervised-remote-bridge) before enabling it. `scv clawbot stop
---account NAME` persists `enabled: false` and joins the instance while retaining
-credentials. Credential or settings changes join the old instance before a
-replacement starts. `scv clawbot logout --account NAME` requires a live daemon
+[security model](security.md#supervised-remote-bridge) before enabling it. `scv channels stop
+wechat --account NAME` persists `enabled: false` and joins the instance while
+retaining credentials. Credential or settings changes join the old instance
+before a replacement starts. `scv channels logout wechat --account NAME` requires a live daemon
 and removes credentials, delivery state, and settings only after joining.
 
 For an offline opt-out, create or edit the account settings to contain
-`{"enabled":false}` before starting the daemon. Keep ClawBot directories mode
+`{"enabled":false}` before starting the daemon. Keep channel directories mode
 `0700` and files mode `0600`; account, settings, and state files must be private
 regular files. Invalid or inaccessible settings fail that account closed.
 Project configuration cannot select accounts, component workspaces, or remote
-authority. See [ClawBot](clawbot.md) for the lifecycle and status contract.
+authority. See [channels](channels.md) for the lifecycle and status contract.
 
 `scv update` installs the published binary and restarts an active systemd user
 daemon. A foreground daemon requires an explicit restart; its in-memory code

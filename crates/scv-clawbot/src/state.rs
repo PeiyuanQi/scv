@@ -167,12 +167,67 @@ fn check_binding(state: &BridgeState, account: Option<&Account>) -> Result<()> {
     Ok(())
 }
 
+/// The WeChat channel's directory, `<SCV home>/channels/wechat`. State saved
+/// by releases before channels, in `<SCV home>/clawbot`, is moved there first.
 pub fn root() -> Result<PathBuf> {
+    let home = scv_home()?;
+    migrate_legacy_root(&home)?;
+    Ok(channel_root(&home))
+}
+
+/// Move this SCV home's pre-channel state now; see [`migrate_legacy_root`].
+pub fn migrate() -> Result<bool> {
+    migrate_legacy_root(&scv_home()?)
+}
+
+fn scv_home() -> Result<PathBuf> {
     std::env::var_os("SCV_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|p| p.join(".scv")))
-        .map(|p| p.join("clawbot"))
         .ok_or_else(|| anyhow!("cannot determine SCV home"))
+}
+
+fn channel_root(home: &Path) -> PathBuf {
+    home.join("channels").join(crate::CHANNEL)
+}
+
+/// Move `<home>/clawbot`, the directory releases before channels used, to
+/// `<home>/channels/wechat` in one rename. Every account's run and transaction
+/// locks are held across it, so a running bridge or login of an older binary
+/// makes it fail instead of racing it. Refuses when both directories exist.
+/// Returns whether anything moved.
+pub fn migrate_legacy_root(home: &Path) -> Result<bool> {
+    let legacy = home.join("clawbot");
+    match std::fs::symlink_metadata(&legacy) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => bail!("{} is not a directory; move it aside", legacy.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    let target = channel_root(home);
+    if std::fs::symlink_metadata(&target).is_ok() {
+        bail!(
+            "both {} (saved before channels) and {} exist; keep one and move the other aside",
+            legacy.display(),
+            target.display()
+        )
+    }
+    let old = Store::new(legacy.clone());
+    let mut held = Vec::new();
+    for name in old.account_names()? {
+        let busy =
+            || anyhow!("the WeChat account {name} is in use by a running SCV; stop it, then retry");
+        held.push(old.lock(&name).map_err(|_| busy())?);
+        held.push(old.transaction(&name).map_err(|_| busy())?);
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("channel path has no parent"))?;
+    private_directory(parent)?;
+    std::fs::rename(&legacy, &target)?;
+    std::fs::File::open(parent)?.sync_all()?;
+    std::fs::File::open(home)?.sync_all()?;
+    Ok(true)
 }
 
 pub fn validate_name(name: &str) -> Result<()> {
@@ -221,6 +276,12 @@ fn private_directory(parent: &Path) -> Result<()> {
         ) && let Some(root) = parent.parent()
         {
             std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+            // Channel names are private too.
+            if let Some(channels) = root.parent()
+                && channels.file_name().and_then(|name| name.to_str()) == Some("channels")
+            {
+                std::fs::set_permissions(channels, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
     }
     Ok(())
@@ -242,13 +303,10 @@ fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     temp.as_file().sync_all()?;
     temp.persist(path)
         .map_err(|e| anyhow!("atomic state replace failed: {}", e.error))?;
-    // Persist the rename and newly created state directory before starting a turn.
-    std::fs::File::open(parent)?.sync_all()?;
-    if let Some(root) = parent.parent() {
-        std::fs::File::open(root)?.sync_all()?;
-        if let Some(home) = root.parent() {
-            std::fs::File::open(home)?.sync_all()?;
-        }
+    // Persist the rename and any newly created directories (the file's own,
+    // the channel's, `channels`, and the SCV home) before starting a turn.
+    for directory in parent.ancestors().take(4) {
+        std::fs::File::open(directory)?.sync_all()?;
     }
     Ok(())
 }
@@ -268,12 +326,21 @@ impl Store {
         Ok(self.root.join(directory).join(format!("{name}.json")))
     }
 
+    /// The single-account credential file of the earliest releases,
+    /// `<SCV home>/clawbot.toml`, beside both the old and the channel layout.
     fn legacy_path(&self) -> Result<PathBuf> {
-        Ok(self
+        let parent = self
             .root
             .parent()
-            .ok_or_else(|| anyhow!("ClawBot state path has no parent"))?
-            .join("clawbot.toml"))
+            .ok_or_else(|| anyhow!("ClawBot state path has no parent"))?;
+        let home = if parent.file_name().and_then(|name| name.to_str()) == Some("channels") {
+            parent
+                .parent()
+                .ok_or_else(|| anyhow!("ClawBot state path has no parent"))?
+        } else {
+            parent
+        };
+        Ok(home.join("clawbot.toml"))
     }
 
     /// Keep the file open for the entire account run. Never unlink lock files:
@@ -558,7 +625,7 @@ mod tests {
     #[test]
     fn replacement_requires_logout_and_preserves_delivery() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         let original = known_account();
         store.save_account("default", &original).unwrap();
         let mut state = store
@@ -613,7 +680,7 @@ mod tests {
     #[test]
     fn binding_rejects_externally_replaced_credentials_without_changing_state() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         let original = known_account();
         store.save_account("default", &original).unwrap();
         let mut state = store
@@ -653,7 +720,7 @@ mod tests {
     #[test]
     fn known_identity_token_rotation_preserves_pending_while_running() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         let original = known_account();
         store.save_account("default", &original).unwrap();
         let _running = store.lock("default").unwrap();
@@ -692,7 +759,7 @@ mod tests {
     #[test]
     fn legacy_binding_requires_original_credentials_and_refuses_login_upgrade() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         let legacy = Account {
             bot_id: None,
             user_id: None,
@@ -757,7 +824,7 @@ mod tests {
     #[test]
     fn replacement_is_rejected_even_without_pending_delivery() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         store.save_account("default", &known_account()).unwrap();
         assert!(
             store
@@ -775,7 +842,7 @@ mod tests {
     #[test]
     fn transaction_contention_fails_promptly_without_partial_mutations() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("clawbot");
+        let root = directory.path().join("channels/wechat");
         let store = Store::new(root.clone());
         let original = known_account();
         store.save_account("default", &original).unwrap();
@@ -885,7 +952,7 @@ mod tests {
     #[test]
     fn settings_default_to_enabled_and_roundtrip_privately() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         assert!(store.settings("default").unwrap() == AccountSettings::default());
         let empty: AccountSettings = serde_json::from_str("{}").unwrap();
         assert!(empty.enabled);
@@ -920,7 +987,7 @@ mod tests {
     #[test]
     fn discovery_is_bounded_and_ignores_bad_credentials() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         atomic_write(&store.legacy_path().unwrap(), "invalid legacy").unwrap();
         atomic_write(&store.path("accounts", "broken").unwrap(), "not JSON").unwrap();
         atomic_write(&store.root.join("accounts/invalid.name.json"), "{}").unwrap();
@@ -939,7 +1006,7 @@ mod tests {
     #[test]
     fn legacy_migration_and_removal_preserve_other_accounts() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         atomic_write(
             &store.legacy_path().unwrap(),
             "token = 'secret'\nbase_url = 'https://example.test'\n",
@@ -964,10 +1031,126 @@ mod tests {
         assert!(store.account("other").unwrap().unwrap() == account);
     }
 
+    /// Account, settings, and delivery state as a release before channels
+    /// saved them in `<home>/clawbot`.
+    fn legacy_layout(home: &Path) -> (Account, AccountSettings, BridgeState) {
+        let store = Store::new(home.join("clawbot"));
+        let account = known_account();
+        store.save_account("default", &account).unwrap();
+        let settings = AccountSettings {
+            enabled: false,
+            workspace: Some(home.join("workspace")),
+            remote_tools: RemoteTools::Owner,
+        };
+        store.save_settings("default", &settings).unwrap();
+        let mut state = store
+            .bind_state("default", &account.token, &account.base_url)
+            .unwrap();
+        state.cursor = "cursor".into();
+        state.seen = vec!["seen-1".into(), "seen-2".into()];
+        state.pending = vec![crate::new_pending(
+            "message", "sender", "context", "reply", 1024,
+        )];
+        state.in_flight = vec![InFlight {
+            message_id: "claimed".into(),
+            to_user_id: "sender".into(),
+            context_token: "ctx".into(),
+            key: String::new(),
+        }];
+        state.held = vec![HeldReply {
+            key: "sender".into(),
+            to_user_id: "sender".into(),
+            reply: "held".into(),
+            held_at: 1,
+        }];
+        store.save_state("default", &state).unwrap();
+        (account, settings, state)
+    }
+
+    #[test]
+    fn legacy_state_moves_into_the_wechat_channel_intact() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let (account, settings, state) = legacy_layout(home);
+        let files = ["accounts", "settings", "state"]
+            .map(|kind| std::fs::read(home.join(format!("clawbot/{kind}/default.json"))).unwrap());
+        assert!(migrate_legacy_root(home).unwrap());
+        assert!(!home.join("clawbot").exists());
+        let store = Store::new(channel_root(home));
+        for (kind, before) in ["accounts", "settings", "state"].iter().zip(&files) {
+            let path = store.path(kind, "default").unwrap();
+            assert_eq!(&std::fs::read(&path).unwrap(), before, "{kind}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in [home.join("channels"), channel_root(home)] {
+                assert_eq!(
+                    std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        // The moved state still binds to the same credentials, with every
+        // cursor, claim, reply, and dedupe ID in place.
+        assert!(store.account("default").unwrap().unwrap() == account);
+        assert!(store.settings("default").unwrap() == settings);
+        let moved = store
+            .bind_state("default", &account.token, &account.base_url)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&moved).unwrap(),
+            serde_json::to_value(&state).unwrap()
+        );
+        assert!(!migrate_legacy_root(home).unwrap());
+    }
+
+    #[test]
+    fn legacy_migration_refuses_both_layouts_and_a_running_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        legacy_layout(home);
+        let running = Store::new(home.join("clawbot")).lock("default").unwrap();
+        let error = migrate_legacy_root(home).unwrap_err().to_string();
+        assert!(error.contains("in use by a running SCV"), "{error}");
+        assert!(home.join("clawbot/accounts/default.json").exists());
+        assert!(!channel_root(home).exists());
+        drop(running);
+
+        std::fs::create_dir_all(channel_root(home)).unwrap();
+        let error = migrate_legacy_root(home).unwrap_err().to_string();
+        assert!(error.contains("both"), "{error}");
+        assert!(home.join("clawbot/accounts/default.json").exists());
+        assert_eq!(std::fs::read_dir(channel_root(home)).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn earliest_single_file_credentials_stay_readable_from_the_channel() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::new(channel_root(directory.path()));
+        atomic_write(
+            &directory.path().join("clawbot.toml"),
+            "token = 'secret'\nbase_url = 'https://example.test'\n",
+        )
+        .unwrap();
+        assert_eq!(store.account_names().unwrap(), vec!["default"]);
+        assert!(store.account("default").unwrap().is_some());
+        assert!(!directory.path().join("clawbot.toml").exists());
+        assert!(store.path("accounts", "default").unwrap().exists());
+    }
+
     #[test]
     fn account_lock_excludes_other_runs_and_removal() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::new(directory.path().join("clawbot"));
+        let store = Store::new(directory.path().join("channels/wechat"));
         let lock = store.lock("default").unwrap();
         assert!(store.lock("default").is_err());
         assert!(store.remove("default").is_err());

@@ -65,7 +65,7 @@ fn hold_transaction(home: &Path, account: &str, duration: Duration) -> std::thre
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(home.join(format!("clawbot/transactions/{account}.json")))
+        .open(home.join(format!("channels/wechat/transactions/{account}.json")))
         .unwrap();
     // SAFETY: the descriptor stays valid until the thread drops `file`.
     assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
@@ -128,7 +128,7 @@ async fn session(
 async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessions() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let accounts = home.path().join("clawbot/accounts");
+    let accounts = home.path().join("channels/wechat/accounts");
     std::fs::create_dir_all(&accounts).unwrap();
     let account = accounts.join("test.json");
     std::fs::write(&account, r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1","bot_id":"bot-test","user_id":"user-test"}"#).unwrap();
@@ -140,6 +140,8 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
         .await
         .unwrap();
     assert_eq!(loaded.components.len(), 1);
+    assert_eq!(loaded.components[0].id, "wechat:test");
+    assert_eq!(loaded.components[0].channel, "wechat");
     assert_eq!(loaded.components[0].bot_id.as_deref(), Some("bot-test"));
     assert_ne!(loaded.components[0].state, ComponentState::Connected);
     assert!(loaded.components[0].last_success_unix_seconds.is_none());
@@ -154,7 +156,8 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
     for _ in 0..2 {
         let running = scv_client::control(
             &socket,
-            DaemonCommand::ClawbotSet {
+            DaemonCommand::ChannelSet {
+                channel: "wechat".into(),
                 account: "test".into(),
                 enabled: true,
                 workspace: None,
@@ -205,7 +208,8 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
     assert_ne!(old_session, new_session);
     let disabled = scv_client::control(
         &socket,
-        DaemonCommand::ClawbotSet {
+        DaemonCommand::ChannelSet {
+            channel: "wechat".into(),
             account: "test".into(),
             enabled: false,
             workspace: None,
@@ -226,7 +230,8 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
     assert_eq!(restored.components[0].state, ComponentState::Disabled);
     let removed = scv_client::control(
         &socket,
-        DaemonCommand::ClawbotLogout {
+        DaemonCommand::ChannelLogout {
+            channel: "wechat".into(),
             account: "test".into(),
         },
     )
@@ -241,7 +246,7 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
 async fn invalid_credentials_report_sanitized_failure_without_disabling_daemon() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let accounts = home.path().join("clawbot/accounts");
+    let accounts = home.path().join("channels/wechat/accounts");
     std::fs::create_dir_all(&accounts).unwrap();
     let account = accounts.join("bad.json");
     std::fs::write(&account, "private-malformed-token").unwrap();
@@ -257,5 +262,100 @@ async fn invalid_credentials_report_sanitized_failure_without_disabling_daemon()
             .unwrap()
             .contains("private-malformed")
     );
+    terminate(&mut child).await;
+}
+
+/// Writes a private file, creating its private parent directories.
+fn write_private(path: &Path, contents: &str) {
+    let parent = path.parent().unwrap();
+    std::fs::create_dir_all(parent).unwrap();
+    for directory in [parent, parent.parent().unwrap()] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[tokio::test]
+async fn daemon_moves_pre_channel_state_into_the_wechat_channel() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let legacy = home.path().join("clawbot");
+    let account = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1","bot_id":"bot-test","user_id":"user-test"}"#;
+    let settings = r#"{"enabled":false,"workspace":null,"remote_tools":"owner"}"#;
+    let state = r#"{"credential_fingerprint":null,"cursor":"cursor-kept","seen":["m1"],"pending":null,"in_flight":null}"#;
+    write_private(&legacy.join("accounts/test.json"), account);
+    write_private(&legacy.join("settings/test.json"), settings);
+    write_private(&legacy.join("state/test.json"), state);
+    let mut child = start(home.path(), workspace.path());
+    status(home.path()).await;
+    let loaded = scv_client::control(&home.path().join("server.sock"), DaemonCommand::Reload)
+        .await
+        .unwrap();
+    assert_eq!(loaded.components.len(), 1);
+    let health = &loaded.components[0];
+    assert_eq!(
+        (health.id.as_str(), health.channel.as_str()),
+        ("wechat:test", "wechat")
+    );
+    assert_eq!(health.state, ComponentState::Disabled);
+    assert_eq!(health.remote_tools, RemoteTools::Owner);
+    assert!(!legacy.exists());
+    let moved = home.path().join("channels/wechat");
+    for (kind, contents) in [
+        ("accounts", account),
+        ("settings", settings),
+        ("state", state),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(moved.join(format!("{kind}/test.json"))).unwrap(),
+            contents,
+            "{kind}"
+        );
+    }
+    terminate(&mut child).await;
+}
+
+#[tokio::test]
+async fn daemon_reports_pre_channel_state_it_cannot_move_without_touching_it() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let account = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1"}"#;
+    write_private(&home.path().join("clawbot/accounts/old.json"), account);
+    write_private(
+        &home.path().join("channels/wechat/accounts/new.json"),
+        account,
+    );
+    let mut child = start(home.path(), workspace.path());
+    status(home.path()).await;
+    assert!(
+        scv_client::control(&home.path().join("server.sock"), DaemonCommand::Reload)
+            .await
+            .is_err()
+    );
+    let status = status(home.path()).await;
+    assert_eq!(status.components.len(), 1);
+    assert_eq!(status.components[0].state, ComponentState::Failed);
+    let message = status.components[0].error.as_deref().unwrap();
+    assert!(message.contains("scv channels status"), "{message}");
+    assert!(
+        !serde_json::to_string(&status)
+            .unwrap()
+            .contains("test-secret")
+    );
+    assert!(home.path().join("clawbot/accounts/old.json").exists());
+    assert!(
+        home.path()
+            .join("channels/wechat/accounts/new.json")
+            .exists()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
+        .args(["channels", "status"])
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("both"), "{stderr}");
     terminate(&mut child).await;
 }

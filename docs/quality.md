@@ -57,6 +57,11 @@ Daemon and component changes require focused coverage for:
   pi importing SCV's own provider;
 - identity/origin binding, same-identity token rotation, conservative legacy
   binding, replacement requiring logout, and stale-runner write rejection;
+- WeChat state saved before channels moving from `clawbot` to
+  `channels/wechat` in one rename with every file, mode, and binding intact,
+  refusing while an account's lock is held or when both directories exist, and
+  the daemon reporting a refused move as a failed component without touching
+  either directory;
 - nonblocking transaction/lifetime locks, serialized login/removal, atomic
   account snapshots, busy snapshots deferred without stopping the current
   instance, and strict settings/discovery validation;

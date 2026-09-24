@@ -339,7 +339,7 @@ fn a_delegated_run_may_not_manage_daemons() {
         &["restart"],
         &["run"],
         &["update"],
-        &["clawbot", "status"],
+        &["channels", "status"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_scv"))
             .isolated(home.path())

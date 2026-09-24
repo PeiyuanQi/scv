@@ -39,9 +39,9 @@ an agent session. The `command` object is tagged by `action`:
 ```json
 {"type":"daemon.control","request_id":"d1","command":{"action":"status"}}
 {"type":"daemon.control","request_id":"d2","command":{"action":"reload"}}
-{"type":"daemon.control","request_id":"d3","command":{"action":"clawbot_set","account":"default","enabled":true,"workspace":"/workspace/project","remote_tools":"owner"}}
-{"type":"daemon.control","request_id":"d4","command":{"action":"clawbot_set","account":"default","enabled":false,"workspace":null}}
-{"type":"daemon.control","request_id":"d5","command":{"action":"clawbot_logout","account":"default"}}
+{"type":"daemon.control","request_id":"d3","command":{"action":"channel_set","channel":"wechat","account":"default","enabled":true,"workspace":"/workspace/project","remote_tools":"owner"}}
+{"type":"daemon.control","request_id":"d4","command":{"action":"channel_set","channel":"wechat","account":"default","enabled":false,"workspace":null}}
+{"type":"daemon.control","request_id":"d5","command":{"action":"channel_logout","channel":"wechat","account":"default"}}
 {"type":"daemon.control","request_id":"d6","command":{"action":"delegations","all":false}}
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
@@ -49,13 +49,15 @@ an agent session. The `command` object is tagged by `action`:
 
 `status` reads live daemon health. `reload` reconciles saved accounts and
 settings immediately; periodic reconciliation also runs every two seconds.
-`clawbot_set` persists enablement and an optional existing absolute workspace;
+`channel_set` persists a channel account's enablement and an optional existing
+absolute workspace; `channel` names the channel (`wechat`), and an unknown one
+is a `component_error`;
 an omitted or null workspace leaves the saved workspace unchanged. The optional
 `remote_tools` (`none` or `owner`) likewise persists only when present.
 Component status reports the effective `remote_tools`, which is `owner` only
 when the account also has a known owner ID; older clients may omit the field. Without a
 saved workspace, the account uses the daemon workspace. Replacements stop and
-join the old instance first. `clawbot_logout` persists disablement and joins
+join the old instance first. `channel_logout` persists disablement and joins
 before removing credentials, delivery state, and settings. Successful actions
 return `daemon.status`; enablement does not imply successful remote contact.
 
@@ -75,7 +77,7 @@ can wait for the component lock while reconciliation joins replacements. Many
 slow replacements can therefore make even a status query time out; a timeout
 does not prove the daemon is down or that a mutation failed. Query status again
 before deciding whether to retry a mutation; mutations are never automatically
-retried. Current ClawBot cancellation drops its owned I/O and sessions
+retried. Current WeChat channel cancellation drops its owned I/O and sessions
 immediately, but future components with slower shutdown can expose this limit.
 
 ### `session.start`
@@ -84,7 +86,7 @@ immediately, but future components with slower shutdown can expose this limit.
 rejects a missing or non-directory workspace.
 
 Optional `provider`, `model`, and `base_url` overrides apply only to this session.
-`no_tools: true` disables all tools in the server-owned runtime; ClawBot remote
+`no_tools: true` disables all tools in the server-owned runtime; channel remote
 sessions set it for every sender except an account owner granted
 `remote_tools = "owner"`.
 
@@ -169,7 +171,7 @@ clears its transcript only after that event.
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.35","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.35","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
 {"type":"daemon.status","request_id":"d6","status":{"version":"0.1.35","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
 ```
 
@@ -188,9 +190,11 @@ from a daemon older than 0.1.26 has no `delegations` and parses as zero.
 `reaped` the orphans this daemon has stopped since it started; `entries` and
 `killed` appear only in `delegations` and `delegation_kill` responses. An
 entry that is a turn of a delegated conversation also carries `conversation`
-(the handle, such as `codex-2`) and `turn`; both are omitted otherwise. Each component contains `id`, `account`, `bot_id`, `user_id`,
-`enabled`, `state`, `last_success_unix_seconds`, `error`, and `restarts`.
-For ClawBot, successful contact means an authenticated, validated `getupdates`
+(the handle, such as `codex-2`) and `turn`; both are omitted otherwise. Each
+component contains `id` (`<channel>:<account>`), `channel`, `account`,
+`bot_id`, `user_id`, `enabled`, `state`, `last_success_unix_seconds`, `error`,
+and `restarts`; a daemon older than 0.1.35 omits `channel`, which parses as
+empty. For WeChat, successful contact means an authenticated, validated `getupdates`
 response. The state fingerprint, bearer token, and delivery state are private
 storage fields, not health fields.
 
@@ -240,7 +244,7 @@ newest lines behind a leading `…` line when older ones were dropped. A call
 produces at most one event per 500 ms, only between its `tool.started` and
 `tool.completed`; lines reported within 500 ms of `tool.completed` may be
 dropped. Progress is display-only: it never enters the model's history or the
-tool result, and ClawBot never forwards it.
+tool result, and channels never forward it.
 
 ### Context and completion
 
