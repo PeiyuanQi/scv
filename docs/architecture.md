@@ -78,7 +78,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.34` and exact workspace dependency pins.
+`0.1.35` and exact workspace dependency pins.
 
 `scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
 speaks the versioned protocol over the daemon socket, using one long-lived
@@ -189,6 +189,19 @@ the same runtime for the agents whose adapter-table entry names an ACP server
 installed, otherwise the per-turn CLI tool. Tools reach the session's approval
 gate through `ToolContext.approvals`, which carries the running call's ID, so a
 nested agent's approval requests are decided like the session's own.
+
+Background delegations live in `scv_tools::background`. Each session owns one
+`BackgroundJobs` store, shared by its tools and dropped with the session,
+which cancels the jobs still running. When `agent.max_background` is positive
+the registry wraps every agent tool in `BackgroundCapable`: a call with
+`background: true` starts the wrapped tool's `execute` in a detached task with
+its own cancellation token, a buffered progress sink, and no approval gate,
+and returns a job handle; `agent_wait` and `agent_status` read the store. A
+finished job wakes the connection loop, which, once the session is idle and
+its queue empty, starts a turn of its own (`TurnStarter::report_background`)
+whose prompt reports the jobs the model has not seen yet; its events carry a
+`TurnOrigin`. ClawBot routes such turns by `request_id`, keeps a session with
+running jobs open, and sends their answers as unprompted messages.
 
 ## Agent loop
 

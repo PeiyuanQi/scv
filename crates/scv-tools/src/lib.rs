@@ -4,6 +4,7 @@ mod acp_agent;
 pub mod adapters;
 mod agent_output;
 mod agent_progress;
+pub mod background;
 pub mod conversation;
 pub mod delegation;
 mod live;
@@ -64,6 +65,12 @@ pub struct ToolsConfig {
     pub conversations: ConversationLimits,
     /// Records delegated runs for listing and cleanup; `None` runs them untracked.
     pub delegation: Option<DelegationContext>,
+    /// Background jobs an agent call may start at once (`background: true`);
+    /// 0 turns background calls and `agent_wait` / `agent_status` off.
+    pub max_background: usize,
+    /// The session's background job store, when the server reports finished
+    /// jobs; otherwise the registry makes its own.
+    pub background: Option<Arc<background::BackgroundJobs>>,
 }
 
 impl Default for ToolsConfig {
@@ -81,6 +88,8 @@ impl Default for ToolsConfig {
                 idle: Duration::from_secs(86400),
             },
             delegation: None,
+            max_background: 2,
+            background: None,
         }
     }
 }
@@ -191,6 +200,24 @@ pub fn builtin_registry(
     } else {
         HashMap::new()
     };
+    // One job store per session, shared by its agent tools and dropped with
+    // it, which cancels the jobs still running.
+    let jobs = (config.max_background > 0).then(|| {
+        config.background.clone().unwrap_or_else(|| {
+            Arc::new(background::BackgroundJobs::new(config.max_background, None))
+        })
+    });
+    let mut agents = 0;
+    let mut register_agent = |registry: &mut ToolRegistry, tool: Arc<dyn Tool>| {
+        agents += 1;
+        match &jobs {
+            Some(jobs) => registry.register(Arc::new(background::BackgroundCapable {
+                inner: tool,
+                jobs: Arc::clone(jobs),
+            })),
+            None => registry.register(tool),
+        }
+    };
     // One store per session, shared by its agent tools and dropped with it.
     let conversations = Arc::new(ConversationStore::new(
         config.conversations,
@@ -205,20 +232,23 @@ pub fn builtin_registry(
                 adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs);
             // An agent that is not installed is not offered to the model.
             if resolved.is_some() {
-                registry.register(Arc::new(scv_agent::ScvAgentTool {
-                    name,
-                    command: adapter.command,
-                    resolved,
-                    args: adapter.args,
-                    environment: adapter.environment,
-                    timeouts: Timeouts {
-                        default: config.agent_timeout,
-                        max: config.max_timeout,
-                    },
-                    output_limit: config.output_limit_bytes,
-                    delegation: config.delegation.clone(),
-                    conversations: Arc::clone(&conversations),
-                }))?;
+                register_agent(
+                    &mut registry,
+                    Arc::new(scv_agent::ScvAgentTool {
+                        name,
+                        command: adapter.command,
+                        resolved,
+                        args: adapter.args,
+                        environment: adapter.environment,
+                        timeouts: Timeouts {
+                            default: config.agent_timeout,
+                            max: config.max_timeout,
+                        },
+                        output_limit: config.output_limit_bytes,
+                        delegation: config.delegation.clone(),
+                        conversations: Arc::clone(&conversations),
+                    }),
+                )?;
             }
             continue;
         }
@@ -226,19 +256,22 @@ pub fn builtin_registry(
             let resolved =
                 adapters::resolve_agent_executable(&launch.command, &adapter.search_dirs);
             if resolved.is_some() {
-                registry.register(Arc::new(acp_agent::AcpAgentTool::new(
-                    name,
-                    &adapter,
-                    launch,
-                    resolved,
-                    Timeouts {
-                        default: config.agent_timeout,
-                        max: config.max_timeout,
-                    },
-                    config.output_limit_bytes,
-                    config.delegation.clone(),
-                    Arc::clone(&conversations),
-                )))?;
+                register_agent(
+                    &mut registry,
+                    Arc::new(acp_agent::AcpAgentTool::new(
+                        name,
+                        &adapter,
+                        launch,
+                        resolved,
+                        Timeouts {
+                            default: config.agent_timeout,
+                            max: config.max_timeout,
+                        },
+                        config.output_limit_bytes,
+                        config.delegation.clone(),
+                        Arc::clone(&conversations),
+                    )),
+                )?;
                 continue;
             }
             if launch.required {
@@ -259,8 +292,18 @@ pub fn builtin_registry(
         );
         // An agent that is not installed is not offered to the model.
         if tool.resolved.is_some() {
-            registry.register(Arc::new(tool))?;
+            register_agent(&mut registry, Arc::new(tool))?;
         }
+    }
+    if let Some(jobs) = jobs.filter(|_| agents > 0) {
+        registry.register(Arc::new(background::WaitTool {
+            jobs: Arc::clone(&jobs),
+            timeouts: Timeouts {
+                default: config.agent_timeout,
+                max: config.max_timeout,
+            },
+        }))?;
+        registry.register(Arc::new(background::StatusTool { jobs }))?;
     }
     Ok(registry)
 }

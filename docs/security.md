@@ -163,6 +163,16 @@ stores a copy of SCV's provider key in the nested SCV's `config.toml`
 nested SCV has no parent daemon socket, and its protocol lines are bounded
 by its frame limit.
 
+A background job (`background: true`) is the same delegated run, detached from
+the turn that started it. It cannot ask for approval: approval requests its
+agent relays are denied, so it acts only within the agent's own permissions,
+and a job whose agent needs approval for a step fails at that step. Jobs
+belong to their session and are cancelled, with their processes, when it
+closes. The turn the server starts to report a finished job has the session's
+own tools and approval policy, like any turn; its prompt quotes the job's
+bounded reply, which is untrusted delegated-agent output. Over WeChat the
+report goes only to the owner's direct chat, as an unprompted message.
+
 ## Web access
 
 `web_fetch` sends a GET request to a URL the model chooses, so the URL can

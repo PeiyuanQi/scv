@@ -28,7 +28,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.1.34"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.1.35"}}
 ```
 
 ### `daemon.control`
@@ -162,15 +162,15 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.1.34"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.1.35"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.34","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.1.34","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.1.35","pid":1234,"components":[{"id":"clawbot:default","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.1.35","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -254,6 +254,26 @@ tool result, and ClawBot never forwards it.
 ```
 
 Usage fields are omitted when the provider does not report them.
+
+### Server-started turns
+
+The server may start a turn itself: when a background delegation (see
+[tools](tools.md#background-jobs)) finishes and the model has not seen its
+result, it reports the job in a new turn once the session is idle and its
+queue is empty. Such a turn is announced and ended like any other, and its
+`turn.started` and terminal event carry an `origin`; a client's own turns have
+none, and older frames without the field parse as client turns.
+
+```json
+{"type":"turn.started","request_id":"background:…","session_id":"...","turn_id":"...","seq":20,"origin":{"kind":"background","jobs":["job-1"]}}
+{"type":"assistant.completed","request_id":"background:…","session_id":"...","turn_id":"...","seq":21,"content":"job-1 finished: …"}
+{"type":"turn.completed","request_id":"background:…","session_id":"...","turn_id":"...","seq":22,"steps":1,"usage":{},"origin":{"kind":"background","jobs":["job-1"]}}
+```
+
+Its `request_id` is server-generated, so a client tells its own turns' events
+apart by `request_id`. A `turn.start` sent while it runs is queued as usual.
+The optional field keeps protocol version 3: v3 clients that predate it read
+the turn as an ordinary one.
 
 ### Errors
 

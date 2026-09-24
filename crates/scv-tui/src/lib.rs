@@ -1,7 +1,7 @@
 //! SCV's terminal client.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::{self, Write as _, stdout},
     path::Path,
     process::Stdio,
@@ -74,12 +74,17 @@ pub async fn run_exec(
         let request_id = new_id();
         client
             .send(&ClientMessage::TurnStart {
-                request_id,
+                request_id: request_id.clone(),
                 session_id: session.id.clone(),
                 prompt,
             })
             .await?;
         let mut printed_delta = false;
+        let mut own_done = false;
+        // Background jobs started in this session keep it open until they
+        // are reported, since closing the session cancels them.
+        let mut background: HashSet<String> = HashSet::new();
+        let mut reporting: HashSet<String> = HashSet::new();
         loop {
             let event = client
                 .read_event()
@@ -119,18 +124,85 @@ pub async fn run_exec(
                     success,
                     output,
                     ..
-                } if !success => eprintln!("\n{name} failed: {output}"),
-                ServerEvent::TurnCompleted { .. } => {
+                } => {
+                    let update = scv_protocol::background_job_update(&output);
+                    background.extend(update.started);
+                    for job in update.settled {
+                        background.remove(&job);
+                    }
+                    if !success {
+                        eprintln!("\n{name} failed: {output}");
+                    }
+                }
+                ServerEvent::TurnStarted {
+                    request_id: started,
+                    origin: Some(origin),
+                    ..
+                } => {
+                    for job in &origin.jobs {
+                        background.remove(job);
+                    }
                     if printed_delta {
                         println!();
+                        printed_delta = false;
                     }
-                    break;
+                    eprintln!("[background report: {}]", origin.jobs.join(", "));
+                    reporting.insert(started);
                 }
-                ServerEvent::TurnCancelled { .. } => bail!("turn cancelled"),
-                ServerEvent::TurnFailed { code, message, .. } => {
+                ServerEvent::TurnCompleted {
+                    request_id: finished,
+                    ..
+                } => {
+                    if printed_delta {
+                        println!();
+                        printed_delta = false;
+                    }
+                    reporting.remove(&finished);
+                    if finished == request_id {
+                        own_done = true;
+                        if !background.is_empty() {
+                            eprintln!(
+                                "scv exec: waiting for {} background job(s) to report",
+                                background.len()
+                            );
+                        }
+                    }
+                    if own_done && background.is_empty() && reporting.is_empty() {
+                        break;
+                    }
+                }
+                ServerEvent::TurnCancelled {
+                    request_id: finished,
+                    ..
+                } if finished == request_id => bail!("turn cancelled"),
+                ServerEvent::TurnFailed {
+                    request_id: finished,
+                    code,
+                    message,
+                    ..
+                } if finished == request_id => {
                     bail!("turn failed ({code}): {message}")
                 }
-                ServerEvent::Error { code, message, .. } => {
+                ServerEvent::TurnCancelled {
+                    request_id: finished,
+                    ..
+                }
+                | ServerEvent::TurnFailed {
+                    request_id: finished,
+                    ..
+                } => {
+                    eprintln!("[background report did not complete]");
+                    reporting.remove(&finished);
+                    if own_done && background.is_empty() && reporting.is_empty() {
+                        break;
+                    }
+                }
+                ServerEvent::Error {
+                    request_id: failed,
+                    code,
+                    message,
+                    ..
+                } if failed.is_none() || failed.as_deref() == Some(request_id.as_str()) => {
                     bail!("server error ({code}): {message}")
                 }
                 _ => {}
@@ -790,10 +862,18 @@ impl App {
                 }
             }
             ServerEvent::SessionPaused { paused, .. } => self.queue_paused = paused,
-            ServerEvent::TurnStarted { turn_id, .. } => {
+            ServerEvent::TurnStarted {
+                turn_id, origin, ..
+            } => {
                 self.running = true;
                 self.active_turn = Some(turn_id);
                 self.started_at = Some(Instant::now());
+                if let Some(origin) = origin {
+                    self.push_item(TranscriptItem::System(format!(
+                        "Background work finished ({}); SCV is reporting it.",
+                        origin.jobs.join(", ")
+                    )));
+                }
             }
             ServerEvent::AssistantDelta { content, .. } => {
                 if let Some(TranscriptItem::Assistant {
@@ -2280,6 +2360,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exceeded"));
+    }
+
+    #[test]
+    fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
+        let mut app = App::new(SessionInfo {
+            id: "s".into(),
+            cwd: "/tmp".into(),
+            model: "test".into(),
+            context_max_tokens: 100,
+            max_server_frame_bytes: DEFAULT_SERVER_FRAME_LIMIT,
+            max_transcript_bytes: 64 * 1024,
+            max_transcript_items: 100,
+            max_prompt_history_bytes: 1024,
+            max_prompt_history_items: 10,
+        });
+        app.handle_server_event(ServerEvent::TurnStarted {
+            request_id: "background:1".into(),
+            session_id: "s".into(),
+            turn_id: "t2".into(),
+            seq: 1,
+            origin: Some(scv_protocol::TurnOrigin {
+                kind: scv_protocol::ORIGIN_BACKGROUND.into(),
+                jobs: vec!["job-1".into()],
+            }),
+        });
+        assert!(app.running);
+        assert!(app.items.iter().any(|item| matches!(
+            item,
+            TranscriptItem::System(text) if text.contains("Background work finished (job-1)")
+        )));
+        app.handle_server_event(ServerEvent::TurnCompleted {
+            request_id: "background:1".into(),
+            session_id: "s".into(),
+            turn_id: "t2".into(),
+            seq: 2,
+            steps: 1,
+            usage: scv_protocol::Usage::default(),
+            origin: Some(scv_protocol::TurnOrigin {
+                kind: scv_protocol::ORIGIN_BACKGROUND.into(),
+                jobs: vec!["job-1".into()],
+            }),
+        });
+        assert!(!app.running);
     }
 
     #[test]

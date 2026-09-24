@@ -1652,3 +1652,351 @@ async fn a_failed_turn_replies_with_the_generic_failure_message() {
             .unwrap();
     result.unwrap();
 }
+
+/// Frames of a server-started turn reporting finished background jobs.
+async fn report_turn(
+    side: &mut BufReader<tokio::net::UnixStream>,
+    request: &str,
+    jobs: &[&str],
+    content: &str,
+) {
+    let origin = json!({"kind":"background","jobs":jobs});
+    send_frame(side, json!({"type":"turn.started","request_id":request,"session_id":"s","turn_id":format!("{request}-t"),"seq":20,"origin":origin})).await;
+    send_frame(side, json!({"type":"assistant.completed","request_id":request,"session_id":"s","turn_id":format!("{request}-t"),"seq":21,"content":content})).await;
+    send_frame(side, json!({"type":"turn.completed","request_id":request,"session_id":"s","turn_id":format!("{request}-t"),"seq":22,"steps":1,"usage":{},"origin":origin})).await;
+}
+
+/// The owner's turn that starts background job `job`.
+async fn start_background_job(
+    side: &mut BufReader<tokio::net::UnixStream>,
+    job: &str,
+    reply: &str,
+) {
+    let output =
+        json!({"job":job,"tool":"agent_codex","status":"running","background":true}).to_string();
+    send_frame(side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent_codex","success":true,"output":output,"truncated":false})).await;
+    finish_turn(side, reply).await;
+}
+
+/// No context token carries more than one message.
+fn one_message_per_token(sends: &[Value]) {
+    let mut tokens = std::collections::HashSet::new();
+    for body in sends {
+        if let Some(token) = body["msg"].get("context_token") {
+            assert!(tokens.insert(token.to_string()), "second send on {token}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_finished_background_job_reaches_the_owner_as_one_unprompted_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message(
+            "m1",
+            "sender",
+            "land it in the background",
+        )]);
+        let (mut side, _) = accept_session(&daemon).await;
+        next_turn(&mut side).await;
+        start_background_job(&mut side, "job-1", "Started job-1.").await;
+        let reply = ilink.sent().await;
+        assert_eq!(sent_text(&reply), "Started job-1.");
+        assert_eq!(reply["msg"]["context_token"], "ctx-m1");
+        // Later the server reports the job in a turn of its own; its approval
+        // requests follow the owner's policy.
+        let origin = json!({"kind":"background","jobs":["job-1"]});
+        send_frame(&mut side, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+        send_frame(&mut side, json!({"type":"approval.requested","request_id":"background:1","session_id":"s","turn_id":"t2","seq":11,"approval_id":"a2","call_id":"c2","name":"bash","risk":"process","cwd":"/","summary":"git log"})).await;
+        let resolved = next_frame(&mut side).await;
+        assert_eq!(
+            (
+                resolved["approval_id"].as_str(),
+                resolved["approved"].as_bool()
+            ),
+            (Some("a2"), Some(true))
+        );
+        send_frame(&mut side, json!({"type":"assistant.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":12,"content":"job-1 landed as 0.1.35."})).await;
+        send_frame(&mut side, json!({"type":"turn.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":13,"steps":2,"usage":{},"origin":origin})).await;
+        let report = ilink.sent().await;
+        assert_eq!(sent_text(&report), "job-1 landed as 0.1.35.");
+        assert_eq!(report["msg"]["to_user_id"], "sender");
+        assert!(report["msg"].get("context_token").is_none(), "{report}");
+        one_message_per_token(&[reply, report]);
+        wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), ilink.sent())
+                .await
+                .is_err(),
+            "nothing else is sent"
+        );
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn a_report_finishing_during_the_owners_turn_follows_that_turns_reply() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message("m1", "sender", "start it")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        next_turn(&mut side).await;
+        start_background_job(&mut side, "job-1", "Started.").await;
+        let first = ilink.sent().await;
+        ilink.push(vec![text_message("m2", "sender", "what else?")]);
+        assert_eq!(next_turn(&mut side).await, "what else?");
+        // The server ran the report first; its events precede this turn's.
+        report_turn(&mut side, "background:1", &["job-1"], "Job report.").await;
+        finish_turn(&mut side, "Answer two.").await;
+        let answer = ilink.sent().await;
+        assert_eq!(sent_text(&answer), "Answer two.");
+        assert_eq!(answer["msg"]["context_token"], "ctx-m2");
+        let report = ilink.sent().await;
+        assert_eq!(sent_text(&report), "Job report.");
+        assert!(report["msg"].get("context_token").is_none());
+        one_message_per_token(&[first, answer, report]);
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn a_long_reply_uses_its_context_token_once_and_the_rest_goes_unprompted() {
+    for (length, truncated) in [
+        (MAX_REPLY_BYTES + 5000, false),
+        (MAX_TOTAL_REPLY_BYTES * 2, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut ilink = FakeIlink::start().await;
+        let store = saved_store(directory.path(), &ilink.base);
+        let socket = directory.path().join("daemon.sock");
+        let daemon = UnixListener::bind(&socket).unwrap();
+        let cancel = CancellationToken::new();
+        let base = ilink.base.clone();
+        let work = until_cancelled(
+            cancel.clone(),
+            run_loop(
+                "token",
+                &base,
+                "default",
+                directory.path(),
+                &socket,
+                None,
+                &store,
+                &|_| {},
+            ),
+        );
+        let content = "é".repeat(length / 2);
+        let peer = async {
+            ilink.push(vec![text_message("m1", "sender", "write a lot")]);
+            let (mut side, _) = accept_session(&daemon).await;
+            next_turn(&mut side).await;
+            finish_turn(&mut side, &content).await;
+            let mut sends = vec![ilink.sent().await];
+            while let Ok(body) =
+                tokio::time::timeout(Duration::from_millis(500), ilink.sent()).await
+            {
+                sends.push(body);
+            }
+            assert!(sends.len() >= 2, "{} sends", sends.len());
+            assert_eq!(sends[0]["msg"]["context_token"], "ctx-m1");
+            for body in &sends[1..] {
+                assert!(body["msg"].get("context_token").is_none(), "{body}");
+                assert_eq!(body["msg"]["to_user_id"], "sender");
+            }
+            one_message_per_token(&sends);
+            let text: String = sends.iter().map(sent_text).collect();
+            if truncated {
+                assert!(text.len() <= MAX_TOTAL_REPLY_BYTES);
+                assert!(
+                    text.ends_with("[reply truncated]"),
+                    "{}",
+                    &text[text.len() - 40..]
+                );
+            } else {
+                assert_eq!(text, content, "a long reply is no longer a failure");
+            }
+            cancel.cancel();
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+                .await
+                .unwrap();
+        result.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_refused_background_report_is_held_for_the_owners_next_reply() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message("m1", "sender", "start it")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        next_turn(&mut side).await;
+        start_background_job(&mut side, "job-1", "Started.").await;
+        ilink.sent().await;
+        // iLink refuses the unprompted report outright.
+        ilink
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(("400 Bad Request", ""));
+        report_turn(&mut side, "background:1", &["job-1"], "Job report.").await;
+        let refused = ilink.sent().await;
+        assert!(refused["msg"].get("context_token").is_none());
+        wait_until(|| store.load_state("default").unwrap().held.len() == 1).await;
+        // It rides ahead of the owner's next reply.
+        ilink.push(vec![text_message("m2", "sender", "and now?")]);
+        next_turn(&mut side).await;
+        finish_turn(&mut side, "Now this.").await;
+        let carried = ilink.sent().await;
+        assert_eq!(carried["msg"]["context_token"], "ctx-m2");
+        let text = sent_text(&carried);
+        assert!(
+            text.contains("Job report.") && text.ends_with("Now this."),
+            "{text}"
+        );
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background_jobs() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = ToolOwner {
+        user_id: "sender".into(),
+        turn_timeout: Duration::from_millis(500),
+    };
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message("m1", "sender", "start it")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        next_turn(&mut side).await;
+        start_background_job(&mut side, "job-1", "Started.").await;
+        ilink.sent().await;
+        // The next turn starts but never finishes in time.
+        ilink.push(vec![text_message("m2", "sender", "slow question")]);
+        let start = next_frame(&mut side).await;
+        assert_eq!(start["type"], "turn.start");
+        let request = start["request_id"].as_str().unwrap().to_owned();
+        send_frame(&mut side, json!({"type":"turn.started","request_id":request,"session_id":"s","turn_id":"slow","seq":30})).await;
+        let cancelled = next_frame(&mut side).await;
+        assert_eq!(
+            (cancelled["type"].as_str(), cancelled["turn_id"].as_str()),
+            (Some("turn.cancel"), Some("slow"))
+        );
+        let failure = ilink.sent().await;
+        assert_eq!(sent_text(&failure), FAILURE_REPLY);
+        // The late end of the abandoned turn is ignored, and the same session
+        // still delivers the job's report: no new session was opened.
+        send_frame(&mut side, json!({"type":"turn.cancelled","request_id":request,"session_id":"s","turn_id":"slow","seq":31})).await;
+        report_turn(&mut side, "background:1", &["job-1"], "Job report.").await;
+        let report = ilink.sent().await;
+        assert_eq!(sent_text(&report), "Job report.");
+        assert!(report["msg"].get("context_token").is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), daemon.accept())
+                .await
+                .is_err(),
+            "the session was replaced"
+        );
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}

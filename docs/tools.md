@@ -304,6 +304,47 @@ after its CLI session ID, and `gc` keeps any transcript a marker whose SCV
 process still runs names. Transcripts written in the last hour are always
 kept, and symlinks are never followed.
 
+### Background jobs
+
+Any `agent_*` call may set `"background": true`. The call then returns at once
+with a job handle, `{"job":"job-1","tool":"agent_codex","status":"running",
+"background":true}`, while the agent keeps working, so a long task (landing or
+releasing a change, say) no longer holds the turn open. The job runs exactly
+as a foreground call would, in its conversation (`session`, `cwd`, model, and
+timeout apply as usual) and tracked like any delegation, and its final result
+is the structured result above. Two read-only tools observe a session's jobs:
+
+- `agent_wait {job, timeout_seconds?}` blocks until the job finishes or the
+  timeout passes (default `tools.agent_timeout_seconds`, at most
+  `tools.max_timeout_seconds`) and returns `{"job","status","elapsed_seconds",
+  "result"}`, or `"status":"running"` with its latest progress line;
+- `agent_status {job?}` describes one job, or `{"jobs":[...]}` for every job
+  the session remembers: running ones with their latest progress, finished
+  ones with their result.
+
+A session runs at most `agent.max_background` jobs at once (default 2; 0 turns
+background calls and both tools off), and a start beyond that is refused with
+an error naming the limit. It remembers its 16 newest finished jobs.
+
+When a job finishes and the model has not already seen its result through
+`agent_wait` or `agent_status`, the server reports it: once the session is idle
+(the user's own queued prompts run first), it starts a turn of its own whose
+prompt, beginning `[SCV background report]`, names each finished job, its
+agent, conversation, status, and bounded reply, and asks the model to tell the
+user. That turn's `turn.started` and final event carry
+`"origin":{"kind":"background","jobs":[...]}` (see
+[protocol](protocol.md#server-started-turns)); one turn reports up to four jobs.
+ClawBot sends the owner the answer as an unprompted message; `scv exec`
+prints it and stays open until every job it started has been reported; the
+TUI shows it like any turn.
+
+A job cannot ask for approval: approval requests a nested agent relays (over
+ACP or from a nested SCV) are denied, so background work relies on the
+agent's own permissions, such as `permissions = "full"`. Jobs belong to their
+session: closing it (a TUI or `scv exec` exiting, an idle ClawBot conversation
+ending) cancels every job still running and kills its processes. A ClawBot
+conversation stays open while its jobs run.
+
 ### Tracking and cleanup
 
 Every delegated process gets `SCV_PARENT=<instance>/<session>/<handle>`

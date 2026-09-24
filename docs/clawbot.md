@@ -140,7 +140,22 @@ the processed batch until its cursor checkpoint, including recovered replies.
 
 `POST /ilink/bot/sendmessage` echoes the original
 `context_token`, uses `message_type = 2`, `message_state = 2`, and a unique
-`client_id`. Pending sends retain that client ID for retry after transport
+`client_id`. Checked live with the owner (2026-09-23):
+
+- A `sendmessage` with no `context_token` is an unprompted message, answering
+  nothing: it returned HTTP 200 with `{"message_id":…}` and no `ret`, and was
+  delivered. It was sent seconds after the owner's last message; whether
+  iLink allows one after a long silence is untested.
+- The first reply on a `context_token`, sent 120 seconds after the inbound
+  message, returned 200 with a `message_id` and was delivered.
+- A second send on the same `context_token` returned 200 with a `message_id`,
+  exactly like a success, but was silently dropped. The API cannot tell it
+  apart from a delivery.
+
+So the bridge sends at most one message per context token: a reply longer
+than one message goes out as the reply followed by unprompted continuations,
+and a background report (below) is always unprompted. A silently dropped
+unprompted message cannot be detected either. Pending sends retain that client ID for retry after transport
 failures, 5xx responses, and HTTP 401, 408, or 429. A rejection is final: an
 explicit `sendmessage` refusal (non-zero `ret` or `errcode` in a 2xx body) or
 any other 4xx status. Live iLink keeps refusing the same reply, including after
@@ -159,8 +174,28 @@ keeps at most 4 replies and 32 KiB per conversation, 128 in total, for 7 days,
 discarding the oldest first and logging only how many it discarded. If the
 carrying reply is refused too, the carried replies return to the store ahead
 of it. The busy notice described below is never held. Text replies are split at
-Unicode boundaries under the configured size limit. Media, typing, and uploads
-are deferred.
+Unicode boundaries into messages of at most 16 KiB; only the first carries the
+context token. A turn's answer is kept to 64 KiB, and a longer one is cut with
+a `[reply truncated]` note instead of failing the turn. Media, typing, and
+uploads are deferred.
+
+## Background reports
+
+When the owner's session starts a background delegation (an `agent_*` call
+with `background: true`; see [tools](tools.md#background-jobs)), the bridge
+notes the job from the tool result and keeps that conversation's session open,
+without the 30-minute idle limit, until the job is reported. When the server
+starts a turn reporting it (`turn.started` with an `origin`), the bridge
+answers that turn's approval requests like the owner's own, collects its
+answer, and sends it to the owner as an unprompted message: recorded as a
+pending delivery before sending, retried with the same client ID, and moved to
+the held-reply store if iLink refuses it outright. A report that finishes
+during one of the owner's turns follows that turn's reply. Only direct chats
+receive reports; group and non-owner sessions have no tools.
+
+If an owner turn runs out of time while jobs are running, the bridge cancels
+that turn (`turn.cancel`) and keeps the session, rather than replacing it,
+which would cancel the jobs; the owner still gets the failure reply.
 
 ## Sessions and safety
 
@@ -177,8 +212,10 @@ once; the rest wait for a slot, and a turn's time limit starts when its slot
 does. A conversation may have 8 claimed messages and the account 64; a message
 beyond either limit is answered at once with a busy notice asking the sender
 to retry, without starting a turn. Each reply goes out with its own message's
-context token. A failed or timed-out turn resets only its own conversation's
-session. Replies are delivered in the order turns complete, and a delivery
+context token. A turn the server fails keeps its session; a turn that times
+out, or a session whose connection broke, resets only its own conversation's
+session (a timed-out turn with background jobs running is cancelled instead;
+see Background reports). Replies are delivered in the order turns complete, and a delivery
 that keeps failing is retried with backoff without stopping polling or other
 turns. Completed assistant output is
 sent only after `turn.completed`; failures become short non-sensitive replies.

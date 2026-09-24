@@ -129,6 +129,66 @@ pub struct QueueEntry {
     pub submitter: String,
 }
 
+/// Why the server started a turn on its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnOrigin {
+    /// `background`: finished background delegations are being reported.
+    pub kind: String,
+    /// The background jobs this turn reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
+}
+
+/// `TurnOrigin::kind` of a turn reporting finished background delegations.
+pub const ORIGIN_BACKGROUND: &str = "background";
+
+/// Background delegation jobs a `tool.completed` output shows starting or
+/// settling. `agent_*` calls with `background: true` return
+/// `{"job", "status":"running", "background":true}`; `agent_wait` and
+/// `agent_status` return job objects (or `{"jobs":[...]}`) whose status is no
+/// longer `running` once they finish. Clients use this to keep a session open
+/// while its jobs run, so the jobs are not cancelled with it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BackgroundJobUpdate {
+    pub started: Vec<String>,
+    pub settled: Vec<String>,
+}
+
+pub fn background_job_update(output: &str) -> BackgroundJobUpdate {
+    let mut update = BackgroundJobUpdate::default();
+    let Ok(serde_json::Value::Object(value)) = serde_json::from_str::<serde_json::Value>(output)
+    else {
+        return update;
+    };
+    let mut visit = |job: &serde_json::Map<String, serde_json::Value>| {
+        let (Some(id), Some(status)) = (
+            job.get("job").and_then(serde_json::Value::as_str),
+            job.get("status").and_then(serde_json::Value::as_str),
+        ) else {
+            return;
+        };
+        if status == "running" {
+            if job.get("background").and_then(serde_json::Value::as_bool) == Some(true) {
+                update.started.push(id.to_owned());
+            }
+        } else {
+            update.settled.push(id.to_owned());
+        }
+    };
+    visit(&value);
+    for job in value
+        .get("jobs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let serde_json::Value::Object(job) = job {
+            visit(job);
+        }
+    }
+    update
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerInfo {
     pub name: String,
@@ -234,6 +294,29 @@ pub enum ClientMessage {
         request_id: String,
         session_id: String,
     },
+}
+
+impl ServerEvent {
+    /// The submitting request of a turn-scoped event, which identifies the
+    /// turn to a client that has several turns' events interleaved.
+    pub fn turn_request_id(&self) -> Option<&str> {
+        match self {
+            Self::QueueDequeued { request_id, .. }
+            | Self::TurnStarted { request_id, .. }
+            | Self::AssistantDelta { request_id, .. }
+            | Self::AssistantCompleted { request_id, .. }
+            | Self::ToolProposed { request_id, .. }
+            | Self::ApprovalRequested { request_id, .. }
+            | Self::ToolStarted { request_id, .. }
+            | Self::ToolProgress { request_id, .. }
+            | Self::ToolCompleted { request_id, .. }
+            | Self::ContextCompacted { request_id, .. }
+            | Self::TurnCompleted { request_id, .. }
+            | Self::TurnCancelled { request_id, .. }
+            | Self::TurnFailed { request_id, .. } => Some(request_id),
+            _ => None,
+        }
+    }
 }
 
 impl ClientMessage {
@@ -343,6 +426,10 @@ pub enum ServerEvent {
         session_id: String,
         turn_id: String,
         seq: u64,
+        /// Set when the server started this turn itself, such as to report
+        /// finished background work; absent for a client's own `turn.start`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<TurnOrigin>,
     },
     #[serde(rename = "assistant.delta")]
     AssistantDelta {
@@ -447,6 +534,10 @@ pub enum ServerEvent {
         seq: u64,
         steps: usize,
         usage: Usage,
+        /// Set when the server started this turn itself, such as to report
+        /// finished background work; absent for a client's own `turn.start`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<TurnOrigin>,
     },
     #[serde(rename = "turn.cancelled")]
     TurnCancelled {
@@ -454,6 +545,10 @@ pub enum ServerEvent {
         session_id: String,
         turn_id: String,
         seq: u64,
+        /// Set when the server started this turn itself, such as to report
+        /// finished background work; absent for a client's own `turn.start`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<TurnOrigin>,
     },
     #[serde(rename = "turn.failed")]
     TurnFailed {
@@ -463,6 +558,10 @@ pub enum ServerEvent {
         seq: u64,
         code: String,
         message: String,
+        /// Set when the server started this turn itself, such as to report
+        /// finished background work; absent for a client's own `turn.start`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<TurnOrigin>,
     },
     #[serde(rename = "error")]
     Error {
@@ -656,5 +755,64 @@ mod tests {
         let status: DaemonStatus =
             serde_json::from_str(r#"{"version":"0.1.23","pid":7,"components":[]}"#).unwrap();
         assert_eq!(status.delegations, DelegationSummary::default());
+    }
+
+    #[test]
+    fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
+        let started = ServerEvent::TurnStarted {
+            request_id: "background:1".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            seq: 4,
+            origin: Some(TurnOrigin {
+                kind: ORIGIN_BACKGROUND.into(),
+                jobs: vec!["job-1".into()],
+            }),
+        };
+        let json = serde_json::to_value(&started).unwrap();
+        assert_eq!(
+            json["origin"],
+            serde_json::json!({"kind":"background","jobs":["job-1"]})
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerEvent>(json).unwrap(),
+            started
+        );
+        assert_eq!(started.turn_request_id(), Some("background:1"));
+        // A client's own turn has no origin on the wire, and older frames parse.
+        let own: ServerEvent = serde_json::from_str(
+            r#"{"type":"turn.completed","request_id":"r","session_id":"s","turn_id":"t","seq":9,"steps":1,"usage":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            own,
+            ServerEvent::TurnCompleted { origin: None, .. }
+        ));
+        assert!(!serde_json::to_string(&own).unwrap().contains("origin"));
+    }
+
+    #[test]
+    fn background_job_updates_come_from_start_wait_and_status_outputs() {
+        let started = background_job_update(
+            r#"{"job":"job-1","tool":"agent_codex","status":"running","background":true}"#,
+        );
+        assert_eq!(started.started, vec!["job-1".to_owned()]);
+        assert!(started.settled.is_empty());
+        // A running job listed by agent_status is neither started nor settled.
+        let listed = background_job_update(
+            r#"{"jobs":[{"job":"job-1","status":"running"},{"job":"job-2","status":"failed"}]}"#,
+        );
+        assert!(listed.started.is_empty());
+        assert_eq!(listed.settled, vec!["job-2".to_owned()]);
+        let waited = background_job_update(r#"{"job":"job-1","status":"completed"}"#);
+        assert_eq!(waited.settled, vec!["job-1".to_owned()]);
+        // Ordinary agent results and non-JSON output are no job updates.
+        for other in [
+            r#"{"agent":"codex","status":"completed"}"#,
+            "plain text",
+            "[1]",
+        ] {
+            assert_eq!(background_job_update(other), BackgroundJobUpdate::default());
+        }
     }
 }
