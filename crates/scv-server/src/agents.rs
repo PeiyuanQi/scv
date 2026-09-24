@@ -1,5 +1,5 @@
 //! Credentials for the native agents SCV delegates to, always inside SCV's
-//! private adapter homes: importing a user's own Codex or Grok setup, and the
+//! private agent homes: importing a user's own Codex or Grok setup, and the
 //! API-key and endpoint stores SCV writes in an agent CLI's native format.
 
 use std::io::{Read as _, Write as _};
@@ -28,7 +28,7 @@ pub fn import_codex(source: &Path, destination: &Path) -> Result<Vec<String>> {
         .with_context(|| format!("resolve SCV Codex home {}", destination.display()))?;
     if source == destination {
         bail!(
-            "{} is already SCV's Codex adapter home; pass your own Codex home with --from",
+            "{} is already SCV's Codex agent home; pass your own Codex home with --from",
             source.display()
         );
     }
@@ -64,6 +64,21 @@ pub fn import_codex(source: &Path, destination: &Path) -> Result<Vec<String>> {
         _ => {}
     }
     Ok(notes)
+}
+
+/// The files [`import_codex`] copies from `source`: `config.toml` when
+/// present, and `auth.json` when it holds an API key.
+pub fn codex_copied_files(source: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    if source.join("config.toml").is_file() {
+        files.push("config.toml".to_owned());
+    }
+    if let Ok(Some(text)) = read_bounded(&source.join("auth.json"))
+        && matches!(classify_auth(&text), Ok(Auth::ApiKey))
+    {
+        files.push("auth.json".to_owned());
+    }
+    files
 }
 
 fn read_bounded(path: &Path) -> Result<Option<String>> {

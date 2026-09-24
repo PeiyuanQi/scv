@@ -3,7 +3,7 @@
 //! Every delegated process is tagged through its environment
 //! (`SCV_PARENT=<instance>/<session>/<handle>`, chained through nested SCVs,
 //! and `SCV_DELEGATION_DEPTH`) and recorded in
-//! `$SCV_HOME/run/delegations/<handle>.json` while it runs. A record whose
+//! `$SCV_HOME/state/delegations/<handle>.json` while it runs. A record whose
 //! owning SCV process died is an orphan: the daemon's reconciliation kills its
 //! process group and anything still carrying its tag, then removes it.
 //!
@@ -149,7 +149,9 @@ pub(crate) struct PendingDelegation {
 }
 
 impl DelegationRegistry {
-    /// The registry for the SCV instance rooted at `instance_home`.
+    /// The registry for the SCV instance rooted at `instance_home`. Its
+    /// records live where `scv_client::Layout::delegations` says; the server
+    /// tests that the two agree.
     pub fn new(instance_home: &Path) -> Self {
         let digest = Sha256::digest(instance_home.as_os_str().as_encoded_bytes());
         let instance = digest[..4]
@@ -157,7 +159,7 @@ impl DelegationRegistry {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         Self {
-            record_dir: instance_home.join("run").join("delegations"),
+            record_dir: instance_home.join("state").join("delegations"),
             instance,
             owner: ProcessIdentity::current(),
             depth: current_depth(),
@@ -191,7 +193,7 @@ impl DelegationRegistry {
     pub fn conversation_dir(&self) -> PathBuf {
         self.record_dir.parent().map_or_else(
             || self.record_dir.join("conversations"),
-            |run| run.join("conversations"),
+            |state| state.join("conversations"),
         )
     }
 

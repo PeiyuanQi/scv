@@ -109,7 +109,7 @@ Listed skills are untrusted instructions, like `.scv/skills`.
 ### Delegated runs
 
 SCV tags each delegated process through its environment (`SCV_PARENT`,
-`SCV_DELEGATION_DEPTH`), records it under `$SCV_HOME/run/delegations` while it
+`SCV_DELEGATION_DEPTH`), records it under `$SCV_HOME/state/delegations` while it
 runs, stops its process group and tagged descendants when it ends, and has the
 daemon stop orphans whose owning SCV process died. This cleanup is
 cooperative. Delegated agents run as the user, unsandboxed, so one that
@@ -129,7 +129,7 @@ its parent. Conversation handles belong to one SCV session and are checked
 against it, so the model cannot reach another session's conversation or pass a
 CLI session ID of its choosing; a continued conversation keeps its original
 `cwd`. `scv agents gc` removes only regular transcript files below each
-adapter home's transcript directory, never follows symlinks, and keeps those
+agent home's transcript directory, never follows symlinks, and keeps those
 of live conversations and anything written in the last hour.
 `scv agents status` prints a summary of Claude Code's and Codex's
 own status output, never the account email or key fragment that output
@@ -226,8 +226,9 @@ clients, and the web tools (`web_fetch` and a configured search
 backend). The updater delegates registry downloads to Cargo. Project
 configuration cannot provide inline credentials or redirect these authorities.
 
-The normal server transport is a local Unix socket at `$SCV_HOME/server.sock`
-(default `~/.scv/server.sock`) with mode `0600`. It is a trusted local-user
+The normal server transport is a local Unix socket at
+`$SCV_HOME/state/server.sock` (default `~/.scv/state/server.sock`) with mode
+`0600` in a mode `0700` directory. It is a trusted local-user
 interface, including daemon management; it is not a remotely authenticated
 network service. A process running as the same user can access that authority.
 The stdio endpoint remains available for one-shot local clients and does not
@@ -261,11 +262,12 @@ logs; channel senders receive only a generic failure reply.
 
 QR login is explicit. Saved channel accounts are enabled by default and start
 under the daemon; login honors a saved opt-out. To opt out before daemon startup,
-set `enabled: false` in the private per-account settings file. Credentials,
-delivery state, and settings under
-`$SCV_HOME/channels/<channel>/{accounts,state,settings}`
-use mode `0600`, atomic writes, and mode `0700` parent directories. Project
-configuration cannot choose bridge accounts, workspaces, or remote authority.
+set `enabled = false` in the account's `[channels.<channel>.<account>]` table
+in `$SCV_HOME/config.toml`. Credentials in `$SCV_HOME/credentials/<channel>`,
+delivery state in `$SCV_HOME/state/channels/<channel>`, and `config.toml` use
+mode `0600` and atomic writes, in mode `0700` directories. Project
+configuration and `SCV_CONFIG` cannot choose bridge accounts, workspaces, or
+remote authority.
 
 By default, remote sessions request `no_tools: true`, enforced by the server,
 and the bridge denies any approval request, so remote messages do not authorize

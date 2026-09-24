@@ -7,6 +7,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use scv_channels::state::AccountSettings;
+use scv_client::Layout;
 use scv_core::{AgentConfig as CoreAgentConfig, ContextConfig, HistoryLimits};
 use scv_provider_openai::ProviderLimits;
 use scv_tools::{
@@ -45,7 +47,11 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub agents: AgentsConfig,
     pub web: WebConfig,
-    /// The process-owned root used for sockets, credentials, skills, and adapters.
+    /// `[channels.<channel>.<account>]`: each chat account's settings. SCV's
+    /// channel store reads and edits them in the instance's `config.toml`;
+    /// here they are only validated.
+    pub channels: BTreeMap<String, BTreeMap<String, AccountSettings>>,
+    /// The process-owned root: see [`Layout`] for what it holds.
     #[serde(skip)]
     pub instance_home: PathBuf,
 }
@@ -581,7 +587,14 @@ impl Config {
                     bail!("explicit configuration is readable by group or others; run chmod 600");
                 }
             }
-            merge(&mut value, read_layer(&path)?);
+            let explicit = read_layer(&path)?;
+            if explicit.get("channels").is_some() {
+                bail!(
+                    "{} cannot set [channels]; channel accounts belong in the instance's config.toml",
+                    path.display()
+                );
+            }
+            merge(&mut value, explicit);
         }
         let mut config: Self = value.try_into().context("parse merged configuration")?;
         if let Some(name) = overrides.provider.as_deref() {
@@ -616,6 +629,113 @@ impl Config {
         config.instance_home = instance_home;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Every leaf setting after layering, as a session started in
+    /// `workspace` would see it, with the layer that set it. Secret values are
+    /// replaced by `<hidden>`. Channel accounts are left out: `scv config
+    /// show` reports them with their credentials.
+    pub fn settings_with_origins(
+        workspace: Option<&std::path::Path>,
+        overrides: &ConfigOverrides,
+    ) -> Result<Vec<Setting>> {
+        let mut settings: BTreeMap<String, (toml::Value, String)> = BTreeMap::new();
+        let mut apply = |value: &toml::Value, origin: &str| {
+            flatten(value, String::new(), &mut |key, value| {
+                settings.insert(key, (value.clone(), origin.to_owned()));
+            });
+        };
+        let defaults: toml::Value = toml::from_str(
+            &toml::to_string(&Self::default()).context("serialize default configuration")?,
+        )?;
+        apply(&defaults, "default");
+        let mut merged = defaults;
+        let user = user_config_path().filter(|path| path.is_file());
+        if let Some(path) = &user {
+            let layer = read_layer(path)?;
+            apply(&layer, "config.toml");
+            merge(&mut merged, layer);
+        }
+        if let Some(workspace) = workspace {
+            let project = workspace.join(".scv/config.toml");
+            let user_file = user
+                .as_ref()
+                .and_then(|path| std::fs::canonicalize(path).ok());
+            if project.is_file() && std::fs::canonicalize(&project).ok() != user_file {
+                let layer = read_layer(&project)?;
+                apply(&layer, "project .scv/config.toml");
+                merge(&mut merged, layer);
+            }
+        }
+        if let Some(path) = std::env::var_os("SCV_CONFIG") {
+            let layer = read_layer(std::path::Path::new(&path))?;
+            apply(&layer, "SCV_CONFIG");
+            merge(&mut merged, layer);
+        }
+        // Environment and flags change the provider in effect: a named
+        // profile's fields when profiles are used, or `[provider]` itself.
+        let active = overrides.provider.clone().or_else(|| {
+            merged
+                .get("provider")?
+                .get("active")?
+                .as_str()
+                .map(ToOwned::to_owned)
+        });
+        let has_profiles = merged
+            .get("providers")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|profiles| !profiles.is_empty());
+        let prefix = match active {
+            Some(name) if has_profiles => format!("providers.{name}"),
+            _ => "provider".into(),
+        };
+        let mut set = |key: String, value: String, origin: &str| {
+            settings.insert(key, (toml::Value::String(value), origin.to_owned()));
+        };
+        if let Some(name) = &overrides.provider {
+            set("provider.active".into(), name.clone(), "--provider flag");
+        }
+        for (field, variable) in [
+            ("model", "SCV_MODEL"),
+            ("base_url", "SCV_BASE_URL"),
+            ("api_key_env", "SCV_API_KEY_ENV"),
+        ] {
+            if let Ok(value) = std::env::var(variable) {
+                set(
+                    format!("{prefix}.{field}"),
+                    value,
+                    &format!("env {variable}"),
+                );
+            }
+        }
+        for (field, value, flag) in [
+            ("model", &overrides.model, "--model flag"),
+            ("base_url", &overrides.base_url, "--base-url flag"),
+        ] {
+            if let Some(value) = value {
+                set(format!("{prefix}.{field}"), value.clone(), flag);
+            }
+        }
+        if let Some(policy) = overrides.approval_policy {
+            let value = toml::Value::try_from(policy).context("serialize approval policy")?;
+            settings.insert(
+                "tools.approval_policy".into(),
+                (value, "--approval-policy flag".into()),
+            );
+        }
+        Ok(settings
+            .into_iter()
+            .filter(|(key, _)| !key.starts_with("channels."))
+            .map(|(key, (value, origin))| Setting {
+                value: if is_secret_key(&key) {
+                    "<hidden>".into()
+                } else {
+                    value.to_string()
+                },
+                key,
+                origin,
+            })
+            .collect())
     }
 
     pub fn core_agent(&self, system_prompt: String) -> CoreAgentConfig {
@@ -721,7 +841,7 @@ impl Config {
             .iter()
             .filter_map(|(name, config)| {
                 let descriptor = scv_tools::adapters::adapter(name)?;
-                let adapter_home = self.instance_home.join("adapters").join(name);
+                let adapter_home = self.layout().agent_home(name);
                 let mut environment = vec![
                     (OsString::from("SCV_HOME"), adapter_home.clone().into()),
                     (OsString::from("HOME"), adapter_home.clone().into()),
@@ -814,17 +934,21 @@ impl Config {
             .collect()
     }
 
+    /// Where this instance keeps everything.
+    pub fn layout(&self) -> Layout {
+        Layout::new(&self.instance_home)
+    }
+
     pub fn prepare_adapter_homes(&self) -> Result<()> {
+        let layout = self.layout();
+        std::fs::create_dir_all(layout.agents()).context("create the agent homes directory")?;
+        ensure_private_dir(&layout.agents())?;
         for name in self.agents.0.keys() {
-            let path = self.instance_home.join("adapters").join(name);
+            let path = layout.agent_home(name);
             std::fs::create_dir_all(&path)
-                .with_context(|| format!("create isolated {name} adapter home"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-                    .with_context(|| format!("secure isolated {name} adapter home"))?;
-            }
+                .with_context(|| format!("create isolated {name} agent home"))?;
+            ensure_private_dir(&path)
+                .with_context(|| format!("secure isolated {name} agent home"))?;
         }
         Ok(())
     }
@@ -853,6 +977,27 @@ impl Config {
             bail!(
                 "provider model and base_url must be non-empty; configure api_key or api_key_env"
             );
+        }
+        for (channel, accounts) in &self.channels {
+            let known = [scv_clawbot::CHANNEL, scv_feishu::CHANNEL];
+            if !known.contains(&channel.as_str()) {
+                bail!(
+                    "unknown channel [channels.{channel}]; known channels are {}",
+                    known.join(", ")
+                );
+            }
+            for (account, settings) in accounts {
+                scv_channels::state::validate_name(account).with_context(|| {
+                    format!("[channels.{channel}.{account}] has an invalid account name")
+                })?;
+                if settings
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|path| !path.is_absolute())
+                {
+                    bail!("channels.{channel}.{account}.workspace must be an absolute path");
+                }
+            }
         }
         for (agent, adapter) in &self.agents.0 {
             if scv_tools::adapters::adapter(agent).is_none() {
@@ -1157,13 +1302,11 @@ fn valid_domain_pattern(entry: &str) -> bool {
 }
 
 fn user_config_path() -> Option<PathBuf> {
-    user_home_path().map(|path| path.join("config.toml"))
+    user_home_path().map(|path| Layout::new(path).config())
 }
 
 pub fn user_home_path() -> Option<PathBuf> {
-    let path = std::env::var_os("SCV_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))?;
+    let path = Layout::from_env().ok()?.home().to_owned();
     if path.exists() {
         Some(std::fs::canonicalize(path.clone()).unwrap_or(path))
     } else if path.is_absolute() {
@@ -1192,7 +1335,24 @@ fn read_layer(path: &std::path::Path) -> Result<toml::Value> {
     }
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("read configuration {}", path.display()))?;
-    toml::from_str(&content).with_context(|| format!("parse configuration {}", path.display()))
+    // The parser's own display quotes the offending line, which may hold a
+    // key, so only its message and line number are kept.
+    toml::from_str(&content).map_err(|error: toml::de::Error| {
+        let line = error.span().map_or_else(String::new, |span| {
+            format!(
+                " line {}",
+                content[..span.start.min(content.len())]
+                    .matches('\n')
+                    .count()
+                    + 1
+            )
+        });
+        anyhow::anyhow!(
+            "parse configuration {}{line}: {}",
+            path.display(),
+            error.message()
+        )
+    })
 }
 
 fn merge(base: &mut toml::Value, overlay: toml::Value) {
@@ -1211,6 +1371,46 @@ fn merge(base: &mut toml::Value, overlay: toml::Value) {
     }
 }
 
+/// A configuration value in effect and the layer that set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setting {
+    /// Dotted key, such as `tools.approval_policy`.
+    pub key: String,
+    /// The value as TOML, or `<hidden>` for a secret.
+    pub value: String,
+    /// `default`, `config.toml`, `project .scv/config.toml`, `SCV_CONFIG`,
+    /// `env <VARIABLE>`, or `--<name> flag`.
+    pub origin: String,
+}
+
+/// Call `visit` with every leaf of `value` under its dotted key.
+fn flatten(value: &toml::Value, prefix: String, visit: &mut impl FnMut(String, &toml::Value)) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, value) in table {
+                let key = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten(value, key, visit);
+            }
+        }
+        leaf => visit(prefix, leaf),
+    }
+}
+
+/// Keys whose values are credentials: API keys, secrets, passwords, and
+/// provider headers, which commonly carry authorization.
+fn is_secret_key(key: &str) -> bool {
+    let last = key.rsplit('.').next().unwrap_or(key);
+    last == "api_key"
+        || last.ends_with("_api_key")
+        || last.contains("secret")
+        || last.contains("password")
+        || key.split('.').any(|segment| segment == "headers")
+}
+
 fn validate_project_keys(value: &toml::Value) -> Result<()> {
     let Some(table) = value.as_table() else {
         bail!("project configuration must be a TOML table");
@@ -1221,6 +1421,7 @@ fn validate_project_keys(value: &toml::Value) -> Result<()> {
         "provider_active",
         "agents",
         "update",
+        "channels",
     ] {
         if table.contains_key(forbidden) {
             bail!("project configuration cannot set [{forbidden}]");
@@ -1527,6 +1728,65 @@ command = "/tmp/fake"
         )
         .unwrap();
         assert!(validate_project_keys(&agent).is_err());
+    }
+
+    #[test]
+    fn channel_accounts_are_user_only_and_validated() {
+        let project: toml::Value =
+            toml::from_str("[channels.wechat.default]\nenabled = false\n").unwrap();
+        assert!(validate_project_keys(&project).is_err());
+
+        let settings = |workspace: Option<&str>| AccountSettings {
+            workspace: workspace.map(PathBuf::from),
+            ..AccountSettings::default()
+        };
+        let with = |channel: &str, account: &str, workspace: Option<&str>| Config {
+            channels: BTreeMap::from([(
+                channel.to_owned(),
+                BTreeMap::from([(account.to_owned(), settings(workspace))]),
+            )]),
+            ..Config::default()
+        };
+        assert!(
+            with("wechat", "default", Some("/srv/work"))
+                .validate()
+                .is_ok()
+        );
+        assert!(with("feishu", "team-2", None).validate().is_ok());
+        let unknown = with("irc", "default", None).validate().unwrap_err();
+        assert!(unknown.to_string().contains("wechat, feishu"), "{unknown}");
+        assert!(with("wechat", "a.b", None).validate().is_err());
+        assert!(with("wechat", "default", Some("work")).validate().is_err());
+        let parsed: Config =
+            toml::from_str("[channels.wechat.default]\nenabled = true\nremote_tools = \"owner\"\n")
+                .unwrap();
+        assert_eq!(
+            parsed.channels["wechat"]["default"].remote_tools,
+            scv_channels::state::RemoteTools::Owner
+        );
+        assert!(toml::from_str::<Config>("[channels.wechat.default]\nenabeld = true\n").is_err());
+    }
+
+    #[test]
+    fn keys_holding_credentials_are_hidden_but_limits_are_not() {
+        for secret in [
+            "providers.openai.api_key",
+            "provider.api_key",
+            "web.brave_api_key",
+            "providers.x.headers.Authorization",
+            "anything.client_secret",
+        ] {
+            assert!(is_secret_key(secret), "{secret}");
+        }
+        for plain in [
+            "provider.api_key_env",
+            "web.brave_api_key_env",
+            "context.max_tokens",
+            "context.reserve_output_tokens",
+            "providers.openai.base_url",
+        ] {
+            assert!(!is_secret_key(plain), "{plain}");
+        }
     }
 
     #[test]
@@ -1887,19 +2147,19 @@ args = ["-p", "--permission-mode", "acceptEdits"]
         let codex = &adapters["agent_codex"];
         assert!(codex.environment.contains(&(
             OsString::from("CODEX_HOME"),
-            OsString::from("/tmp/scv-instance/adapters/codex")
+            OsString::from("/tmp/scv-instance/agents/codex")
         )));
         assert!(codex.environment.contains(&(
             OsString::from("SCV_HOME"),
-            OsString::from("/tmp/scv-instance/adapters/codex")
+            OsString::from("/tmp/scv-instance/agents/codex")
         )));
         for (agent, variable, path) in [
-            ("grok", "GROK_HOME", "/tmp/scv-instance/adapters/grok/.grok"),
-            ("dsh", "DSH_HOME", "/tmp/scv-instance/adapters/dsh/.dsh"),
+            ("grok", "GROK_HOME", "/tmp/scv-instance/agents/grok/.grok"),
+            ("dsh", "DSH_HOME", "/tmp/scv-instance/agents/dsh/.dsh"),
             (
                 "pi",
                 "PI_CODING_AGENT_DIR",
-                "/tmp/scv-instance/adapters/pi/.pi/agent",
+                "/tmp/scv-instance/agents/pi/.pi/agent",
             ),
         ] {
             let adapter = &adapters[&format!("agent_{agent}")];
@@ -1911,7 +2171,7 @@ args = ["-p", "--permission-mode", "acceptEdits"]
             );
             assert!(adapter.environment.contains(&(
                 OsString::from("HOME"),
-                OsString::from(format!("/tmp/scv-instance/adapters/{agent}"))
+                OsString::from(format!("/tmp/scv-instance/agents/{agent}"))
             )));
         }
         assert!(adapters["agent_grok"].environment.contains(&(

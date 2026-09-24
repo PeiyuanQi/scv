@@ -30,6 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create, locate, and inspect this SCV instance's configuration.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -89,8 +90,8 @@ enum Command {
     /// Sign in the agent CLIs SCV delegates to (Claude Code, Codex, Grok
     /// Build, DeepSeek Harness, pi).
     ///
-    /// Each agent keeps its own credentials in SCV's private adapter home
-    /// (`<SCV home>/adapters/<agent>`), separate from your personal login.
+    /// Each agent keeps its own credentials in SCV's private agent home
+    /// (`<SCV home>/agents/<agent>`), separate from your personal login.
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
@@ -98,7 +99,18 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Create `config.toml` with a starter provider if it does not exist.
     Init,
+    /// Show every path SCV uses, the settings in effect for a session started
+    /// here and where each came from, and whether each credential is in
+    /// place. Secrets are never shown.
+    Show {
+        /// Also list settings left at their defaults.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print the path of the settings file, `<SCV home>/config.toml`.
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -191,7 +203,7 @@ impl ChannelArg {
 
 #[derive(Subcommand)]
 enum AgentsCommand {
-    /// Sign an agent in inside SCV's adapter home: the agent's own login, or
+    /// Sign an agent in inside SCV's agent home: the agent's own login, or
     /// a key prompt for agents that use an API key.
     Login {
         #[arg(value_parser = agent_names())]
@@ -253,7 +265,7 @@ enum AgentsCommand {
         #[arg(long)]
         orphans: bool,
     },
-    /// Copy a setup into SCV's adapter home. `codex`: your own config.toml
+    /// Copy a setup into SCV's agent home. `codex`: your own config.toml
     /// and an API-key auth.json (never a ChatGPT sign-in). `grok`: your own
     /// config.toml with its model profiles (never a `grok login` sign-in).
     /// `pi --from-scv-provider`: SCV's own OpenAI-compatible provider as pi's
@@ -358,13 +370,28 @@ async fn main() -> Result<()> {
     let command = cli.command.unwrap_or(Command::Tui);
     refuse_nested_daemon_control(&command)?;
     match command {
-        Command::Config {
-            command: ConfigCommand::Init,
-        } => {
-            let path = scv_server::init_user_config()?;
-            println!("Created configuration at {}", path.display());
-            Ok(())
-        }
+        Command::Config { command } => match command {
+            ConfigCommand::Init => {
+                let path = scv_server::init_user_config()?;
+                println!("Created configuration at {}", path.display());
+                Ok(())
+            }
+            ConfigCommand::Show { all } => {
+                let overrides = ConfigOverrides {
+                    provider: cli.provider,
+                    model: cli.model,
+                    base_url: cli.base_url,
+                    approval_policy: cli.approval_policy.map(Into::into),
+                    no_tools: false,
+                };
+                print!("{}", scv_server::overview::render(&cwd, &overrides, all)?);
+                Ok(())
+            }
+            ConfigCommand::Path => {
+                println!("{}", scv_client::Layout::from_env()?.config().display());
+                Ok(())
+            }
+        },
         Command::Tui => scv_tui::run_tui(&cwd, launch).await,
         Command::Exec { prompt, yes } => scv_tui::run_exec(&cwd, prompt, yes, launch).await,
         Command::Server { stdio } => {
@@ -799,7 +826,7 @@ async fn agents(command: AgentsCommand) -> Result<()> {
             match adapter.login {
                 Login::Command(args) => run_agent(name, args, &extra, "sign-in")?,
                 Login::Interactive { args, hint } => {
-                    println!("Opening {} in SCV's adapter home: {hint}.", adapter.product);
+                    println!("Opening {} in SCV's agent home: {hint}.", adapter.product);
                     run_agent(name, args, &extra, "sign-in")?;
                 }
                 Login::Import => {
@@ -879,6 +906,9 @@ async fn agents(command: AgentsCommand) -> Result<()> {
                             println!("  Sign in for SCV with: scv agents login {name}");
                         }
                     }
+                }
+                if let Some(line) = scv_server::agent_import_status(name)? {
+                    println!("  {line}");
                 }
             }
             Ok(())
@@ -1005,7 +1035,7 @@ async fn agents(command: AgentsCommand) -> Result<()> {
     }
 }
 
-/// Run an agent's own command inside its SCV adapter home.
+/// Run an agent's own command inside its SCV agent home.
 fn run_agent(name: &str, args: &[&str], extra: &[String], action: &str) -> Result<()> {
     let status = scv_server::agent_command(name)?
         .args(args)
@@ -1031,16 +1061,6 @@ fn prompt_line(prompt: &str) -> Result<String> {
 }
 
 async fn channels(command: ChannelsCommand) -> Result<()> {
-    // State saved before channels moves on first use. The daemon moves it
-    // too; this reports the move, or why it cannot happen, to the user.
-    match scv_clawbot::state::migrate() {
-        Ok(true) => println!(
-            "Moved saved WeChat state to {}.",
-            scv_clawbot::state::root()?.display()
-        ),
-        Ok(false) => {}
-        Err(error) => eprintln!("Warning: saved WeChat state was not moved: {error:#}"),
-    }
     match command {
         ChannelsCommand::Login {
             channel,

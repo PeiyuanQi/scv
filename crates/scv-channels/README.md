@@ -24,16 +24,20 @@ newest 4096 IDs, including replies recovered before the first receive.
 Conversations run their turns in order, at most four at once, with bounded
 queues answered by a busy notice beyond them.
 
-`state::Store<C>` keeps one channel's accounts under
-`<SCV home>/channels/<channel>`: `accounts`, `settings`, `state`, `locks`, and
-`transactions`, with private directories, mode `0600` files, and atomic writes.
+`state::Store<C>` keeps one channel's accounts where the instance layout puts
+them: credentials in `<SCV home>/credentials/<channel>/<account>.json`,
+settings as `[channels.<channel>.<account>]` in `<SCV home>/config.toml`
+(edited in place, keeping the rest of the file and its comments), and delivery
+state with its `.lock` and `.transaction` files in
+`<SCV home>/state/channels/<channel>`, with private directories, mode `0600`
+files, and atomic writes.
 State is bound to the credentials' fingerprint; a mismatched binding fails
 before receiving, recovery, or delivery, and replacing an account's identity
 requires logout first. A short, nonblocking transaction lock serializes
 credential, settings, and state writes, binding, and removal, and no network
 I/O holds it. A lifetime lock is held throughout each run; `remove` refuses
-while one is held. `relocate` moves a whole store in one rename while holding
-every account's locks. Discovery fails on more than 128 entries or
+while one is held. `inspect` reads an account for display without any lock.
+Discovery fails on more than 128 entries or
 directory-entry errors and leaves credential validation to the caller.
 
 Focused verification:

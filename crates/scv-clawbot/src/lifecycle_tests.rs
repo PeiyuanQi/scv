@@ -64,7 +64,7 @@ fn inbound() -> Value {
 }
 
 fn saved_store(directory: &Path, base_url: &str) -> state::Store {
-    let store = state::Store::new(directory.join("channels/wechat"));
+    let store = state::Store::new(&scv_channels::Layout::new(directory), crate::CHANNEL);
     store
         .save_account(
             "default",

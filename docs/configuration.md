@@ -6,8 +6,9 @@ Run `scv config init` on first use to create the user file from `config.example.
 
 An SCV instance is identified by its home root. Use `--scv-home PATH` or
 `SCV_HOME` to isolate a daemon and its configuration from other SCV processes;
-the root owns the config file, socket, skills, channel state, adapter state, and
-systemd unit identity. Use `--config PATH` or `SCV_CONFIG` for an additional
+the root owns the config file, credentials, agent homes, skills, runtime state,
+and systemd unit identity (see [Instance layout](#instance-layout)). Use
+`--config PATH` or `SCV_CONFIG` for an additional
 explicit file. Both selectors are captured before SCV starts its server or
 TUI child. A custom home never merges or falls back to the default `~/.scv`
 file.
@@ -24,13 +25,102 @@ SCV merges configuration in this order, from lowest to highest precedence:
 4. documented environment variables;
 5. command-line flags.
 
-Unknown keys and invalid values are startup errors. Project configuration is
+Unknown keys and invalid values are startup errors, reported with the file
+and line but never the line's text, which may hold a key. Project configuration is
 treated as untrusted input: it cannot contain credentials or disable an
 interactive approval required by user-level policy. When the workspace's
 `.scv/config.toml` is the user configuration itself, as when SCV runs from `~`
 with the default home, it is applied once as the user layer and there is no
 project layer. `scv agents` reads no project layer at all, since project
 configuration cannot set `[agents]`.
+
+## Instance layout
+
+An instance keeps everything under its home, `SCV_HOME` (default `~/.scv`), in
+five places:
+
+```text
+~/.scv/
+├── config.toml        settings you edit: provider and key, limits, tools,
+│                      [agents.<name>], and [channels.<channel>.<account>]
+├── credentials/       sign-ins SCV writes itself (0700)
+│   ├── wechat/<account>.json
+│   └── feishu/<account>.json
+├── agents/<name>/     private homes of the delegated agents (claude, codex,
+│                      grok, dsh, pi, scv), with their own sign-ins
+├── skills/            your SCV skills
+└── state/             runtime data SCV writes and reads back (0700)
+    ├── server.sock, server.lock
+    ├── config.lock
+    ├── delegations/<handle>.json
+    ├── conversations/
+    ├── imports/<agent>.json
+    └── channels/<channel>/<account>.json, .lock, .transaction
+```
+
+The rules behind it:
+
+- **One file to edit.** Every setting a person changes is in `config.toml`,
+  including chat accounts. The only other writers are `scv channels run`,
+  `stop`, and `logout`, which change just their own
+  `[channels.<channel>.<account>]` table and keep the rest of the file,
+  comments included.
+- **Credentials apart from settings.** Channel logins, which SCV writes and a
+  token rotation rewrites, live in `credentials/`, so a machine write never
+  replaces a file a person edits.
+- **The provider key stays in `config.toml`.** A person enters it and SCV never
+  writes it, so it belongs with the settings rather than with machine-written
+  credentials; one private (0600) file is simpler to check than two. Use
+  `api_key_env` to keep it in the environment instead. `scv config show`
+  hides it, so the overview is safe to share.
+- **Agents keep their own sign-ins.** Delegated CLIs run with their agent home
+  as `HOME`, and store their logins there in their own formats (such as
+  `agents/codex/auth.json`). `scv agents login|logout` manage them, and
+  `scv config show` reports each file without reading it.
+- **State is not configuration.** `state/` holds only what SCV writes and
+  reads back: the daemon socket, delegated-run records, channel delivery
+  checkpoints, and locks. Nothing there is meant to be edited.
+
+Outside the home are the systemd user unit
+(`~/.config/systemd/user/scv.service`, or a hashed name for a custom home) and,
+per project, `<workspace>/.scv/config.toml` and `.scv/skills/`.
+
+SCV reads nothing else in the home. `scv config show` lists other entries under
+"Not used by SCV", and the daemon logs a warning at startup for paths of the
+layout before `0.2.0` (`adapters/`, `channels/`, `run/`, `server.sock`), which
+no release reads; see [release notes](release.md#upgrading-to-020).
+
+### Seeing it all
+
+`scv config show` prints, for a session started in the current directory:
+
+- every path above, with its mode, whether a daemon listens on the socket,
+  and the service unit;
+- each setting that is not a default, as `key = value [origin]`, where the
+  origin is `config.toml`, `project .scv/config.toml`, `SCV_CONFIG`,
+  `env SCV_MODEL` (and the other variables below), or a `--flag`; `--all`
+  adds the defaults. Keys named `api_key`, `*_api_key`, `*secret*`,
+  `*password*`, and every provider header show `<hidden>`;
+- the provider in effect and where its key comes from;
+- each channel account's settings and credential file, or why they are
+  invalid;
+- each agent's credential files and, for an imported setup, whether its source
+  has changed since;
+- entries of the home that SCV does not read.
+
+It reads files only and takes no lock a running daemon needs. `scv config path`
+prints the path of `config.toml`, for example `$EDITOR "$(scv config path)"`.
+
+### Imported agent setups
+
+Delegated agents never read the user's own `~/.codex` or `~/.grok`: SCV runs
+them in their agent homes so they cannot reuse or change the user's personal
+setup. `scv agents import codex|grok` copies that setup in, and `scv agents
+import scv|pi` copies SCV's own provider. Each import records a digest of what
+it copied in `state/imports/<agent>.json`; `scv agents status` and `scv config
+show` compare it with the source now and say when the copy is stale, so a
+changed Grok profile or rotated key shows up instead of going unnoticed. Run
+the import again to refresh it.
 
 ## Schema
 
@@ -158,6 +248,11 @@ effort_args = ["--thinking", "{effort}"]
 [agents.scv]
 command = "scv"
 args = ["server", "--stdio"]
+
+[channels.wechat.default]
+enabled = true
+workspace = "/absolute/path/to/workspace" # optional; the daemon's workspace otherwise
+remote_tools = "none"                     # or "owner"
 ```
 
 Every table also accepts `prompt_args` (default `[]` except Grok),
@@ -180,7 +275,9 @@ placeholder. Overriding only `command` or `args` keeps the built-in templates. T
 available; attempting to call a missing adapter returns a clear tool error.
 
 `provider`, `agents.*`, and `skills.user_dir` are accepted only from built-in,
-user, explicit `SCV_CONFIG`, environment, and CLI layers. Project configuration
+user, explicit `SCV_CONFIG`, environment, and CLI layers. `[channels]` is
+accepted only in the instance's own `config.toml`, where SCV's channel store
+reads it. Project configuration
 cannot change a model endpoint, credential-variable name, user skill root,
 executable, or fixed arguments. A native-agent approval shows the resolved
 absolute executable, the complete fixed argument vector, the workspace, and
@@ -314,7 +411,7 @@ instead:
 
 `codex-acp` takes no `-c` overrides; `CODEX_CONFIG` is its JSON form of them,
 merged into every session, so SCV sets it on the ACP server rather than
-rewriting the imported `$SCV_HOME/adapters/codex/config.toml`. An inherited
+rewriting the imported `$SCV_HOME/agents/codex/config.toml`. An inherited
 `CODEX_CONFIG` is removed from every delegated agent's environment.
 
 ### Agent transport
@@ -432,8 +529,8 @@ choice for that invocation.
 
 SCV v0.1 reads:
 
-- `SCV_HOME` for the user configuration, skills, daemon socket, and channel state
-  root (default `~/.scv`);
+- `SCV_HOME` for the instance home (default `~/.scv`); see
+  [Instance layout](#instance-layout);
 - `SCV_CONFIG` for one additional explicit configuration file;
 - `SCV_MODEL`;
 - `SCV_BASE_URL`;
@@ -448,8 +545,8 @@ For example, two independent daemons can use different models without sharing
 their sockets or settings:
 
 ```bash
-scv --scv-home ~/.scv/work --model gpt-4.1-mini start --workspace /repo
-scv --scv-home ~/.scv/review --model o4-mini start --workspace /repo
+scv --scv-home ~/.scv-work --model gpt-4.1-mini start --workspace /repo
+scv --scv-home ~/.scv-review --model o4-mini start --workspace /repo
 ```
 
 The default `scv.service` is retained for the default home. Custom homes use a
@@ -469,7 +566,7 @@ your Codex provider setup with `scv agents import codex` or your Grok model
 profiles with `scv agents import grok`, or point pi at SCV's own provider with
 `scv agents import pi --from-scv-provider`; see
 [Signing in delegated agents](tools.md#signing-in-delegated-agents). The nested
-SCV behind `agent_scv` gets `SCV_HOME=$SCV_HOME/adapters/scv`, so its own
+SCV behind `agent_scv` gets `SCV_HOME=$SCV_HOME/agents/scv`, so its own
 `config.toml`, skills, and delegations live there; give it SCV's own provider
 with `scv agents import scv` (see [Nested SCV](tools.md#nested-scv-agent_scv)).
 
@@ -478,37 +575,44 @@ or tool results.
 
 ## Daemon and component settings
 
-`scv-client` resolves the default socket as `$SCV_HOME/server.sock`, normally
-`~/.scv/server.sock`. The TUI and daemon control commands use this same path.
+`scv-client` resolves the default socket as `$SCV_HOME/state/server.sock`,
+normally `~/.scv/state/server.sock`. The TUI and daemon control commands use
+this same path.
 `scv status` queries the running server; `scv reload` immediately reconciles
 saved accounts and component settings without restarting unrelated sessions.
 The daemon also reconciles on startup and every two seconds.
 
-Delegated agent runs are recorded in `$SCV_HOME/run/delegations/<handle>.json`
+Delegated agent runs are recorded in `$SCV_HOME/state/delegations/<handle>.json`
 (mode `0600`) while they run. The daemon stops orphans, whose owning SCV
 process has died, at startup and every 60 seconds; `scv agents ps` and
 `scv agents kill` list and stop runs. See
 [Tracking and cleanup](tools.md#tracking-and-cleanup).
 
-Channel credentials live in `channels/<channel>/accounts/<account>.json`
+Channel credentials live in `credentials/<channel>/<account>.json`
 (`<channel>` is `wechat` or `feishu`) and durable delivery state in
-`channels/<channel>/state/<account>.json` under the same root. Per-account
-settings are separate from project TOML, at
-`$SCV_HOME/channels/<channel>/settings/<account>.json`:
+`state/channels/<channel>/<account>.json` under the same root. Each account's
+settings are a table in the instance's `config.toml`:
 
-```json
-{"enabled":true,"workspace":"/absolute/path/to/workspace","remote_tools":"none"}
+```toml
+[channels.wechat.default]
+enabled = true
+workspace = "/absolute/path/to/workspace"
+remote_tools = "none"
 ```
 
-Missing settings default to `enabled: true` and `remote_tools: "none"`; an
-omitted or null `workspace` uses the daemon workspace. An explicit workspace must be an existing absolute
+A missing table or key defaults to `enabled = true` and `remote_tools =
+"none"`; an omitted `workspace` uses the daemon workspace. An explicit workspace must be an existing absolute
 directory. Saved accounts autostart when enabled, but QR login is always
 explicit. Logging in again preserves a saved disabled setting. A Feishu
 account's credentials hold the app ID and secret, its brand (`feishu` or
 `lark`), and the owner's `open_id`; the secret is never printed.
 
 Account settings reject unknown keys. The daemon reads credentials and settings
-together under the account transaction lock. Login can rotate a token for the
+together under the account transaction lock, on every reconciliation, so an
+edit to a `[channels]` table takes effect within two seconds without a
+restart. SCV's own edits hold `state/config.lock`, rewrite the file atomically
+with mode `0600` (through a symlinked `config.toml` to its target), and keep
+every other table and comment. Login can rotate a token for the
 same known bot/user identity and normalized API origin while preserving delivery
 state. A different identity/origin requires explicit logout first; legacy
 credentials without both IDs are conservatively bound to their token and also
@@ -525,11 +629,12 @@ saved as `remote_tools` (`"none"` by default) in the account settings; see the
 <channel> --account NAME` persists `enabled: false` and joins the instance while
 retaining credentials. Credential or settings changes join the old instance
 before a replacement starts. `scv channels logout <channel> --account NAME` requires a live daemon
-and removes credentials, delivery state, and settings only after joining.
+and removes credentials, delivery state, and the account's `[channels]` table
+only after joining.
 
-For an offline opt-out, create or edit the account settings to contain
-`{"enabled":false}` before starting the daemon. Keep channel directories mode
-`0700` and files mode `0600`; account, settings, and state files must be private
+For an offline opt-out, set `enabled = false` in the account's table before
+starting the daemon. Keep channel directories mode
+`0700` and files mode `0600`; credential and state files must be private
 regular files. Invalid or inaccessible settings fail that account closed.
 Project configuration cannot select accounts, component workspaces, or remote
 authority. See [channels](channels.md) for the lifecycle and status contract.

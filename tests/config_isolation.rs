@@ -135,7 +135,7 @@ fn agent_sign_in_ignores_project_configuration() {
         String::from_utf8_lossy(&output.stdout),
         "claude:\n  signed in (Claude account, max)\n"
     );
-    assert!(home.path().join("adapters/claude").is_dir());
+    assert!(home.path().join("agents/claude").is_dir());
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn codex_import_copies_into_the_instance_adapter_home() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(r#"model_provider "relay""#));
     assert!(!stdout.contains("sk-test-secret"));
-    let adapter = home.path().join("adapters/codex");
+    let adapter = home.path().join("agents/codex");
     assert!(
         std::fs::read_to_string(adapter.join("auth.json"))
             .unwrap()
@@ -248,7 +248,7 @@ fn dsh_login_stores_a_piped_key_in_its_private_home() {
         stdout.contains("Stored the API key as DEEPSEEK_API_KEY"),
         "{stdout}"
     );
-    let credentials = home.path().join("adapters/dsh/.dsh/.credentials.yaml");
+    let credentials = home.path().join("agents/dsh/.dsh/.credentials.yaml");
     assert!(
         std::fs::read_to_string(&credentials)
             .unwrap()
@@ -281,7 +281,7 @@ fn pi_imports_the_scv_provider_as_its_default_endpoint() {
         stdout.contains(r#"openai-responses at provider.invalid, model "gpt-relay""#),
         "{stdout}"
     );
-    let dir = home.path().join("adapters/pi/.pi/agent");
+    let dir = home.path().join("agents/pi/.pi/agent");
     let auth: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("auth.json")).unwrap()).unwrap();
     assert_eq!(auth["scv"]["key"], "sk-env-secret");
@@ -393,4 +393,77 @@ fn codex_status_on_stderr_is_summarized_without_the_key() {
         "codex:\n  signed in (API key)\n"
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("sk-"));
+}
+
+#[test]
+fn config_show_names_each_setting_origin_and_hides_secrets() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    write_private(
+        &home.path().join("config.toml"),
+        "[provider]\nactive = \"relay\"\n\n[providers.relay]\nkind = \"openai-compatible\"\nmodel = \"file-model\"\nbase_url = \"https://relay.invalid/v1\"\napi_key = \"sk-test-secret\"\nheaders = { Authorization = \"Bearer test-header-secret\" }\n\n[tools]\ncommand_timeout_seconds = 900\n",
+    );
+    std::fs::create_dir(workspace.path().join(".scv")).unwrap();
+    std::fs::write(
+        workspace.path().join(".scv/config.toml"),
+        "[tools]\ncommand_timeout_seconds = 300\n",
+    )
+    .unwrap();
+    std::fs::create_dir(home.path().join("run")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
+        .args(["config", "show"])
+        .env("SCV_MODEL", "env-model")
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "providers.relay.model = \"env-model\"  [env SCV_MODEL]",
+        "providers.relay.base_url = \"https://relay.invalid/v1\"  [config.toml]",
+        "providers.relay.api_key = <hidden>  [config.toml]",
+        "providers.relay.headers.Authorization = <hidden>  [config.toml]",
+        "tools.command_timeout_seconds = 300  [project .scv/config.toml]",
+        "In effect: profile \"relay\", model \"env-model\"",
+        "left by an older SCV layout",
+    ] {
+        assert!(
+            shown.contains(expected),
+            "missing {expected:?} in:\n{shown}"
+        );
+    }
+    assert!(!shown.contains("test-secret"), "{shown}");
+    assert!(!shown.contains("test-header-secret"), "{shown}");
+    assert!(!shown.contains("tools.max_timeout_seconds"), "{shown}");
+    let all = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
+        .args(["config", "show", "--all"])
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+    let all = String::from_utf8_lossy(&all.stdout);
+    assert!(
+        all.contains("tools.max_timeout_seconds = 14400  [default]"),
+        "{all}"
+    );
+
+    let path = Command::new(env!("CARGO_BIN_EXE_scv"))
+        .isolated(home.path())
+        .args(["config", "path"])
+        .output()
+        .unwrap();
+    // The home is resolved, so macOS's /var temporary paths print as /private/var.
+    assert_eq!(
+        String::from_utf8_lossy(&path.stdout).trim(),
+        std::fs::canonicalize(home.path())
+            .unwrap()
+            .join("config.toml")
+            .display()
+            .to_string()
+    );
 }

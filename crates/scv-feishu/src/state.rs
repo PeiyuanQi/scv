@@ -1,9 +1,8 @@
 //! Feishu channel credentials and where the channel keeps its state.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 
 pub use scv_channels::state::{
     AccountSettings, BridgeState, RemoteTools, private_directory, validate_name,
@@ -116,20 +115,9 @@ pub fn validate_open_id(open_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The Feishu channel's directory, `<SCV home>/channels/feishu`.
-pub fn root() -> Result<PathBuf> {
-    Ok(scv_home()?.join("channels").join(crate::CHANNEL))
-}
-
+/// The Feishu channel's account store in the instance selected by `SCV_HOME`.
 pub fn store() -> Result<Store> {
-    Ok(Store::new(root()?))
-}
-
-fn scv_home() -> Result<PathBuf> {
-    std::env::var_os("SCV_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|p| p.join(".scv")))
-        .ok_or_else(|| anyhow!("cannot determine SCV home"))
+    Store::from_env(crate::CHANNEL)
 }
 
 pub fn account(name: &str) -> Result<Option<Account>> {
@@ -231,11 +219,11 @@ mod tests {
     #[test]
     fn saved_accounts_are_private_and_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path().join("channels").join("feishu"));
+        let store = Store::new(&scv_channels::Layout::new(dir.path()), crate::CHANNEL);
         store.save_account("default", &account()).unwrap();
         assert!(store.account("default").unwrap() == Some(account()));
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(store.path("accounts", "default").unwrap())
+        let mode = std::fs::metadata(store.credentials_path("default").unwrap())
             .unwrap()
             .permissions()
             .mode();

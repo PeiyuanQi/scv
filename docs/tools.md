@@ -258,7 +258,7 @@ log never reaches the parent model:
   conversation starts.
 - Codex's `--json` events give the last `agent_message` item as the reply,
   `turn.completed` usage, and `turn.failed` or `error` messages. `-o` names a
-  file in a private `tmp` directory of Codex's adapter home holding the final
+  file in a private `tmp` directory of Codex's agent home holding the final
   message, used if the stream carried none and deleted afterwards.
 - pi's `--mode json` gives the last assistant `message_end` text and usage.
 - Grok and DeepSeek Harness stay plain text: stdout is the reply. Grok's JSON
@@ -332,7 +332,7 @@ forgets one left unused for `agent.conversation_idle_seconds` (default 86400).
 Handles end with the SCV session. `scv agents ps` shows a running turn's
 conversation and turn number.
 
-The CLIs keep transcripts in their private adapter homes (Claude Code under
+The CLIs keep transcripts in their private agent homes (Claude Code under
 `.claude/projects`, Codex under `sessions`, pi under `.pi/agent/sessions`).
 `scv agents gc` removes old ones:
 
@@ -341,7 +341,7 @@ scv agents gc --dry-run                 # what would go, per agent
 scv agents gc --older-than 7d codex     # default 30d, never less than an hour
 ```
 
-A live conversation leaves a marker in `$SCV_HOME/run/conversations`, named
+A live conversation leaves a marker in `$SCV_HOME/state/conversations`, named
 after its CLI session ID, and `gc` keeps any transcript a marker whose SCV
 process still runs names. Transcripts written in the last hour are always
 kept, and symlinks are never followed.
@@ -434,7 +434,7 @@ A session started for a chat channel also gets a *Chat channel* section (see
 Every delegated process gets `SCV_PARENT=<instance>/<session>/<handle>`
 (appended to an inherited chain when SCV itself runs delegated) and
 `SCV_DELEGATION_DEPTH`, one more than the caller's. Its descendants inherit
-both. While it runs, SCV records it in `$SCV_HOME/run/delegations/<handle>.json`
+both. While it runs, SCV records it in `$SCV_HOME/state/delegations/<handle>.json`
 (mode `0600`, directories `0700`, written atomically): handle, agent, parent
 session, `cwd`, depth, and the PID plus start time of both the agent and the
 SCV process that owns it, so a reused PID never matches.
@@ -485,15 +485,15 @@ carries the session workspace. Project configuration cannot replace the
 executable or arguments.
 
 Adapter processes use instance-private state directories under
-`$SCV_HOME/adapters/<name>`. In particular, `agent_codex` receives
-`CODEX_HOME=$SCV_HOME/adapters/codex` and does not read the user's normal
+`$SCV_HOME/agents/<name>`. In particular, `agent_codex` receives
+`CODEX_HOME=$SCV_HOME/agents/codex` and does not read the user's normal
 `~/.codex` state, `agent_claude` does not read `~/.claude`, and Grok, DeepSeek
 Harness, and pi never read `~/.grok`, `~/.dsh`, or `~/.pi`.
 
 ### Nested SCV (`agent_scv`)
 
 `agent_scv` delegates to another SCV: a separate session in SCV's private
-home `$SCV_HOME/adapters/scv`, with its own context, instructions, and tools.
+home `$SCV_HOME/agents/scv`, with its own context, instructions, and tools.
 Unlike the CLI adapters, which start one process per turn, it keeps one
 `scv server --stdio` running for a whole conversation and speaks the
 [client protocol](protocol.md) to it:
@@ -544,7 +544,7 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
 `~/.cargo/bin`, where `cargo install` puts it) and a provider in its private
 home: `scv agents import scv` (or `scv agents login scv`) copies SCV's own
 active provider there, as below. Its own delegated agents live under
-`$SCV_HOME/adapters/scv/adapters` and are signed out unless signed in there.
+`$SCV_HOME/agents/scv/agents` and are signed out unless signed in there.
 Attaching to an already running daemon instead of starting a child is future
 work.
 
@@ -654,7 +654,7 @@ They work from any directory. For Claude Code, Codex, and Grok, `login` and
 `logout` run the agent's own command with exactly the private home and cleaned
 environment that the daemon's `agent_*` tool uses, with the terminal attached
 for browser or device-code flows, and the agent CLI itself writes those
-credentials under `$SCV_HOME/adapters/<name>` (mode `0700`). For Claude Code
+credentials under `$SCV_HOME/agents/<name>` (mode `0700`). For Claude Code
 and Codex, `status` runs the CLI's own status command but prints only a
 summary, such as `signed in (Claude account, max)` or `signed in (API key)`,
 because their output names the account email or part of the key; for the
@@ -673,6 +673,13 @@ copy has, such as the `[marketplace]` state Grok writes there, are kept. The
 merged file is validated before anything is written, and it prints the profiles
 and default model, never a key. `auth.json` sign-ins are never copied. Re-run it
 after changing your own Grok config.
+
+Every import (`codex`, `grok`, `scv`, and `pi --from-scv-provider`) is a copy,
+and records a digest of what it copied, never the content, in
+`$SCV_HOME/state/imports/<agent>.json`. `scv agents status` and
+`scv config show` then compare the source with that digest and print either
+`up to date` or that the source has changed since, with the import command to
+run; see [imported agent setups](configuration.md#imported-agent-setups).
 
 DeepSeek Harness signs in with an API key only. `scv agents login dsh` reads
 it without echo, or from stdin when stdin is not a terminal, and writes it as
@@ -703,7 +710,7 @@ providers have stored sign-ins; `logout` removes `auth.json`, the `scv`
 provider, and a default that points at it.
 
 `scv agents import scv` gives the nested SCV behind `agent_scv` a copy of
-SCV's own active provider: `$SCV_HOME/adapters/scv/config.toml` (mode `0600`,
+SCV's own active provider: `$SCV_HOME/agents/scv/config.toml` (mode `0600`,
 written atomically) gets `[provider] active = "scv"` and a `[providers.scv]`
 profile with the same kind, wire API, model, base URL, timeout, and headers,
 plus `[web] search = "provider"` when SCV's own config uses hosted search. The

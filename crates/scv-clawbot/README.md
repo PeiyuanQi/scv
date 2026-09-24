@@ -16,12 +16,11 @@ covers the normalized API origin and the authenticated bot/user IDs, so a token
 rotation for the same identity preserves delivery state; credentials without
 both IDs are bound to their token.
 
-State lives in `<SCV home>/channels/wechat`. `state::migrate` moves the
-directory releases before channels used, `<SCV home>/clawbot`, there in one
-rename while holding every account's locks, and refuses when both exist. The
-earliest single-file credentials, `<SCV home>/clawbot.toml`, are read as the
-`default` account. Old **0.1.9 standalone ClawBot processes do not honor the
-account locks**; stop them manually before enabling the supervised component.
+Credentials live in `<SCV home>/credentials/wechat`, settings in
+`[channels.wechat.<account>]` of `<SCV home>/config.toml`, and delivery state
+in `<SCV home>/state/channels/wechat`. Old **0.1.9 standalone ClawBot
+processes do not honor the account locks**; stop them manually before enabling
+the supervised component.
 
 iLink accepts one message per context token, so only the first part of a reply
 carries it and later parts go out unprompted. Poll batches above 4096 messages

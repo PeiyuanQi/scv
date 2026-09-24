@@ -214,20 +214,15 @@ impl Channel {
         }
     }
 
-    /// Account discovery. WeChat state saved before channels moves first;
-    /// the user resolves a failed move by hand, and `scv channels status`
-    /// names the files.
+    /// Account discovery from saved credentials.
     fn account_names(self) -> std::result::Result<Vec<String>, &'static str> {
         const DISCOVERY: &str =
             "Account discovery failed; components stopped until configuration is readable";
         match self {
-            Self::Wechat => scv_clawbot::state::migrate()
-                .map_err(|_| {
-                    "Saved WeChat state could not move to channels/wechat; run `scv channels status` for details"
-                })
-                .and_then(|_| scv_clawbot::state::account_names().map_err(|_| DISCOVERY)),
-            Self::Feishu => scv_feishu::state::account_names().map_err(|_| DISCOVERY),
+            Self::Wechat => scv_clawbot::state::account_names(),
+            Self::Feishu => scv_feishu::state::account_names(),
         }
+        .map_err(|_| DISCOVERY)
     }
 
     fn snapshot(self, account: &str) -> Result<(Option<Credentials>, AccountSettings)> {
@@ -499,7 +494,9 @@ impl Components {
         self.desired.remove(&id);
         let mut health = initial_health(channel, name, None, true);
         health.state = ComponentState::Failed;
-        health.error = Some("Invalid or inaccessible account/settings".into());
+        health.error = Some(
+            "Invalid or inaccessible account or settings; `scv config show` says which".into(),
+        );
         self.inactive.insert(id, health);
     }
 

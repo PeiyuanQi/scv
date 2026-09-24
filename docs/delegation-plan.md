@@ -73,7 +73,7 @@ approval summary. The built-in default stays `default`.
   `agent.max_delegation_depth` (default 2; `[agents]` holds only per-adapter
   tables). `scv run/start/stop/restart/update/channels` are refused at
   depth > 0.
-- `$SCV_HOME/run/delegations/<handle>.json` (0600, atomic) is written at spawn
+- `$SCV_HOME/state/delegations/<handle>.json` (0600, atomic) is written at spawn
   and removed at reap. The daemon reconciles at startup and every 60 seconds,
   killing groups whose owning process died.
 - The daemon becomes a child subreaper on Linux. After a delegation exits,
@@ -102,7 +102,7 @@ approval summary. The built-in default stays `default`.
 - Claude Code, Codex, and pi resume; Grok and DeepSeek Harness start fresh on
   every call until their resume options can be verified headless.
 - `scv agents gc --older-than 30d` removes conversation files in the private
-  agent homes, skipping live ones (marked in `$SCV_HOME/run/conversations`)
+  agent homes, skipping live ones (marked in `$SCV_HOME/state/conversations`)
   and anything written in the last hour.
 
 ### 4. SCV web tools
@@ -139,7 +139,7 @@ approval summary. The built-in default stays `default`.
   store keeps it as the conversation's attachment, so 6b reuses both.
 - `ToolContext.approvals` gives tools the session's approval gate.
 - `agent_scv` runs `scv server --stdio` with its own home
-  (`~/.scv/adapters/scv`), configured by `scv agents import scv`. The child's
+  (`~/.scv/agents/scv`), configured by `scv agents import scv`. The child's
   `approval.requested` goes through the parent's approval gate; cancellation
   and timeouts become `turn.cancel`.
 - Future work: `[agents.scv] socket`, attaching to an existing daemon instead
