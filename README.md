@@ -73,6 +73,7 @@ cargo publish --locked -p scv-protocol
 cargo publish --locked -p scv-client
 cargo publish --locked -p scv-provider-openai
 cargo publish --locked -p scv-tools
+cargo publish --locked -p scv-channels
 cargo publish --locked -p scv-clawbot
 cargo publish --locked -p scv-server
 cargo publish --locked -p scv-tui
@@ -304,14 +305,17 @@ SCV is a Cargo workspace with deliberately narrow packages:
 - `scv-client`: shared default socket path and daemon control helper;
 - `scv-provider-openai`: streaming provider transport;
 - `scv-tools`: filesystem, process, skill, and nested-agent tools;
-- `scv-clawbot`: iLink login, polling, delivery state, and remote sessions;
+- `scv-channels`: the chat-channel bridge every channel shares: durable
+  claims, delivery state, and remote sessions;
+- `scv-clawbot`: the WeChat channel's iLink login, polling, and sending;
 - `scv-server`: configuration, sessions, permissions, component supervision,
   and protocol dispatch;
 - `scv-tui`: terminal client and headless protocol client.
 
 The TUI connects to the local Unix-socket daemon; `scv-server --stdio` exposes
 the same server library to one-shot local clients. Dependencies flow from
-server to ClawBot to client to protocol; the TUI depends on client, not server.
+server to the WeChat channel (`scv-clawbot`) to the channel core
+(`scv-channels`) to client to protocol; the TUI depends on client, not server.
 All long-running components must be supervised by the server. Start with the
 final v0.1
 [`architecture`](docs/architecture.md), then see the

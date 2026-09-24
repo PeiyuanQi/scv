@@ -3,6 +3,7 @@
 use anyhow::{Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use scv_channels::SendOutcome;
 use serde_json::Value;
 use std::time::Duration;
 use uuid::Uuid;
@@ -36,7 +37,10 @@ pub async fn send_reply(
     max_bytes: usize,
 ) -> Result<()> {
     // One message per context token: later parts go out unprompted.
-    for (index, chunk) in crate::split_utf8(reply, max_bytes).iter().enumerate() {
+    for (index, chunk) in scv_channels::split_utf8(reply, max_bytes)
+        .iter()
+        .enumerate()
+    {
         send_reply_chunk(
             client,
             token,
@@ -74,15 +78,6 @@ pub async fn send_reply_chunk(
         SendOutcome::Delivered => Ok(()),
         SendOutcome::Rejected => bail!("iLink API rejected request"),
     }
-}
-
-/// Result of a send that iLink answered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SendOutcome {
-    Delivered,
-    /// iLink explicitly refused the message. Retrying the same request
-    /// cannot succeed, so the refusal is final for that reply.
-    Rejected,
 }
 
 pub(crate) fn reply_body(

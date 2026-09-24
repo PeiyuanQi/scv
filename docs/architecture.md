@@ -25,8 +25,9 @@ flowchart LR
     server --> core["scv-core"]
     server --> tools["scv-tools"]
     server --> provider["scv-provider-openai"]
-    clawbot --> client
-    clawbot --> protocol
+    clawbot --> channels["scv-channels"]
+    channels --> client
+    channels --> protocol
     tui --> client
     tui --> protocol
     client --> protocol
@@ -71,17 +72,22 @@ The repository is one Cargo workspace with these packages:
 | `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
-| `scv-clawbot` | WeChat iLink authentication, polling, durable delivery state, and daemon-session adapter. |
+| `scv-channels` | The bridge every chat channel shares: the `Transport` trait, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, and background reports. |
+| `scv-clawbot` | The WeChat channel: iLink authentication, polling, and sending behind `Transport`, its credentials, and moving pre-channel state. |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. |
 
-The integration dependency chain is `server -> clawbot -> client -> protocol`.
+The integration dependency chain is
+`server -> clawbot -> channels -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
 `0.1.35` and exact workspace dependency pins.
 
-`scv-clawbot` is an adapter hosted by the daemon's component supervisor. It
+Each channel account is a component hosted by the daemon's supervisor. A
+channel crate (WeChat's `scv-clawbot`) implements `scv-channels::Transport`:
+it signs in, receives a batch of messages after a checkpoint, and sends one
+part of a message. `scv-channels::run` does the rest for every channel. It
 speaks the versioned protocol over the daemon socket, using one long-lived
 session per remote sender (and per group and sender in group chats). Sessions
 are tool-free unless the account's `remote_tools = "owner"` setting grants the

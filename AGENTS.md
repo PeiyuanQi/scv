@@ -52,8 +52,10 @@
   and daemon control helpers in `scv-client`, loop and extension traits
   in `scv-core`, provider transport in provider crates, tool implementations in
   `scv-tools`, policy and session authority in `scv-server`, and terminal
-  presentation in `scv-tui`. Preserve `server -> clawbot -> client -> protocol`;
-  TUI and ClawBot must not depend on server.
+  presentation in `scv-tui`. Keep the shared chat-channel bridge in
+  `scv-channels` and each platform's transport in its own crate (WeChat in
+  `scv-clawbot`). Preserve `server -> clawbot -> channels -> client -> protocol`;
+  TUI and channel crates must not depend on server.
 - All current and future long-running components must implement the server's
   `Component::run(cancel, HealthReporter)` contract and run under its
   `Supervisor`. Keep starts idempotent per account, retries bounded, and
@@ -62,7 +64,7 @@
   through shutdown.
 - Keep all crate versions aligned and internal workspace dependency versions
   exactly pinned. Publish in dependency order: core, protocol, client,
-  provider-openai, tools, clawbot, server, tui, cli.
+  provider-openai, tools, channels, clawbot, server, tui, cli.
 - Treat `SCV_HOME` or `--scv-home` as the instance ownership boundary. Separate
   profiles must not share sockets, service units, credentials, adapter state,
   or provider/model configuration. SCV-created native-agent subprocesses must

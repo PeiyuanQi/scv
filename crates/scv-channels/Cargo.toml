@@ -1,0 +1,22 @@
+[package]
+name = "scv-channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared chat-channel bridge core for the SCV daemon"
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+scv-protocol.workspace = true
+scv-client.workspace = true
+tempfile.workspace = true
+serde.workspace = true
+toml.workspace = true
+libc.workspace = true
+tracing.workspace = true
+futures-util.workspace = true

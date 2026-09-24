@@ -9,8 +9,10 @@ iLink HTTP API, is the channel today; Feishu/Lark is planned in the
 
 Each account runs as a supervised component inside the single SCV daemon,
 which remains authoritative for sessions, provider selection, policy, and turn
-execution. `scv-server` depends on `scv-clawbot`, which uses `scv-client` and
-`scv-protocol`; the bridge does not depend on the server crate.
+execution. `scv-channels` holds the bridge every channel shares; a channel
+crate such as `scv-clawbot` supplies only its transport. `scv-server` depends
+on `scv-clawbot`, which uses `scv-channels` and, through it, `scv-client` and
+`scv-protocol`; no channel crate depends on the server crate.
 
 ## User workflow
 
@@ -285,7 +287,8 @@ state use atomic writes and mode `0600` on Unix; parent directories are mode
 `0700`. Account names contain only ASCII letters, digits, `_`, and `-`.
 Project configuration cannot select accounts, workspaces, or remote authority.
 
-`scv-clawbot` owns iLink authentication, polling, durable state, sender
-sessions, and delivery retries. `scv-server::components` owns lifecycle and
+`scv-channels` owns durable state, claims, sender sessions, held replies, and
+delivery retries; `scv-clawbot` owns iLink authentication, polling, message
+parsing, and sending. `scv-server::components` owns lifecycle and
 health. Account selection uses `--account` (default `default`), not project
 configuration. The [quality contract](quality.md) defines local-only verification.
