@@ -4,8 +4,8 @@ use anyhow::{Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use scv_channels::SendOutcome;
+use scv_channels::retry::{Attempt, SendLabels, retry_send};
 use serde_json::Value;
-use std::time::Duration;
 use uuid::Uuid;
 
 pub fn auth_headers(token: &str, uin: u32) -> HeaderMap {
@@ -121,44 +121,53 @@ pub(crate) async fn upload(
     upload: &crate::media::Upload,
     report: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<Option<String>> {
-    let mut delay = Duration::from_secs(1);
-    for attempt in 0..3 {
+    let labels = SendLabels {
+        refused: "ClawBot file upload refused",
+        failed: "ClawBot file upload failed",
+        gave_up: "ClawBot could not upload the file",
+    };
+    retry_send(labels, report, || async {
         let result = async {
             let response = client
                 .post(format!("{base_url}/ilink/bot/getuploadurl"))
                 .headers(auth_headers(token, rand_u32()))
                 .json(&upload.request(to_user_id))
-                .timeout(Duration::from_secs(20))
+                .timeout(crate::REQUEST_TIMEOUT)
                 .send()
                 .await?;
             let status = response.status();
-            if status.is_client_error() && !matches!(status.as_u16(), 401 | 408 | 429) {
-                return Ok(Err(format!(
+            if status.is_client_error() && !retryable_client_error(status) {
+                return Ok(Attempt::Refused(format!(
                     "upload address HTTP status {}",
                     status.as_u16()
                 )));
             }
             let body = crate::response_body(response).await?;
             if let Err(rejection) = crate::check_send_ack(&body) {
-                return Ok(Err(format!("upload address refused: {rejection}")));
+                return Ok(Attempt::Refused(format!(
+                    "upload address refused: {rejection}"
+                )));
             }
             let reply: Value = serde_json::from_slice(&body)
                 .map_err(|_| anyhow!("invalid upload address response"))?;
             let target = match upload.target(&reply) {
                 Ok(target) => target,
-                Err(error) => return Ok(Err(error.to_string())),
+                Err(error) => return Ok(Attempt::Refused(error.to_string())),
             };
             let response = client
                 .post(target)
                 .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
                 .body(upload.encrypted.clone())
-                .timeout(Duration::from_secs(120))
+                .timeout(crate::CDN_TIMEOUT)
                 .send()
                 .await
                 .map_err(|_| anyhow!("CDN upload failed"))?;
             let status = response.status();
             if status.is_client_error() {
-                return Ok(Err(format!("CDN upload HTTP status {}", status.as_u16())));
+                return Ok(Attempt::Refused(format!(
+                    "CDN upload HTTP status {}",
+                    status.as_u16()
+                )));
             }
             if !status.is_success() {
                 bail!("CDN upload HTTP status {}", status.as_u16())
@@ -169,25 +178,12 @@ pub(crate) async fn upload(
                 .and_then(|value| value.to_str().ok())
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| anyhow!("CDN upload reply omitted its download parameter"))?;
-            Ok::<_, anyhow::Error>(Ok(param.to_owned()))
+            Ok::<_, anyhow::Error>(Attempt::Done(param.to_owned()))
         }
         .await;
-        match result {
-            Ok(Ok(param)) => return Ok(Some(param)),
-            Ok(Err(rejection)) => {
-                tracing::warn!("ClawBot file upload refused ({rejection}); not retrying");
-                return Ok(None);
-            }
-            Err(error) => tracing::warn!(attempt, "ClawBot file upload failed: {error}"),
-        }
-        report(false);
-        if attempt == 2 {
-            return Err(anyhow!("ClawBot could not upload the file"));
-        }
-        tokio::time::sleep(delay).await;
-        delay *= 2;
-    }
-    unreachable!("upload loop returns after success or final attempt")
+        result.unwrap_or_else(|error| Attempt::Retry(error.to_string()))
+    })
+    .await
 }
 
 pub(crate) async fn send_reply_request(
@@ -197,42 +193,46 @@ pub(crate) async fn send_reply_request(
     body: &Value,
     report: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<SendOutcome> {
-    let mut delay = Duration::from_secs(1);
-    for attempt in 0..3 {
+    let labels = SendLabels {
+        refused: "ClawBot reply rejected by iLink",
+        failed: "ClawBot reply send failed",
+        gave_up: "ClawBot could not deliver the reply",
+    };
+    let sent = retry_send(labels, report, || async {
         let result = async {
             let response = client
                 .post(format!("{base_url}/ilink/bot/sendmessage"))
                 .headers(auth_headers(token, rand_u32()))
                 .json(body)
-                .timeout(Duration::from_secs(20))
+                .timeout(crate::REQUEST_TIMEOUT)
                 .send()
                 .await?;
             let status = response.status();
             // A permanent client error cannot succeed on resend; auth,
             // timeout and rate-limit statuses stay retryable.
-            if status.is_client_error() && !matches!(status.as_u16(), 401 | 408 | 429) {
-                return Ok(Err(format!("HTTP status {}", status.as_u16())));
+            if status.is_client_error() && !retryable_client_error(status) {
+                return Ok(Attempt::Refused(format!("HTTP status {}", status.as_u16())));
             }
             let body = crate::response_body(response).await?;
-            Ok::<_, anyhow::Error>(crate::check_send_ack(&body))
+            Ok::<_, anyhow::Error>(match crate::check_send_ack(&body) {
+                Ok(()) => Attempt::Done(()),
+                Err(rejection) => Attempt::Refused(rejection),
+            })
         }
         .await;
-        match result {
-            Ok(Ok(())) => return Ok(SendOutcome::Delivered),
-            Ok(Err(rejection)) => {
-                tracing::warn!("ClawBot reply rejected by iLink ({rejection}); not retrying");
-                return Ok(SendOutcome::Rejected);
-            }
-            Err(error) => tracing::warn!(attempt, "ClawBot reply send failed: {error}"),
-        }
-        report(false);
-        if attempt == 2 {
-            return Err(anyhow!("ClawBot could not deliver the reply"));
-        }
-        tokio::time::sleep(delay).await;
-        delay *= 2;
-    }
-    unreachable!("delivery loop returns after success or final attempt")
+        result.unwrap_or_else(|error| Attempt::Retry(error.to_string()))
+    })
+    .await?;
+    Ok(match sent {
+        Some(()) => SendOutcome::Delivered,
+        None => SendOutcome::Rejected,
+    })
+}
+
+/// Auth, timeout, and rate-limit statuses can succeed on resend; any other
+/// client error cannot.
+fn retryable_client_error(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 401 | 408 | 429)
 }
 
 fn rand_u32() -> u32 {

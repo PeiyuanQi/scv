@@ -132,6 +132,26 @@ pub enum Attempt {
     Retry(String),
 }
 
+impl From<Attempt> for scv_channels::retry::Attempt<()> {
+    fn from(attempt: Attempt) -> Self {
+        match attempt {
+            Attempt::Delivered => Self::Done(()),
+            Attempt::Refused(reason) => Self::Refused(reason),
+            Attempt::Retry(reason) => Self::Retry(reason),
+        }
+    }
+}
+
+impl From<Uploaded> for scv_channels::retry::Attempt<String> {
+    fn from(uploaded: Uploaded) -> Self {
+        match uploaded {
+            Uploaded::Key(key) => Self::Done(key),
+            Uploaded::Refused(reason) => Self::Refused(reason),
+            Uploaded::Retry(reason) => Self::Retry(reason),
+        }
+    }
+}
+
 /// One page of a chat's history, oldest first.
 pub struct HistoryPage {
     pub items: Vec<Value>,

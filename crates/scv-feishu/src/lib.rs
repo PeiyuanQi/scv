@@ -27,8 +27,9 @@ pub mod login;
 pub mod socket;
 pub mod state;
 
-use api::{Api, Attempt, Endpoints, Refusal, Resource, UploadKind, Uploaded};
+use api::{Api, Endpoints, Refusal, Resource, UploadKind};
 use inbound::{Checkpoint, Event, Received};
+use scv_channels::retry::{SendLabels, retry_send};
 
 /// The channel name this crate serves: `scv channels <command> feishu`.
 pub const CHANNEL: &str = "feishu";
@@ -57,7 +58,10 @@ const MAX_SEND_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 /// remote tools; every other sender stays tool-free. `media` is where files
 /// go and how large they may be, and `link` connects the account to the
 /// daemon's hub.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 pub async fn run_supervised(
     credentials: &state::Account,
     account: &str,
@@ -285,10 +289,13 @@ impl Transport for Feishu {
         message: &Outbound<'_>,
         report: &(dyn Fn(bool) + Send + Sync),
     ) -> Result<SendOutcome> {
-        let mut delay = Duration::from_secs(1);
-        for attempt in 0..3 {
-            match self
-                .api
+        let labels = SendLabels {
+            refused: "Feishu refused a reply",
+            failed: "Feishu reply send failed",
+            gave_up: "Feishu could not deliver the reply",
+        };
+        let sent = retry_send(labels, report, || async {
+            self.api
                 .send_text(
                     message.to,
                     message.reply_to,
@@ -296,24 +303,10 @@ impl Transport for Feishu {
                     message.client_id,
                 )
                 .await
-            {
-                Attempt::Delivered => return Ok(SendOutcome::Delivered),
-                Attempt::Refused(reason) => {
-                    tracing::warn!("Feishu refused a reply ({reason}); not retrying");
-                    return Ok(SendOutcome::Rejected);
-                }
-                Attempt::Retry(reason) => {
-                    tracing::warn!(attempt, "Feishu reply send failed: {reason}")
-                }
-            }
-            report(false);
-            if attempt == 2 {
-                anyhow::bail!("Feishu could not deliver the reply");
-            }
-            tokio::time::sleep(delay).await;
-            delay *= 2;
-        }
-        unreachable!("delivery loop returns after success or final attempt")
+                .into()
+        })
+        .await?;
+        Ok(outcome(sent))
     }
 
     async fn download(&self, media: &Media, max_bytes: u64) -> Result<Downloaded> {
@@ -398,59 +391,47 @@ impl Transport for Feishu {
         } else {
             UploadKind::File(file_type(file.name))
         };
-        let mut delay = Duration::from_secs(1);
-        let mut key = None;
-        for attempt in 0..3 {
-            match self.api.upload(upload_kind, file.name, bytes.clone()).await {
-                Uploaded::Key(uploaded) => {
-                    key = Some(uploaded);
-                    break;
-                }
-                Uploaded::Refused(reason) => {
-                    tracing::warn!("Feishu refused a file upload ({reason}); not retrying");
-                    return Ok(SendOutcome::Rejected);
-                }
-                Uploaded::Retry(reason) => {
-                    tracing::warn!(attempt, "Feishu file upload failed: {reason}")
-                }
-            }
-            report(false);
-            if attempt == 2 {
-                anyhow::bail!("Feishu could not upload the file");
-            }
-            tokio::time::sleep(delay).await;
-            delay *= 2;
-        }
-        let key = key.ok_or_else(|| anyhow!("Feishu could not upload the file"))?;
+        let labels = SendLabels {
+            refused: "Feishu refused a file upload",
+            failed: "Feishu file upload failed",
+            gave_up: "Feishu could not upload the file",
+        };
+        let uploaded = retry_send(labels, report, || async {
+            self.api
+                .upload(upload_kind, file.name, bytes.clone())
+                .await
+                .into()
+        })
+        .await?;
+        let Some(key) = uploaded else {
+            return Ok(SendOutcome::Rejected);
+        };
         let (msg_type, content) = if image {
             ("image", serde_json::json!({"image_key": key}))
         } else {
             ("file", serde_json::json!({"file_key": key}))
         };
-        let mut delay = Duration::from_secs(1);
-        for attempt in 0..3 {
-            match self
-                .api
+        let labels = SendLabels {
+            refused: "Feishu refused a file message",
+            failed: "Feishu file message failed",
+            gave_up: "Feishu could not deliver the file",
+        };
+        let sent = retry_send(labels, report, || async {
+            self.api
                 .send_message(file.to, file.reply_to, msg_type, &content, file.client_id)
                 .await
-            {
-                Attempt::Delivered => return Ok(SendOutcome::Delivered),
-                Attempt::Refused(reason) => {
-                    tracing::warn!("Feishu refused a file message ({reason}); not retrying");
-                    return Ok(SendOutcome::Rejected);
-                }
-                Attempt::Retry(reason) => {
-                    tracing::warn!(attempt, "Feishu file message failed: {reason}")
-                }
-            }
-            report(false);
-            if attempt == 2 {
-                anyhow::bail!("Feishu could not deliver the file");
-            }
-            tokio::time::sleep(delay).await;
-            delay *= 2;
-        }
-        unreachable!("delivery loop returns after success or final attempt")
+                .into()
+        })
+        .await?;
+        Ok(outcome(sent))
+    }
+}
+
+/// A retried send's result as the bridge counts it: a refusal is final.
+fn outcome(sent: Option<()>) -> SendOutcome {
+    match sent {
+        Some(()) => SendOutcome::Delivered,
+        None => SendOutcome::Rejected,
     }
 }
 

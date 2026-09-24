@@ -14,6 +14,20 @@ pub use scv_channels::{ToolOwner, owner_turn_timeout};
 /// The channel name this crate serves: `scv channels <command> wechat`.
 pub const CHANNEL: &str = "wechat";
 
+/// iLink's `bot_type` for a ClawBot login QR code.
+const CLAWBOT_BOT_TYPE: u8 = 3;
+/// One ordinary iLink request: a QR code, a reply, an upload address.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// A long poll (`getupdates`, `get_qrcode_status`), which iLink holds open
+/// until there is news.
+const LONG_POLL_TIMEOUT: Duration = Duration::from_secs(50);
+/// How long a login QR code is worth waiting for.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+/// The pause between login status polls.
+const LOGIN_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Moving one file to or from the CDN, up to the media size limits.
+pub(crate) const CDN_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub mod bridge;
 pub mod media;
 pub mod state;
@@ -33,8 +47,10 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
     let base = normalize_base_url(base)?;
     let qr = response_json(
         client
-            .get(format!("{base}/ilink/bot/get_bot_qrcode?bot_type=3"))
-            .timeout(Duration::from_secs(20))
+            .get(format!(
+                "{base}/ilink/bot/get_bot_qrcode?bot_type={CLAWBOT_BOT_TYPE}"
+            ))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await?,
     )
@@ -50,7 +66,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or(code)
     );
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + LOGIN_TIMEOUT;
     loop {
         if Instant::now() >= deadline {
             bail!("WeChat QR login timed out; run `scv channels login wechat` again")
@@ -59,7 +75,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
             client
                 .get(format!("{base}/ilink/bot/get_qrcode_status"))
                 .query(&[("qrcode", code)])
-                .timeout(Duration::from_secs(50))
+                .timeout(LONG_POLL_TIMEOUT)
                 .send()
                 .await?,
         )
@@ -94,7 +110,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
             "expired" => bail!("WeChat QR code expired; run `scv channels login wechat` again"),
             _ => {}
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(LOGIN_POLL_INTERVAL).await;
     }
 }
 
@@ -127,7 +143,10 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
 /// remote tools; every other sender stays tool-free. `media` is where files
 /// go and how large they may be, and `link` connects the account to the
 /// daemon's hub.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 pub async fn run_supervised(
     token: &str,
     base_url: &str,
@@ -212,7 +231,10 @@ async fn response_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
 
 /// Bridge one account over iLink with the given running credentials.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 async fn run_loop(
     token: &str,
     base_url: &str,
@@ -240,7 +262,10 @@ async fn run_loop(
 }
 
 /// [`run_loop`] linked to the daemon's hub.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 async fn run_loop_linked(
     token: &str,
     base_url: &str,
@@ -300,7 +325,7 @@ impl Transport for Ilink<'_> {
                 u32::from_le_bytes(*Uuid::new_v4().as_bytes().first_chunk::<4>().unwrap()),
             ))
             .json(&serde_json::json!({"get_updates_buf":cursor,"base_info":{"channel_version":"1.0.0"}}))
-            .timeout(Duration::from_secs(50))
+            .timeout(LONG_POLL_TIMEOUT)
             .send()
             .await?;
         let value = response_json(response).await?;

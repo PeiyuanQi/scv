@@ -14,7 +14,6 @@ use md5::Md5;
 use scv_channels::{Media, MediaKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::Duration;
 
 /// The CDN iLink files live on, when a message gives no full URL.
 pub const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
@@ -221,7 +220,7 @@ pub async fn download(
     let url = download_url(source)?;
     let mut response = client
         .get(url)
-        .timeout(Duration::from_secs(120))
+        .timeout(crate::CDN_TIMEOUT)
         .send()
         .await
         .map_err(|_| anyhow!("CDN download failed"))?;

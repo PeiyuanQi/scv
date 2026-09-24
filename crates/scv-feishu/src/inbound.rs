@@ -23,9 +23,11 @@ pub struct Received {
     pub created_ms: u64,
 }
 
-/// What a socket event carried. Events are handled one at a time, so the
-/// message variant's size does not matter.
-#[allow(clippy::large_enum_variant)]
+/// What a socket event carried.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "events are handled one at a time, so the message variant's size does not matter"
+)]
 pub enum Event {
     Message(Received),
     /// Another event type, such as `im.message.message_read_v1`.
@@ -129,7 +131,10 @@ fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fields of one message event, borrowed from its payload"
+)]
 fn received(
     message: &Value,
     chat_type: Option<&str>,

@@ -161,7 +161,10 @@ pub struct RunningJob {
 mod one_or_many {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    #[allow(clippy::ptr_arg)]
+    #[allow(
+        clippy::ptr_arg,
+        reason = "serde's `serialize_with` passes the field as `&Vec<T>`"
+    )]
     pub fn serialize<T: Serialize, S: Serializer>(
         items: &Vec<T>,
         serializer: S,

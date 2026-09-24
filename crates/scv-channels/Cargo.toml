@@ -26,3 +26,6 @@ toml_edit.workspace = true
 libc.workspace = true
 tracing.workspace = true
 futures-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

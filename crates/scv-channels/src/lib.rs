@@ -22,6 +22,7 @@ use uuid::Uuid;
 pub use scv_client::Layout;
 pub mod hub;
 pub mod media;
+pub mod retry;
 pub mod session;
 pub mod state;
 
@@ -312,7 +313,10 @@ pub trait Transport: Send + Sync {
 /// `tool_owner` is the authenticated owner when the account grants its owner
 /// remote tools; every other sender stays tool-free. `media` says where
 /// received and outgoing files live and how large they may be.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 pub async fn run<C: state::Credentials, T: Transport>(
     transport: &T,
     account: &str,
@@ -342,7 +346,10 @@ pub async fn run<C: state::Credentials, T: Transport>(
 /// [`run`] for an account the daemon runs, linked to its [`hub::Hub`]: the
 /// daemon then sees the account's owner work and chats and can queue
 /// notices, and recovery describes work a planned restart interrupted.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
+)]
 pub async fn run_linked<C: state::Credentials, T: Transport>(
     transport: &T,
     account: &str,
@@ -564,7 +571,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     /// conversation. Receiving continues while turns run.
     async fn poll(&self, tool_owner: Option<&ToolOwner>, start: &Starter) -> Result<()> {
         let mut conversations: HashMap<String, Conversation> = HashMap::new();
-        let mut backoff = Duration::from_secs(1);
+        let mut backoff = retry::Backoff::new();
         let mut pruned = Instant::now();
         loop {
             if pruned.elapsed() >= PRUNE_EVERY {
@@ -580,12 +587,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 Err(error) => {
                     tracing::warn!("{} poll failed: {error}", self.transport.label());
                     (self.report)(false);
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                    backoff.wait().await;
                     continue;
                 }
             };
-            backoff = Duration::from_secs(1);
+            backoff.reset();
             // Conversations close their queues after idling.
             conversations.retain(|_, conversation| !conversation.jobs.is_closed());
             for inbound in &batch.messages {
@@ -1203,15 +1209,12 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
 
     /// Deliver queued replies in order for the life of the run.
     async fn deliver(&self) -> Result<()> {
-        let mut backoff = Duration::from_secs(1);
+        let mut backoff = retry::Backoff::new();
         loop {
             match self.deliver_next().await? {
                 Step::Idle => self.replies.notified().await,
-                Step::Progress => backoff = Duration::from_secs(1),
-                Step::Retry => {
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                }
+                Step::Progress => backoff.reset(),
+                Step::Retry => backoff.wait().await,
             }
         }
     }
