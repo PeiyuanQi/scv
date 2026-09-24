@@ -62,6 +62,9 @@ stage 0.
   the change. Commit the manifest and lockfile together.
 - **Repo-only change** (skills, CI, unpackaged docs): no bump and no release.
   Stop after stage 5.
+- **Batch small fixes:** crates.io accepts at most 20 new versions of a crate
+  per 24 hours. Merge small fixes to `main` as they land, without a bump, and
+  publish them together in one release, keeping under 20 versions a day.
 
 ## 3. Gates
 
