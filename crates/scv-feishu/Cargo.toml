@@ -1,0 +1,29 @@
+[package]
+name = "scv-feishu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Feishu and Lark chat channel for the SCV daemon"
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+dirs.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+prost.workspace = true
+qrcode.workspace = true
+reqwest.workspace = true
+scv-channels.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

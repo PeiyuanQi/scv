@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
-use scv_clawbot::state::{self, Account, AccountSettings};
+use scv_channels::state::{self, AccountSettings};
 use scv_protocol::{ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, RemoteTools};
 use std::{
     collections::BTreeMap,
@@ -176,46 +176,180 @@ impl Supervisor {
     }
 }
 
-struct ClawBot {
+/// A chat channel whose accounts the daemon supervises.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    Wechat,
+    Feishu,
+}
+
+const CHANNELS: [Channel; 2] = [Channel::Wechat, Channel::Feishu];
+
+/// A channel account's saved credentials.
+#[derive(Clone, PartialEq)]
+enum Credentials {
+    Wechat(scv_clawbot::state::Account),
+    Feishu(scv_feishu::state::Account),
+}
+
+impl Channel {
+    fn parse(name: &str) -> Result<Self> {
+        CHANNELS
+            .into_iter()
+            .find(|channel| channel.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown channel {name:?}"))
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Wechat => scv_clawbot::CHANNEL,
+            Self::Feishu => scv_feishu::CHANNEL,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Wechat => "WeChat",
+            Self::Feishu => "Feishu",
+        }
+    }
+
+    /// Account discovery. WeChat state saved before channels moves first;
+    /// the user resolves a failed move by hand, and `scv channels status`
+    /// names the files.
+    fn account_names(self) -> std::result::Result<Vec<String>, &'static str> {
+        const DISCOVERY: &str =
+            "Account discovery failed; components stopped until configuration is readable";
+        match self {
+            Self::Wechat => scv_clawbot::state::migrate()
+                .map_err(|_| {
+                    "Saved WeChat state could not move to channels/wechat; run `scv channels status` for details"
+                })
+                .and_then(|_| scv_clawbot::state::account_names().map_err(|_| DISCOVERY)),
+            Self::Feishu => scv_feishu::state::account_names().map_err(|_| DISCOVERY),
+        }
+    }
+
+    fn snapshot(self, account: &str) -> Result<(Option<Credentials>, AccountSettings)> {
+        Ok(match self {
+            Self::Wechat => {
+                let (credentials, settings) = scv_clawbot::state::account_snapshot(account)?;
+                (credentials.map(Credentials::Wechat), settings)
+            }
+            Self::Feishu => {
+                let (credentials, settings) = scv_feishu::state::account_snapshot(account)?;
+                (credentials.map(Credentials::Feishu), settings)
+            }
+        })
+    }
+
+    fn signed_in(self, account: &str) -> Result<bool> {
+        Ok(match self {
+            Self::Wechat => scv_clawbot::state::account(account)?.is_some(),
+            Self::Feishu => scv_feishu::state::account(account)?.is_some(),
+        })
+    }
+
+    fn settings(self, account: &str) -> Result<AccountSettings> {
+        match self {
+            Self::Wechat => scv_clawbot::state::settings(account),
+            Self::Feishu => scv_feishu::state::settings(account),
+        }
+    }
+
+    fn save_settings(self, account: &str, settings: &AccountSettings) -> Result<()> {
+        match self {
+            Self::Wechat => scv_clawbot::state::save_settings(account, settings),
+            Self::Feishu => scv_feishu::state::save_settings(account, settings),
+        }
+    }
+
+    fn remove(self, account: &str) -> Result<()> {
+        match self {
+            Self::Wechat => scv_clawbot::state::remove(account),
+            Self::Feishu => scv_feishu::state::remove(account),
+        }
+    }
+}
+
+impl Credentials {
+    /// The authenticated owner, the only sender remote tools may reach.
+    fn owner(&self) -> Option<&str> {
+        match self {
+            Self::Wechat(account) => account.user_id.as_deref(),
+            Self::Feishu(account) => account.owner_open_id.as_deref(),
+        }
+    }
+
+    /// The bot's identity shown in status: the iLink bot or the Feishu app.
+    fn bot_id(&self) -> Option<String> {
+        match self {
+            Self::Wechat(account) => account.bot_id.clone(),
+            Self::Feishu(account) => Some(account.app_id.clone()),
+        }
+    }
+}
+
+struct ChannelAccount {
+    channel: Channel,
     account: String,
-    credentials: Account,
+    credentials: Credentials,
     workspace: PathBuf,
     socket: PathBuf,
     tool_owner: Option<String>,
 }
 
 #[async_trait]
-impl Component for ClawBot {
+impl Component for ChannelAccount {
     async fn run(&self, cancellation: CancellationToken, health: HealthReporter) -> Result<()> {
         let tool_owner = self.tool_owner.clone().map(|user_id| {
-            let turn_timeout = scv_clawbot::owner_turn_timeout(max_tool_timeout(&self.workspace));
+            let turn_timeout = scv_channels::owner_turn_timeout(max_tool_timeout(&self.workspace));
             tracing::info!(
-                "ClawBot {} owner turns may run up to {} seconds",
+                "{} {} owner turns may run up to {} seconds",
+                self.channel.title(),
                 self.account,
                 turn_timeout.as_secs()
             );
-            scv_clawbot::ToolOwner {
+            scv_channels::ToolOwner {
                 user_id,
                 turn_timeout,
             }
         });
-        scv_clawbot::run_supervised(
-            &self.credentials.token,
-            &self.credentials.base_url,
-            &self.account,
-            &self.workspace,
-            &self.socket,
-            tool_owner.as_ref(),
-            cancellation,
-            Arc::new(move |connected| health.contact(connected)),
-        )
-        .await
+        let report = Arc::new(move |connected| health.contact(connected));
+        match &self.credentials {
+            Credentials::Wechat(credentials) => {
+                scv_clawbot::run_supervised(
+                    &credentials.token,
+                    &credentials.base_url,
+                    &self.account,
+                    &self.workspace,
+                    &self.socket,
+                    tool_owner.as_ref(),
+                    cancellation,
+                    report,
+                )
+                .await
+            }
+            Credentials::Feishu(credentials) => {
+                scv_feishu::run_supervised(
+                    credentials,
+                    &self.account,
+                    &self.workspace,
+                    &self.socket,
+                    tool_owner.as_ref(),
+                    cancellation,
+                    report,
+                )
+                .await
+            }
+        }
     }
 }
 
 pub(crate) struct Components {
     supervisor: Supervisor,
-    desired: BTreeMap<String, (Account, AccountSettings)>,
+    /// Running or disabled accounts by component ID, `<channel>:<account>`.
+    desired: BTreeMap<String, (Credentials, AccountSettings)>,
     inactive: BTreeMap<String, ComponentHealth>,
     socket: PathBuf,
     workspace: PathBuf,
@@ -244,48 +378,62 @@ impl Components {
         }
     }
 
+    /// Match running components to every channel's saved accounts. A channel
+    /// whose accounts cannot be discovered stops its own components and
+    /// reports why; other channels keep running.
     pub async fn reconcile(&mut self) -> Result<()> {
-        // State saved before channels moves first; the user resolves a
-        // failed move by hand, and `scv channels status` names the files.
-        let names = state::migrate()
-            .map_err(|_| {
-                "Saved WeChat state could not move to channels/wechat; run `scv channels status` for details"
-            })
-            .and_then(|_| {
-                state::account_names().map_err(|_| {
-                    "Account discovery failed; components stopped until configuration is readable"
-                })
-            });
-        let names = match names {
-            Ok(names) => names,
-            Err(message) => {
-                self.supervisor.shutdown().await;
-                self.desired.clear();
-                self.inactive.clear();
-                let mut health = initial_health("discovery", None, false);
-                health.id = component_id("discovery-error");
-                health.state = ComponentState::Failed;
-                health.error = Some(message.into());
-                self.inactive.insert("discovery-error".into(), health);
-                bail!("Account discovery failed");
+        let mut failed = false;
+        for channel in CHANNELS {
+            match channel.account_names() {
+                Ok(names) => self.reconcile_channel(channel, names).await,
+                Err(message) => {
+                    failed = true;
+                    for id in self.ids(channel) {
+                        self.supervisor.stop(&id).await;
+                        self.desired.remove(&id);
+                        self.inactive.remove(&id);
+                    }
+                    let mut health = initial_health(channel, "discovery", None, false);
+                    health.id = component_id(channel, "discovery-error");
+                    health.state = ComponentState::Failed;
+                    health.error = Some(message.into());
+                    self.inactive.insert(health.id.clone(), health);
+                }
             }
-        };
-        for name in self
-            .desired
+        }
+        if failed {
+            bail!("Account discovery failed");
+        }
+        Ok(())
+    }
+
+    /// Component IDs of one channel, running or not.
+    fn ids(&self, channel: Channel) -> Vec<String> {
+        let prefix = format!("{}:", channel.name());
+        self.desired
             .keys()
             .chain(self.inactive.keys())
+            .filter(|id| id.starts_with(&prefix))
             .cloned()
-            .collect::<Vec<_>>()
-        {
-            if !names.contains(&name) {
-                self.supervisor.stop(&component_id(&name)).await;
-                self.desired.remove(&name);
-                self.inactive.remove(&name);
+            .collect()
+    }
+
+    async fn reconcile_channel(&mut self, channel: Channel, names: Vec<String>) {
+        let wanted: Vec<String> = names
+            .iter()
+            .map(|name| component_id(channel, name))
+            .collect();
+        for id in self.ids(channel) {
+            if !wanted.contains(&id) {
+                self.supervisor.stop(&id).await;
+                self.desired.remove(&id);
+                self.inactive.remove(&id);
             }
         }
         for name in names {
+            let id = component_id(channel, &name);
             let loaded = (|| -> Result<_> {
-                let (account, settings) = state::account_snapshot(&name)?;
+                let (account, settings) = channel.snapshot(&name)?;
                 Ok((
                     account.ok_or_else(|| anyhow::anyhow!("missing account"))?,
                     settings,
@@ -294,16 +442,16 @@ impl Components {
             let (credentials, settings) = match loaded {
                 Ok(value) => value,
                 Err(error) => {
-                    self.account_error(name, error).await;
+                    self.account_error(channel, &name, error).await;
                     continue;
                 }
             };
-            if self.desired.get(&name) == Some(&(credentials.clone(), settings.clone())) {
+            if self.desired.get(&id) == Some(&(credentials.clone(), settings.clone())) {
                 continue;
             }
-            self.supervisor.stop(&component_id(&name)).await;
-            self.inactive.remove(&name);
-            let mut health = initial_health(&name, Some(&credentials), settings.enabled);
+            self.supervisor.stop(&id).await;
+            self.inactive.remove(&id);
+            let mut health = initial_health(channel, &name, Some(&credentials), settings.enabled);
             let tool_owner = tool_owner(&credentials, &settings);
             if tool_owner.is_some() {
                 health.remote_tools = RemoteTools::Owner;
@@ -317,12 +465,13 @@ impl Components {
                     health.state = ComponentState::Failed;
                     health.error =
                         Some("Component workspace must be an existing absolute directory".into());
-                    self.inactive.insert(name.clone(), health);
-                    self.desired.remove(&name);
+                    self.inactive.insert(id.clone(), health);
+                    self.desired.remove(&id);
                     continue;
                 }
                 self.supervisor.start(
-                    Arc::new(ClawBot {
+                    Arc::new(ChannelAccount {
+                        channel,
                         account: name.clone(),
                         credentials: credentials.clone(),
                         workspace,
@@ -333,25 +482,25 @@ impl Components {
                 );
             } else {
                 health.state = ComponentState::Disabled;
-                self.inactive.insert(name.clone(), health);
+                self.inactive.insert(id.clone(), health);
             }
-            self.desired.insert(name, (credentials, settings));
+            self.desired.insert(id, (credentials, settings));
         }
-        Ok(())
     }
 
-    async fn account_error(&mut self, name: String, error: anyhow::Error) {
+    async fn account_error(&mut self, channel: Channel, name: &str, error: anyhow::Error) {
         // A bridge state commit briefly holds this same lock. Retry next refresh
         // rather than interrupting healthy work for ordinary lock contention.
         if is_busy(&error) {
             return;
         }
-        self.supervisor.stop(&component_id(&name)).await;
-        self.desired.remove(&name);
-        let mut health = initial_health(&name, None, true);
+        let id = component_id(channel, name);
+        self.supervisor.stop(&id).await;
+        self.desired.remove(&id);
+        let mut health = initial_health(channel, name, None, true);
         health.state = ComponentState::Failed;
         health.error = Some("Invalid or inaccessible account/settings".into());
-        self.inactive.insert(name, health);
+        self.inactive.insert(id, health);
     }
 
     pub async fn control(&mut self, command: DaemonCommand) -> Result<DaemonStatus> {
@@ -368,7 +517,7 @@ impl Components {
                 workspace,
                 remote_tools,
             } => {
-                known_channel(&channel)?;
+                let channel = Channel::parse(&channel)?;
                 state::validate_name(&account)?;
                 let workspace = match workspace {
                     Some(path) => {
@@ -381,10 +530,10 @@ impl Components {
                     None => None,
                 };
                 retry_while_busy(|| {
-                    if state::account(&account)?.is_none() {
+                    if !channel.signed_in(&account)? {
                         bail!("Account is not logged in");
                     }
-                    let mut settings = state::settings(&account)?;
+                    let mut settings = channel.settings(&account)?;
                     settings.enabled = enabled;
                     if let Some(path) = &workspace {
                         settings.workspace = Some(path.clone());
@@ -392,26 +541,27 @@ impl Components {
                     if let Some(mode) = remote_tools {
                         settings.remote_tools = mode;
                     }
-                    state::save_settings(&account, &settings)
+                    channel.save_settings(&account, &settings)
                 })
                 .await?;
             }
             DaemonCommand::ChannelLogout { channel, account } => {
-                known_channel(&channel)?;
+                let channel = Channel::parse(&channel)?;
                 state::validate_name(&account)?;
                 // Persist disabled and tool-free first, so failed deletion can
                 // neither resurrect a live account nor hand a later login the grant.
                 retry_while_busy(|| {
-                    let mut settings = state::settings(&account)?;
+                    let mut settings = channel.settings(&account)?;
                     settings.enabled = false;
                     settings.remote_tools = RemoteTools::None;
-                    state::save_settings(&account, &settings)
+                    channel.save_settings(&account, &settings)
                 })
                 .await?;
-                self.supervisor.stop(&component_id(&account)).await;
-                self.desired.remove(&account);
-                self.inactive.remove(&account);
-                retry_while_busy(|| state::remove(&account)).await?;
+                let id = component_id(channel, &account);
+                self.supervisor.stop(&id).await;
+                self.desired.remove(&id);
+                self.inactive.remove(&id);
+                retry_while_busy(|| channel.remove(&account)).await?;
             }
         }
         self.reconcile().await?;
@@ -429,7 +579,7 @@ fn max_tool_timeout(workspace: &std::path::Path) -> std::time::Duration {
     let seconds = crate::Config::load(workspace, crate::ConfigOverrides::default())
         .map(|config| config.tools.max_timeout_seconds)
         .unwrap_or_else(|error| {
-            tracing::warn!("ClawBot uses the default tool timeout ceiling: {error:#}");
+            tracing::warn!("Channel owner turns use the default tool timeout ceiling: {error:#}");
             crate::config::ToolConfig::default().max_timeout_seconds
         });
     std::time::Duration::from_secs(seconds)
@@ -458,32 +608,29 @@ fn is_busy(error: &anyhow::Error) -> bool {
 
 /// Only the authenticated account owner may receive tools. Credentials without
 /// a known owner ID grant tools to nobody, even when the setting asks for it.
-fn tool_owner(credentials: &Account, settings: &AccountSettings) -> Option<String> {
+fn tool_owner(credentials: &Credentials, settings: &AccountSettings) -> Option<String> {
     (settings.remote_tools == RemoteTools::Owner)
-        .then(|| credentials.user_id.clone())
+        .then(|| credentials.owner().map(str::to_owned))
         .flatten()
         .filter(|owner| !owner.is_empty())
 }
 
-/// Only the WeChat channel exists so far.
-fn known_channel(channel: &str) -> Result<()> {
-    if channel != scv_clawbot::CHANNEL {
-        bail!("Unknown channel {channel:?}");
-    }
-    Ok(())
+fn component_id(channel: Channel, account: &str) -> String {
+    format!("{}:{account}", channel.name())
 }
 
-fn component_id(account: &str) -> String {
-    format!("{}:{account}", scv_clawbot::CHANNEL)
-}
-
-fn initial_health(account: &str, credentials: Option<&Account>, enabled: bool) -> ComponentHealth {
+fn initial_health(
+    channel: Channel,
+    account: &str,
+    credentials: Option<&Credentials>,
+    enabled: bool,
+) -> ComponentHealth {
     ComponentHealth {
-        id: component_id(account),
-        channel: scv_clawbot::CHANNEL.into(),
+        id: component_id(channel, account),
+        channel: channel.name().into(),
         account: account.into(),
-        bot_id: credentials.and_then(|a| a.bot_id.clone()),
-        user_id: credentials.and_then(|a| a.user_id.clone()),
+        bot_id: credentials.and_then(Credentials::bot_id),
+        user_id: credentials.and_then(|c| c.owner().map(str::to_owned)),
         enabled,
         state: ComponentState::Starting,
         last_success_unix_seconds: None,
@@ -530,8 +677,14 @@ mod tests {
             initial_backoff: Duration::from_millis(10),
             ..Supervisor::default()
         };
-        supervisor.start(fake.clone(), initial_health("test", None, true));
-        supervisor.start(fake.clone(), initial_health("test", None, true));
+        supervisor.start(
+            fake.clone(),
+            initial_health(Channel::Wechat, "test", None, true),
+        );
+        supervisor.start(
+            fake.clone(),
+            initial_health(Channel::Wechat, "test", None, true),
+        );
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if supervisor.health()[0].state == ComponentState::Connected {
@@ -549,7 +702,7 @@ mod tests {
         assert!(health.error.is_none());
         supervisor.shutdown().await;
         assert_eq!(stops.load(Ordering::SeqCst), 1);
-        supervisor.start(fake, initial_health("test", None, true));
+        supervisor.start(fake, initial_health(Channel::Wechat, "test", None, true));
         tokio::time::sleep(Duration::from_millis(20)).await;
         supervisor.shutdown().await;
         assert_eq!(starts.load(Ordering::SeqCst), 3);
@@ -558,7 +711,7 @@ mod tests {
 
     #[test]
     fn credentials_are_not_connection_evidence() {
-        let health = initial_health("saved", None, true);
+        let health = initial_health(Channel::Wechat, "saved", None, true);
         assert_eq!(health.state, ComponentState::Starting);
         assert_eq!(health.last_success_unix_seconds, None);
     }
@@ -574,7 +727,7 @@ mod tests {
                 stops: stops.clone(),
                 fail_first: false,
             }),
-            initial_health("test", None, true),
+            initial_health(Channel::Wechat, "test", None, true),
         );
         tokio::time::timeout(Duration::from_secs(1), async {
             while starts.load(Ordering::SeqCst) == 0 {
@@ -585,7 +738,8 @@ mod tests {
         .unwrap();
         components
             .account_error(
-                "test".into(),
+                Channel::Wechat,
+                "test",
                 std::io::Error::from(std::io::ErrorKind::WouldBlock).into(),
             )
             .await;
@@ -596,7 +750,7 @@ mod tests {
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert_eq!(stops.load(Ordering::SeqCst), 0);
         components
-            .account_error("test".into(), anyhow::anyhow!("invalid settings"))
+            .account_error(Channel::Wechat, "test", anyhow::anyhow!("invalid settings"))
             .await;
         assert_eq!(stops.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -619,7 +773,10 @@ mod tests {
             grace: Duration::from_millis(20),
             ..Supervisor::default()
         };
-        supervisor.start(Arc::new(Stubborn), initial_health("stubborn", None, true));
+        supervisor.start(
+            Arc::new(Stubborn),
+            initial_health(Channel::Wechat, "stubborn", None, true),
+        );
         tokio::task::yield_now().await;
         tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
             .await
@@ -630,7 +787,7 @@ mod tests {
             stops: Arc::new(AtomicUsize::new(0)),
             fail_first: true,
         });
-        supervisor.start(fake, initial_health("backoff", None, true));
+        supervisor.start(fake, initial_health(Channel::Wechat, "backoff", None, true));
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(supervisor.health()[0].state, ComponentState::Backoff);
         assert_eq!(
@@ -644,28 +801,66 @@ mod tests {
 
     #[test]
     fn remote_tools_require_owner_mode_and_known_owner() {
-        let account = |user_id: Option<&str>| Account {
-            token: "token".into(),
-            base_url: "https://example.invalid".into(),
-            bot_id: Some("bot".into()),
-            user_id: user_id.map(Into::into),
+        let wechat = |user_id: Option<&str>| {
+            Credentials::Wechat(scv_clawbot::state::Account {
+                token: "token".into(),
+                base_url: "https://example.invalid".into(),
+                bot_id: Some("bot".into()),
+                user_id: user_id.map(Into::into),
+            })
+        };
+        let feishu = |owner: Option<&str>| {
+            Credentials::Feishu(scv_feishu::state::Account {
+                app_id: "cli_a1b2".into(),
+                app_secret: "secret".into(),
+                brand: scv_feishu::state::Brand::Feishu,
+                owner_open_id: owner.map(Into::into),
+            })
         };
         let owner = AccountSettings {
             remote_tools: RemoteTools::Owner,
             ..Default::default()
         };
         assert_eq!(
-            tool_owner(&account(Some("owner@im.wechat")), &owner).as_deref(),
+            tool_owner(&wechat(Some("owner@im.wechat")), &owner).as_deref(),
             Some("owner@im.wechat")
         );
-        assert_eq!(tool_owner(&account(None), &owner), None);
-        assert_eq!(tool_owner(&account(Some("")), &owner), None);
+        assert_eq!(tool_owner(&wechat(None), &owner), None);
+        assert_eq!(tool_owner(&wechat(Some("")), &owner), None);
         assert_eq!(
             tool_owner(
-                &account(Some("owner@im.wechat")),
+                &wechat(Some("owner@im.wechat")),
                 &AccountSettings::default()
             ),
             None
         );
+        assert_eq!(
+            tool_owner(&feishu(Some("ou_owner")), &owner).as_deref(),
+            Some("ou_owner")
+        );
+        assert_eq!(tool_owner(&feishu(None), &owner), None);
+        assert_eq!(
+            tool_owner(&feishu(Some("ou_owner")), &AccountSettings::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn channels_are_named_and_health_shows_the_app_and_owner() {
+        assert_eq!(Channel::parse("wechat").unwrap(), Channel::Wechat);
+        assert_eq!(Channel::parse("feishu").unwrap(), Channel::Feishu);
+        assert!(Channel::parse("lark").is_err());
+        let credentials = Credentials::Feishu(scv_feishu::state::Account {
+            app_id: "cli_a1b2".into(),
+            app_secret: "secret".into(),
+            brand: scv_feishu::state::Brand::Feishu,
+            owner_open_id: Some("ou_owner".into()),
+        });
+        let health = initial_health(Channel::Feishu, "default", Some(&credentials), true);
+        assert_eq!(health.id, "feishu:default");
+        assert_eq!(health.channel, "feishu");
+        assert_eq!(health.bot_id.as_deref(), Some("cli_a1b2"));
+        assert_eq!(health.user_id.as_deref(), Some("ou_owner"));
+        assert!(!serde_json::to_string(&health).unwrap().contains("secret"));
     }
 }

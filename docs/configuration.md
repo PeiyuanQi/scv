@@ -211,7 +211,7 @@ Both defaults must not exceed the ceiling, and the ceiling is at most 86400
 max_timeout_seconds = 28800
 ```
 
-A WeChat channel owner turn may run for the ceiling plus five minutes of model time,
+A channel owner turn (WeChat or Feishu) may run for the ceiling plus five minutes of model time,
 and never less than 30 minutes, so four hours and five minutes by default; the
 component reads the ceiling from the workspace configuration each time it
 starts. `agent.max_steps` (default 128) bounds model/tool rounds per turn.
@@ -481,10 +481,11 @@ process has died, at startup and every 60 seconds; `scv agents ps` and
 `scv agents kill` list and stop runs. See
 [Tracking and cleanup](tools.md#tracking-and-cleanup).
 
-WeChat channel credentials live in `channels/wechat/accounts/<account>.json`
-and durable delivery state in `channels/wechat/state/<account>.json` under the
-same root. Per-account settings are separate from project TOML, at
-`$SCV_HOME/channels/wechat/settings/<account>.json`:
+Channel credentials live in `channels/<channel>/accounts/<account>.json`
+(`<channel>` is `wechat` or `feishu`) and durable delivery state in
+`channels/<channel>/state/<account>.json` under the same root. Per-account
+settings are separate from project TOML, at
+`$SCV_HOME/channels/<channel>/settings/<account>.json`:
 
 ```json
 {"enabled":true,"workspace":"/absolute/path/to/workspace","remote_tools":"none"}
@@ -493,7 +494,9 @@ same root. Per-account settings are separate from project TOML, at
 Missing settings default to `enabled: true` and `remote_tools: "none"`; an
 omitted or null `workspace` uses the daemon workspace. An explicit workspace must be an existing absolute
 directory. Saved accounts autostart when enabled, but QR login is always
-explicit. Logging in again preserves a saved disabled setting.
+explicit. Logging in again preserves a saved disabled setting. A Feishu
+account's credentials hold the app ID and secret, its brand (`feishu` or
+`lark`), and the owner's `open_id`; the secret is never printed.
 
 Account settings reject unknown keys. The daemon reads credentials and settings
 together under the account transaction lock. Login can rotate a token for the
@@ -504,15 +507,15 @@ require logout before replacement with an identified account.
 A busy transaction during the snapshot defers reconciliation; the current
 instance keeps running until a later pass can read the account.
 
-`scv channels run wechat --account NAME --workspace PATH` persists enablement and the
+`scv channels run <channel> --account NAME --workspace PATH` persists enablement and the
 resolved workspace through the live daemon, then returns. Adding
 `--remote-tools owner` grants the account's authenticated owner full,
-auto-approved tools from WeChat; `--remote-tools none` revokes it. The value is
+auto-approved tools from that chat account; `--remote-tools none` revokes it. The value is
 saved as `remote_tools` (`"none"` by default) in the account settings; see the
 [security model](security.md#supervised-remote-bridge) before enabling it. `scv channels stop
-wechat --account NAME` persists `enabled: false` and joins the instance while
+<channel> --account NAME` persists `enabled: false` and joins the instance while
 retaining credentials. Credential or settings changes join the old instance
-before a replacement starts. `scv channels logout wechat --account NAME` requires a live daemon
+before a replacement starts. `scv channels logout <channel> --account NAME` requires a live daemon
 and removes credentials, delivery state, and settings only after joining.
 
 For an offline opt-out, create or edit the account settings to contain

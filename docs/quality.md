@@ -73,6 +73,21 @@ Daemon and component changes require focused coverage for:
   accepted (including a returned regional host) with the TLS port pinned and
   redirects not followed, oversized responses rejected before parsing, and
   replies chunked on UTF-8 boundaries within the byte limit;
+- Feishu: registration posting `init`, `begin`, and `poll` forms, waiting out
+  pending polls, following a Lark tenant once, and stopping when declined or
+  when secret-based apps are not offered; the long-connection URL refused
+  before dialing unless it is on the brand's domain over TLS; frames round
+  tripping with their required fields, split events reassembled within bounds,
+  a ping on connect, and message events acknowledged only on the next receive
+  while other events are acknowledged at once; catch-up from chat history on
+  every (re)connection, skipping older, deleted, and app messages; group
+  messages answered only when they mention the bot; replies and direct
+  messages retried with the same `uuid`, refusals final, invalid tokens
+  renewed, and outgoing `<at` tags broken; a caught-up message answered
+  through the full bridge; app secrets absent from debug output and status;
+  channel login options refused on the other channel and IDs checked before
+  any request; and a Feishu account supervised beside WeChat, surviving
+  WeChat's discovery failure;
 - polling and other senders continuing during a long owner turn, a
   conversation's messages running in order with their own context tokens, at
   most four turns at once, busy notices beyond the queue limits without a
@@ -97,7 +112,8 @@ Daemon and component changes require focused coverage for:
   automatic replay of submitted work.
 
 Use fake components, local protocol peers, and fake HTTP services for these
-checks. Correctness tests must not contact WeChat or a live model provider.
+checks. Correctness tests must not contact WeChat, Feishu, or a live model
+provider.
 
 ## Required checks
 

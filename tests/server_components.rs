@@ -359,3 +359,97 @@ async fn daemon_reports_pre_channel_state_it_cannot_move_without_touching_it() {
     assert!(stderr.contains("both"), "{stderr}");
     terminate(&mut child).await;
 }
+
+#[tokio::test]
+async fn feishu_accounts_run_beside_wechat_and_outlive_its_discovery_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let account = r#"{"app_id":"cli_a1b2c3d4","app_secret":"test-secret-never-in-status","brand":"feishu","owner_open_id":"ou_owner"}"#;
+    let settings = r#"{"enabled":false,"workspace":null,"remote_tools":"owner"}"#;
+    write_private(
+        &home.path().join("channels/feishu/accounts/default.json"),
+        account,
+    );
+    write_private(
+        &home.path().join("channels/feishu/settings/default.json"),
+        settings,
+    );
+    // WeChat state that cannot move fails WeChat discovery alone.
+    let wechat = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1"}"#;
+    write_private(&home.path().join("clawbot/accounts/old.json"), wechat);
+    write_private(
+        &home.path().join("channels/wechat/accounts/new.json"),
+        wechat,
+    );
+    let mut child = start(home.path(), workspace.path());
+    status(home.path()).await;
+    assert!(
+        scv_client::control(&home.path().join("server.sock"), DaemonCommand::Reload)
+            .await
+            .is_err()
+    );
+    let status = status(home.path()).await;
+    let ids: Vec<_> = status.components.iter().map(|h| h.id.as_str()).collect();
+    assert_eq!(ids, ["feishu:default", "wechat:discovery-error"]);
+    let feishu = &status.components[0];
+    assert_eq!(feishu.channel, "feishu");
+    assert_eq!(feishu.state, ComponentState::Disabled);
+    assert_eq!(feishu.bot_id.as_deref(), Some("cli_a1b2c3d4"));
+    assert_eq!(feishu.user_id.as_deref(), Some("ou_owner"));
+    assert_eq!(feishu.remote_tools, RemoteTools::Owner);
+    assert_eq!(status.components[1].state, ComponentState::Failed);
+    assert!(
+        !serde_json::to_string(&status)
+            .unwrap()
+            .contains("test-secret")
+    );
+    terminate(&mut child).await;
+}
+
+#[tokio::test]
+async fn channel_login_options_stay_with_their_platform_and_ids_are_checked_first() {
+    let home = tempfile::tempdir().unwrap();
+    for (args, expected) in [
+        (
+            &["channels", "login", "wechat", "--app-id", "cli_1"][..],
+            "Feishu options",
+        ),
+        (
+            &[
+                "channels",
+                "login",
+                "feishu",
+                "--login-url",
+                "https://x.test",
+            ][..],
+            "WeChat option",
+        ),
+        (
+            &["channels", "login", "lark", "--app-id", "not-an-app"][..],
+            "invalid Feishu app ID",
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_scv"))
+            .isolated(home.path())
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The secret arrives on stdin, never as an argument.
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(b"test-secret-never-printed\n")
+            .await
+            .unwrap();
+        drop(stdin);
+        let output = child.wait_with_output().await.unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!format!("{stdout}{stderr}").contains("test-secret"));
+    }
+    assert!(!home.path().join("channels/feishu/accounts").exists());
+}

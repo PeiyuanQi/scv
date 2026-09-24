@@ -79,8 +79,9 @@ enum Command {
         #[arg(long, value_name = "URL")]
         index_url: Option<String>,
     },
-    /// Connect chat channels (WeChat) to this SCV instance: sign accounts
-    /// in, run them under the daemon, and check their connections.
+    /// Connect chat channels (WeChat, Feishu/Lark) to this SCV instance:
+    /// sign accounts in, run them under the daemon, and check their
+    /// connections.
     Channels {
         #[command(subcommand)]
         command: ChannelsCommand,
@@ -102,15 +103,25 @@ enum ConfigCommand {
 
 #[derive(Subcommand)]
 enum ChannelsCommand {
-    /// Sign a channel account in by scanning the QR code it shows.
+    /// Sign a channel account in by scanning the QR code it shows. For
+    /// Feishu the scan creates a bot app; `--app-id` signs in an existing
+    /// app instead.
     Login {
         #[arg(value_enum)]
         channel: ChannelArg,
         #[arg(long, default_value = "default")]
         account: String,
-        /// WeChat: the iLink login API origin.
-        #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
-        login_url: String,
+        /// WeChat: the iLink login API origin [default: https://ilinkai.weixin.qq.com].
+        #[arg(long)]
+        login_url: Option<String>,
+        /// Feishu: sign in an existing app by its ID; the app secret is read
+        /// from a hidden prompt or stdin, never an argument.
+        #[arg(long, value_name = "CLI_ID")]
+        app_id: Option<String>,
+        /// Feishu, with --app-id: the owner's open_id for this app, the only
+        /// sender remote tools can reach. Without it nobody gets tools.
+        #[arg(long, value_name = "OPEN_ID", requires = "app_id")]
+        owner_open_id: Option<String>,
     },
     /// Enable a signed-in account under the SCV daemon.
     Run {
@@ -155,18 +166,25 @@ enum ChannelsCommand {
 enum ChannelArg {
     /// WeChat, through its ClawBot (iLink) bot.
     Wechat,
+    /// Feishu, through a bot app.
+    Feishu,
+    /// Lark, Feishu's international edition: the `feishu` channel.
+    Lark,
 }
 
 impl ChannelArg {
     fn name(self) -> &'static str {
         match self {
             Self::Wechat => scv_clawbot::CHANNEL,
+            Self::Feishu | Self::Lark => scv_feishu::CHANNEL,
         }
     }
 
     fn title(self) -> &'static str {
         match self {
             Self::Wechat => "WeChat",
+            Self::Feishu => "Feishu",
+            Self::Lark => "Lark",
         }
     }
 }
@@ -364,7 +382,7 @@ async fn main() -> Result<()> {
             .await
         }
         Command::Run { workspace } => {
-            // Daemon diagnostics (ClawBot poll and delivery failures) go to
+            // Daemon diagnostics (channel poll and delivery failures) go to
             // stderr, which the user service sends to the journal.
             init_tracing();
             run_daemon(
@@ -1028,9 +1046,47 @@ async fn channels(command: ChannelsCommand) -> Result<()> {
             channel,
             account,
             login_url,
-        } => match channel {
-            ChannelArg::Wechat => wechat_login(&login_url, &account).await,
-        },
+            app_id,
+            owner_open_id,
+        } => {
+            match channel {
+                ChannelArg::Wechat => {
+                    if app_id.is_some() {
+                        bail!("--app-id and --owner-open-id are Feishu options");
+                    }
+                    let login_url =
+                        login_url.unwrap_or_else(|| "https://ilinkai.weixin.qq.com".into());
+                    scv_clawbot::login(&login_url, &account).await?;
+                }
+                ChannelArg::Feishu | ChannelArg::Lark => {
+                    if login_url.is_some() {
+                        bail!("--login-url is a WeChat option");
+                    }
+                    let brand = match channel {
+                        ChannelArg::Lark => scv_feishu::state::Brand::Lark,
+                        _ => scv_feishu::state::Brand::Feishu,
+                    };
+                    match app_id {
+                        Some(app_id) => {
+                            let secret = scv_server::read_secret(&format!(
+                                "{} app secret (input hidden)",
+                                brand.title()
+                            ))?;
+                            scv_feishu::login::login_existing(
+                                &account,
+                                &app_id,
+                                &secret,
+                                owner_open_id.as_deref(),
+                                brand,
+                            )
+                            .await?;
+                        }
+                        None => scv_feishu::login::login(&account, brand).await?,
+                    }
+                }
+            }
+            reload_after_login().await
+        }
         ChannelsCommand::Run {
             channel,
             account,
@@ -1152,8 +1208,7 @@ async fn control(command: DaemonCommand) -> Result<DaemonStatus> {
     scv_client::control(&scv_client::default_socket_path()?, command).await
 }
 
-async fn wechat_login(login_url: &str, account: &str) -> Result<()> {
-    scv_clawbot::login(login_url, account).await?;
+async fn reload_after_login() -> Result<()> {
     match control(DaemonCommand::Reload).await {
         Ok(_) => println!("Daemon refreshed; enabled accounts start automatically."),
         Err(_) => println!(

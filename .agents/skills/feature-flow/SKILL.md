@@ -146,8 +146,8 @@ scripts/publish.sh          # publish in AGENTS.md dependency order
 
 Before publishing, the script requires a clean tree at `origin/main` and one
 shared version. It publishes `scv-core`, `scv-protocol`, `scv-client`,
-`scv-provider-openai`, `scv-tools`, `scv-channels`, `scv-clawbot`, `scv-server`,
-`scv-tui`, and `scv-cli` in that order, and skips any crate already on
+`scv-provider-openai`, `scv-tools`, `scv-channels`, `scv-clawbot`, `scv-feishu`,
+`scv-server`, `scv-tui`, and `scv-cli` in that order, and skips any crate already on
 crates.io, so a partial run can be resumed. It needs the `cargo login` token in the real home.
 
 ## 7. Install and restart
