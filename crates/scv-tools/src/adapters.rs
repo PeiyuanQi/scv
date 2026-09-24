@@ -1,7 +1,7 @@
 //! The native agent CLIs SCV can delegate to, one descriptor each.
 //!
 //! A descriptor is the whole integration: the default command line, where the
-//! CLI keeps its state inside SCV's private adapter home, which inherited
+//! CLI keeps its state inside SCV's private agent home, which inherited
 //! variables it must never see, and how `scv agents login|status|logout`
 //! handle it. Adding an agent means adding one entry to [`ADAPTERS`].
 
@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// How SCV signs an agent in, inside its private adapter home.
+/// How SCV signs an agent in, inside its private agent home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Login {
     /// Run the CLI's own sign-in command.
@@ -148,7 +148,7 @@ impl Resume {
     }
 }
 
-/// Where a CLI keeps conversation transcripts inside its adapter home:
+/// Where a CLI keeps conversation transcripts inside its agent home:
 /// files with `extension` anywhere below `dir`, named after their session ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConversationFiles {
@@ -176,7 +176,7 @@ pub enum Logout {
     Stored(KeyStore),
 }
 
-/// A CLI's native credential file, relative to the adapter home.
+/// A CLI's native credential file, relative to the agent home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStore {
     /// Grok: sign-ins from `grok login` in `auth` (a JSON object of entries),
@@ -200,7 +200,7 @@ pub enum KeyStore {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterDescriptor {
-    /// Short name: the tool is `agent_<name>` and the home `adapters/<name>`.
+    /// Short name: the tool is `agent_<name>` and the home `agents/<name>`.
     pub name: &'static str,
     /// Product name for messages and the tool description.
     pub product: &'static str,
@@ -216,7 +216,7 @@ pub struct AdapterDescriptor {
     pub effort_args: &'static [&'static str],
     /// Describes the `model` argument for the calling model.
     pub model_hint: &'static str,
-    /// Variables pointing the CLI's state into the adapter home, as paths
+    /// Variables pointing the CLI's state into the agent home, as paths
     /// relative to it (`""` is the home itself).
     pub home_environment: &'static [(&'static str, &'static str)],
     /// Fixed variables for every delegated run.
@@ -247,6 +247,9 @@ pub struct AdapterDescriptor {
     pub resume: Resume,
     /// Transcripts `scv agents gc` may remove; `None` when unknown.
     pub conversation_files: Option<ConversationFiles>,
+    /// Files in the agent home that hold its sign-in or keys, relative to it,
+    /// which `scv config show` reports without reading.
+    pub credential_files: &'static [&'static str],
     /// How SCV talks to the agent.
     pub transport: Transport,
     /// Its ACP server, when it has a verified one. With `[agents.<name>]
@@ -322,6 +325,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             dir: ".claude/projects",
             extension: "jsonl",
         }),
+        credential_files: &[".claude/.credentials.json"],
         transport: Transport::Process,
         // The official adapter from the ACP organisation (npm
         // @agentclientprotocol/claude-agent-acp), on the Claude Agent SDK.
@@ -379,6 +383,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             dir: "sessions",
             extension: "jsonl",
         }),
+        credential_files: &["auth.json"],
         transport: Transport::Process,
         // The official adapter from the ACP organisation (npm
         // @agentclientprotocol/codex-acp). It reads `$CODEX_HOME/config.toml`
@@ -423,6 +428,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // verified while it is signed out here.
         resume: Resume::Unsupported,
         conversation_files: None,
+        credential_files: &[".grok/auth.json", ".grok/config.toml"],
         transport: Transport::Process,
         // Native: `grok agent [options] stdio`; options precede the mode.
         acp: Some(AcpLaunch {
@@ -458,6 +464,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Only its interactive profile documents `--resume`.
         resume: Resume::Unsupported,
         conversation_files: None,
+        credential_files: &[".dsh/.credentials.yaml"],
         transport: Transport::Process,
         // Native: the shipped `acp` profile. `permissions = "full"` is the
         // `DSH_PERMISSION_MODE` variable above.
@@ -505,6 +512,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             dir: ".pi/agent/sessions",
             extension: "jsonl",
         }),
+        credential_files: &[".pi/agent/auth.json", ".pi/agent/models.json"],
         transport: Transport::Process,
         // Only a community ACP adapter exists.
         acp: None,
@@ -520,7 +528,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         model_args: &[],
         effort_args: &[],
         model_hint: "Model ID for the nested SCV's provider; applies to a new conversation only.",
-        // `SCV_HOME` already points at the adapter home, where the nested
+        // `SCV_HOME` already points at the agent home, where the nested
         // SCV keeps its config, skills, and its own delegations.
         home_environment: &[],
         fixed_environment: &[],
@@ -537,6 +545,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         output: OutputFormat::Text,
         resume: Resume::Unsupported,
         conversation_files: None,
+        credential_files: &["config.toml"],
         transport: Transport::ScvProtocol,
         acp: None,
     },
@@ -722,7 +731,7 @@ mod tests {
                     KeyStore::Grok { auth, config } => vec![auth, config],
                     KeyStore::DshRefs { path, .. } => vec![path],
                     KeyStore::Pi { dir } => vec![dir],
-                    // The nested SCV's `SCV_HOME` is the adapter home itself.
+                    // The nested SCV's `SCV_HOME` is the agent home itself.
                     KeyStore::Scv { .. } => vec![],
                 };
                 for path in paths {

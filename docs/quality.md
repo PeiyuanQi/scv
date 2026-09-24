@@ -43,7 +43,7 @@ Daemon and component changes require focused coverage for:
   with `-` or `@`, and signed-out agent failures gaining a
   `scv agents login <name>` hint while other failures do not;
 - Codex import copying `config.toml` and API-key `auth.json` atomically with
-  mode `0600` into the instance adapter home, never copying a ChatGPT session,
+  mode `0600` into the instance agent home, never copying a ChatGPT session,
   flagging `env_key` providers, printing no secrets, and writing nothing when
   either input is invalid;
 - every agent descriptor self-consistent (templates carry their placeholder,
@@ -57,11 +57,13 @@ Daemon and component changes require focused coverage for:
   pi importing SCV's own provider;
 - identity/origin binding, same-identity token rotation, conservative legacy
   binding, replacement requiring logout, and stale-runner write rejection;
-- WeChat state saved before channels moving from `clawbot` to
-  `channels/wechat` in one rename with every file, mode, and binding intact,
-  refusing while an account's lock is held or when both directories exist, and
-  the daemon reporting a refused move as a failed component without touching
-  either directory;
+- account settings read from and written to `[channels.<channel>.<account>]`
+  in `config.toml`, keeping a person's other tables and comments, taking effect
+  at the next reconciliation, and failing the account closed when invalid;
+  files of the layout before `0.2.0` never read;
+- `scv config show` naming each setting's origin, hiding every credential,
+  and listing entries of the home SCV does not read; `scv agents import`
+  records reporting a changed source;
 - nonblocking transaction/lifetime locks, serialized login/removal, atomic
   account snapshots, busy snapshots deferred without stopping the current
   instance, and strict settings/discovery validation;

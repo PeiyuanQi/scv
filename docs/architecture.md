@@ -69,14 +69,14 @@ The repository is one Cargo workspace with these packages:
 | Package | Responsibility |
 | --- | --- |
 | `scv-protocol` | Wire messages and the protocol version. It contains no runtime policy. |
-| `scv-client` | Default socket path and bounded daemon control helper; depends on protocol, not server. |
+| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`), the default socket path, and a bounded daemon control helper; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-channels` | The bridge every chat channel shares: the `Transport` trait, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, and background reports. |
-| `scv-clawbot` | The WeChat channel: iLink authentication, polling, and sending behind `Transport`, its credentials, and moving pre-channel state. |
+| `scv-clawbot` | The WeChat channel: iLink authentication, polling, and sending behind `Transport`, and its credentials. |
 | `scv-feishu` | The Feishu/Lark channel: app registration by QR scan, the event long connection with catch-up from chat history, and sending behind `Transport`, and its credentials. |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. |
 
@@ -86,7 +86,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.1.35` and exact workspace dependency pins.
+`0.2.0` and exact workspace dependency pins.
 
 Each channel account is a component hosted by the daemon's supervisor. A
 channel crate (WeChat's `scv-clawbot`, Feishu's `scv-feishu`) implements
@@ -146,14 +146,14 @@ cancels, aborts if necessary, and joins work within bounded shutdown.
 All future long-running components must use this server-owned lifecycle.
 
 The daemon discovers saved channel accounts on startup and reconciles every
-two seconds or immediately on `scv reload`, first moving WeChat state saved
-before channels into `channels/wechat`. Each account is the component
+two seconds or immediately on `scv reload`. Each account is the component
 `<channel>:<account>`. Login is explicit; saved accounts
-autostart unless their private settings disable them. Each account's optional
+autostart unless their `[channels.<channel>.<account>]` table in `config.toml`
+disables them. Each account's optional
 workspace defaults to the daemon workspace. Credential or settings replacement
 stops and joins the old instance before starting its replacement. Logout
 requires a live daemon, disables and joins the component, then removes its
-credentials, delivery state, and settings.
+credentials, delivery state, and settings table.
 
 Reconciliation runs in a separate cancellation-aware task, leaving the listener
 free to accept connections. `state::account_snapshot` reads credentials and
@@ -181,7 +181,7 @@ Delegated agent runs are tracked by `scv_tools::delegation`. Each SCV process
 (the daemon or a `scv server --stdio`) holds one `DelegationRegistry` for its
 instance, and every session's agent tools record their runs in it through
 `ToolsConfig.delegation`, which carries the registry and the session ID.
-Records live in `$SCV_HOME/run/delegations`, so the daemon also sees runs that
+Records live in `$SCV_HOME/state/delegations`, so the daemon also sees runs that
 `scv exec` servers started. A separate daemon task reconciles them at startup
 and every 60 seconds, stopping orphans, and collects exited orphan processes;
 on Linux the daemon is a child subreaper. `delegations` and `delegation_kill`
@@ -312,14 +312,17 @@ and skills need no SCV registration.
 An SCV process owns one immutable instance root selected by `--scv-home` or
 `SCV_HOME` (default `~/.scv`). The root is the namespace for configuration,
 socket, service unit identity, skills, credentials, channel state, and nested
-adapter state. `--config`/`SCV_CONFIG` selects an explicit additional config
+agent state, laid out by `scv_client::Layout` as `config.toml`,
+`credentials/`, `agents/`, `skills/`, and `state/` (see
+[instance layout](configuration.md#instance-layout)); every crate takes its
+paths from `Layout` rather than joining its own. `--config`/`SCV_CONFIG` selects an explicit additional config
 layer for that instance. Custom roots never fall back to the default user
 configuration, allowing forked SCV processes to choose different providers and
 models without sharing mutable state. The systemd launcher persists the
 selectors and `scv update` restarts only the selected instance.
 
 Native agent adapters receive a derived private home under
-`<instance>/adapters/<name>`. Codex receives the matching `CODEX_HOME`; SCV
+`<instance>/agents/<name>`. Codex receives the matching `CODEX_HOME`; SCV
 also removes SCV selector variables from the child environment. This prevents
 an SCV adapter from reusing or changing the user's normal Codex configuration.
 

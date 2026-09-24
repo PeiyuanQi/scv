@@ -3,6 +3,8 @@
 mod agents;
 pub mod components;
 mod config;
+pub mod imports;
+pub mod overview;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -52,7 +54,7 @@ pub fn agent_command(agent: &str) -> Result<std::process::Command> {
                 )
             })?;
     let mut command = std::process::Command::new(executable);
-    command.current_dir(config.instance_home.join("adapters").join(agent));
+    command.current_dir(config.layout().agent_home(agent));
     scv_tools::apply_agent_environment(&mut command, &adapter.environment);
     Ok(command)
 }
@@ -70,11 +72,11 @@ pub fn agent_executable(agent: &str) -> Result<Option<PathBuf>> {
     ))
 }
 
-/// The prepared private adapter home for `agent`.
+/// The prepared private agent home for `agent`.
 pub fn agent_home(agent: &str) -> Result<PathBuf> {
     let config = Config::load_user(ConfigOverrides::default())?;
     config.prepare_adapter_homes()?;
-    let home = config.instance_home.join("adapters").join(agent);
+    let home = config.layout().agent_home(agent);
     if !home.is_dir() {
         return Err(anyhow!("unknown agent {agent}"));
     }
@@ -82,7 +84,7 @@ pub fn agent_home(agent: &str) -> Result<PathBuf> {
 }
 
 /// Remove delegated-conversation transcripts older than `older_than` from
-/// the adapter homes (`agent`, or every agent that keeps them), keeping any a
+/// the agent homes (`agent`, or every agent that keeps them), keeping any a
 /// live conversation still uses. Returns each agent's report.
 pub fn collect_agent_garbage(
     agent: Option<&str>,
@@ -90,7 +92,7 @@ pub fn collect_agent_garbage(
     dry_run: bool,
 ) -> Result<Vec<(&'static str, scv_tools::conversation::GcReport)>> {
     let config = Config::load_user(ConfigOverrides::default())?;
-    let markers = config.instance_home.join("run").join("conversations");
+    let markers = config.layout().conversations();
     let mut reports = Vec::new();
     for adapter in adapters::ADAPTERS {
         if agent.is_some_and(|agent| agent != adapter.name) {
@@ -99,7 +101,7 @@ pub fn collect_agent_garbage(
         let Some(files) = adapter.conversation_files else {
             continue;
         };
-        let home = config.instance_home.join("adapters").join(adapter.name);
+        let home = config.layout().agent_home(adapter.name);
         if !home.is_dir() {
             continue;
         }
@@ -121,7 +123,7 @@ fn key_store_home(agent: &str) -> Result<PathBuf> {
     agent_home(agent)
 }
 
-/// Store `key` in the agent's native credential file inside its adapter home.
+/// Store `key` in the agent's native credential file inside its agent home.
 pub fn store_agent_key(agent: &str, store: adapters::KeyStore, key: &str) -> Result<Vec<String>> {
     agents::store_key(store, &key_store_home(agent)?, key)
 }
@@ -132,7 +134,7 @@ pub fn agent_stored_status(agent: &str, store: adapters::KeyStore) -> Result<(bo
     agents::stored_status(store, &key_store_home(agent)?)
 }
 
-/// Remove the agent's stored credentials from its adapter home.
+/// Remove the agent's stored credentials from its agent home.
 pub fn remove_agent_credentials(agent: &str, store: adapters::KeyStore) -> Result<Vec<String>> {
     agents::remove_stored(store, &key_store_home(agent)?)
 }
@@ -155,6 +157,12 @@ pub fn import_pi_from_scv_provider() -> Result<Vec<String>> {
         model: provider.model.clone(),
     };
     let mut notes = agents::configure_pi_endpoint(&pi_agent_dir()?, &endpoint, &key)?;
+    imports::record(
+        &config.layout(),
+        "pi",
+        imports::Source::ScvProvider,
+        provider_digest("pi", &config, &key)?,
+    )?;
     if !provider.headers.is_empty() {
         notes.push(
             "Note: SCV's provider sends extra headers, which were not copied; add them to \
@@ -183,14 +191,46 @@ fn scv_provider_key(provider: &config::ProviderConfig) -> Result<String> {
     }
 }
 
+/// Digest of what a provider import copies to `agent`: SCV's provider
+/// settings and key, as each agent receives them.
+fn provider_digest(agent: &str, config: &Config, key: &str) -> Result<String> {
+    let provider = &config.provider;
+    let mut headers: Vec<_> = provider.headers.iter().collect();
+    headers.sort();
+    match agent {
+        "pi" => imports::digest_value(&(&provider.base_url, &provider.model, key)),
+        _ => imports::digest_value(&(
+            &provider.base_url,
+            &provider.model,
+            key,
+            &provider.wire_api,
+            provider.timeout_seconds,
+            headers,
+            config.hosted_web_search(),
+        )),
+    }
+}
+
+/// How `agent`'s imported copy compares with its source now, as one display
+/// line without secrets; `None` when nothing was imported.
+pub fn agent_import_status(agent: &str) -> Result<Option<String>> {
+    let config = Config::load_user(ConfigOverrides::default())?;
+    let status = imports::check(&config.layout(), agent, || {
+        let key = scv_provider_key(&config.provider).ok()?;
+        provider_digest(agent, &config, &key).ok()
+    })?;
+    Ok(status.map(|status| status.describe(agent, imports::now())))
+}
+
 /// Give the nested SCV (`agent_scv`) its own copy of SCV's active provider,
-/// in `$SCV_HOME/adapters/scv/config.toml` (mode 0600).
+/// in `$SCV_HOME/agents/scv/config.toml` (mode 0600).
 pub fn import_scv_from_scv_provider() -> Result<Vec<String>> {
     let config = Config::load_user(ConfigOverrides::default())?;
     config.prepare_adapter_homes()?;
     let provider = &config.provider;
     let key = scv_provider_key(provider)?;
-    agents::configure_scv_child(
+    let digest = provider_digest("scv", &config, &key)?;
+    let notes = agents::configure_scv_child(
         &agent_home("scv")?,
         &agents::ScvChildProvider {
             wire_api: &provider.wire_api,
@@ -201,7 +241,14 @@ pub fn import_scv_from_scv_provider() -> Result<Vec<String>> {
             hosted_web_search: config.hosted_web_search(),
         },
         &key,
-    )
+    )?;
+    imports::record(
+        &config.layout(),
+        "scv",
+        imports::Source::ScvProvider,
+        digest,
+    )?;
+    Ok(notes)
 }
 
 fn pi_agent_dir() -> Result<PathBuf> {
@@ -216,12 +263,28 @@ fn pi_agent_dir() -> Result<PathBuf> {
 }
 
 /// Copy the user's own Codex setup from `source` into SCV's private Codex
-/// adapter home: `config.toml`, and `auth.json` only when it holds an API key.
+/// agent home: `config.toml`, and `auth.json` only when it holds an API key.
 /// Returns display lines that never contain secret values.
 pub fn import_codex(source: &Path) -> Result<Vec<String>> {
     let config = Config::load_user(ConfigOverrides::default())?;
     config.prepare_adapter_homes()?;
-    agents::import_codex(source, &config.instance_home.join("adapters").join("codex"))
+    let layout = config.layout();
+    let notes = agents::import_codex(source, &layout.agent_home("codex"))?;
+    record_file_import(&layout, "codex", source, agents::codex_copied_files(source))?;
+    Ok(notes)
+}
+
+/// Remember which files an import copied from `source`, so a later change
+/// there shows up as a stale copy.
+fn record_file_import(
+    layout: &scv_client::Layout,
+    agent: &str,
+    source: &Path,
+    files: Vec<String>,
+) -> Result<()> {
+    let dir = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_owned());
+    let digest = imports::digest_files(&dir, &files)?;
+    imports::record(layout, agent, imports::Source::Files { dir, files }, digest)
 }
 
 /// Copy the user's own Grok `config.toml` from `source` (a Grok home) into
@@ -237,15 +300,11 @@ pub fn import_grok(source: &Path) -> Result<Vec<String>> {
         .iter()
         .find(|(variable, _)| *variable == "GROK_HOME")
         .map(|(_, relative)| *relative)
-        .ok_or_else(|| anyhow!("grok has no GROK_HOME in its adapter home"))?;
-    agents::import_grok(
-        source,
-        &config
-            .instance_home
-            .join("adapters")
-            .join("grok")
-            .join(grok_home),
-    )
+        .ok_or_else(|| anyhow!("grok has no GROK_HOME in its agent home"))?;
+    let layout = config.layout();
+    let notes = agents::import_grok(source, &layout.agent_home("grok").join(grok_home))?;
+    record_file_import(&layout, "grok", source, vec!["config.toml".into()])?;
+    Ok(notes)
 }
 
 /// Return the user service name for the selected SCV instance.
@@ -333,8 +392,24 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         tokio::fs::create_dir_all(parent)
             .await
             .context("create SCV socket directory")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .context("secure SCV socket directory")?;
+        }
     }
     let _lock = SocketLock::acquire(path)?;
+    // Nothing reads an older release's files; say so once rather than let
+    // them look like live configuration.
+    if let Ok(strays) = scv_client::Layout::from_env().and_then(|layout| layout.strays()) {
+        for stray in strays.into_iter().filter(|stray| stray.legacy) {
+            tracing::warn!(
+                "{} is from an older SCV layout and is not used; see `scv config show`",
+                stray.path.display()
+            );
+        }
+    }
     if path.exists() {
         if UnixStream::connect(path).await.is_ok() {
             return Err(anyhow!(
@@ -2272,6 +2347,15 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    #[test]
+    fn delegation_records_live_where_the_layout_says() {
+        let home = std::path::Path::new("/tmp/scv-layout-check");
+        let registry = DelegationRegistry::new(home);
+        let layout = scv_client::Layout::new(home);
+        assert_eq!(registry.record_dir(), layout.delegations());
+        assert_eq!(registry.conversation_dir(), layout.conversations());
+    }
+
     /// A delegation registry in a private temporary instance home.
     fn test_registry() -> Arc<DelegationRegistry> {
         let home = tempfile::tempdir().unwrap().keep();
@@ -2843,7 +2927,7 @@ mod tests {
         assert!(offered.contains_key("agent_claude"));
         assert!(offered.contains_key("agent_codex"));
         // A stored dsh key makes it available.
-        let dsh = home.path().join("adapters/dsh/.dsh");
+        let dsh = home.path().join("agents/dsh/.dsh");
         std::fs::create_dir_all(&dsh).unwrap();
         std::fs::write(
             dsh.join(".credentials.yaml"),

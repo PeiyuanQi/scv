@@ -25,8 +25,10 @@ retries idempotent; outgoing `<at` tags are broken so replies never mention
 anyone. In groups the bot answers only messages that mention it.
 
 `state::Account` has a redacting `Debug`. Its fingerprint covers the brand,
-app ID, and owner, so a rotated secret keeps delivery state. State lives in
-`<SCV home>/channels/feishu`.
+app ID, and owner, so a rotated secret keeps delivery state. Credentials live
+in `<SCV home>/credentials/feishu`, settings in `[channels.feishu.<account>]`
+of `<SCV home>/config.toml`, and delivery state in
+`<SCV home>/state/channels/feishu`.
 
 Focused verification:
 

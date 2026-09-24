@@ -19,9 +19,11 @@ Lark) is the second.
 - Options that belong to one platform stay on that platform: WeChat keeps its
   iLink `--login-url`; Feishu needs none, because its sign-in reports whether
   the account is on Feishu or Lark.
-- Each channel keeps its state in `$SCV_HOME/channels/<channel>/`, with the
-  same private layout (`accounts`, `settings`, `state`, `locks`,
-  `transactions`) and the same account-name rules.
+- Each channel keeps its credentials in `$SCV_HOME/credentials/<channel>/`,
+  its settings in `[channels.<channel>.<account>]` of `config.toml`, and its
+  delivery state in `$SCV_HOME/state/channels/<channel>/`, with the same
+  account-name rules (the [instance layout](configuration.md#instance-layout)
+  of `0.2.0`).
 - Daemon components are named `<channel>:<account>` and report a `channel`
   field. Control actions are `channel_set` and `channel_logout`, each naming
   its channel.
@@ -138,7 +140,7 @@ message parsing, and sending behind that trait. The dependency chain becomes
   unprompted continuations.
 - **Safety**: only the Feishu and Lark hosts and the socket host they return
   are trusted, redirects are not followed, and response sizes are bounded.
-  The app secret is stored in `$SCV_HOME/channels/feishu/accounts/<name>.json`
+  The app secret is stored in `$SCV_HOME/credentials/feishu/<name>.json`
   with mode `0600` and never printed; status shows the app ID and owner only.
 - **Still to check**: group chats, and sign-in from a company account whose
   administrators must approve apps. A `begin` call with `app_name` and `name`

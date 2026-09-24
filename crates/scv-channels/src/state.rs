@@ -1,11 +1,12 @@
 //! Durable channel credentials, settings, and delivery state.
 //!
-//! Each channel keeps its accounts under one private directory,
-//! `<SCV home>/channels/<channel>`, with `accounts`, `settings`, `state`,
-//! `locks`, and `transactions` beneath it. The channel supplies the
+//! A channel's accounts follow the instance layout ([`Layout`]): credentials
+//! under `credentials/<channel>`, settings in `config.toml`, and delivery
+//! state and locks under `state/channels/<channel>`. The channel supplies the
 //! credential type and how credentials bind delivery state.
 
 use anyhow::{Result, anyhow, bail};
+use scv_client::Layout;
 pub use scv_protocol::RemoteTools;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -20,7 +21,7 @@ pub trait Credentials: Clone + PartialEq + Serialize + DeserializeOwned {
     fn fingerprint(&self) -> Result<String>;
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccountSettings {
     pub enabled: bool,
@@ -186,37 +187,39 @@ fn check_private(path: &Path, kind: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create `parent` privately. A store subdirectory also makes its channel
-/// directory, and `channels` above it, private.
-pub fn private_directory(parent: &Path) -> Result<()> {
-    std::fs::create_dir_all(parent)?;
+/// Create `directory` privately. Every directory between the instance home
+/// and it is made private too, because channel and account names are.
+pub fn private_directory(home: &Path, directory: &Path) -> Result<()> {
+    std::fs::create_dir_all(directory)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-        if matches!(
-            parent.file_name().and_then(|name| name.to_str()),
-            Some("accounts" | "state" | "settings" | "locks" | "transactions")
-        ) && let Some(root) = parent.parent()
-        {
-            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-            // Channel names are private too.
-            if let Some(channels) = root.parent()
-                && channels.file_name().and_then(|name| name.to_str()) == Some("channels")
-            {
-                std::fs::set_permissions(channels, std::fs::Permissions::from_mode(0o700))?;
+        for path in directory.ancestors() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            if path == home || !path.starts_with(home) {
+                break;
             }
         }
     }
     Ok(())
 }
 
-/// Replace `path` with `contents` atomically, as a private file.
+/// Replace `path` with `contents` atomically, as a private file in a private
+/// directory.
 pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("state path has no parent"))?;
-    private_directory(parent)?;
+    private_directory(parent, parent)?;
+    replace_file(path, contents)
+}
+
+/// Replace `path` with `contents` atomically, as a private file, in its
+/// existing directory.
+fn replace_file(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("state path has no parent"))?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     use std::io::Write;
     temp.write_all(contents.as_bytes())?;
@@ -229,75 +232,116 @@ pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     temp.persist(path)
         .map_err(|e| anyhow!("atomic state replace failed: {}", e.error))?;
     // Persist the rename and any newly created directories (the file's own,
-    // the channel's, `channels`, and the SCV home) before starting a turn.
+    // `channels`, `state` or `credentials`, and the SCV home) before starting
+    // a turn.
     for directory in parent.ancestors().take(4) {
         std::fs::File::open(directory)?.sync_all()?;
     }
     Ok(())
 }
 
-/// One channel's accounts. Explicit paths keep recovery tests independent of
-/// process environment.
+/// Largest `config.toml` SCV reads.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// The instance's `config.toml`, or `None` when there is none. It holds the
+/// provider key, so it must be private, and its text is never echoed.
+fn read_config(path: &Path) -> Result<Option<String>> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display())
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!(
+                "{} is readable by group or others; run chmod 600",
+                path.display()
+            )
+        }
+    }
+    if metadata.len() > MAX_CONFIG_BYTES {
+        bail!("{} exceeds 1 MiB", path.display())
+    }
+    Ok(Some(std::fs::read_to_string(path)?))
+}
+
+/// Where a TOML error is, without the source text it would otherwise quote.
+fn toml_line(text: &str, span: Option<std::ops::Range<usize>>) -> String {
+    span.map(|span| {
+        let line = text[..span.start.min(text.len())].matches('\n').count() + 1;
+        format!(" (line {line})")
+    })
+    .unwrap_or_default()
+}
+
+/// One channel's accounts in an SCV instance:
+///
+/// - credentials in `credentials/<channel>/<account>.json`;
+/// - settings in `config.toml`, as `[channels.<channel>.<account>]`;
+/// - delivery state in `state/channels/<channel>/<account>.json`, beside the
+///   account's `.lock` (held for a whole run) and `.transaction` (held for
+///   each short filesystem transaction).
 pub struct Store<C> {
-    root: PathBuf,
-    /// Single-file credentials of an earliest release, read as the `default`
-    /// account and moved into place on first read.
-    legacy: Option<PathBuf>,
-    credentials: PhantomData<fn() -> C>,
+    channel: String,
+    home: PathBuf,
+    credentials: PathBuf,
+    state: PathBuf,
+    config: PathBuf,
+    config_lock: PathBuf,
+    kind: PhantomData<fn() -> C>,
 }
 
 impl<C: Credentials> Store<C> {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(layout: &Layout, channel: &str) -> Self {
         Self {
-            root,
-            legacy: None,
-            credentials: PhantomData,
+            channel: channel.to_owned(),
+            home: layout.home().to_owned(),
+            credentials: layout.channel_credentials(channel),
+            state: layout.channel_state(channel),
+            config: layout.config(),
+            config_lock: layout.config_lock(),
+            kind: PhantomData,
         }
     }
 
-    /// A store that also reads `legacy`, a single-file credential of the
-    /// earliest releases, as its `default` account.
-    pub fn with_legacy(root: PathBuf, legacy: PathBuf) -> Self {
-        Self {
-            legacy: Some(legacy),
-            ..Self::new(root)
-        }
+    /// The store of the instance selected by `SCV_HOME`.
+    pub fn from_env(channel: &str) -> Result<Self> {
+        Ok(Self::new(&Layout::from_env()?, channel))
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    /// The file of `name` in one of the store's directories.
-    pub fn path(&self, directory: &str, name: &str) -> Result<PathBuf> {
+    pub fn credentials_path(&self, name: &str) -> Result<PathBuf> {
         validate_name(name)?;
-        Ok(self.root.join(directory).join(format!("{name}.json")))
+        Ok(self.credentials.join(format!("{name}.json")))
     }
 
-    fn legacy_exists(&self) -> Result<bool> {
-        match &self.legacy {
-            Some(legacy) => Ok(legacy.try_exists()?),
-            None => Ok(false),
-        }
+    pub fn state_path(&self, name: &str) -> Result<PathBuf> {
+        validate_name(name)?;
+        Ok(self.state.join(format!("{name}.json")))
     }
 
     /// Keep the file open for the entire account run. Never unlink lock files:
     /// competing open descriptors must always refer to the same inode.
     pub fn lock(&self, name: &str) -> Result<std::fs::File> {
-        self.file_lock(name, "locks")
+        validate_name(name)?;
+        self.file_lock(&self.state.join(format!("{name}.lock")))
     }
 
     /// Only synchronous, short filesystem transactions hold this lock. Never
     /// hold it across HTTP, protocol I/O, or a lifetime lock acquisition.
     pub fn transaction(&self, name: &str) -> Result<std::fs::File> {
-        self.file_lock(name, "transactions")
+        validate_name(name)?;
+        self.file_lock(&self.state.join(format!("{name}.transaction")))
     }
 
-    fn file_lock(&self, name: &str, directory: &str) -> Result<std::fs::File> {
+    fn file_lock(&self, path: &Path) -> Result<std::fs::File> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
-        let path = self.path(directory, name)?;
-        private_directory(path.parent().unwrap())?;
+        private_directory(&self.home, path.parent().unwrap())?;
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -305,8 +349,8 @@ impl<C: Credentials> Store<C> {
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)?;
-        check_private(&path, "lock")?;
+            .open(path)?;
+        check_private(path, "lock")?;
         // SAFETY: the descriptor is valid for this call; flock neither retains
         // pointers nor closes it. Dropping the file releases the lock.
         let flags = libc::LOCK_EX | libc::LOCK_NB;
@@ -317,29 +361,23 @@ impl<C: Credentials> Store<C> {
         Ok(file)
     }
 
+    fn write_private(&self, path: &Path, contents: &str) -> Result<()> {
+        private_directory(&self.home, path.parent().unwrap())?;
+        atomic_write(path, contents)
+    }
+
     pub fn account(&self, name: &str) -> Result<Option<C>> {
         let _transaction = self.transaction(name)?;
         self.account_unlocked(name)
     }
 
     fn account_unlocked(&self, name: &str) -> Result<Option<C>> {
-        let path = self.path("accounts", name)?;
-        if path.try_exists()? {
-            check_private(&path, "account")?;
-            return Ok(Some(serde_json::from_str(&std::fs::read_to_string(path)?)?));
-        }
-        let Some(legacy) = self.legacy.as_ref().filter(|_| name == "default") else {
-            return Ok(None);
-        };
-        if !legacy.try_exists()? {
+        let path = self.credentials_path(name)?;
+        if !path.try_exists()? {
             return Ok(None);
         }
-        check_private(legacy, "legacy credential")?;
-        let account: C = toml::from_str(&std::fs::read_to_string(legacy)?)
-            .map_err(|_| anyhow!("parse legacy channel credentials"))?;
-        atomic_write(&path, &serde_json::to_string(&account)?)?;
-        std::fs::remove_file(legacy)?;
-        Ok(Some(account))
+        check_private(&path, "account")?;
+        Ok(Some(serde_json::from_str(&std::fs::read_to_string(path)?)?))
     }
 
     pub fn save_account(&self, name: &str, value: &C) -> Result<()> {
@@ -364,8 +402,8 @@ impl<C: Credentials> Store<C> {
         // Persist the binding before credentials. A crash between files fails
         // closed; identity replacement never resets or archives a runner's state.
         self.save_state_unlocked(name, &state)?;
-        atomic_write(
-            &self.path("accounts", name)?,
+        self.write_private(
+            &self.credentials_path(name)?,
             &serde_json::to_string(value)?,
         )
     }
@@ -375,44 +413,152 @@ impl<C: Credentials> Store<C> {
         self.settings_unlocked(name)
     }
 
+    /// `[channels.<channel>.<name>]` from `config.toml`; defaults when absent.
     fn settings_unlocked(&self, name: &str) -> Result<AccountSettings> {
-        let path = self.path("settings", name)?;
-        if !path.try_exists()? {
+        validate_name(name)?;
+        let Some(text) = read_config(&self.config)? else {
             return Ok(AccountSettings::default());
-        }
-        check_private(&path, "settings")?;
-        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+        };
+        let table: toml::Table = text.parse().map_err(|error: toml::de::Error| {
+            anyhow!(
+                "{} is not valid TOML{}",
+                self.config.display(),
+                toml_line(&text, error.span())
+            )
+        })?;
+        let section = format!("[channels.{}.{name}]", self.channel);
+        let Some(channels) = table.get("channels") else {
+            return Ok(AccountSettings::default());
+        };
+        let Some(accounts) = channels
+            .as_table()
+            .ok_or_else(|| anyhow!("[channels] in config.toml must be a table"))?
+            .get(&self.channel)
+        else {
+            return Ok(AccountSettings::default());
+        };
+        let Some(settings) = accounts
+            .as_table()
+            .ok_or_else(|| anyhow!("[channels.{}] in config.toml must be a table", self.channel))?
+            .get(name)
+        else {
+            return Ok(AccountSettings::default());
+        };
+        // Account settings hold no secrets, so their own errors are safe to show.
+        settings
+            .clone()
+            .try_into()
+            .map_err(|error: toml::de::Error| {
+                anyhow!("{section} in config.toml: {}", error.message())
+            })
     }
 
     pub fn save_settings(&self, name: &str, value: &AccountSettings) -> Result<()> {
         let _transaction = self.transaction(name)?;
-        atomic_write(
-            &self.path("settings", name)?,
-            &serde_json::to_string(value)?,
-        )
+        self.edit_settings(name, Some(value))
     }
 
-    /// Discover accounts, failing on entry errors or more than 128 entries
-    /// including an unmigrated legacy default account. Credentials are
-    /// validated separately.
+    /// Set or remove `[channels.<channel>.<name>]` in `config.toml`, keeping
+    /// the rest of the file, comments included, as the person wrote it.
+    fn edit_settings(&self, name: &str, value: Option<&AccountSettings>) -> Result<()> {
+        use toml_edit::{DocumentMut, Item, Table};
+        validate_name(name)?;
+        let _config = self.file_lock(&self.config_lock)?;
+        let text = read_config(&self.config)?.unwrap_or_default();
+        let mut document: DocumentMut = text.parse().map_err(|error: toml_edit::TomlError| {
+            anyhow!(
+                "{} is not valid TOML{}; fix it before changing channel settings",
+                self.config.display(),
+                toml_line(&text, error.span())
+            )
+        })?;
+        let implicit = || {
+            let mut table = Table::new();
+            table.set_implicit(true);
+            Item::Table(table)
+        };
+        match value {
+            Some(settings) => {
+                let accounts = document
+                    .entry("channels")
+                    .or_insert_with(implicit)
+                    .as_table_mut()
+                    .ok_or_else(|| anyhow!("[channels] in config.toml must be a table"))?
+                    .entry(&self.channel)
+                    .or_insert_with(implicit)
+                    .as_table_mut()
+                    .ok_or_else(|| {
+                        anyhow!("[channels.{}] in config.toml must be a table", self.channel)
+                    })?;
+                let table = accounts
+                    .entry(name)
+                    .or_insert_with(|| Item::Table(Table::new()))
+                    .as_table_mut()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "[channels.{}.{name}] in config.toml must be a table",
+                            self.channel
+                        )
+                    })?;
+                table["enabled"] = toml_edit::value(settings.enabled);
+                match &settings.workspace {
+                    Some(path) => {
+                        let path = path
+                            .to_str()
+                            .ok_or_else(|| anyhow!("channel workspace path is not UTF-8"))?;
+                        table["workspace"] = toml_edit::value(path);
+                    }
+                    None => {
+                        table.remove("workspace");
+                    }
+                }
+                table["remote_tools"] = toml_edit::value(match settings.remote_tools {
+                    RemoteTools::None => "none",
+                    RemoteTools::Owner => "owner",
+                });
+            }
+            None => {
+                let Some(channels) = document.get_mut("channels").and_then(Item::as_table_mut)
+                else {
+                    return Ok(());
+                };
+                let Some(accounts) = channels.get_mut(&self.channel).and_then(Item::as_table_mut)
+                else {
+                    return Ok(());
+                };
+                if accounts.remove(name).is_none() {
+                    return Ok(());
+                }
+                if accounts.is_empty() {
+                    channels.remove(&self.channel);
+                }
+                if channels.is_empty() {
+                    document.remove("channels");
+                }
+            }
+        }
+        // Write through a symlinked config.toml rather than replacing the
+        // link, leaving the directory that holds it as it is.
+        let target = std::fs::canonicalize(&self.config).unwrap_or_else(|_| self.config.clone());
+        replace_file(&target, &document.to_string())
+    }
+
+    /// Discover accounts from saved credentials, failing on entry errors or
+    /// more than 128 entries. Credentials are validated separately.
     pub fn account_names(&self) -> Result<Vec<String>> {
         const MAX_ENTRIES: usize = 128;
         let mut names = BTreeSet::new();
-        if self.legacy_exists()? {
-            names.insert("default".to_owned());
-        }
-        let entries = match std::fs::read_dir(self.root.join("accounts")) {
+        let entries = match std::fs::read_dir(&self.credentials) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(names.into_iter().collect());
+                return Ok(Vec::new());
             }
             Err(error) => return Err(error.into()),
         };
         // Discovery never reads credentials: one broken account must not hide others.
-        let budget = MAX_ENTRIES - names.len();
         for (index, entry) in entries.enumerate() {
             let entry = entry?;
-            if index >= budget {
+            if index >= MAX_ENTRIES {
                 bail!("channel account discovery exceeds 128 entries")
             }
             let path = entry.path();
@@ -434,7 +580,7 @@ impl<C: Credentials> Store<C> {
     }
 
     fn load_state_unlocked(&self, name: &str) -> Result<BridgeState> {
-        let path = self.path("state", name)?;
+        let path = self.state_path(name)?;
         if !path.try_exists()? {
             return Ok(BridgeState::default());
         }
@@ -449,12 +595,12 @@ impl<C: Credentials> Store<C> {
     }
 
     fn save_state_unlocked(&self, name: &str, value: &BridgeState) -> Result<()> {
-        atomic_write(&self.path("state", name)?, &serde_json::to_string(value)?)
+        self.write_private(&self.state_path(name)?, &serde_json::to_string(value)?)
     }
 
     /// Load the account's delivery state for a run with the credentials the
     /// runner holds. `running` says whether they are the saved credentials;
-    /// unbound state from older releases is bound to them before first use.
+    /// unbound state is bound to them before first use.
     pub fn bind_state(
         &self,
         name: &str,
@@ -482,46 +628,39 @@ impl<C: Credentials> Store<C> {
         Ok((self.account_unlocked(name)?, self.settings_unlocked(name)?))
     }
 
-    /// The caller must stop the account's running component before removing
-    /// its files.
+    /// A lock-free look at one account for display: its credentials and its
+    /// settings, each parsed. It never holds a lock a running bridge needs;
+    /// every file is replaced atomically, so each read is whole.
+    pub fn inspect(&self, name: &str) -> (Result<Option<C>>, Result<AccountSettings>) {
+        (self.account_unlocked(name), self.settings_unlocked(name))
+    }
+
+    /// Accounts that have a `[channels.<channel>.<account>]` table.
+    pub fn configured_accounts(&self) -> Result<Vec<String>> {
+        let Some(text) = read_config(&self.config)? else {
+            return Ok(Vec::new());
+        };
+        let table: toml::Table = text
+            .parse()
+            .map_err(|_| anyhow!("{} is not valid TOML", self.config.display()))?;
+        Ok(table
+            .get("channels")
+            .and_then(|channels| channels.get(&self.channel))
+            .and_then(toml::Value::as_table)
+            .map(|accounts| accounts.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Remove the account's credentials, delivery state, and settings. The
+    /// caller must stop the account's running component first.
     pub fn remove(&self, name: &str) -> Result<()> {
         let _lock = self.lock(name)?;
         let _transaction = self.transaction(name)?;
-        // Both credential layouts must be durably gone before settings can
-        // disappear and fall back to enabled-by-default on the next startup.
-        remove_if_present(&self.path("accounts", name)?)?;
-        if name == "default"
-            && let Some(legacy) = &self.legacy
-        {
-            remove_if_present(legacy)?;
-        }
-        for directory in ["state", "settings"] {
-            remove_if_present(&self.path(directory, name)?)?;
-        }
-        Ok(())
-    }
-
-    /// Move the whole store to `target`, which must not exist, in one rename.
-    /// Every account's lifetime and transaction locks are held across it, so
-    /// a running bridge or login makes it fail instead of racing it.
-    pub fn relocate(&self, target: &Path) -> Result<()> {
-        let mut held = Vec::new();
-        for name in self.account_names()? {
-            let busy =
-                || anyhow!("the account {name} is in use by a running SCV; stop it, then retry");
-            held.push(self.lock(&name).map_err(|_| busy())?);
-            held.push(self.transaction(&name).map_err(|_| busy())?);
-        }
-        let parent = target
-            .parent()
-            .ok_or_else(|| anyhow!("channel path has no parent"))?;
-        private_directory(parent)?;
-        std::fs::rename(&self.root, target)?;
-        std::fs::File::open(parent)?.sync_all()?;
-        if let Some(home) = parent.parent() {
-            std::fs::File::open(home)?.sync_all()?;
-        }
-        Ok(())
+        // Credentials must be durably gone before settings can disappear and
+        // fall back to enabled-by-default on the next startup.
+        remove_if_present(&self.credentials_path(name)?)?;
+        remove_if_present(&self.state_path(name)?)?;
+        self.edit_settings(name, None)
     }
 }
 
@@ -564,10 +703,12 @@ mod tests {
     }
 
     fn store(directory: &Path) -> Store<Test> {
-        Store::with_legacy(
-            directory.join("channels/test"),
-            directory.join("legacy.toml"),
-        )
+        Store::new(&Layout::new(directory), "test")
+    }
+
+    fn mode(path: impl AsRef<Path>) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     #[test]
@@ -667,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_to_enabled_and_roundtrip_privately() {
+    fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(directory.path());
         assert!(store.settings("default").unwrap() == AccountSettings::default());
@@ -675,8 +816,10 @@ mod tests {
         assert!(empty.enabled);
         assert!(empty.workspace.is_none());
         assert_eq!(empty.remote_tools, RemoteTools::None);
-        assert!(serde_json::from_str::<AccountSettings>(r#"{"enabeld":false}"#).is_err());
-        assert!(serde_json::from_str::<AccountSettings>(r#"{"remote_tools":"everyone"}"#).is_err());
+
+        let config = directory.path().join("config.toml");
+        let original = "# my provider\n[provider]\nactive = \"openai\" # keep this\n";
+        atomic_write(&config, original).unwrap();
         let settings = AccountSettings {
             enabled: false,
             workspace: Some(directory.path().join("workspace")),
@@ -684,36 +827,101 @@ mod tests {
         };
         store.save_settings("default", &settings).unwrap();
         assert!(store.settings("default").unwrap() == settings);
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.starts_with(original), "{text}");
+        assert!(
+            text.contains("[channels.test.default]\nenabled = false\n"),
+            "{text}"
+        );
+        assert!(!text.contains("[channels]\n"), "{text}");
+        assert_eq!(mode(&config), 0o600);
+
+        // A person's edit is read back, and their own keys and comments survive
+        // SCV's next change.
+        let edited = text.replace("enabled = false", "enabled = true # on again");
+        atomic_write(&config, &edited).unwrap();
+        assert!(store.settings("default").unwrap().enabled);
+        store
+            .save_settings(
+                "default",
+                &AccountSettings {
+                    workspace: None,
+                    ..settings.clone()
+                },
+            )
+            .unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            text.contains("# keep this") && !text.contains("workspace"),
+            "{text}"
+        );
+
+        for invalid in [
+            "[channels.test.default]\nenabeld = false\n",
+            "[channels.test.default]\nremote_tools = \"everyone\"\n",
+            "[channels]\ntest = 1\n",
+        ] {
+            atomic_write(&config, invalid).unwrap();
+            assert!(store.settings("default").is_err(), "{invalid}");
+        }
+        // Parse errors name the line but never quote the file, which holds keys.
+        atomic_write(&config, "api_key = \"sk-secret\"\nbroken =\n").unwrap();
+        let error = store.settings("default").unwrap_err().to_string();
+        assert!(
+            error.contains("line 2") && !error.contains("sk-secret"),
+            "{error}"
+        );
+        assert!(store.save_settings("default", &settings).is_err());
+        assert!(store.save_settings("../escape", &settings).is_err());
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            for (path, mode) in [
-                (directory.path().join("channels"), 0o700),
-                (store.root.clone(), 0o700),
-                (store.root.join("settings"), 0o700),
-                (store.path("settings", "default").unwrap(), 0o600),
-            ] {
-                assert_eq!(
-                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                    mode
-                );
-            }
+            atomic_write(&config, "").unwrap();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(store.settings("default").is_err());
         }
-        assert!(store.save_settings("../escape", &settings).is_err());
+    }
+
+    #[test]
+    fn files_follow_the_instance_layout_privately() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let store = store(home);
+        store.save_account("default", &credentials("a")).unwrap();
+        store
+            .save_settings("default", &AccountSettings::default())
+            .unwrap();
+        let _lock = store.lock("default").unwrap();
+        for (path, expected) in [
+            (home.join("credentials"), 0o700),
+            (home.join("credentials/test"), 0o700),
+            (home.join("credentials/test/default.json"), 0o600),
+            (home.join("state"), 0o700),
+            (home.join("state/channels"), 0o700),
+            (home.join("state/channels/test"), 0o700),
+            (home.join("state/channels/test/default.json"), 0o600),
+            (home.join("state/channels/test/default.lock"), 0o600),
+            (home.join("state/channels/test/default.transaction"), 0o600),
+            (home.join("config.toml"), 0o600),
+        ] {
+            assert_eq!(mode(&path), expected, "{}", path.display());
+        }
     }
 
     #[test]
     fn discovery_is_bounded_and_ignores_bad_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(directory.path());
-        atomic_write(store.legacy.as_ref().unwrap(), "invalid legacy").unwrap();
-        atomic_write(&store.path("accounts", "broken").unwrap(), "not JSON").unwrap();
-        atomic_write(&store.root.join("accounts/invalid.name.json"), "{}").unwrap();
-        assert_eq!(store.account_names().unwrap(), vec!["broken", "default"]);
+        assert!(store.account_names().unwrap().is_empty());
+        private_directory(directory.path(), &store.credentials).unwrap();
+        atomic_write(&store.credentials_path("broken").unwrap(), "not JSON").unwrap();
+        atomic_write(&store.credentials.join("invalid.name.json"), "{}").unwrap();
+        assert_eq!(store.account_names().unwrap(), vec!["broken"]);
         assert!(store.account("broken").is_err());
         for index in 0..140 {
             atomic_write(
-                &store.path("accounts", &format!("account-{index}")).unwrap(),
+                &store.credentials_path(&format!("account-{index}")).unwrap(),
                 "{}",
             )
             .unwrap();
@@ -722,28 +930,31 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migration_and_removal_preserve_other_accounts() {
+    fn removal_clears_one_account_and_preserves_others() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(directory.path());
-        let legacy = store.legacy.clone().unwrap();
-        atomic_write(&legacy, "id = 'a'\nsecret = 'secret'\n").unwrap();
-        assert_eq!(store.account_names().unwrap(), vec!["default"]);
-        let account = store.account("default").unwrap().unwrap();
-        assert!(account == credentials("a"));
-        assert!(!legacy.exists());
+        let account = credentials("a");
+        store.save_account("default", &account).unwrap();
         store.save_account("other", &account).unwrap();
-        store
-            .save_settings("default", &AccountSettings::default())
-            .unwrap();
+        for name in ["default", "other"] {
+            store
+                .save_settings(name, &AccountSettings::default())
+                .unwrap();
+        }
         store
             .save_state("default", &BridgeState::default())
             .unwrap();
         store.remove("default").unwrap();
         assert!(store.account("default").unwrap().is_none());
-        for directory in ["accounts", "settings", "state"] {
-            assert!(!store.path(directory, "default").unwrap().exists());
-        }
+        assert!(!store.credentials_path("default").unwrap().exists());
+        assert!(!store.state_path("default").unwrap().exists());
+        let config = std::fs::read_to_string(directory.path().join("config.toml")).unwrap();
+        assert!(!config.contains("[channels.test.default]"), "{config}");
+        assert!(config.contains("[channels.test.other]"), "{config}");
         assert!(store.account("other").unwrap().unwrap() == account);
+        store.remove("other").unwrap();
+        let config = std::fs::read_to_string(directory.path().join("config.toml")).unwrap();
+        assert!(!config.contains("channels"), "{config}");
     }
 
     #[test]
@@ -757,22 +968,5 @@ mod tests {
         drop(lock);
         assert!(store.lock("default").is_ok());
         store.remove("default").unwrap();
-    }
-
-    #[test]
-    fn relocation_moves_everything_and_refuses_a_running_account() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = store(directory.path());
-        store.save_account("default", &credentials("a")).unwrap();
-        let target = directory.path().join("moved/test");
-        let running = store.lock("default").unwrap();
-        let error = store.relocate(&target).unwrap_err().to_string();
-        assert!(error.contains("in use by a running SCV"), "{error}");
-        assert!(!target.exists());
-        drop(running);
-        store.relocate(&target).unwrap();
-        assert!(!store.root.exists());
-        let moved = Store::<Test>::new(target);
-        assert!(moved.account("default").unwrap().unwrap() == credentials("a"));
     }
 }

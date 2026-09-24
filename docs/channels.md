@@ -52,7 +52,7 @@ authority (see [Sessions and safety](#sessions-and-safety)); omitting it keeps
 the saved value. `stop` persistently disables the account and joins
 its component while retaining credentials. `logout` requires a live daemon:
 it persists disablement, cancels and joins the component, then removes local
-credentials, delivery state, and settings. The API has no documented remote
+credentials, delivery state, and the account's `[channels]` table. The API has no documented remote
 token-revocation operation.
 
 `status` queries the running daemon, showing its PID/version and each selected
@@ -72,24 +72,29 @@ updated credentials or settings. Unexpected exits retry with exponential
 backoff from 1 to 60 seconds. SIGTERM and Ctrl+C cancel and join components and daemon sessions with
 bounded shutdown. All long-running integrations use server supervision.
 
-Settings live at `$SCV_HOME/channels/<channel>/settings/<account>.json`
-(`SCV_HOME` defaults to `~/.scv`):
+Each account's settings are a table in the instance's `config.toml`
+(`$SCV_HOME/config.toml`, `SCV_HOME` defaulting to `~/.scv`):
 
-```json
-{"enabled":true,"workspace":"/absolute/path/to/workspace"}
+```toml
+[channels.wechat.default]
+enabled = true
+workspace = "/absolute/path/to/workspace"
+remote_tools = "none"
 ```
 
-Missing settings default to enabled. An omitted or null workspace uses the
-daemon workspace. `run --account NAME --workspace PATH` persists an explicit
-workspace. To opt out offline, create or edit the settings to contain
-`{"enabled":false}` before starting the daemon. Keep the file mode `0600` and
-its channel parent directories mode `0700`. Login honors this opt-out.
+A missing table or key defaults to enabled and tool-free. An omitted workspace
+uses the daemon workspace. `run --account NAME --workspace PATH` persists an
+explicit workspace. To opt out offline, set `enabled = false` in the table
+before starting the daemon. Login honors this opt-out. `scv channels run`,
+`stop`, and `logout` edit only their own table, keeping the rest of the file
+and its comments; a person's own edit takes effect at the next reconciliation.
 
 Settings reject unknown fields. The supervisor reads credentials and settings
 together through `state::account_snapshot` under a short transaction lock.
 A busy snapshot defers that account's reconciliation to a later pass without
-stopping its current instance.
-Discovery rejects more than 128 entries (including the legacy default account)
+stopping its current instance. Invalid settings, or a `config.toml` that does
+not parse, fail the account closed; `scv config show` names the problem.
+Discovery lists `credentials/<channel>/`, rejecting more than 128 entries
 and directory-entry errors rather than silently returning a partial account set.
 Each channel is discovered separately: one that fails stops only its own
 accounts and reports a `<channel>:discovery-error` component, while the other
@@ -116,9 +121,10 @@ unknown identity to identified credentials, until explicit logout. Login never
 resets or archives a running account's state. Logout discards the old state
 after stopping the component; a subsequent login starts fresh.
 
-A lifetime advisory lock prevents cooperating runners from using the same
-account concurrently. A separate transaction file lock serializes login
-credential writes, settings/state writes, binding, migration, and removal.
+A lifetime advisory lock (`state/channels/<channel>/<account>.lock`) prevents
+cooperating runners from using the same account concurrently. A separate
+transaction file lock (`<account>.transaction` beside it) serializes login
+credential writes, settings/state writes, binding, and removal.
 State writes recheck the binding, preventing a stale runner from overwriting
 another identity's state. These locks are nonblocking: contention returns a
 retry error, and network I/O never holds the transaction lock. The daemon's
@@ -126,21 +132,6 @@ account commands (enable, disable, settings, logout) retry that error for up to
 five seconds, so they wait out a running bridge's state commit instead of
 failing. Lock files remain in place after logout so open descriptors cannot
 refer to different lock inodes.
-
-## State saved before channels
-
-Releases before `0.1.35` kept WeChat state in `$SCV_HOME/clawbot`. The daemon,
-at every reconciliation, and each `scv channels` command move that directory to
-`$SCV_HOME/channels/wechat` in one rename, so credentials, settings, cursor,
-deduplicated IDs, claims, pending and held replies, and the credential binding
-arrive unchanged. The move holds every account's lifetime and transaction locks
-from the old directory: a bridge or login of an older binary still using them
-makes it fail with a retry message instead of racing it. When both directories
-exist, nothing moves: the daemon reports a failed `wechat:discovery-error`
-component and stops its accounts, and `scv channels status` prints both paths
-so the user can keep one and move the other aside. The earliest single-file
-credentials, `$SCV_HOME/clawbot.toml`, still become the `default` account on
-first read.
 
 ## WeChat iLink contract
 
@@ -395,15 +386,15 @@ their CLIs signed in for SCV first; see `scv agents login` in the
 
 The bridge never invokes `scv exec --yes`.
 
-Credentials are stored at `$SCV_HOME/channels/<channel>/accounts/<account>.json`;
+Credentials are stored at `$SCV_HOME/credentials/<channel>/<account>.json`;
 the checkpoint (WeChat's cursor, Feishu's per-chat times) and message IDs,
 in-flight claims, pending replies, and held replies are stored at
-`$SCV_HOME/channels/<channel>/state/<account>.json`. Claims and pending replies keep the
+`$SCV_HOME/state/channels/<channel>/<account>.json`. Claims and pending replies keep the
 single-object form older bridges wrote while at most one of each exists, and
 become lists when several do; a bridge older than `0.1.23` cannot read state
 that holds several. Credentials, settings, and delivery
-state use atomic writes and mode `0600` on Unix; parent directories are mode
-`0700`. Account names contain only ASCII letters, digits, `_`, and `-`.
+state use atomic writes and mode `0600` on Unix; the directories between the
+SCV home and them are mode `0700`. Account names contain only ASCII letters, digits, `_`, and `-`.
 Project configuration cannot select accounts, workspaces, or remote authority.
 
 `scv-channels` owns durable state, claims, sender sessions, held replies, and

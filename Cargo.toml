@@ -18,7 +18,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.35"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -50,20 +50,21 @@ tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "
 tokio-util = { version = "0.7.16", features = ["rt"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "0.9.5"
+toml_edit = "0.23"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 which = "8.0.0"
 
-scv-core = { version = "=0.1.35", path = "crates/scv-core" }
-scv-client = { version = "=0.1.35", path = "crates/scv-client" }
-scv-channels = { version = "=0.1.35", path = "crates/scv-channels" }
-scv-clawbot = { version = "=0.1.35", path = "crates/scv-clawbot" }
-scv-feishu = { version = "=0.1.35", path = "crates/scv-feishu" }
-scv-protocol = { version = "=0.1.35", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "=0.1.35", path = "crates/scv-provider-openai" }
-scv-server = { version = "=0.1.35", path = "crates/scv-server" }
-scv-tools = { version = "=0.1.35", path = "crates/scv-tools" }
-scv-tui = { version = "=0.1.35", path = "crates/scv-tui" }
+scv-core = { version = "=0.2.0", path = "crates/scv-core" }
+scv-client = { version = "=0.2.0", path = "crates/scv-client" }
+scv-channels = { version = "=0.2.0", path = "crates/scv-channels" }
+scv-clawbot = { version = "=0.2.0", path = "crates/scv-clawbot" }
+scv-feishu = { version = "=0.2.0", path = "crates/scv-feishu" }
+scv-protocol = { version = "=0.2.0", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.2.0", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.2.0", path = "crates/scv-server" }
+scv-tools = { version = "=0.2.0", path = "crates/scv-tools" }
+scv-tui = { version = "=0.2.0", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true

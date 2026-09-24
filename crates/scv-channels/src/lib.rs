@@ -18,6 +18,7 @@ use std::{
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 use uuid::Uuid;
 
+pub use scv_client::Layout;
 pub mod session;
 pub mod state;
 

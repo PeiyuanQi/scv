@@ -12,7 +12,7 @@ impl state::Credentials for Test {
 }
 
 fn test_store(directory: &Path) -> state::Store<Test> {
-    state::Store::new(directory.join("channels/test"))
+    state::Store::new(&scv_client::Layout::new(directory), "test")
 }
 
 #[test]

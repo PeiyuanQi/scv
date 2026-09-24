@@ -1,9 +1,8 @@
 //! WeChat channel credentials and where the channel keeps its state.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
 
 pub use scv_channels::state::{
     AccountSettings, BridgeState, HeldReply, InFlight, PendingDelivery, RemoteTools, validate_name,
@@ -52,66 +51,9 @@ pub fn runs_as(saved: &Account, token: &str, base_url: &str) -> Result<bool> {
     Ok(saved.token == token && supplied.fingerprint()? == saved.fingerprint()?)
 }
 
-/// The WeChat channel's directory, `<SCV home>/channels/wechat`. State saved
-/// by releases before channels, in `<SCV home>/clawbot`, is moved there first.
-pub fn root() -> Result<PathBuf> {
-    let home = scv_home()?;
-    migrate_legacy_root(&home)?;
-    Ok(channel_root(&home))
-}
-
-/// The channel's account store, after moving pre-channel state.
+/// The WeChat channel's account store in the instance selected by `SCV_HOME`.
 pub fn store() -> Result<Store> {
-    let home = scv_home()?;
-    migrate_legacy_root(&home)?;
-    Ok(store_in(&home))
-}
-
-/// Move this SCV home's pre-channel state now; see [`migrate_legacy_root`].
-pub fn migrate() -> Result<bool> {
-    migrate_legacy_root(&scv_home()?)
-}
-
-fn scv_home() -> Result<PathBuf> {
-    std::env::var_os("SCV_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|p| p.join(".scv")))
-        .ok_or_else(|| anyhow!("cannot determine SCV home"))
-}
-
-fn channel_root(home: &Path) -> PathBuf {
-    home.join("channels").join(crate::CHANNEL)
-}
-
-/// The store in `home`, which also reads the single-file credentials of the
-/// earliest releases, `<home>/clawbot.toml`, as the `default` account.
-fn store_in(home: &Path) -> Store {
-    Store::with_legacy(channel_root(home), home.join("clawbot.toml"))
-}
-
-/// Move `<home>/clawbot`, the directory releases before channels used, to
-/// `<home>/channels/wechat` in one rename. Every account's run and transaction
-/// locks are held across it, so a running bridge or login of an older binary
-/// makes it fail instead of racing it. Refuses when both directories exist.
-/// Returns whether anything moved.
-pub fn migrate_legacy_root(home: &Path) -> Result<bool> {
-    let legacy = home.join("clawbot");
-    match std::fs::symlink_metadata(&legacy) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => bail!("{} is not a directory; move it aside", legacy.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    }
-    let target = channel_root(home);
-    if std::fs::symlink_metadata(&target).is_ok() {
-        bail!(
-            "both {} (saved before channels) and {} exist; keep one and move the other aside",
-            legacy.display(),
-            target.display()
-        )
-    }
-    Store::with_legacy(legacy, home.join("clawbot.toml")).relocate(&target)?;
-    Ok(true)
+    Store::from_env(crate::CHANNEL)
 }
 
 pub fn account(name: &str) -> Result<Option<Account>> {
@@ -130,8 +72,8 @@ pub fn settings(name: &str) -> Result<AccountSettings> {
 pub fn save_settings(name: &str, value: &AccountSettings) -> Result<()> {
     store()?.save_settings(name, value)
 }
-/// Discover accounts, failing on entry errors or more than 128 entries including
-/// an unmigrated legacy default account. Credentials are validated separately.
+/// Discover accounts, failing on entry errors or more than 128 entries.
+/// Credentials are validated separately.
 pub fn account_names() -> Result<Vec<String>> {
     store()?.account_names()
 }
@@ -163,7 +105,7 @@ mod tests {
     #[test]
     fn replacement_requires_logout_and_preserves_delivery() {
         let directory = tempfile::tempdir().unwrap();
-        let store = store_in(directory.path());
+        let store = Store::new(&scv_channels::Layout::new(directory.path()), crate::CHANNEL);
         let original = known_account();
         store.save_account("default", &original).unwrap();
         let mut state = store
@@ -179,7 +121,7 @@ mod tests {
             1024,
         )];
         store.save_state("default", &state).unwrap();
-        let before = std::fs::read(store.path("state", "default").unwrap()).unwrap();
+        let before = std::fs::read(store.state_path("default").unwrap()).unwrap();
         for replacement in [
             Account {
                 bot_id: Some("other".into()),
@@ -203,7 +145,7 @@ mod tests {
             );
             assert!(store.account("default").unwrap().unwrap() == original);
             assert_eq!(
-                std::fs::read(store.path("state", "default").unwrap()).unwrap(),
+                std::fs::read(store.state_path("default").unwrap()).unwrap(),
                 before
             );
         }
@@ -220,7 +162,7 @@ mod tests {
     #[test]
     fn binding_rejects_externally_replaced_credentials_without_changing_state() {
         let directory = tempfile::tempdir().unwrap();
-        let store = store_in(directory.path());
+        let store = Store::new(&scv_channels::Layout::new(directory.path()), crate::CHANNEL);
         let original = known_account();
         store.save_account("default", &original).unwrap();
         let mut state = store
@@ -241,7 +183,7 @@ mod tests {
             ..original
         };
         atomic_write(
-            &store.path("accounts", "default").unwrap(),
+            &store.credentials_path("default").unwrap(),
             &serde_json::to_string(&replacement).unwrap(),
         )
         .unwrap();
@@ -264,7 +206,7 @@ mod tests {
     #[test]
     fn known_identity_token_rotation_preserves_pending_while_running() {
         let directory = tempfile::tempdir().unwrap();
-        let store = store_in(directory.path());
+        let store = Store::new(&scv_channels::Layout::new(directory.path()), crate::CHANNEL);
         let original = known_account();
         store.save_account("default", &original).unwrap();
         let _running = store.lock("default").unwrap();
@@ -313,14 +255,14 @@ mod tests {
     #[test]
     fn legacy_binding_requires_original_credentials_and_refuses_login_upgrade() {
         let directory = tempfile::tempdir().unwrap();
-        let store = store_in(directory.path());
+        let store = Store::new(&scv_channels::Layout::new(directory.path()), crate::CHANNEL);
         let legacy = Account {
             bot_id: None,
             user_id: None,
             ..known_account()
         };
         atomic_write(
-            &store.path("accounts", "default").unwrap(),
+            &store.credentials_path("default").unwrap(),
             &serde_json::to_string(&legacy).unwrap(),
         )
         .unwrap();
@@ -384,7 +326,7 @@ mod tests {
     #[test]
     fn replacement_is_rejected_even_without_pending_delivery() {
         let directory = tempfile::tempdir().unwrap();
-        let store = store_in(directory.path());
+        let store = Store::new(&scv_channels::Layout::new(directory.path()), crate::CHANNEL);
         store.save_account("default", &known_account()).unwrap();
         assert!(
             store
@@ -411,125 +353,5 @@ mod tests {
         let restored: Account =
             serde_json::from_str(&serde_json::to_string(&account).unwrap()).unwrap();
         assert!(account == restored);
-    }
-
-    /// Account, settings, and delivery state as a release before channels
-    /// saved them in `<home>/clawbot`.
-    fn legacy_layout(home: &Path) -> (Account, AccountSettings, BridgeState) {
-        let store = Store::new(home.join("clawbot"));
-        let account = known_account();
-        store.save_account("default", &account).unwrap();
-        let settings = AccountSettings {
-            enabled: false,
-            workspace: Some(home.join("workspace")),
-            remote_tools: RemoteTools::Owner,
-        };
-        store.save_settings("default", &settings).unwrap();
-        let mut state = store
-            .bind_state("default", |saved| {
-                runs_as(saved, &account.token, &account.base_url)
-            })
-            .unwrap();
-        state.cursor = "cursor".into();
-        state.seen = vec!["seen-1".into(), "seen-2".into()];
-        state.pending = vec![scv_channels::new_pending(
-            "message", "sender", "context", "reply", 1024,
-        )];
-        state.in_flight = vec![InFlight {
-            message_id: "claimed".into(),
-            to_user_id: "sender".into(),
-            context_token: "ctx".into(),
-            key: String::new(),
-        }];
-        state.held = vec![HeldReply {
-            key: "sender".into(),
-            to_user_id: "sender".into(),
-            reply: "held".into(),
-            held_at: 1,
-        }];
-        store.save_state("default", &state).unwrap();
-        (account, settings, state)
-    }
-
-    #[test]
-    fn legacy_state_moves_into_the_wechat_channel_intact() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path();
-        let (account, settings, state) = legacy_layout(home);
-        let files = ["accounts", "settings", "state"]
-            .map(|kind| std::fs::read(home.join(format!("clawbot/{kind}/default.json"))).unwrap());
-        assert!(migrate_legacy_root(home).unwrap());
-        assert!(!home.join("clawbot").exists());
-        let store = Store::new(channel_root(home));
-        for (kind, before) in ["accounts", "settings", "state"].iter().zip(&files) {
-            let path = store.path(kind, "default").unwrap();
-            assert_eq!(&std::fs::read(&path).unwrap(), before, "{kind}");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                assert_eq!(
-                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                    0o600
-                );
-            }
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for directory in [home.join("channels"), channel_root(home)] {
-                assert_eq!(
-                    std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
-                    0o700
-                );
-            }
-        }
-        // The moved state still binds to the same credentials, with every
-        // cursor, claim, reply, and dedupe ID in place.
-        assert!(store.account("default").unwrap().unwrap() == account);
-        assert!(store.settings("default").unwrap() == settings);
-        let moved = store
-            .bind_state("default", |saved| {
-                runs_as(saved, &account.token, &account.base_url)
-            })
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(&moved).unwrap(),
-            serde_json::to_value(&state).unwrap()
-        );
-        assert!(!migrate_legacy_root(home).unwrap());
-    }
-
-    #[test]
-    fn legacy_migration_refuses_both_layouts_and_a_running_account() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path();
-        legacy_layout(home);
-        let running = Store::new(home.join("clawbot")).lock("default").unwrap();
-        let error = migrate_legacy_root(home).unwrap_err().to_string();
-        assert!(error.contains("in use by a running SCV"), "{error}");
-        assert!(home.join("clawbot/accounts/default.json").exists());
-        assert!(!channel_root(home).exists());
-        drop(running);
-
-        std::fs::create_dir_all(channel_root(home)).unwrap();
-        let error = migrate_legacy_root(home).unwrap_err().to_string();
-        assert!(error.contains("both"), "{error}");
-        assert!(home.join("clawbot/accounts/default.json").exists());
-        assert_eq!(std::fs::read_dir(channel_root(home)).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn earliest_single_file_credentials_stay_readable_from_the_channel() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = store_in(directory.path());
-        atomic_write(
-            &directory.path().join("clawbot.toml"),
-            "token = 'secret'\nbase_url = 'https://example.test'\n",
-        )
-        .unwrap();
-        assert_eq!(store.account_names().unwrap(), vec!["default"]);
-        assert!(store.account("default").unwrap().is_some());
-        assert!(!directory.path().join("clawbot.toml").exists());
-        assert!(store.path("accounts", "default").unwrap().exists());
     }
 }

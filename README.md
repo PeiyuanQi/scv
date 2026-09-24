@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.35`, with exact `=0.1.35` pins for dependencies
+All packages use version `0.2.0`, with exact `=0.2.0` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -109,9 +109,9 @@ Each SCV instance owns an explicit profile root. Use `--scv-home PATH` (or
 sockets, credentials, skills, channel state, and systemd units:
 
 ```bash
-scv --scv-home ~/.scv/work --model gpt-4.1-mini start --workspace /path/to/workspace
-scv --scv-home ~/.scv/review --model o4-mini start --workspace /path/to/workspace
-scv --scv-home ~/.scv/work status
+scv --scv-home ~/.scv-work --model gpt-4.1-mini start --workspace /path/to/workspace
+scv --scv-home ~/.scv-review --model o4-mini start --workspace /path/to/workspace
+scv --scv-home ~/.scv-work status
 ```
 
 `--config PATH` (or `SCV_CONFIG`) selects an additional explicit configuration
@@ -144,11 +144,10 @@ scv --provider local --model llama3.1 --base-url http://localhost:11434/v1
 Chat channels connect chat accounts to the daemon, all through
 `scv channels <command> <channel>`. Authenticate the WeChat ClawBot bridge once
 with `scv channels login wechat`. The QR login stores the bearer token at
-`$SCV_HOME/channels/wechat/accounts/<account>.json` (normally under `~/.scv`)
+`$SCV_HOME/credentials/wechat/<account>.json` (normally under `~/.scv`)
 with mode `0600`; the token is never printed. Saved accounts are enabled by
 default and start under the daemon automatically. Login remains explicit and
-honors an account's saved opt-out. WeChat state saved by releases before
-`0.1.35` in `$SCV_HOME/clawbot` moves there automatically.
+honors an account's saved opt-out.
 
 Delivery state is bound to the account identity and API origin. Token rotation
 for the same known identity preserves state; changing identity or origin
@@ -167,7 +166,7 @@ account; `--remote-tools none` revokes it. `scv channels stop wechat
 including identity and last successful contact; saved credentials alone do not
 mean connected. `scv channels logout wechat --account NAME` requires a live
 daemon and joins the component before deleting credentials, delivery state, and
-settings.
+the account's settings table.
 
 Feishu (and Lark, its international edition) works the same way:
 `scv channels login feishu` shows a QR code; scanning it with the Feishu app
@@ -180,11 +179,13 @@ meantime from chat history. In groups it answers only messages that mention
 it. `scv channels run feishu --workspace PATH --remote-tools owner` then
 grants the owner's direct chats every SCV tool, exactly as for WeChat.
 
-Account settings live at `$SCV_HOME/channels/<channel>/settings/<account>.json`, with
+Account settings are `[channels.<channel>.<account>]` tables in
+`config.toml`, with
 `enabled` defaulting to `true`, `remote_tools` defaulting to `"none"`, and an
-optional workspace defaulting to the daemon workspace. The daemon reconciles accounts and settings every two seconds
-or immediately on `scv reload`. To opt out while offline, set `enabled` to
-`false` in the private settings file before daemon startup. See the
+optional workspace defaulting to the daemon workspace. `scv channels run` and
+`stop` edit only that table and keep your comments. The daemon reconciles accounts and settings every two seconds
+or immediately on `scv reload`, so a hand edit takes effect without a restart.
+To opt out while offline, set `enabled = false` before daemon startup. See the
 [channels contract](docs/channels.md) for permissions and recovery behavior.
 
 ## Quick start
@@ -217,7 +218,20 @@ toggles the latest tool result, and `/help` lists the compact command set.
 
 ## Configuration
 
-User configuration lives at `~/.scv/config.toml` (or `$SCV_HOME/config.toml`); copy
+Everything an SCV instance keeps is under `~/.scv` (or `$SCV_HOME`), and the
+one file you edit is `config.toml`:
+
+```text
+~/.scv/config.toml     settings: provider and key, limits, agents, chat accounts
+~/.scv/credentials/    channel sign-ins SCV writes
+~/.scv/agents/<name>/  private homes of delegated agents, with their sign-ins
+~/.scv/skills/         your skills
+~/.scv/state/          runtime state: socket, delegated runs, delivery state
+```
+
+`scv config show` lists every path, the settings in effect with where each
+came from, and whether each credential is in place, without showing any
+secret; `scv config path` prints the file's path. Copy
 [`config.example.toml`](config.example.toml) there to get started. A workspace may add
 `.scv/config.toml`, but project configuration cannot redirect provider
 credentials or replace native-agent executables.
@@ -254,8 +268,8 @@ approval gates, and event sinks. Registering a new `Tool` does not require a
 change to the agent loop or TUI.
 
 Skills use `.scv/skills/<name>/SKILL.md` in a project or
-`~/.scv/skills/<name>/SKILL.md` for the user. Set `SCV_HOME` to relocate all user
-configuration and skills. Only skill metadata enters
+`~/.scv/skills/<name>/SKILL.md` for the user. Set `SCV_HOME` to relocate the
+whole instance. Only skill metadata enters
 the initial prompt; the model loads full instructions through the contained
 `read_skill` tool when needed. Tool-enabled sessions also list the Codex and
 Claude Code skills (`.agents/skills`, `.claude/skills`) of the workspace and its
@@ -280,7 +294,7 @@ directory inside the workspace, where the agent loads that project's
 change. Each adapter receives an instance-private
 `HOME`, `SCV_HOME`, XDG directories, and the agent's own state directory
 (`CODEX_HOME`, `GROK_HOME`, `DSH_HOME`, `PI_CODING_AGENT_DIR`) under
-`$SCV_HOME/adapters/<name>`, and inherits no API-key variables. SCV never
+`$SCV_HOME/agents/<name>`, and inherits no API-key variables. SCV never
 reuses or modifies the user's normal `~/.claude`, `~/.codex`, `~/.grok`,
 `~/.dsh`, or `~/.pi` configuration. Sign the agents in for SCV once with
 `scv agents login <name>`, copy a custom-provider Codex setup with

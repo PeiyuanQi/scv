@@ -1,4 +1,8 @@
-//! Shared local transport interfaces, without server policy or bridge dependencies.
+//! Shared local transport interfaces and the instance layout, without server
+//! policy or bridge dependencies.
+
+pub mod layout;
+pub use layout::Layout;
 
 use anyhow::{Context, Result, bail};
 use scv_protocol::{
@@ -30,12 +34,9 @@ fn parse_delegation_depth(value: Option<&str>) -> Option<u32> {
         .filter(|depth| *depth > 0)
 }
 
+/// The daemon socket of the instance selected by `SCV_HOME`.
 pub fn default_socket_path() -> Result<PathBuf> {
-    let root = std::env::var_os("SCV_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))
-        .context("cannot determine SCV_HOME")?;
-    Ok(root.join("server.sock"))
+    Ok(Layout::from_env()?.socket())
 }
 
 /// A bounded management exchange. Never retries mutations on ambiguous failure.

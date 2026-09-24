@@ -579,7 +579,7 @@ async fn an_untrusted_socket_host_is_never_dialed() {
 async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
     let mut fake = Fake::start().await;
     let directory = tempfile::tempdir().unwrap();
-    let store = state::Store::new(directory.path().join("channels/feishu"));
+    let store = state::Store::new(&scv_channels::Layout::new(directory.path()), crate::CHANNEL);
     store.save_account("default", &account()).unwrap();
     let last = now_ms() - 60_000;
     let mut saved = store.load_state("default").unwrap();

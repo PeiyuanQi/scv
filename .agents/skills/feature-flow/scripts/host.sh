@@ -2,10 +2,10 @@
 # Run a command with the user's real home, even from an SCV-delegated agent.
 #
 # SCV starts delegated agents with HOME, XDG_* and SCV_HOME pointing at a
-# private adapter home (<scv-home>/adapters/<agent>). Git identity and SSH
+# private agent home (<scv-home>/agents/<agent>). Git identity and SSH
 # keys, gh, rustup/cargo, the crates.io token, and the daemon socket all live
 # under the real home, so landing steps run through this wrapper. Outside an
-# SCV adapter it passes the command through unchanged.
+# SCV agent home it passes the command through unchanged.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
@@ -14,7 +14,7 @@ if [ "$#" -eq 0 ]; then
 fi
 
 case "${SCV_HOME:-}" in
-  */adapters/*) ;;
+  */agents/*) ;;
   *) exec "$@" ;;
 esac
 
@@ -24,9 +24,9 @@ if [ -z "$real_home" ] || [ ! -d "$real_home" ]; then
   exit 1
 fi
 
-# The daemon's own instance home is the parent of adapters/. The default
+# The daemon's own instance home is the parent of agents/. The default
 # instance runs without SCV_HOME, which also keeps its unit name scv.service.
-instance=${SCV_HOME%/adapters/*}
+instance=${SCV_HOME%/agents/*}
 unset SCV_HOME CODEX_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME
 if [ "$instance" != "$real_home/.scv" ]; then
   export SCV_HOME="$instance"

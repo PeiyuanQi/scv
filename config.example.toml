@@ -15,3 +15,10 @@ model = "llama3.1"
 base_url = "http://localhost:11434/v1"
 api_key = "local"
 timeout_seconds = 600
+
+# Chat accounts, one table each. `scv channels run|stop|logout` edit only
+# their own table and keep the rest of this file; you may edit them too.
+# [channels.wechat.default]
+# enabled = true
+# workspace = "/absolute/path/to/workspace"
+# remote_tools = "none" # "owner" gives the account's owner every tool

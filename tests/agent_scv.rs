@@ -124,7 +124,7 @@ struct Turn {
 }
 
 fn delegation_pid(home: &Path) -> Option<(u32, String)> {
-    let dir = home.join("run").join("delegations");
+    let dir = home.join("state").join("delegations");
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let record: Value = serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
         if record["agent"] == "scv" {
@@ -183,7 +183,7 @@ async fn delegate(approve_nested: bool) {
     );
     // What `scv agents import scv` would write: the nested SCV's own provider.
     write_private(
-        &home_path.join("adapters/scv/config.toml"),
+        &home_path.join("agents/scv/config.toml"),
         &format!(
             "[provider]\nactive = \"t\"\n\n[providers.t]\nkind = \"openai-compatible\"\nmodel = \"child-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n"
         ),

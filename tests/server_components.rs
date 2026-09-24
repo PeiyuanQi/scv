@@ -31,7 +31,7 @@ async fn status(home: &Path) -> DaemonStatus {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(status) =
-                scv_client::control(&home.join("server.sock"), DaemonCommand::Status).await
+                scv_client::control(&home.join("state/server.sock"), DaemonCommand::Status).await
             {
                 return status;
             }
@@ -65,7 +65,7 @@ fn hold_transaction(home: &Path, account: &str, duration: Duration) -> std::thre
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(home.join(format!("channels/wechat/transactions/{account}.json")))
+        .open(home.join(format!("state/channels/wechat/{account}.transaction")))
         .unwrap();
     // SAFETY: the descriptor stays valid until the thread drops `file`.
     assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
@@ -83,7 +83,9 @@ async fn session(
     BufReader<tokio::net::unix::OwnedReadHalf>,
     tokio::net::unix::OwnedWriteHalf,
 ) {
-    let stream = UnixStream::connect(home.join("server.sock")).await.unwrap();
+    let stream = UnixStream::connect(home.join("state/server.sock"))
+        .await
+        .unwrap();
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     for message in [
@@ -130,13 +132,13 @@ async fn session(
 async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessions() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let accounts = home.path().join("channels/wechat/accounts");
+    let accounts = home.path().join("credentials/wechat");
     std::fs::create_dir_all(&accounts).unwrap();
     let account = accounts.join("test.json");
     std::fs::write(&account, r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1","bot_id":"bot-test","user_id":"user-test"}"#).unwrap();
     std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut child = start(home.path(), workspace.path());
-    let socket = home.path().join("server.sock");
+    let socket = home.path().join("state/server.sock");
     let first = status(home.path()).await;
     let loaded = scv_client::control(&socket, DaemonCommand::Reload)
         .await
@@ -248,16 +250,19 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
 async fn invalid_credentials_report_sanitized_failure_without_disabling_daemon() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let accounts = home.path().join("channels/wechat/accounts");
+    let accounts = home.path().join("credentials/wechat");
     std::fs::create_dir_all(&accounts).unwrap();
     let account = accounts.join("bad.json");
     std::fs::write(&account, "private-malformed-token").unwrap();
     std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut child = start(home.path(), workspace.path());
     status(home.path()).await;
-    let loaded = scv_client::control(&home.path().join("server.sock"), DaemonCommand::Reload)
-        .await
-        .unwrap();
+    let loaded = scv_client::control(
+        &home.path().join("state/server.sock"),
+        DaemonCommand::Reload,
+    )
+    .await
+    .unwrap();
     assert_eq!(loaded.components[0].state, ComponentState::Failed);
     assert!(
         !serde_json::to_string(&loaded)
@@ -267,7 +272,15 @@ async fn invalid_credentials_report_sanitized_failure_without_disabling_daemon()
     terminate(&mut child).await;
 }
 
-/// Writes a private file, creating its private parent directories.
+/// Writes the instance's private `config.toml`.
+fn write_config(home: &Path, contents: &str) {
+    let path = home.join("config.toml");
+    std::fs::write(&path, contents).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// Writes a private file two levels below the instance home, creating its
+/// private parent directories.
 fn write_private(path: &Path, contents: &str) {
     let parent = path.parent().unwrap();
     std::fs::create_dir_all(parent).unwrap();
@@ -279,86 +292,83 @@ fn write_private(path: &Path, contents: &str) {
 }
 
 #[tokio::test]
-async fn daemon_moves_pre_channel_state_into_the_wechat_channel() {
+async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_read() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let legacy = home.path().join("clawbot");
     let account = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1","bot_id":"bot-test","user_id":"user-test"}"#;
-    let settings = r#"{"enabled":false,"workspace":null,"remote_tools":"owner"}"#;
-    let state = r#"{"credential_fingerprint":null,"cursor":"cursor-kept","seen":["m1"],"pending":null,"in_flight":null}"#;
-    write_private(&legacy.join("accounts/test.json"), account);
-    write_private(&legacy.join("settings/test.json"), settings);
-    write_private(&legacy.join("state/test.json"), state);
-    let mut child = start(home.path(), workspace.path());
-    status(home.path()).await;
-    let loaded = scv_client::control(&home.path().join("server.sock"), DaemonCommand::Reload)
-        .await
-        .unwrap();
-    assert_eq!(loaded.components.len(), 1);
-    let health = &loaded.components[0];
-    assert_eq!(
-        (health.id.as_str(), health.channel.as_str()),
-        ("wechat:test", "wechat")
-    );
-    assert_eq!(health.state, ComponentState::Disabled);
-    assert_eq!(health.remote_tools, RemoteTools::Owner);
-    assert!(!legacy.exists());
-    let moved = home.path().join("channels/wechat");
-    for (kind, contents) in [
-        ("accounts", account),
-        ("settings", settings),
-        ("state", state),
-    ] {
-        assert_eq!(
-            std::fs::read_to_string(moved.join(format!("{kind}/test.json"))).unwrap(),
-            contents,
-            "{kind}"
-        );
-    }
-    terminate(&mut child).await;
-}
-
-#[tokio::test]
-async fn daemon_reports_pre_channel_state_it_cannot_move_without_touching_it() {
-    let home = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    let account = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1"}"#;
-    write_private(&home.path().join("clawbot/accounts/old.json"), account);
+    // An account saved in the layout before 0.2.0 is ignored, not moved.
     write_private(
-        &home.path().join("channels/wechat/accounts/new.json"),
+        &home.path().join("channels/wechat/accounts/old.json"),
         account,
     );
+    write_private(&home.path().join("credentials/wechat/test.json"), account);
+    let config = home.path().join("config.toml");
+    let text = "# Chat accounts\n[channels.wechat.test] # hand-written\nenabled = false\nremote_tools = \"owner\"\n";
+    write_config(home.path(), text);
     let mut child = start(home.path(), workspace.path());
     status(home.path()).await;
-    assert!(
-        scv_client::control(&home.path().join("server.sock"), DaemonCommand::Reload)
-            .await
-            .is_err()
-    );
-    let status = status(home.path()).await;
-    assert_eq!(status.components.len(), 1);
-    assert_eq!(status.components[0].state, ComponentState::Failed);
-    let message = status.components[0].error.as_deref().unwrap();
-    assert!(message.contains("scv channels status"), "{message}");
-    assert!(
-        !serde_json::to_string(&status)
-            .unwrap()
-            .contains("test-secret")
-    );
-    assert!(home.path().join("clawbot/accounts/old.json").exists());
+    let socket = home.path().join("state/server.sock");
+    let loaded = scv_client::control(&socket, DaemonCommand::Reload)
+        .await
+        .unwrap();
+    let ids: Vec<_> = loaded.components.iter().map(|h| h.id.as_str()).collect();
+    assert_eq!(ids, ["wechat:test"]);
+    assert_eq!(loaded.components[0].state, ComponentState::Disabled);
+    assert_eq!(loaded.components[0].remote_tools, RemoteTools::Owner);
     assert!(
         home.path()
-            .join("channels/wechat/accounts/new.json")
+            .join("channels/wechat/accounts/old.json")
             .exists()
     );
+
+    // SCV's own change keeps the person's comments.
+    scv_client::control(
+        &socket,
+        DaemonCommand::ChannelSet {
+            channel: "wechat".into(),
+            account: "test".into(),
+            enabled: false,
+            workspace: Some(workspace.path().display().to_string()),
+            remote_tools: Some(RemoteTools::None),
+        },
+    )
+    .await
+    .unwrap();
+    let edited = std::fs::read_to_string(&config).unwrap();
+    assert!(edited.starts_with("# Chat accounts\n[channels.wechat.test] # hand-written\n"));
+    assert!(edited.contains("remote_tools = \"none\""), "{edited}");
+    assert!(edited.contains("workspace = "), "{edited}");
+
+    // A person's own edit takes effect at the next reconciliation.
+    std::fs::write(
+        &config,
+        edited.replace("remote_tools = \"none\"", "remote_tools = \"owner\""),
+    )
+    .unwrap();
+    let reloaded = scv_client::control(&socket, DaemonCommand::Reload)
+        .await
+        .unwrap();
+    assert_eq!(reloaded.components[0].remote_tools, RemoteTools::Owner);
+
     let output = Command::new(env!("CARGO_BIN_EXE_scv"))
         .isolated(home.path())
-        .args(["channels", "status"])
+        .args(["config", "show"])
+        .current_dir(workspace.path())
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("both"), "{stderr}");
+    assert!(output.status.success());
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(shown.contains("wechat:test"), "{shown}");
+    assert!(
+        shown.contains("credentials/wechat/test.json 0600"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("channels") && shown.contains("left by an older SCV layout"),
+        "{shown}"
+    );
+    assert!(!shown.contains("test-secret"), "{shown}");
     terminate(&mut child).await;
 }
 
@@ -367,28 +377,23 @@ async fn feishu_accounts_run_beside_wechat_and_outlive_its_discovery_failure() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let account = r#"{"app_id":"cli_a1b2c3d4","app_secret":"test-secret-never-in-status","brand":"feishu","owner_open_id":"ou_owner"}"#;
-    let settings = r#"{"enabled":false,"workspace":null,"remote_tools":"owner"}"#;
+    let settings = "[channels.feishu.default]\nenabled = false\nremote_tools = \"owner\"\n";
     write_private(
-        &home.path().join("channels/feishu/accounts/default.json"),
+        &home.path().join("credentials/feishu/default.json"),
         account,
     );
-    write_private(
-        &home.path().join("channels/feishu/settings/default.json"),
-        settings,
-    );
-    // WeChat state that cannot move fails WeChat discovery alone.
-    let wechat = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1"}"#;
-    write_private(&home.path().join("clawbot/accounts/old.json"), wechat);
-    write_private(
-        &home.path().join("channels/wechat/accounts/new.json"),
-        wechat,
-    );
+    write_config(home.path(), settings);
+    // Unreadable WeChat credentials fail WeChat discovery alone.
+    write_private(&home.path().join("credentials/wechat"), "not a directory");
     let mut child = start(home.path(), workspace.path());
     status(home.path()).await;
     assert!(
-        scv_client::control(&home.path().join("server.sock"), DaemonCommand::Reload)
-            .await
-            .is_err()
+        scv_client::control(
+            &home.path().join("state/server.sock"),
+            DaemonCommand::Reload
+        )
+        .await
+        .is_err()
     );
     let status = status(home.path()).await;
     let ids: Vec<_> = status.components.iter().map(|h| h.id.as_str()).collect();
@@ -453,5 +458,5 @@ async fn channel_login_options_stay_with_their_platform_and_ids_are_checked_firs
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(!format!("{stdout}{stderr}").contains("test-secret"));
     }
-    assert!(!home.path().join("channels/feishu/accounts").exists());
+    assert!(!home.path().join("credentials/feishu").exists());
 }

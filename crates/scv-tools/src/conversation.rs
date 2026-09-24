@@ -118,7 +118,7 @@ pub fn is_handle(value: &str) -> bool {
 }
 
 impl ConversationStore {
-    /// `marker_dir` is `$SCV_HOME/run/conversations`; `None` keeps no markers.
+    /// `marker_dir` is `$SCV_HOME/state/conversations`; `None` keeps no markers.
     pub fn new(limits: ConversationLimits, marker_dir: Option<PathBuf>) -> Self {
         Self {
             limits,
@@ -754,8 +754,8 @@ mod tests {
     #[test]
     fn markers_follow_the_conversation_and_gc_keeps_live_transcripts() {
         let home = tempfile::tempdir().unwrap();
-        let markers = home.path().join("run/conversations");
-        let adapter = home.path().join("adapters/codex");
+        let markers = home.path().join("state/conversations");
+        let adapter = home.path().join("agents/codex");
         let day = adapter.join("sessions/2026/01/02");
         std::fs::create_dir_all(&day).unwrap();
         let old = SystemTime::now() - Duration::from_secs(10 * 86400);

@@ -2,8 +2,8 @@
 
 Status: final design for v0.1
 
-The current workspace release is `0.1.35`. All crates share that version, and
-dependencies between workspace packages use exact `=0.1.35` pins.
+The current workspace release is `0.2.0`. All crates share that version, and
+dependencies between workspace packages use exact `=0.2.0` pins.
 
 SCV v0.1 supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,11 +51,50 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
-Account settings saved with `remote_tools` by `0.1.16` or newer fail closed
-under older releases, which reject unknown settings keys; remove the key
-before downgrading. `0.1.35` replaces `scv clawbot` with `scv channels` and
-moves WeChat state from `$SCV_HOME/clawbot` to `$SCV_HOME/channels/wechat`
-on first use; before downgrading below `0.1.35`, move it back.
+
+## Upgrading to 0.2.0
+
+`0.2.0` changes where an instance keeps its files, as described in
+[instance layout](configuration.md#instance-layout), and reads only the new
+layout: it moves nothing itself. A daemon started on an old home finds no
+channel accounts or agent sign-ins, logs a warning for each old path, and
+`scv config show` lists them under "Not used by SCV". Move them once, with the
+daemon stopped, for each instance home (`~/.scv` and any `--scv-home`):
+
+```bash
+scv stop                                   # or: systemctl --user stop scv.service
+cp -a ~/.scv ~/.scv.bak-0.1                # keep a copy until 0.2.0 works
+cd ~/.scv
+mv adapters agents                         # delegated agents' homes
+mkdir -m 700 -p credentials state/channels
+for channel in wechat feishu; do
+  [ -d channels/$channel/accounts ] && mv channels/$channel/accounts credentials/$channel
+  [ -d channels/$channel/state ] && mv channels/$channel/state state/channels/$channel
+done
+[ -d run/delegations ] && mv run/delegations state/
+[ -d run/conversations ] && mv run/conversations state/
+rm -f server.sock server.lock              # recreated under state/
+```
+
+Then write each `channels/<channel>/settings/<account>.json` as a table in
+`config.toml` and remove the old `channels/` and `run/` directories. For
+example `{"enabled":true,"workspace":"/srv/work","remote_tools":"owner"}` for
+`wechat/default` becomes:
+
+```toml
+[channels.wechat.default]
+enabled = true
+workspace = "/srv/work"
+remote_tools = "owner"
+```
+
+The nested SCV's home moves with `agents/` (`agents/scv`); inside it, rename
+its own `adapters` to `agents` too. Old lock files (`channels/*/locks`,
+`channels/*/transactions`) are not needed. State from before `0.1.35` lives in
+`clawbot/` rather than `channels/wechat/`, with the same subdirectories.
+Start the daemon with `scv start --workspace ...` and check `scv config show`
+and `scv channels status`. To go back, stop the daemon, restore the copy, and
+install the earlier release.
 
 ## Publication and checks
 

@@ -18,8 +18,8 @@ stage 0.
 
 ## 0. Know where you run
 
-- **Delegated by SCV:** `$SCV_HOME` ends in `/adapters/<agent>`. `HOME` and XDG
-  then point at SCV's private adapter home, which has no git identity, SSH
+- **Delegated by SCV:** `$SCV_HOME` ends in `/agents/<agent>`. `HOME` and XDG
+  then point at SCV's private agent home, which has no git identity, SSH
   keys, `gh` login, rustup toolchain, crates.io token, or daemon socket. Run
   your own `git`, `gh`, `cargo`, `scv`, and `systemctl` commands as
   `scripts/host.sh <command...>`, which restores the real home. Outside SCV it
@@ -31,8 +31,10 @@ stage 0.
   minutes); pass a larger `timeout_seconds`, up to `tools.max_timeout_seconds`
   (14400), when CI reruns are likely. The agent needs `permissions = "full"`
   in its `[agents.<name>]` user config to run commands and edit files unprompted.
-- **Secrets:** never print `~/.scv/config.toml`, `~/.scv/channels/*/accounts/`,
-  `~/.scv/adapters/*/auth.json`, or `~/.cargo/credentials.toml`.
+- **Secrets:** never print `~/.scv/config.toml`, `~/.scv/credentials/`,
+  the sign-in files under `~/.scv/agents/` (such as `codex/auth.json`), or
+  `~/.cargo/credentials.toml`. `scv config show` reports all of them with
+  secrets hidden.
 
 ## 1. Develop in a sibling worktree
 
