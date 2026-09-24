@@ -182,6 +182,14 @@ own tools and approval policy, like any turn; its prompt quotes the job's
 bounded reply, which is untrusted delegated-agent output. Over WeChat or Feishu
 the report goes only to the owner's direct chat, as an unprompted message.
 
+SCV never routes a refused request to another agent by itself. A run whose
+model refused (`declined`) gets no fallback suggestion, and its note and the
+system prompt tell the main agent to report the refusal to the user instead of
+retrying elsewhere; the user may still name another agent, whose own policies
+then apply. Fallback suggestions for real availability failures are decided
+from the result's status and structured `error` only, so text in an agent's
+reply cannot trigger one.
+
 ## Web access
 
 `web_fetch` sends a GET request to a URL the model chooses, so the URL can

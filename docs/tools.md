@@ -169,12 +169,22 @@ use_for = "current events, and anything that needs posts on X"
 `use_for` (one line, at most 500 bytes) is appended to that tool's
 description; `prefer` names only agents the session offers, and an unknown
 name fails configuration validation. When a call fails in a way another agent
-could avoid (the executable is missing or exits, it reads as signed out, or
-its provider refuses with an HTTP 401, 403, 404, 429, or 5xx, a quota, or an
+could avoid (the executable is missing or exits, it is signed out, or its
+provider returned an HTTP 401, 403, 404, 429, or 5xx, a quota error, or an
 unknown model), the result gains a `fallback` field naming the other agents
-this session offers, such as `"This agent could not do the work. Other agents
-are available: agent_claude, agent_codex."`; an error message gets the same
-sentence. Other failures, such as failing tests, are returned unchanged.
+this session offers, such as `"This agent could not run: it is missing, signed
+out, or its provider returned an error. Other agents are available:
+agent_claude, agent_codex."`; SCV's own error message (such as a missing
+executable) gets the same sentence. The decision reads only the result's
+`status` (`failed`) and its structured `error`, never the agent's reply, so
+nothing the agent writes can trigger it. Other failures, such as failing
+tests, are returned unchanged.
+
+A `declined` result, where the agent's model refused the request, never gets a
+`fallback`. Its `note` tells the calling model to tell the user what the agent
+said rather than pass the request to another agent on its own; if the user then
+asks for a specific agent, the main agent uses it, and that agent's own
+policies apply.
 
 They share this schema:
 
@@ -273,11 +283,18 @@ is one object:
 ```
 
 `status` is `completed`, `failed` (non-zero exit or a reported error),
-`timeout`, or `cancelled` (stopped by `scv agents kill`). `reply` is bounded by
+`declined` (the model stopped with a `refusal` stop reason: Claude Code's
+`stop_reason` in stream-json, or ACP's `stopReason`), `timeout`, or `cancelled`
+(stopped by `scv agents kill`). `reply` is bounded by
 `tools.output_limit_bytes` on a character boundary, `stderr_tail` holds the
-last 2 KiB of stderr, and `truncated` says whether anything was cut. A failure
-that reads like a missing sign-in gains a `hint` (see below). A turn of a
-conversation (next section) also carries `"session"` and `"turn"`.
+last 2 KiB of stderr, and `truncated` says whether anything was cut. A failed
+run also carries `error`, what went wrong as the CLI or SCV reported it and
+never the model's reply: Claude Code's result of a failed run, Codex's
+`turn.failed` or `error` message, pi's `errorMessage`, a failed plain-text
+run's closing output, and the stderr tail. A failure whose `error` reads like
+a missing sign-in gains a `hint` (see below), and a `declined` result carries
+a `note` for the calling model. A turn of a conversation (next section) also
+carries `"session"` and `"turn"`.
 
 ### Progress
 
@@ -424,7 +441,10 @@ started and the job handle. It relays each `[SCV background report]`, uses
 `agent_status` and `agent_cancel` when the user asks, and keeps `agent_wait`,
 foreground agent calls, and long `bash` commands for quick results it needs
 within the turn, since those hold the turn open and the user cannot reach it
-meanwhile. The wording explains why rather than issuing capitalised rules.
+meanwhile. If an agent declines a request, it tells the user what the agent
+said rather than passing the request to another agent on its own, and uses a
+specific agent if the user then asks for one. The wording explains why rather
+than issuing capitalised rules.
 Without background jobs the section only asks for self-contained briefs.
 A session started for a chat channel also gets a *Chat channel* section (see
 [protocol](protocol.md#sessionstart)).
@@ -612,11 +632,11 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   them, keeping live web search as in resume mode without rewriting the
   private `config.toml`.
 - The result has the CLI adapters' shape. `stopReason` `end_turn` completes
-  the call; `cancelled` ends it as cancelled; `refusal` fails it; any other
-  reason completes it with an `(stopped early: …)` note. A JSON-RPC error
-  fails it with the agent's redacted message and, when that reads like a
-  sign-in problem (including `session/new`'s "Authentication required"), the
-  `scv agents login <name>` hint.
+  the call; `cancelled` ends it as cancelled; `refusal` ends it as `declined`;
+  any other reason completes it with an `(stopped early: …)` note. A JSON-RPC
+  error fails it with the agent's redacted message as its `error` and, when
+  that reads like a sign-in problem (including `session/new`'s "Authentication
+  required"), the `scv agents login <name>` hint.
 - A cancelled or timed-out call sends `session/cancel`; an agent that answers
   within 2 seconds keeps the conversation (a timed-out turn is resumable),
   otherwise it is shut down and the conversation forgotten. An agent that

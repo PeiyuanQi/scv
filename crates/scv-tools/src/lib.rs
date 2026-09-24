@@ -1235,7 +1235,21 @@ impl Tool for NativeAgentTool {
             .as_deref()
             .and_then(|path| take_file(path, self.output_limit));
         let run = run?;
-        let result = run.stream.finish(run.exit, fallback);
+        let mut result = run.stream.finish(run.exit, fallback);
+        // A failed CLI's stderr is its own diagnostics, never the reply.
+        let stderr = run.stderr_tail.trim();
+        if result.status == agent_output::RunStatus::Failed
+            && !stderr.is_empty()
+            && !result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(stderr))
+        {
+            result.error = Some(match result.error.take() {
+                Some(error) => format!("{error}\n{stderr}"),
+                None => stderr.to_owned(),
+            });
+        }
         let conversation = turn.and_then(|turn| {
             let number = turn.turn;
             turn.finish(
@@ -1265,11 +1279,18 @@ impl Tool for NativeAgentTool {
     }
 }
 
-/// Point a failed agent run that reads like a missing sign-in at the host
-/// command that fixes it, since the agent's own advice (`/login`) cannot be
-/// followed from a remote chat.
+/// Point a failed agent run whose reported error reads like a missing
+/// sign-in at the host command that fixes it, since the agent's own advice
+/// (`/login`) cannot be followed from a remote chat. Only the structured
+/// `error` counts, never the agent's reply.
 pub(crate) fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
-    let lower = output.content.to_ascii_lowercase();
+    let Ok(Value::Object(mut content)) = serde_json::from_str::<Value>(&output.content) else {
+        return;
+    };
+    let Some(error) = content.get("error").and_then(Value::as_str) else {
+        return;
+    };
+    let lower = error.to_ascii_lowercase();
     let unauthenticated = [
         "not logged in",
         "not signed in",
@@ -1287,17 +1308,15 @@ pub(crate) fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
     if !unauthenticated {
         return;
     }
-    if let Ok(Value::Object(mut content)) = serde_json::from_str::<Value>(&output.content) {
-        content.insert(
-            "hint".into(),
-            format!(
-                "The {agent} CLI appears to be signed out of SCV's private agent home. \
-                 The host owner can sign it in with: scv agents login {agent}"
-            )
-            .into(),
-        );
-        output.content = Value::Object(content).to_string();
-    }
+    content.insert(
+        "hint".into(),
+        format!(
+            "The {agent} CLI appears to be signed out of SCV's private agent home. \
+             The host owner can sign it in with: scv agents login {agent}"
+        )
+        .into(),
+    );
+    output.content = Value::Object(content).to_string();
 }
 
 /// Give a native agent command its adapter environment: remove every
@@ -3006,6 +3025,93 @@ exit 1
                 .unwrap()
                 .contains("scv agents login claude")
         );
+    }
+
+    #[tokio::test]
+    async fn cli_refusals_are_declined_and_only_availability_failures_offer_other_agents() {
+        let workspace = tempfile::tempdir().unwrap();
+        let chosen = |tool: NativeAgentTool| agent_choice::ChosenAgent {
+            inner: Arc::new(tool),
+            use_for: None,
+            alternatives: vec!["agent_codex".into(), "agent_grok".into()],
+        };
+        // Claude Code relays the API's `refusal` stop reason; the reply
+        // mentions authentication and a 403, and the run exits 0.
+        let refusing = chosen(structured_agent(
+            workspace.path(),
+            "agent_claude",
+            OutputFormat::ClaudeStreamJson,
+            r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I cannot help bypass authentication or the 403."}],"stop_reason":"refusal"}}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot help bypass authentication or the 403."}'
+"#,
+            None,
+            None,
+            Duration::from_secs(10),
+        ));
+        let output = refusing
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(value["status"], "declined");
+        assert_eq!(value["note"], agent_output::DECLINED_NOTE);
+        for absent in ["fallback", "hint", "error"] {
+            assert!(value.get(absent).is_none(), "{absent} in {value}");
+        }
+        // A signed-out CLI, reported on stderr: the other agents are named.
+        let signed_out = chosen(fake_agent(
+            workspace.path(),
+            "agent_dsh",
+            "echo 'dsh: MISSING_CREDENTIAL: no API key' >&2\nexit 1\n",
+            &[],
+            Vec::new(),
+        ));
+        let output = signed_out
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(value["status"], "failed");
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap()
+                .contains("MISSING_CREDENTIAL")
+        );
+        assert!(
+            value["fallback"]
+                .as_str()
+                .unwrap()
+                .ends_with("agent_codex, agent_grok."),
+            "{value}"
+        );
+        // A rate-limited one too.
+        let limited = chosen(structured_agent(
+            workspace.path(),
+            "agent_claude",
+            OutputFormat::ClaudeStreamJson,
+            r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate limit exceeded"}'
+exit 1
+"#,
+            None,
+            None,
+            Duration::from_secs(10),
+        ));
+        let output = limited
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&output.content).unwrap();
+        assert!(value["fallback"].is_string(), "{value}");
+        // A missing executable fails before running, in SCV's own words.
+        let mut missing = fake_agent(workspace.path(), "agent_pi", "exit 0\n", &[], Vec::new());
+        missing.resolved = None;
+        let error = chosen(missing)
+            .execute(json!({"prompt":"hi"}), context(workspace.path()))
+            .await
+            .unwrap_err();
+        assert!(error.0.ends_with("agent_codex, agent_grok."), "{error}");
     }
 
     #[cfg(target_os = "linux")]
