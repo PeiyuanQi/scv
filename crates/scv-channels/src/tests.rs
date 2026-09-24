@@ -1,5 +1,9 @@
+//! Unit tests for `src/lib.rs`.
+
 use super::*;
 use std::path::Path;
+
+mod bridge;
 
 /// Credentials that bind nothing, for state-level tests.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
