@@ -1276,6 +1276,12 @@ impl std::io::Write for Logs {
 async fn a_refused_reply_rides_ahead_of_the_senders_next_reply_and_never_reaches_logs() {
     let logs = Logs::default();
     let writer = logs.clone();
+    // With a single registered dispatcher, tracing sets a callsite's interest
+    // from the default of whichever thread reaches it first, so a log line
+    // that another test's thread reaches first would never reach this
+    // subscriber. While a second dispatcher is registered, every event asks
+    // the current thread's subscriber instead.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let _logging = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
