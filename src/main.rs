@@ -1260,9 +1260,15 @@ async fn show_status(channel: Option<&str>, account: Option<&str>) -> Result<()>
         .filter(|h| channel.is_none_or(|name| h.channel == name))
         .filter(|h| account.is_none_or(|name| h.account == name))
         .collect();
+    let enabled = matching.iter().filter(|health| health.enabled).count();
+    let connected = matching
+        .iter()
+        .filter(|health| health.enabled && health.state == scv_protocol::ComponentState::Connected)
+        .count();
+    println!("Channels: {connected} of {enabled} enabled accounts connected");
     for health in &matching {
         // JSON escaping makes account identity and other untrusted strings terminal-safe.
-        println!("{}", serde_json::to_string(health)?);
+        println!("{}", serde_json::to_string_pretty(health)?);
     }
     if matching.is_empty() {
         println!("No matching supervised components.");
