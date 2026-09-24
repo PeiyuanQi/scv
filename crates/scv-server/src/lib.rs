@@ -1820,7 +1820,7 @@ fn delegation_guidance(config: &Config, context: &PromptContext<'_>) -> String {
     if !preferred.is_empty() {
         text.push_str(&format!(
             " The user prefers {}, in that order; choose another when the work needs \
-             something only it offers, or when a preferred one fails.",
+             something only it offers, or when a preferred one is unavailable.",
             preferred.join(", ")
         ));
     }
@@ -1849,6 +1849,12 @@ fn delegation_guidance(config: &Config, context: &PromptContext<'_>) -> String {
              constraints, and what to report back.\n",
         );
     }
+    // A refusal is the agent's own judgement, so it goes back to the user;
+    // the user may still choose another agent, whose policies then apply.
+    text.push_str(
+        "\nIf an agent declines a request, tell the user what it said; don't pass the request \
+         to another agent on your own. If the user then asks for a specific agent, use it.\n",
+    );
     text
 }
 
@@ -2806,6 +2812,19 @@ mod tests {
         assert!(prompt.contains("agent_cancel"), "{prompt}");
         assert!(prompt.contains("[SCV background report]"), "{prompt}");
         assert!(!prompt.contains("# Chat channel"), "{prompt}");
+        // A declined request goes back to the user, who may pick an agent.
+        assert!(
+            prompt.contains(
+                "If an agent declines a request, tell the user what it said; don't pass the \
+                 request to another agent on your own. If the user then asks for a specific \
+                 agent, use it."
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("a preferred one is unavailable"),
+            "{prompt}"
+        );
         // Calm guidance: no shouted rules.
         for loud in ["CRITICAL", "MUST", "IMPORTANT", "NEVER"] {
             assert!(!prompt.contains(loud), "{loud} in {prompt}");
@@ -2820,6 +2839,7 @@ mod tests {
             },
         );
         assert!(foreground.contains("Hand substantial work to an agent"));
+        assert!(foreground.contains("If an agent declines a request"));
         assert!(!foreground.contains("background set to true"));
         assert!(!foreground.contains("prefers"));
 

@@ -771,14 +771,15 @@ fn result(
     conversation: Option<(&str, u32)>,
     limit: usize,
 ) -> ToolOutput {
-    let reply = match error {
-        Some(error) if reply.is_empty() => error,
+    let reply = match &error {
+        Some(error) if reply.is_empty() => error.clone(),
         Some(error) => format!("{reply}\n{error}"),
         None => reply,
     };
     let result = AgentResult {
         status,
         reply,
+        error,
         usage,
         truncated: cut,
         session: None,

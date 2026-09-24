@@ -741,14 +741,15 @@ impl AcpAgentTool {
         error: Option<String>,
         conversation: Option<(&str, u32)>,
     ) -> ToolOutput {
-        let reply = match error {
-            Some(error) if reply.is_empty() => error,
+        let reply = match &error {
+            Some(error) if reply.is_empty() => error.clone(),
             Some(error) => format!("{reply}\n{error}"),
             None => reply,
         };
         let result = AgentResult {
             status,
             reply,
+            error,
             usage,
             truncated: cut,
             session: None,
@@ -1165,12 +1166,7 @@ impl Tool for AcpAgentTool {
                     drop(turn.finish(Some(child.session_id.clone()), false));
                     return Err(ToolError(format!("{} turn cancelled", self.name)));
                 }
-                "refusal" => (
-                    RunStatus::Failed,
-                    reply,
-                    usage,
-                    Some("the agent refused the request".to_owned()),
-                ),
+                "refusal" => (RunStatus::Declined, reply, usage, None),
                 other => (
                     RunStatus::Completed,
                     reply,
@@ -1358,6 +1354,7 @@ for line in sys.stdin:
             send({"id": rid, "error": {"code": -32603, "message": "Internal error",
                   "data": {"message": "Unauthorized (401): Bearer sk-live-abcdef123456 expired"}}})
         elif text == "refuse":
+            chunk(session, "I can't help get past authentication or a 403 on that site.")
             send({"id": rid, "result": {"stopReason": "refusal"}})
         elif text == "env":
             chunk(session, "CODEX_CONFIG=" + os.environ.get("CODEX_CONFIG", "unset"))
@@ -1756,11 +1753,32 @@ for line in sys.stdin:
             "{value}"
         );
 
+        // A refusal is declined, whatever its reply mentions: no error, no
+        // sign-in hint, and the note says to tell the user.
         let refused = tool
             .execute(json!({"prompt":"refuse"}), context(dir.path(), None))
             .await
             .unwrap();
-        assert_eq!(json(&refused)["status"], "failed");
+        assert!(refused.is_error);
+        let value = json(&refused);
+        assert_eq!(value["status"], "declined");
+        assert!(value["reply"].as_str().unwrap().contains("403"), "{value}");
+        assert_eq!(value["note"], crate::agent_output::DECLINED_NOTE);
+        assert!(value.get("error").is_none(), "{value}");
+        assert!(value.get("hint").is_none(), "{value}");
+        // Chosen among several agents, it still names no fallback.
+        let chosen = crate::agent_choice::ChosenAgent {
+            inner: Arc::new(tool),
+            use_for: None,
+            alternatives: vec!["agent_codex".into(), "agent_grok".into()],
+        };
+        let refused = chosen
+            .execute(json!({"prompt":"refuse"}), context(dir.path(), None))
+            .await
+            .unwrap();
+        let value = json(&refused);
+        assert_eq!(value["status"], "declined");
+        assert!(value.get("fallback").is_none(), "{value}");
 
         let auth_dir = tempfile::tempdir().unwrap();
         let script = fake_agent(auth_dir.path(), "auth");
@@ -1778,6 +1796,24 @@ for line in sys.stdin:
                 .contains("Authentication required")
         );
         assert!(value["hint"].is_string(), "{value}");
+        // A signed-out agent is a real availability failure: the others are named.
+        let chosen = crate::agent_choice::ChosenAgent {
+            inner: Arc::new(tool),
+            use_for: None,
+            alternatives: vec!["agent_codex".into()],
+        };
+        let output = chosen
+            .execute(json!({"prompt":"hello"}), context(auth_dir.path(), None))
+            .await
+            .unwrap();
+        assert!(
+            json(&output)["fallback"]
+                .as_str()
+                .unwrap()
+                .ends_with("available: agent_codex."),
+            "{}",
+            output.content
+        );
         wait_gone(pid(auth_dir.path())).await;
 
         let old_dir = tempfile::tempdir().unwrap();

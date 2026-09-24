@@ -17,6 +17,12 @@ const MAX_EVENT_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FALLBACK_BYTES: usize = 16 * 1024;
 /// Bytes of stderr kept, from the end.
 pub(crate) const STDERR_TAIL_BYTES: usize = 2048;
+/// Bytes of a failed plain-text run's stdout kept as its `error`.
+const TEXT_ERROR_BYTES: usize = 500;
+/// What a declined run's result tells the calling model.
+pub(crate) const DECLINED_NOTE: &str = "The agent declined this request. Tell the user what it \
+     said; don't pass the request to another agent on your own. If the user then asks for a \
+     specific agent, use it.";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentUsage {
@@ -29,6 +35,8 @@ pub(crate) struct AgentUsage {
 pub(crate) enum RunStatus {
     Completed,
     Failed,
+    /// The agent's model refused the request (a `refusal` stop reason).
+    Declined,
     Timeout,
     Cancelled,
 }
@@ -38,6 +46,7 @@ impl RunStatus {
         match self {
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Declined => "declined",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
         }
@@ -59,6 +68,8 @@ pub(crate) struct AgentStream {
     error: Option<String>,
     failed: bool,
     completed: bool,
+    /// The model stopped with a `refusal` stop reason.
+    refused: bool,
     usage: Option<AgentUsage>,
     /// The CLI's own session ID, for continuing the conversation.
     session: Option<String>,
@@ -84,6 +95,7 @@ impl AgentStream {
             error: None,
             failed: false,
             completed: false,
+            refused: false,
             usage: None,
             session: None,
             progress: ProgressSink::default(),
@@ -182,9 +194,14 @@ impl AgentStream {
                     if event.get("is_error").and_then(Value::as_bool) == Some(true) || error_subtype
                     {
                         self.failed = true;
+                        // Claude Code puts its own error (sign-in, API
+                        // status) in the result of a failed run.
+                        self.error = self.reply.clone();
                     } else {
                         self.completed = true;
                     }
+                    self.refused |=
+                        event.get("stop_reason").and_then(Value::as_str) == Some("refusal");
                     self.usage = usage(event.get("usage"), "input_tokens", "output_tokens");
                 }
                 "assistant" => {
@@ -192,6 +209,11 @@ impl AgentStream {
                     if !text.is_empty() && !self.completed {
                         self.reply = Some(text);
                     }
+                    // The API message's own stop reason.
+                    self.refused |= event
+                        .pointer("/message/stop_reason")
+                        .and_then(Value::as_str)
+                        == Some("refusal");
                 }
                 _ => {}
             },
@@ -263,6 +285,7 @@ impl AgentStream {
         let status = match exit {
             RunExit::TimedOut => RunStatus::Timeout,
             RunExit::Killed => RunStatus::Cancelled,
+            RunExit::Exited { .. } if self.refused => RunStatus::Declined,
             RunExit::Exited { success } => {
                 if !success || self.failed || (incomplete && self.error.is_some()) {
                     RunStatus::Failed
@@ -270,6 +293,14 @@ impl AgentStream {
                     RunStatus::Completed
                 }
             }
+        };
+        // What went wrong, kept apart from the reply: the CLI's reported
+        // error, or for a failed plain-text run its closing output, which
+        // is the CLI's own error message rather than a model reply.
+        let error = match status {
+            RunStatus::Failed if structured => self.error.clone(),
+            RunStatus::Failed if !text.is_empty() => Some(tail(&text, TEXT_ERROR_BYTES)),
+            _ => None,
         };
         if status != RunStatus::Completed
             && let Some(error) = &self.error
@@ -284,11 +315,21 @@ impl AgentStream {
         AgentResult {
             status,
             reply,
+            error,
             usage: self.usage,
             truncated: self.text_truncated && !structured,
             session: self.session,
         }
     }
+}
+
+/// The last `limit` bytes of `text`, on a character boundary.
+fn tail(text: &str, limit: usize) -> String {
+    let mut start = text.len().saturating_sub(limit);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_owned()
 }
 
 /// How the process ended, as far as the parser needs to know.
@@ -306,6 +347,10 @@ pub(crate) enum RunExit {
 pub(crate) struct AgentResult {
     pub status: RunStatus,
     pub reply: String,
+    /// Why the run failed, as the CLI, the agent's protocol, or SCV reported
+    /// it; never taken from the model's reply. Fallback advice and sign-in
+    /// hints are decided from this and the status alone.
+    pub error: Option<String>,
     pub usage: Option<AgentUsage>,
     pub truncated: bool,
     /// The session ID the CLI reported, if any.
@@ -336,6 +381,12 @@ impl AgentResult {
             "stderr_tail": stderr_tail,
             "truncated": truncated,
         });
+        if let Some(error) = &self.error {
+            value["error"] = truncate_utf8(error, limit).0.into();
+        }
+        if self.status == RunStatus::Declined {
+            value["note"] = DECLINED_NOTE.into();
+        }
         if let Some((handle, turn)) = conversation {
             value["session"] = handle.into();
             value["turn"] = turn.into();
@@ -624,6 +675,7 @@ mod tests {
         let result = AgentResult {
             status: RunStatus::Completed,
             reply: "ééé".into(),
+            error: None,
             usage: None,
             truncated: false,
             session: None,
@@ -634,6 +686,64 @@ mod tests {
         assert_eq!(value["reply"], "é");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["usage"], Value::Null);
+    }
+
+    #[test]
+    fn a_claude_refusal_is_declined_whatever_its_reply_says() {
+        let stdout = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I can't help bypass authentication or a 403."}],"stop_reason":"refusal"}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"I can't help bypass authentication or a 403."}"#,
+            "\n"
+        );
+        let result = run(OutputFormat::ClaudeStreamJson, stdout, OK);
+        assert_eq!(result.status, RunStatus::Declined);
+        assert_eq!(result.error, None);
+        let (json, _) = result.to_json("claude", None, Some(0), "", 4096);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["status"], "declined");
+        assert_eq!(value["note"], DECLINED_NOTE);
+        assert!(value.get("error").is_none(), "{value}");
+        // The same text from a run that ended normally is just a reply.
+        let plain = run(
+            OutputFormat::ClaudeStreamJson,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 403 in authentication."}"#,
+            OK,
+        );
+        assert_eq!(plain.status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn failures_carry_the_reported_error_apart_from_the_reply() {
+        // Claude Code's own error in a failed result.
+        let claude = run(
+            OutputFormat::ClaudeStreamJson,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate limited"}"#,
+            RunExit::Exited { success: false },
+        );
+        assert_eq!(claude.error.as_deref(), Some("API Error: 429 rate limited"));
+        // Codex: the reply stays the agent's message, the error is its own.
+        let codex = run(
+            OutputFormat::CodexJsonl,
+            concat!(
+                r#"{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"see the authentication docs"}}"#,
+                "\n",
+                r#"{"type":"turn.failed","error":{"message":"stream disconnected"}}"#,
+                "\n"
+            ),
+            RunExit::Exited { success: false },
+        );
+        assert_eq!(codex.error.as_deref(), Some("stream disconnected"));
+        // A failed plain-text CLI's closing output is its error message.
+        let text = run(
+            OutputFormat::Text,
+            "Error: model not found\n",
+            RunExit::Exited { success: false },
+        );
+        assert_eq!(text.error.as_deref(), Some("Error: model not found"));
+        // Successful runs carry none, whatever their reply mentions.
+        let ok = run(OutputFormat::Text, "fixed the 403\n", OK);
+        assert_eq!(ok.error, None);
     }
 
     #[test]

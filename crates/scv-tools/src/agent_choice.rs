@@ -1,8 +1,14 @@
 //! What lets the model choose between delegated agents: each `agent_*` tool
 //! names its product and what that harness offers, carries the user's own
-//! `use_for` note, and, when a call fails because the agent is unavailable,
-//! signed out, or its provider refused, names the other agents to fall back
-//! on.
+//! `use_for` note, and, when a call fails because the agent is missing,
+//! signed out, or its provider returned an error, names the other agents to
+//! fall back on.
+//!
+//! That fallback is decided from the structured failure alone (the result's
+//! `status` and `error`, or SCV's own error message), never from the agent's
+//! reply. A `declined` result, where the agent's model refused the request,
+//! never gets one: the calling model tells the user instead, and only the
+//! user may then name another agent.
 
 use std::sync::Arc;
 
@@ -12,8 +18,9 @@ use serde_json::Value;
 
 use crate::adapters;
 
-/// Lowercase fragments of a failure that another agent could avoid: the
-/// agent is missing or died, is signed out, or its provider refused.
+/// Lowercase fragments of a reported failure that another agent could avoid:
+/// the agent is missing or died, is signed out, or its provider returned an
+/// error.
 const UNAVAILABLE: &[&str] = &[
     "not found on path",
     "no such file or directory",
@@ -67,11 +74,23 @@ impl ChosenAgent {
     fn fallback(&self) -> Option<String> {
         (!self.alternatives.is_empty()).then(|| {
             format!(
-                "This agent could not do the work. Other agents are available: {}.",
+                "This agent could not run: it is missing, signed out, or its provider \
+                 returned an error. Other agents are available: {}.",
                 self.alternatives.join(", ")
             )
         })
     }
+}
+
+/// Whether a failed agent result shows the agent was unavailable, judged by
+/// its `status` and structured `error` only. A declined request, or a result
+/// without a reported error, never qualifies.
+fn unavailable_result(content: &serde_json::Map<String, Value>) -> bool {
+    content.get("status").and_then(Value::as_str) == Some("failed")
+        && content
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(unavailable)
 }
 
 /// `agent_codex` → the Codex descriptor, when it is a known adapter.
@@ -110,18 +129,18 @@ impl Tool for ChosenAgent {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         match self.inner.execute(arguments, context).await {
-            Ok(mut output) if output.is_error && unavailable(&output.content) => {
-                if let Some(fallback) = self.fallback() {
-                    match serde_json::from_str::<Value>(&output.content) {
-                        Ok(Value::Object(mut content)) => {
-                            content.insert("fallback".into(), fallback.into());
-                            output.content = Value::Object(content).to_string();
-                        }
-                        _ => output.content = format!("{}\n{fallback}", output.content),
-                    }
+            Ok(mut output) if output.is_error => {
+                if let Ok(Value::Object(mut content)) =
+                    serde_json::from_str::<Value>(&output.content)
+                    && unavailable_result(&content)
+                    && let Some(fallback) = self.fallback()
+                {
+                    content.insert("fallback".into(), fallback.into());
+                    output.content = Value::Object(content).to_string();
                 }
                 Ok(output)
             }
+            // SCV's own messages, such as a missing executable.
             Err(error) if unavailable(&error.0) => Err(match self.fallback() {
                 Some(fallback) => ToolError(format!("{} {fallback}", error.0)),
                 None => error,
@@ -224,20 +243,34 @@ mod tests {
         assert_eq!(product("agent_fake"), "agent_fake");
     }
 
+    fn failed(error: &str) -> ToolOutput {
+        ToolOutput::failure(
+            json!({"agent":"grok","status":"failed","reply":"","error":error}).to_string(),
+        )
+    }
+
     #[tokio::test]
     async fn availability_failures_name_the_other_agents() {
-        let failed = ToolOutput::failure(
-            json!({"agent":"grok","status":"failed","reply":"HTTP 404: model grok-4.7 not found"})
-                .to_string(),
-        );
-        let agent = chosen("agent_grok", Ok(failed), &["agent_claude", "agent_codex"]);
-        let output = run(&agent).await.unwrap();
-        let content: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(
-            content["fallback"],
-            "This agent could not do the work. Other agents are available: agent_claude, \
-             agent_codex."
-        );
+        for error in [
+            "HTTP 404: model grok-4.7 not found",
+            "Not logged in · Please run /login",
+            "API Error: 429 rate limited",
+            "the agent exited",
+        ] {
+            let agent = chosen(
+                "agent_grok",
+                Ok(failed(error)),
+                &["agent_claude", "agent_codex"],
+            );
+            let output = run(&agent).await.unwrap();
+            let content: Value = serde_json::from_str(&output.content).unwrap();
+            assert_eq!(
+                content["fallback"],
+                "This agent could not run: it is missing, signed out, or its provider returned \
+                 an error. Other agents are available: agent_claude, agent_codex.",
+                "{error}"
+            );
+        }
         // A launch error carries it too.
         let missing = chosen(
             "agent_grok",
@@ -251,15 +284,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn other_failures_and_lone_agents_add_nothing() {
-        let tests_failed = ToolOutput::failure(
-            json!({"status":"failed","reply":"cargo test: 3 tests failed"}).to_string(),
+    async fn a_declined_request_never_suggests_another_agent() {
+        // The reply is the agent's own words and may mention anything.
+        let declined = ToolOutput::failure(
+            json!({
+                "agent":"claude",
+                "status":"declined",
+                "reply":"I won't help get past authentication; that 403 is forbidden for a reason.",
+                "note":"The agent declined this request."
+            })
+            .to_string(),
         );
+        let agent = chosen("agent_claude", Ok(declined.clone()), &["agent_grok"]);
+        assert_eq!(run(&agent).await.unwrap().content, declined.content);
+    }
+
+    #[tokio::test]
+    async fn only_the_reported_error_decides_a_fallback() {
+        // An unavailable-sounding reply with no reported error, as when a
+        // task genuinely failed while discussing a 403.
+        let reply_only = ToolOutput::failure(
+            json!({"status":"failed","reply":"authentication returns 403; 3 tests failed"})
+                .to_string(),
+        );
+        let agent = chosen("agent_codex", Ok(reply_only.clone()), &["agent_claude"]);
+        assert_eq!(run(&agent).await.unwrap().content, reply_only.content);
+        let tests_failed = failed("cargo test: 3 tests failed");
         let agent = chosen("agent_codex", Ok(tests_failed.clone()), &["agent_claude"]);
         assert_eq!(run(&agent).await.unwrap().content, tests_failed.content);
-        let signed_out = ToolOutput::failure("not signed in");
-        let alone = chosen("agent_codex", Ok(signed_out.clone()), &[]);
-        assert_eq!(run(&alone).await.unwrap().content, signed_out.content);
+        // Unstructured output is never judged.
+        let plain = ToolOutput::failure("not signed in");
+        let agent = chosen("agent_codex", Ok(plain.clone()), &["agent_claude"]);
+        assert_eq!(run(&agent).await.unwrap().content, plain.content);
+        // A timeout is not an availability failure.
+        let timeout = ToolOutput::failure(
+            json!({"status":"timeout","reply":"","error":"503 upstream"}).to_string(),
+        );
+        let agent = chosen("agent_codex", Ok(timeout.clone()), &["agent_claude"]);
+        assert_eq!(run(&agent).await.unwrap().content, timeout.content);
+        // A lone agent has nobody to name, and successes are left alone.
+        let alone = chosen("agent_codex", Ok(failed("not signed in")), &[]);
+        assert!(!run(&alone).await.unwrap().content.contains("fallback"));
         let fine = ToolOutput::success("404 pages fixed");
         let agent = chosen("agent_codex", Ok(fine.clone()), &["agent_claude"]);
         assert_eq!(run(&agent).await.unwrap().content, fine.content);
