@@ -139,6 +139,7 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-your-key"
 api_key_env = "OPENAI_API_KEY" # optional fallback
 timeout_seconds = 600
+image_input = true # show attached images to the model
 
 [providers.custom]
 kind = "openai-compatible"
@@ -365,6 +366,13 @@ seconds is reported instead. A retry happens only while nothing from
 that response has streamed, so text is never repeated. Cancelling the turn
 interrupts the wait. Set `0` to report the first failure. Project
 configuration may lower it but not raise it.
+
+`image_input` (default `true`) sends images a turn attaches, such as photos
+chat users send, to the model as Responses `input_image` items. Set it to
+`false` for a model without vision; the model then sees each image named in
+the prompt instead, with its path when the session has tools. When the
+provider rejects a request with images and its error mentions images, SCV
+describes images for the rest of that session and sends the request again.
 
 SCV reuses provider connections but retires one after 30 idle seconds.
 Proxies in front of providers commonly close idle keep-alive connections after
@@ -622,6 +630,22 @@ enabled = true
 workspace = "/absolute/path/to/workspace"
 remote_tools = "none"
 ```
+
+Account tables may also limit the files senders send:
+
+```toml
+[channels.wechat.default.media]
+owner_max_mib = 50
+others_image_max_mib = 5
+keep_days = 7
+```
+
+`owner_max_mib` is the largest file downloaded from the account owner (0 turns
+downloads off for everyone), `others_image_max_mib` the largest image from any
+other sender, whose other files are never downloaded (0 turns their images off
+too), and `keep_days` how long received files and copies of sent files stay in
+`$SCV_HOME/state/media`. SCV leaves the defaults above out of the file. See
+[channel media](channels.md#media).
 
 A missing table or key defaults to `enabled = true` and `remote_tools =
 "none"`; an omitted `workspace` uses the daemon workspace. An explicit workspace must be an existing absolute

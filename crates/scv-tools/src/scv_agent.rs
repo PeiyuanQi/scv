@@ -240,6 +240,7 @@ impl ScvAgentTool {
                 request_id: request_id.clone(),
                 session_id: child.session_id.clone(),
                 prompt,
+                attachments: Vec::new(),
             })
             .await
         {

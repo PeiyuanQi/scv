@@ -160,6 +160,7 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             request_id: "turn".into(),
             session_id,
             prompt: "say hello".into(),
+            attachments: Vec::new(),
         },
     )
     .await;
@@ -267,6 +268,7 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
             request_id: "turn".into(),
             session_id,
             prompt: "say hello".into(),
+            attachments: Vec::new(),
         },
     )
     .await;
@@ -386,6 +388,7 @@ async fn tool_results_are_replayed_after_their_calls() {
             request_id: "turn".into(),
             session_id,
             prompt: "read the README".into(),
+            attachments: Vec::new(),
         },
     )
     .await;
@@ -569,6 +572,7 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
             request_id: "turn".into(),
             session_id: session_id.clone(),
             prompt: "read the docs".into(),
+            attachments: Vec::new(),
         },
     )
     .await;
@@ -631,6 +635,8 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
 
     let tools = bodies[0]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|tool| tool["name"] == "web_fetch"));
+    // Only chat sessions can send files back.
+    assert!(!tools.iter().any(|tool| tool["name"] == "chat_attach"));
     assert!(tools.contains(&serde_json::json!({"type":"web_search"})));
     assert!(
         timeout(Duration::from_secs(3), child.wait())
@@ -720,6 +726,7 @@ async fn tool_free_sessions_get_no_web_access() {
             request_id: "turn".into(),
             session_id,
             prompt: "search the web".into(),
+            attachments: Vec::new(),
         },
     )
     .await;
@@ -736,6 +743,166 @@ async fn tool_free_sessions_get_no_web_access() {
     drop(input);
     let body = provider.join().unwrap();
     assert!(body.get("tools").is_none(), "{body}");
+    assert!(
+        timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+/// A chat session's model gets `chat_attach`, sees the files a turn attaches
+/// listed with their paths, and sees images as image input.
+#[tokio::test]
+async fn chat_sessions_attach_files_and_show_images() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = read_json_body(&mut stream);
+        let events = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"a chart\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        body
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[provider]\nactive = \"fake\"\n\n[providers.fake]\nkind = \"openai-compatible\"\nmodel = \"fake-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n"
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let media = tempfile::tempdir().unwrap();
+    let image = media.path().join("chart.png");
+    let png = b"\x89PNG\r\n\x1a\nfake image";
+    std::fs::write(&image, png).unwrap();
+    let report = media.path().join("report.pdf");
+    std::fs::write(&report, b"%PDF-1.7").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(home.path())
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    send(
+        &mut input,
+        &ClientMessage::Initialize {
+            request_id: "init".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "integration-test".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .await;
+    send(
+        &mut input,
+        &ClientMessage::SessionStart {
+            request_id: "session".into(),
+            cwd: workspace.path().display().to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+            no_tools: Some(false),
+            delegation_depth: None,
+            channel: Some("WeChat".into()),
+            auto_approve: None,
+        },
+    )
+    .await;
+    next_event(&mut lines).await;
+    let session_id = match next_event(&mut lines).await {
+        ServerEvent::SessionStarted { session_id, .. } => session_id,
+        event => panic!("expected session.started, received {event:?}"),
+    };
+    let attachment =
+        |kind: &str, path: &std::path::Path, mime: &str, size: u64| scv_protocol::Attachment {
+            kind: kind.into(),
+            path: path.display().to_string(),
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            mime: mime.into(),
+            size,
+            transcript: None,
+        };
+    send(
+        &mut input,
+        &ClientMessage::TurnStart {
+            request_id: "turn".into(),
+            session_id,
+            prompt: "what is this?".into(),
+            attachments: vec![
+                attachment("image", &image, "image/png", png.len() as u64),
+                attachment("file", &report, "application/pdf", 8),
+            ],
+        },
+    )
+    .await;
+    loop {
+        match next_event(&mut lines).await {
+            ServerEvent::TurnCompleted { .. } => break,
+            ServerEvent::TurnFailed { code, message, .. } => {
+                panic!("turn failed with {code}: {message}")
+            }
+            _ => {}
+        }
+    }
+    input.shutdown().await.unwrap();
+    drop(input);
+    let body = provider.join().unwrap();
+    let tools = body["tools"].as_array().unwrap();
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "chat_attach"),
+        "{tools:?}"
+    );
+    let user = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|item| item["role"] == "user")
+        .unwrap();
+    let parts = user["content"].as_array().unwrap();
+    let text = parts[0]["text"].as_str().unwrap();
+    assert!(text.starts_with("what is this?"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "image chart.png (image/png, 18 bytes) at {}",
+            image.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("file report.pdf (application/pdf, 8 bytes) at"),
+        "{text}"
+    );
+    use base64::Engine as _;
+    assert_eq!(
+        parts[1],
+        serde_json::json!({
+            "type": "input_image",
+            "image_url": format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png)
+            ),
+        })
+    );
+    assert_eq!(parts.len(), 2);
     assert!(
         timeout(Duration::from_secs(3), child.wait())
             .await

@@ -1,10 +1,14 @@
 //! Turning Feishu messages, from socket events or chat history, into the
 //! bridge's inbound messages, and the checkpoint that drives catch-up.
 
-use scv_channels::{Inbound, Message};
+use crate::api::Resource;
+use scv_channels::{Inbound, Media, MediaKind, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+/// Longest text taken from an interactive card, in characters.
+const MAX_CARD_CHARS: usize = 2000;
 
 const MAX_ID_BYTES: usize = 256;
 /// Chats the checkpoint remembers for catch-up, most recently active first.
@@ -19,7 +23,9 @@ pub struct Received {
     pub created_ms: u64,
 }
 
-/// What a socket event carried.
+/// What a socket event carried. Events are handled one at a time, so the
+/// message variant's size does not matter.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Message(Received),
     /// Another event type, such as `im.message.message_read_v1`.
@@ -154,18 +160,24 @@ fn received(
     if group && !mentioned {
         return Some(ignored());
     }
-    let text = content
+    let content = content
         .and_then(|content| serde_json::from_str::<Value>(content).ok())
-        .and_then(|content| match message_type? {
-            "text" => content.get("text")?.as_str().map(str::to_owned),
-            "post" => post_text(&content),
-            _ => None,
-        })
-        .map(|text| replace_mentions(&text, mentions, bot_open_id))
-        .filter(|text| !text.trim().is_empty());
-    let Some(text) = text else {
+        .unwrap_or_default();
+    let Some(parsed) = message_type.and_then(|kind| parse_content(id, kind, &content)) else {
         return Some(ignored());
     };
+    let text = replace_mentions(&parsed.text, mentions, bot_open_id);
+    let parent = str_field(message, "parent_id").filter(|parent| valid_id(parent));
+    let reference = (parent.is_some() || parsed.forward).then(|| {
+        serde_json::to_string(&Reference {
+            parent: parent.map(str::to_owned),
+            forward: parsed.forward,
+        })
+        .unwrap_or_default()
+    });
+    if text.trim().is_empty() && parsed.media.is_empty() && reference.is_none() {
+        return Some(ignored());
+    }
     Some(Received {
         inbound: Inbound::Text(Message {
             id: id.to_owned(),
@@ -173,11 +185,148 @@ fn received(
             text: text.trim().to_owned(),
             reply_to: id.to_owned(),
             group: group.then(|| chat_id.to_owned()),
+            media: parsed.media,
+            reference,
         }),
         chat_id: chat_id.to_owned(),
         group,
         created_ms,
     })
+}
+
+/// What a message refers to, resolved before its turn: the message it
+/// quotes, and for a forwarded bundle the messages inside it.
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forward: bool,
+}
+
+/// A message's content as the bridge takes it: text, including markers for
+/// what has no file, and the files to fetch.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Content {
+    pub text: String,
+    pub media: Vec<Media>,
+    /// A forwarded bundle, whose messages are fetched before the turn.
+    pub forward: bool,
+}
+
+/// Parse the content of message `id` of `kind`, or `None` for a system
+/// message, which is only marked seen.
+pub fn parse_content(id: &str, kind: &str, content: &Value) -> Option<Content> {
+    let text = |key: &str| content.get(key).and_then(Value::as_str).unwrap_or_default();
+    let resource = |key: &str, resource: &str| Resource {
+        message_id: id.to_owned(),
+        key: key.to_owned(),
+        kind: resource.to_owned(),
+    };
+    let media =
+        |kind: MediaKind, key: &str, resource_kind: &str, name: &str, mime: Option<&str>| {
+            (!key.is_empty()).then(|| Media {
+                kind,
+                name: name.to_owned(),
+                size: None,
+                mime: mime.map(str::to_owned),
+                transcript: None,
+                source: serde_json::to_string(&resource(key, resource_kind)).unwrap_or_default(),
+            })
+        };
+    let mut parsed = Content::default();
+    match kind {
+        "text" => parsed.text = text("text").to_owned(),
+        "post" => {
+            let (body, files) = post(id, content);
+            parsed.text = body;
+            parsed.media = files;
+        }
+        "image" => parsed.media.extend(media(
+            MediaKind::Image,
+            text("image_key"),
+            "image",
+            "",
+            None,
+        )),
+        "file" => parsed.media.extend(media(
+            MediaKind::File,
+            text("file_key"),
+            "file",
+            text("file_name"),
+            None,
+        )),
+        "audio" => parsed.media.extend(media(
+            MediaKind::Audio,
+            text("file_key"),
+            "file",
+            "",
+            Some("audio/opus"),
+        )),
+        "media" => parsed.media.extend(media(
+            MediaKind::Video,
+            text("file_key"),
+            "file",
+            text("file_name"),
+            None,
+        )),
+        // Feishu's resource API does not serve stickers.
+        "sticker" => parsed.text = "[sticker]".into(),
+        "share_chat" => parsed.text = "[shared a group chat]".into(),
+        "share_user" => parsed.text = "[shared a contact card]".into(),
+        "location" => {
+            let name = text("name");
+            let (latitude, longitude) = (text("latitude"), text("longitude"));
+            parsed.text = if latitude.is_empty() {
+                format!("[location: {name}]")
+            } else {
+                format!("[location: {name} ({latitude}, {longitude})]")
+            };
+        }
+        "interactive" => parsed.text = format!("[card] {}", card_text(content)),
+        "merge_forward" => {
+            parsed.text = "[Forwarded messages]".into();
+            parsed.forward = true;
+        }
+        "system" => return None,
+        other => parsed.text = format!("[{other} message]"),
+    }
+    Some(parsed)
+}
+
+/// The readable text of an interactive card: its titles and text elements,
+/// one per line, bounded.
+fn card_text(content: &Value) -> String {
+    fn collect(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                // A title reads before the body, whatever the key order.
+                let keys = ["title", "text", "content"];
+                for key in keys {
+                    if let Some(Value::String(text)) = map.get(key)
+                        && !text.trim().is_empty()
+                    {
+                        out.push(text.trim().to_owned());
+                    }
+                }
+                for (key, value) in map {
+                    if !value.is_string() || !keys.contains(&key.as_str()) {
+                        collect(value, out);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
+            _ => {}
+        }
+    }
+    let mut lines = Vec::new();
+    collect(content, &mut lines);
+    let text = lines.join("\n");
+    let mut bounded: String = text.chars().take(MAX_CARD_CHARS).collect();
+    if text.chars().count() > MAX_CARD_CHARS {
+        bounded.push('…');
+    }
+    bounded
 }
 
 fn valid_id(id: &str) -> bool {
@@ -202,24 +351,48 @@ fn replace_mentions(text: &str, mentions: &[Mention<'_>], bot_open_id: Option<&s
     text
 }
 
-/// The text of a rich-text (`post`) message, one paragraph per line.
-fn post_text(content: &Value) -> Option<String> {
+/// The text of a rich-text (`post`) message, one paragraph per line, and
+/// the images and videos embedded in it.
+fn post(id: &str, content: &Value) -> (String, Vec<Media>) {
     // Events carry the post itself; some payloads wrap it by locale.
     let post = if content.get("content").is_some() {
-        content
+        Some(content)
     } else {
         content
-            .as_object()?
-            .values()
-            .find(|v| v.get("content").is_some())?
+            .as_object()
+            .and_then(|map| map.values().find(|v| v.get("content").is_some()))
+    };
+    let Some(post) = post else {
+        return (String::new(), Vec::new());
     };
     let mut lines = Vec::new();
+    let mut media = Vec::new();
     if let Some(title) = post.get("title").and_then(Value::as_str)
         && !title.trim().is_empty()
     {
         lines.push(title.to_owned());
     }
-    for paragraph in post.get("content")?.as_array()? {
+    let embedded = |kind: MediaKind, key: Option<&str>, resource: &str| {
+        key.filter(|key| !key.is_empty()).map(|key| Media {
+            kind,
+            name: String::new(),
+            size: None,
+            mime: None,
+            transcript: None,
+            source: serde_json::to_string(&Resource {
+                message_id: id.to_owned(),
+                key: key.to_owned(),
+                kind: resource.to_owned(),
+            })
+            .unwrap_or_default(),
+        })
+    };
+    for paragraph in post
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let mut line = String::new();
         for element in paragraph.as_array().into_iter().flatten() {
             let text = element.get("text").and_then(Value::as_str);
@@ -231,12 +404,27 @@ fn post_text(content: &Value) -> Option<String> {
                         line.push_str(name);
                     }
                 }
+                Some("img") => media.extend(embedded(
+                    MediaKind::Image,
+                    element.get("image_key").and_then(Value::as_str),
+                    "image",
+                )),
+                Some("media") => media.extend(embedded(
+                    MediaKind::Video,
+                    element.get("file_key").and_then(Value::as_str),
+                    "file",
+                )),
+                Some("emotion") => {
+                    if let Some(emoji) = element.get("emoji_type").and_then(Value::as_str) {
+                        line.push_str(&format!("[{emoji}]"));
+                    }
+                }
                 _ => {}
             }
         }
         lines.push(line);
     }
-    Some(lines.join("\n"))
+    (lines.join("\n"), media)
 }
 
 /// What the transport has received, per chat: the newest creation time it
@@ -381,27 +569,183 @@ mod tests {
         assert_eq!(text(parse_event(&payload, None)), None);
     }
 
+    fn answer(event: Option<Event>) -> Message {
+        match event {
+            Some(Event::Message(Received {
+                inbound: Inbound::Text(message),
+                ..
+            })) => message,
+            _ => panic!("expected a message"),
+        }
+    }
+
+    fn resource(media: &Media) -> Resource {
+        serde_json::from_str(&media.source).unwrap()
+    }
+
     #[test]
-    fn rich_text_is_flattened_and_other_types_are_only_seen() {
+    fn rich_text_is_flattened_and_its_images_are_fetched() {
         let post = json!({"title": "Plan", "content": [
             [{"tag": "text", "text": "step "}, {"tag": "a", "text": "one", "href": "https://x"}],
-            [{"tag": "img", "image_key": "k"}, {"tag": "text", "text": "two"}],
+            [{"tag": "img", "image_key": "img_1"}, {"tag": "text", "text": "two"}],
+            [{"tag": "media", "file_key": "file_1", "image_key": "img_cover"}],
         ]});
+        let message = answer(parse_event(
+            &event("p2p", "post", post, json!([])),
+            Some(BOT),
+        ));
+        assert_eq!(message.text, "Plan\nstep one\ntwo");
+        assert_eq!(message.media.len(), 2);
+        assert_eq!(message.media[0].kind, MediaKind::Image);
         assert_eq!(
-            text(parse_event(
-                &event("p2p", "post", post, json!([])),
-                Some(BOT)
-            )),
-            Some(("Plan\nstep one\ntwo".into(), None))
+            resource(&message.media[0]),
+            Resource {
+                message_id: "om_1".into(),
+                key: "img_1".into(),
+                kind: "image".into()
+            }
         );
-        let image = event("p2p", "image", json!({"image_key": "k"}), json!([]));
+        assert_eq!(message.media[1].kind, MediaKind::Video);
+        assert_eq!(resource(&message.media[1]).kind, "file");
+    }
+
+    #[test]
+    fn files_become_media_to_fetch() {
+        let cases = [
+            (
+                "image",
+                json!({"image_key": "img_k"}),
+                MediaKind::Image,
+                "",
+                "image",
+                None,
+            ),
+            (
+                "file",
+                json!({"file_key": "file_k", "file_name": "report.pdf"}),
+                MediaKind::File,
+                "report.pdf",
+                "file",
+                None,
+            ),
+            (
+                "audio",
+                json!({"file_key": "file_k", "duration": 3000}),
+                MediaKind::Audio,
+                "",
+                "file",
+                Some("audio/opus"),
+            ),
+            (
+                "media",
+                json!({"file_key": "file_k", "image_key": "img_c", "file_name": "clip.mp4"}),
+                MediaKind::Video,
+                "clip.mp4",
+                "file",
+                None,
+            ),
+        ];
+        for (kind, content, expected, name, served_as, mime) in cases {
+            let message = answer(parse_event(
+                &event("p2p", kind, content, json!([])),
+                Some(BOT),
+            ));
+            assert_eq!(message.text, "", "{kind}");
+            assert_eq!(message.media.len(), 1, "{kind}");
+            let media = &message.media[0];
+            assert_eq!(media.kind, expected, "{kind}");
+            assert_eq!(media.name, name, "{kind}");
+            assert_eq!(media.mime.as_deref(), mime, "{kind}");
+            assert_eq!(resource(media).kind, served_as, "{kind}");
+            assert_eq!(resource(media).message_id, "om_1", "{kind}");
+        }
+        // A file message without a key has nothing to answer.
         assert!(matches!(
-            parse_event(&image, Some(BOT)),
+            parse_event(&event("p2p", "image", json!({}), json!([])), Some(BOT)),
             Some(Event::Message(Received {
                 inbound: Inbound::Ignored { .. },
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn content_without_files_becomes_readable_markers() {
+        let cases = [
+            ("sticker", json!({"file_key": "k"}), "[sticker]"),
+            (
+                "share_chat",
+                json!({"chat_id": "oc_x"}),
+                "[shared a group chat]",
+            ),
+            (
+                "share_user",
+                json!({"user_id": "ou_x"}),
+                "[shared a contact card]",
+            ),
+            (
+                "location",
+                json!({"name": "Office", "latitude": "31.2", "longitude": "121.5"}),
+                "[location: Office (31.2, 121.5)]",
+            ),
+            (
+                "interactive",
+                json!({"title": "Deploy", "elements": [[{"tag": "text", "text": "Approved"}]]}),
+                "[card] Deploy\nApproved",
+            ),
+            ("vote", json!({}), "[vote message]"),
+        ];
+        for (kind, content, expected) in cases {
+            let message = answer(parse_event(
+                &event("p2p", kind, content, json!([])),
+                Some(BOT),
+            ));
+            assert_eq!(message.text, expected, "{kind}");
+            assert!(message.media.is_empty(), "{kind}");
+        }
+        let system = event("p2p", "system", json!({"template": "x"}), json!([]));
+        assert!(matches!(
+            parse_event(&system, Some(BOT)),
+            Some(Event::Message(Received {
+                inbound: Inbound::Ignored { .. },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn quotes_and_forwarded_bundles_are_resolved_before_the_turn() {
+        let mut quoted: Value =
+            serde_json::from_slice(&event("p2p", "text", json!({"text": "why?"}), json!([])))
+                .unwrap();
+        quoted["event"]["message"]["parent_id"] = json!("om_parent");
+        let message = answer(parse_event(quoted.to_string().as_bytes(), Some(BOT)));
+        assert_eq!(message.text, "why?");
+        let reference: Reference =
+            serde_json::from_str(message.reference.as_deref().unwrap()).unwrap();
+        assert_eq!(reference.parent.as_deref(), Some("om_parent"));
+        assert!(!reference.forward);
+
+        let forward = answer(parse_event(
+            &event(
+                "p2p",
+                "merge_forward",
+                json!({"content": "Merged"}),
+                json!([]),
+            ),
+            Some(BOT),
+        ));
+        assert_eq!(forward.text, "[Forwarded messages]");
+        let reference: Reference =
+            serde_json::from_str(forward.reference.as_deref().unwrap()).unwrap();
+        assert!(reference.forward);
+        assert_eq!(reference.parent, None);
+
+        let plain = answer(parse_event(
+            &event("p2p", "text", json!({"text": "hi"}), json!([])),
+            Some(BOT),
+        ));
+        assert_eq!(plain.reference, None);
     }
 
     #[test]

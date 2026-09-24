@@ -20,6 +20,10 @@ use tokio_util::sync::CancellationToken;
 pub enum Message {
     User {
         content: String,
+        /// Images that come with the text, for a model that accepts image
+        /// input. History keeps their paths, not their bytes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageInput>,
     },
     Assistant {
         content: String,
@@ -38,9 +42,60 @@ pub enum Message {
 }
 
 impl Message {
+    /// A user message of plain text.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::User {
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
     fn estimated_tokens(&self, bytes_per_token: usize) -> usize {
         let bytes = serde_json::to_vec(self).map_or(0, |value| value.len());
-        bytes.div_ceil(bytes_per_token).saturating_add(4)
+        let images = match self {
+            Self::User { images, .. } => images.len(),
+            _ => 0,
+        };
+        bytes
+            .div_ceil(bytes_per_token)
+            .saturating_add(4)
+            .saturating_add(images.saturating_mul(IMAGE_TOKENS))
+    }
+}
+
+/// What one image costs in context, whatever its size: providers scale
+/// images down to a bounded number of tiles.
+pub const IMAGE_TOKENS: usize = 1600;
+
+/// An image file shown to the model with a user message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageInput {
+    /// Absolute path on the host; the provider reads it for each request, so
+    /// an image removed since is replaced by a note.
+    pub path: PathBuf,
+    /// MIME type, such as `image/png`.
+    pub mime: String,
+}
+
+/// The user's side of a turn: text, and images for a model that accepts them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnInput {
+    pub text: String,
+    pub images: Vec<ImageInput>,
+}
+
+impl From<String> for TurnInput {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for TurnInput {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
     }
 }
 
@@ -612,7 +667,7 @@ impl BudgetContextPolicy {
         );
         for message in messages {
             let (label, content) = match message {
-                Message::User { content } => ("user", content.as_str()),
+                Message::User { content, .. } => ("user", content.as_str()),
                 Message::Assistant { content, .. } => ("assistant", content.as_str()),
                 Message::Tool {
                     name,
@@ -861,14 +916,14 @@ impl AgentRuntime {
     pub async fn run_turn(
         &self,
         history: &mut Vec<Message>,
-        prompt: String,
+        prompt: impl Into<TurnInput>,
         sink: Arc<dyn EventSink>,
         approvals: Arc<dyn ApprovalGate>,
         cancellation: CancellationToken,
     ) -> Result<TurnOutcome, AgentError> {
         let checkpoint = history.clone();
         let result = self
-            .run_turn_inner(history, prompt, sink, approvals, cancellation)
+            .run_turn_inner(history, prompt.into(), sink, approvals, cancellation)
             .await;
         if result.is_err() {
             *history = checkpoint;
@@ -879,7 +934,7 @@ impl AgentRuntime {
     async fn run_turn_inner(
         &self,
         history: &mut Vec<Message>,
-        prompt: String,
+        prompt: TurnInput,
         sink: Arc<dyn EventSink>,
         approvals: Arc<dyn ApprovalGate>,
         cancellation: CancellationToken,
@@ -887,7 +942,10 @@ impl AgentRuntime {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
-        history.push(Message::User { content: prompt });
+        history.push(Message::User {
+            content: prompt.text,
+            images: prompt.images,
+        });
         self.enforce_history_limits(history, sink.as_ref()).await?;
         let specs = self.tools.specs();
         let mut usage = Usage::default();
@@ -1211,7 +1269,7 @@ fn summarize_history_trim(messages: &[Message], removed: usize, max_chars: usize
         format!("[SCV trimmed {removed} earlier canonical messages to enforce session limits.]\n");
     for message in messages {
         let (label, content) = match message {
-            Message::User { content } => ("user", content.as_str()),
+            Message::User { content, .. } => ("user", content.as_str()),
             Message::Assistant { content, .. } => ("assistant", content.as_str()),
             Message::Tool {
                 name,
@@ -1283,6 +1341,27 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[test]
+    fn images_cost_a_fixed_amount_of_context_whatever_their_size() {
+        let plain = Message::user("look");
+        let with_image = Message::User {
+            content: "look".into(),
+            images: vec![ImageInput {
+                path: "/media/huge.png".into(),
+                mime: "image/png".into(),
+            }],
+        };
+        let extra = with_image.estimated_tokens(4) - plain.estimated_tokens(4);
+        assert!(
+            (IMAGE_TOKENS..IMAGE_TOKENS + 20).contains(&extra),
+            "{extra}"
+        );
+        // Older history without images reads back unchanged.
+        let json = serde_json::to_string(&plain).unwrap();
+        assert_eq!(json, r#"{"role":"user","content":"look"}"#);
+        assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), plain);
+    }
 
     #[test]
     fn risks_parse_from_their_wire_names() {
@@ -1578,7 +1657,7 @@ mod tests {
         runtime
             .run_turn(
                 &mut history,
-                "go".into(),
+                "go",
                 sink.clone(),
                 Arc::new(Allow),
                 CancellationToken::new(),
@@ -1653,7 +1732,7 @@ mod tests {
         let outcome = runtime
             .run_turn(
                 &mut history,
-                "hello".into(),
+                "hello",
                 sink.clone(),
                 Arc::new(Allow),
                 CancellationToken::new(),
@@ -1679,9 +1758,7 @@ mod tests {
         })
         .unwrap();
         let history = vec![
-            Message::User {
-                content: "old request ".repeat(20),
-            },
+            Message::user("old request ".repeat(20)),
             Message::Assistant {
                 content: String::new(),
                 tool_calls: vec![ToolCall {
@@ -1696,9 +1773,7 @@ mod tests {
                 content: "result".into(),
                 is_error: false,
             },
-            Message::User {
-                content: "new".into(),
-            },
+            Message::user("new"),
         ];
         let selection = policy.select(&history, "system", &[]).unwrap();
         assert!(selection.removed_messages > 0);
@@ -1742,16 +1817,12 @@ mod tests {
             Message::HistoryNote {
                 content: "previous trim".into(),
             },
-            Message::User {
-                content: "old request".into(),
-            },
+            Message::user("old request"),
             Message::Assistant {
                 content: "old answer".into(),
                 tool_calls: Vec::new(),
             },
-            Message::User {
-                content: "active request".into(),
-            },
+            Message::user("active request"),
         ];
         runtime
             .enforce_history_limits(&mut history, &sink)
@@ -1786,7 +1857,7 @@ mod tests {
         let result = runtime
             .run_turn(
                 &mut history,
-                "too large for the configured history".into(),
+                "too large for the configured history",
                 Arc::new(sink),
                 Arc::new(Allow),
                 CancellationToken::new(),
@@ -1840,7 +1911,7 @@ mod tests {
         let outcome = runtime
             .run_turn(
                 &mut history,
-                "start".into(),
+                "start",
                 sink,
                 Arc::new(Allow),
                 CancellationToken::new(),
@@ -1897,7 +1968,7 @@ mod tests {
         runtime
             .run_turn(
                 &mut history,
-                "start".into(),
+                "start",
                 Arc::new(CollectSink(Mutex::new(Vec::new()))),
                 Arc::new(Deny),
                 CancellationToken::new(),
@@ -1941,9 +2012,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         let before = vec![
-            Message::User {
-                content: "previous".into(),
-            },
+            Message::user("previous"),
             Message::Assistant {
                 content: "answer".into(),
                 tool_calls: Vec::new(),
@@ -1956,7 +2025,7 @@ mod tests {
         let wait = Arc::clone(&entered);
         let run = runtime.run_turn(
             &mut history,
-            "new turn".into(),
+            "new turn",
             Arc::new(CollectSink(Mutex::new(Vec::new()))),
             Arc::new(WaitForCancellation { entered }),
             cancellation,
@@ -1999,7 +2068,7 @@ mod tests {
         let result = runtime
             .run_turn(
                 &mut Vec::new(),
-                "start".into(),
+                "start",
                 Arc::new(CollectSink(Mutex::new(Vec::new()))),
                 Arc::new(Allow),
                 CancellationToken::new(),

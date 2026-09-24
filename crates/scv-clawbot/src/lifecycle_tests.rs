@@ -15,6 +15,17 @@ async fn request(listener: &TcpListener) -> (TcpStream, String, Value) {
 }
 
 async fn read_request(stream: TcpStream) -> (TcpStream, String, Value) {
+    let (stream, route, body) = read_raw_request(stream).await;
+    let body = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    (stream, route, body)
+}
+
+/// A request's route and raw body, such as an encrypted CDN upload.
+async fn read_raw_request(stream: TcpStream) -> (TcpStream, String, Vec<u8>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
@@ -43,15 +54,7 @@ async fn read_request(stream: TcpStream) -> (TcpStream, String, Value) {
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await.unwrap();
-    (
-        reader.into_inner(),
-        route,
-        if body.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&body).unwrap()
-        },
-    )
+    (reader.into_inner(), route, body)
 }
 
 async fn respond(stream: &mut TcpStream, status: &str, body: &str, headers: &str) {
@@ -61,6 +64,16 @@ async fn respond(stream: &mut TcpStream, status: &str, body: &str, headers: &str
 
 fn inbound() -> Value {
     json!({"message_id":"incoming", "message_type":1, "from_user_id":"sender", "context_token":"context", "item_list":[{"text_item":{"text":"hello"}}]})
+}
+
+/// Media directories inside a test's temporary directory.
+fn media(root: &Path) -> scv_channels::MediaOptions {
+    scv_channels::MediaOptions::new(
+        &root.join("media"),
+        "wechat",
+        "default",
+        scv_channels::MediaSettings::default(),
+    )
 }
 
 fn saved_store(directory: &Path, base_url: &str) -> state::Store {
@@ -113,6 +126,7 @@ async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &report,
         ),
@@ -186,6 +200,7 @@ async fn cancellation_drops_long_poll_and_pending_send() {
                 directory.path(),
                 &socket,
                 None,
+                media(directory.path()),
                 &store,
                 &report,
             ),
@@ -231,6 +246,7 @@ async fn cancellation_drops_handshake_and_active_turn_with_durable_marker() {
                 directory.path(),
                 &socket,
                 None,
+                media(directory.path()),
                 &store,
                 &|_| {},
             ),
@@ -328,6 +344,7 @@ async fn failed_poll_reports_unhealthy_and_cancels_backoff() {
                 directory.path(),
                 &socket,
                 None,
+                media(directory.path()),
                 &store,
                 &report,
             ),
@@ -379,6 +396,7 @@ async fn failed_send_retries_same_client_id_and_only_poll_restores_health() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &report,
         ),
@@ -443,6 +461,7 @@ async fn live_send_ack_without_ret_completes_pending_delivery_once() {
                 directory.path(),
                 &socket,
                 None,
+                media(directory.path()),
                 &store,
                 &report,
             ),
@@ -500,6 +519,7 @@ async fn oversized_batch_never_executes_or_advances_cursor() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &report,
         ),
@@ -554,6 +574,7 @@ async fn mismatched_credentials_never_contact_poll_or_send() {
         directory.path(),
         &directory.path().join("missing.sock"),
         None,
+        media(directory.path()),
         &store,
         &|_| panic!("no contact"),
     )
@@ -653,6 +674,7 @@ async fn pre_cancelled_public_runner_does_not_touch_state() {
         Path::new("/"),
         Path::new("/missing"),
         None,
+        &media(Path::new("/missing")),
         cancellation,
         Arc::new(|_| panic!("cancelled before startup")),
         scv_channels::hub::Link::detached(),
@@ -715,6 +737,7 @@ async fn rejected_send_case(status: &str, rejection: &str) {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &report,
         ),
@@ -771,6 +794,9 @@ struct FakeIlink {
     batches: tokio::sync::mpsc::UnboundedSender<Vec<Value>>,
     sends: tokio::sync::mpsc::UnboundedReceiver<Value>,
     responses: Arc<Mutex<std::collections::VecDeque<(&'static str, &'static str)>>>,
+    /// CDN downloads by route, and the bodies posted to `/cdn/upload`.
+    files: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    uploads: Arc<Mutex<Vec<Vec<u8>>>>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -783,18 +809,65 @@ impl FakeIlink {
         let (sent, sends) = tokio::sync::mpsc::unbounded_channel();
         let responses = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let script = Arc::clone(&responses);
+        let files = Arc::new(Mutex::new(
+            std::collections::HashMap::<String, Vec<u8>>::new(),
+        ));
+        let uploads = Arc::new(Mutex::new(Vec::new()));
+        let (served, posted) = (Arc::clone(&files), Arc::clone(&uploads));
         let server = tokio::spawn(async move {
             let cursor = Arc::new(std::sync::atomic::AtomicU64::new(0));
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                let (queue, sent, script, cursor) = (
+                let (queue, sent, script, cursor, served, posted) = (
                     Arc::clone(&queue),
                     sent.clone(),
                     Arc::clone(&script),
                     Arc::clone(&cursor),
+                    Arc::clone(&served),
+                    Arc::clone(&posted),
                 );
                 tokio::spawn(async move {
-                    let (mut stream, route, body) = read_request(stream).await;
+                    let (mut stream, route, raw) = read_raw_request(stream).await;
+                    if route.starts_with("/cdn/upload") {
+                        let count = {
+                            let mut posted = posted.lock().unwrap();
+                            posted.push(raw);
+                            posted.len()
+                        };
+                        respond(
+                            &mut stream,
+                            "200 OK",
+                            "",
+                            &format!("x-encrypted-param: down-{count}\r\n"),
+                        )
+                        .await;
+                        return;
+                    }
+                    if route.starts_with("/cdn/") {
+                        let file = served.lock().unwrap().get(&route).cloned();
+                        match file {
+                            Some(bytes) => {
+                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await.unwrap();
+                                stream.write_all(&bytes).await.unwrap();
+                                stream.shutdown().await.unwrap();
+                            }
+                            None => respond(&mut stream, "404 Not Found", "", "").await,
+                        }
+                        return;
+                    }
+                    let body = if raw.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_slice(&raw).unwrap()
+                    };
+                    if route.ends_with("getuploadurl") {
+                        // Every upload goes to the fake CDN on this origin.
+                        let _ = sent.send(body);
+                        let host = stream.local_addr().unwrap();
+                        let reply = json!({"upload_full_url": format!("http://{host}/cdn/upload")});
+                        respond(&mut stream, "200 OK", &reply.to_string(), "").await;
+                        return;
+                    }
                     if route.ends_with("getupdates") {
                         let batch = tokio::time::timeout(Duration::from_millis(50), async {
                             queue.lock().await.recv().await
@@ -820,8 +893,17 @@ impl FakeIlink {
             batches,
             sends,
             responses,
+            files,
+            uploads,
             server,
         }
+    }
+
+    /// Serve `bytes` on the fake CDN; returns the full download URL.
+    fn serve_file(&self, name: &str, bytes: Vec<u8>) -> String {
+        let route = format!("/cdn/file/{name}");
+        self.files.lock().unwrap().insert(route.clone(), bytes);
+        format!("{}{route}", self.base)
     }
 
     fn push(&self, batch: Vec<Value>) {
@@ -922,6 +1004,7 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
                 directory.path(),
                 &socket,
                 owner.as_ref(),
+                media(directory.path()),
                 &store,
                 &|_| {},
             ),
@@ -984,6 +1067,7 @@ async fn a_long_owner_turn_neither_blocks_other_senders_nor_reorders_the_owners_
             directory.path(),
             &socket,
             Some(&owner),
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1069,6 +1153,7 @@ async fn at_most_four_senders_run_turns_at_once() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1132,6 +1217,7 @@ async fn a_full_conversation_queue_gets_a_busy_reply_without_a_turn() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1199,6 +1285,7 @@ async fn recovery_answers_every_claim_once_and_never_replays_it() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1260,6 +1347,7 @@ async fn shutdown_closes_every_running_turn_and_keeps_the_claims() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1357,6 +1445,7 @@ async fn a_refused_reply_rides_ahead_of_the_senders_next_reply_and_never_reaches
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1414,6 +1503,7 @@ async fn tool_progress_never_reaches_wechat() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1467,6 +1557,7 @@ async fn a_failed_turn_replies_with_the_generic_failure_message() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1544,6 +1635,7 @@ async fn a_finished_background_job_reaches_the_owner_as_one_unprompted_message()
             directory.path(),
             &socket,
             Some(&owner),
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1615,6 +1707,7 @@ async fn a_report_finishing_during_the_owners_turn_follows_that_turns_reply() {
             directory.path(),
             &socket,
             Some(&owner),
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1668,6 +1761,7 @@ async fn a_long_reply_uses_its_context_token_once_and_the_rest_goes_unprompted()
                 directory.path(),
                 &socket,
                 None,
+                media(directory.path()),
                 &store,
                 &|_| {},
             ),
@@ -1731,6 +1825,7 @@ async fn a_refused_background_report_is_held_for_the_owners_next_reply() {
             directory.path(),
             &socket,
             Some(&owner),
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1793,6 +1888,7 @@ async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background
             directory.path(),
             &socket,
             Some(&owner),
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -1872,6 +1968,7 @@ async fn the_hub_sees_owner_work_until_its_report_is_stored_and_can_queue_notice
             directory.path(),
             &socket,
             Some(&owner),
+            media(directory.path()),
             &store,
             &|_| {},
             &link,
@@ -1952,6 +2049,7 @@ async fn a_report_turn_starting_during_the_owners_turn_is_still_delivered() {
             directory.path(),
             &socket,
             Some(&owner),
+            media(directory.path()),
             &store,
             &|_| {},
         ),
@@ -2027,6 +2125,7 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
             directory.path(),
             &socket,
             None,
+            media(directory.path()),
             &store,
             &|_| {},
             &link,
@@ -2048,6 +2147,326 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
             saved.pending.is_empty() && saved.jobs.is_empty()
         })
         .await;
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+/// An owner's message with an image and a file, as iLink delivers them: each
+/// item points at the CDN with its own key.
+fn media_message(ilink: &FakeIlink, id: &str, sender: &str, key: &[u8; 16]) -> (Value, Vec<u8>) {
+    use base64::Engine as _;
+    let png = b"\x89PNG\r\n\x1a\nfake image".to_vec();
+    let image_url = ilink.serve_file(&format!("{id}-image"), crate::media::encrypt(&png, key));
+    let file_url = ilink.serve_file(
+        &format!("{id}-file"),
+        crate::media::encrypt(b"%PDF-1.7", key),
+    );
+    // Images carry the key as hex; files carry base64 of the hex digits.
+    let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+    let message = json!({"message_id":id, "message_type":1, "from_user_id":sender,
+    "context_token":format!("ctx-{id}"), "item_list":[
+        {"type":1,"text_item":{"text":"what are these?"}},
+        {"type":2,"image_item":{"aeskey":hex,"media":{"full_url":image_url,"encrypt_query_param":"p"}}},
+        {"type":4,"file_item":{"file_name":"../report.pdf","len":"8",
+            "media":{"full_url":file_url,"aes_key":base64::engine::general_purpose::STANDARD.encode(&hex)}}},
+    ]});
+    (message, png)
+}
+
+#[tokio::test]
+async fn an_owners_files_are_decrypted_saved_privately_and_attached_to_the_turn() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("owner");
+    let base = ilink.base.clone();
+    let key = [7u8; 16];
+    let (message, png) = media_message(&ilink, "m1", "owner", &key);
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            media(directory.path()),
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![message]);
+        let (mut side, start) = accept_session(&daemon).await;
+        // A chat session names its channel, so the server offers chat_attach.
+        assert_eq!(start["channel"], "WeChat");
+        let turn = next_frame(&mut side).await;
+        assert_eq!(turn["type"], "turn.start");
+        assert_eq!(turn["prompt"], "what are these?");
+        let attachments = turn["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 2);
+        let image = &attachments[0];
+        assert_eq!(image["kind"], "image");
+        assert_eq!(image["mime"], "image/png");
+        assert_eq!(image["size"], png.len());
+        let path = Path::new(image["path"].as_str().unwrap());
+        assert!(path.starts_with(directory.path().join("media/wechat/default")));
+        assert_eq!(std::fs::read(path).unwrap(), png);
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        let file = &attachments[1];
+        assert_eq!(file["kind"], "file");
+        // The sender's name is kept, without its directory part.
+        assert_eq!(file["name"], "report.pdf");
+        assert_eq!(file["mime"], "application/pdf");
+        assert_eq!(
+            std::fs::read(file["path"].as_str().unwrap()).unwrap(),
+            b"%PDF-1.7"
+        );
+        finish_turn(&mut side, "a chart and a report").await;
+        let body = ilink.sent().await;
+        assert_eq!(sent_text(&body), "a chart and a report");
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn files_from_other_senders_are_not_downloaded_and_failures_are_explained() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("owner");
+    let base = ilink.base.clone();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            media(directory.path()),
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        let key = [3u8; 16];
+        let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+        // Another sender's lone file: nothing to answer, so no turn at all.
+        let file = json!({"message_id":"x1", "message_type":1, "from_user_id":"other",
+            "context_token":"ctx-x1", "item_list":[{"type":4,"file_item":{"file_name":"a.zip",
+            "media":{"full_url":format!("{}/cdn/file/never", ilink.base),"aes_key":hex}}}]});
+        ilink.push(vec![file]);
+        let body = ilink.sent().await;
+        assert_eq!(body["msg"]["context_token"], "ctx-x1");
+        assert_eq!(
+            sent_text(&body),
+            "SCV can read text and pictures from you here, but not a file."
+        );
+        // Their voice message is not downloaded, but its transcript is enough
+        // for a turn.
+        let voice = json!({"message_id":"x2", "message_type":1, "from_user_id":"other",
+            "context_token":"ctx-x2", "item_list":[{"type":3,"voice_item":{"encode_type":6,
+            "text":"are you there?","media":{"full_url":format!("{}/cdn/file/never", ilink.base),"aes_key":hex}}}]});
+        ilink.push(vec![voice]);
+        let (mut other, start) = accept_session(&daemon).await;
+        assert_eq!(start["no_tools"], true);
+        let turn = next_frame(&mut other).await;
+        assert_eq!(
+            turn["prompt"],
+            "[voice message: not opened for this sender] It says: \"are you there?\""
+        );
+        finish_turn(&mut other, "yes").await;
+        assert_eq!(sent_text(&ilink.sent().await), "yes");
+        // The owner's image fails to download: the turn gets a note.
+        let broken = json!({"message_id":"o1", "message_type":1, "from_user_id":"owner",
+        "context_token":"ctx-o1", "item_list":[
+            {"type":1,"text_item":{"text":"see this"}},
+            {"type":2,"image_item":{"aeskey":hex,"media":{"full_url":format!("{}/cdn/file/missing", ilink.base)}}},
+        ]});
+        ilink.push(vec![broken]);
+        let (mut side, _) = accept_session(&daemon).await;
+        let turn = next_frame(&mut side).await;
+        assert_eq!(turn["prompt"], "see this\n[image: download failed]");
+        assert!(turn.get("attachments").is_none(), "{turn}");
+        finish_turn(&mut side, "I could not open it").await;
+        assert_eq!(sent_text(&ilink.sent().await), "I could not open it");
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn files_the_model_attaches_are_uploaded_encrypted_after_the_reply() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("owner");
+    let base = ilink.base.clone();
+    let options = media(directory.path());
+    let chart =
+        scv_channels::media::save(&options.outbox, "chart.png", b"\x89PNG\r\n\x1a\nchart").unwrap();
+    let chart = std::fs::canonicalize(chart).unwrap();
+    let outside = directory.path().join("secret.txt");
+    std::fs::write(&outside, "do not send").unwrap();
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            Some(&owner),
+            options,
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        ilink.push(vec![text_message("o1", "owner", "chart please")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        assert_eq!(next_turn(&mut side).await, "chart please");
+        let attached = |path: &Path, name: &str, caption: &str| {
+            json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,
+                "call_id":"c","name":"chat_attach","success":true,"truncated":false,
+                "output":json!({"attached":{"path":path,"name":name,"size":13,"caption":caption}}).to_string()})
+        };
+        send_frame(&mut side, attached(&chart, "chart.png", "sales by month")).await;
+        // A file outside the outbox is never sent, whatever the event says.
+        send_frame(&mut side, attached(&outside, "secret.txt", "")).await;
+        finish_turn(&mut side, "Here it is.").await;
+        let text = ilink.sent().await;
+        assert_eq!(text["msg"]["context_token"], "ctx-o1");
+        assert_eq!(
+            sent_text(&text),
+            "Here it is.\n\nchart.png: sales by month\n\n[1 attached files could not be sent]"
+        );
+        let request = ilink.sent().await;
+        assert_eq!(request["media_type"], 1);
+        assert_eq!(request["to_user_id"], "owner");
+        assert_eq!(request["rawsize"], 13);
+        assert_eq!(request["filesize"], 16);
+        let image = ilink.sent().await;
+        // Only the reply's first message answers the context token.
+        assert!(image["msg"].get("context_token").is_none(), "{image}");
+        assert_eq!(image["msg"]["to_user_id"], "owner");
+        let item = &image["msg"]["item_list"][0];
+        assert_eq!(item["type"], 2);
+        assert_eq!(item["image_item"]["media"]["encrypt_query_param"], "down-1");
+        let key = crate::media::tests_key(item["image_item"]["media"]["aes_key"].as_str().unwrap());
+        let uploaded = ilink.uploads.lock().unwrap()[0].clone();
+        assert_eq!(
+            crate::media::decrypt(&uploaded, &key).unwrap(),
+            b"\x89PNG\r\n\x1a\nchart"
+        );
+        // The copy goes once it is sent; the outside file stays untouched.
+        wait_until(|| !chart.exists() && store.load_state("default").unwrap().pending.is_empty())
+            .await;
+        assert!(outside.exists());
+        assert_eq!(ilink.uploads.lock().unwrap().len(), 1);
+        cancel.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, peer) })
+            .await
+            .unwrap();
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn a_restart_resumes_sending_files_where_it_stopped_with_the_same_client_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let options = media(directory.path());
+    let first = scv_channels::media::save(&options.outbox, "a.txt", b"first").unwrap();
+    let second = scv_channels::media::save(&options.outbox, "b.txt", b"second").unwrap();
+    let file = |path: &Path, name: &str, client_id: &str| scv_channels::state::PendingFile {
+        path: std::fs::canonicalize(path).unwrap().display().to_string(),
+        name: name.into(),
+        mime: "text/plain".into(),
+        kind: scv_channels::MediaKind::File,
+        client_id: client_id.into(),
+    };
+    // Crashed after the text and the first file were sent.
+    let mut pending = new_pending("incoming", "sender", "context", "files", MAX_REPLY_BYTES);
+    pending.next_chunk = 1;
+    pending.files = vec![
+        file(&first, "a.txt", "file-1"),
+        file(&second, "b.txt", "file-2"),
+    ];
+    pending.next_file = 1;
+    store
+        .save_state(
+            "default",
+            &state::BridgeState {
+                pending: vec![pending],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let base = ilink.base.clone();
+    let socket = directory.path().join("missing.sock");
+    let work = until_cancelled(
+        cancel.clone(),
+        run_loop(
+            "token",
+            &base,
+            "default",
+            directory.path(),
+            &socket,
+            None,
+            options,
+            &store,
+            &|_| {},
+        ),
+    );
+    let peer = async {
+        let request = ilink.sent().await;
+        assert_eq!(request["media_type"], 3);
+        let message = ilink.sent().await;
+        assert_eq!(message["msg"]["client_id"], "file-2");
+        let item = &message["msg"]["item_list"][0];
+        assert_eq!(item["type"], 4);
+        assert_eq!(item["file_item"]["file_name"], "b.txt");
+        assert_eq!(item["file_item"]["len"], "6");
+        wait_until(|| {
+            let saved = store.load_state("default").unwrap();
+            saved.pending.is_empty() && saved.seen == ["incoming"]
+        })
+        .await;
+        assert!(!second.exists());
+        assert_eq!(ilink.uploads.lock().unwrap().len(), 1);
         cancel.cancel();
     };
     let (result, ()) =

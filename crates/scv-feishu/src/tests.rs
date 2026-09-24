@@ -24,6 +24,7 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// Scripted answers: a route prefix, a status, and a body.
 type Script = Arc<StdMutex<VecDeque<(&'static str, u16, String)>>>;
+type Resources = Arc<StdMutex<std::collections::HashMap<String, (String, Vec<u8>)>>>;
 
 #[derive(Debug)]
 struct Request {
@@ -39,6 +40,8 @@ struct Fake {
     origin: String,
     requests: mpsc::UnboundedReceiver<Request>,
     script: Script,
+    /// Message resources by route: a content type and bytes.
+    resources: Resources,
     to_client: mpsc::UnboundedSender<Frame>,
     from_client: mpsc::UnboundedReceiver<Frame>,
     /// Closes the current socket connection.
@@ -67,13 +70,31 @@ impl Fake {
         let (requests_tx, requests) = mpsc::unbounded_channel();
         let script: Script = Arc::new(StdMutex::new(VecDeque::new()));
         let routes = Arc::clone(&script);
+        let resources: Resources = Arc::default();
+        let files = Arc::clone(&resources);
         let http_task = tokio::spawn(async move {
             loop {
                 let (stream, _) = http.accept().await.unwrap();
-                let (requests_tx, routes, socket_url) =
-                    (requests_tx.clone(), Arc::clone(&routes), socket_url.clone());
+                let (requests_tx, routes, socket_url, files) = (
+                    requests_tx.clone(),
+                    Arc::clone(&routes),
+                    socket_url.clone(),
+                    Arc::clone(&files),
+                );
                 tokio::spawn(async move {
                     let (mut stream, request) = read_request(stream).await;
+                    let file = files.lock().unwrap().get(&request.route).cloned();
+                    if let Some((content_type, bytes)) = file {
+                        let _ = requests_tx.send(request);
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            bytes.len()
+                        );
+                        let _ = stream.write_all(head.as_bytes()).await;
+                        let _ = stream.write_all(&bytes).await;
+                        let _ = stream.shutdown().await;
+                        return;
+                    }
                     let scripted = {
                         let mut routes = routes.lock().unwrap();
                         let index = routes
@@ -127,6 +148,7 @@ impl Fake {
             origin,
             requests,
             script,
+            resources,
             to_client,
             from_client,
             kick,
@@ -140,6 +162,14 @@ impl Fake {
             .lock()
             .unwrap()
             .push_back((prefix, status, body.to_string()));
+    }
+
+    /// Serve a file at `route` with its content type.
+    fn resource(&self, route: &str, content_type: &str, bytes: &[u8]) {
+        self.resources
+            .lock()
+            .unwrap()
+            .insert(route.into(), (content_type.into(), bytes.to_vec()));
     }
 
     fn transport(&self) -> Feishu {
@@ -236,6 +266,7 @@ async fn read_request(stream: TcpStream) -> (TcpStream, Request) {
     let mut length = 0;
     let mut authorization = None;
     let mut form = false;
+    let mut multipart = false;
     loop {
         line.clear();
         reader.read_line(&mut line).await.unwrap();
@@ -250,6 +281,7 @@ async fn read_request(stream: TcpStream) -> (TcpStream, Request) {
                 authorization = Some(value.to_owned());
             } else if key.eq_ignore_ascii_case("content-type") {
                 form = value.starts_with("application/x-www-form-urlencoded");
+                multipart = value.starts_with("multipart/form-data");
             }
         }
     }
@@ -257,6 +289,9 @@ async fn read_request(stream: TcpStream) -> (TcpStream, Request) {
     reader.read_exact(&mut body).await.unwrap();
     let body = if body.is_empty() {
         Value::Null
+    } else if multipart {
+        // Uploads: keep the raw form for assertions.
+        Value::String(String::from_utf8_lossy(&body).into_owned())
     } else if form {
         // Registration posts forms; present them as JSON for assertions.
         let text = String::from_utf8(body).unwrap();
@@ -608,12 +643,19 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
     let socket = directory.path().join("missing.sock");
     let reports = StdMutex::new(Vec::new());
     let report = |healthy| reports.lock().unwrap().push(healthy);
+    let media = scv_channels::MediaOptions::new(
+        &directory.path().join("media"),
+        "feishu",
+        "default",
+        scv_channels::MediaSettings::default(),
+    );
     let run = scv_channels::run(
         &transport,
         "default",
         directory.path(),
         &socket,
         None,
+        &media,
         &store,
         |credentials| Ok(credentials == &account()),
         &report,
@@ -764,4 +806,176 @@ fn the_model_is_told_the_brand_its_users_know() {
     )
     .unwrap();
     assert_eq!(scv_channels::Transport::channel(&lark), "Lark");
+}
+
+fn media_of(content: Value, kind: &str) -> Media {
+    inbound::parse_content("om_1", kind, &content)
+        .unwrap()
+        .media
+        .remove(0)
+}
+
+#[tokio::test]
+async fn files_download_through_the_resource_api_within_limits() {
+    let mut fake = Fake::start().await;
+    let transport = fake.transport();
+    fake.resource(
+        "/open-apis/im/v1/messages/om_1/resources/img_k?type=image",
+        "image/png",
+        b"\x89PNGbytes",
+    );
+    let image = media_of(json!({"image_key": "img_k"}), "image");
+    let downloaded = transport.download(&image, 1024).await.unwrap();
+    assert_eq!(downloaded.bytes, b"\x89PNGbytes");
+    assert_eq!(downloaded.mime.as_deref(), Some("image/png"));
+    let request = fake
+        .request("/open-apis/im/v1/messages/om_1/resources/")
+        .await;
+    assert_eq!(request.authorization.as_deref(), Some("Bearer t-1"));
+    assert!(transport.download(&image, 4).await.is_err());
+
+    // A missing permission comes back as a JSON error, even with 200.
+    fake.script(
+        "/open-apis/im/v1/messages/om_1/resources/file_k",
+        400,
+        json!({"code": 99991672, "msg": "Access denied"}),
+    );
+    let file = media_of(json!({"file_key": "file_k", "file_name": "a.pdf"}), "file");
+    let error = transport
+        .download(&file, 1024)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("lacks a permission"), "{error}");
+    assert!(error.contains("im:resource"), "{error}");
+}
+
+#[tokio::test]
+async fn quoted_and_forwarded_messages_are_resolved_into_context_and_files() {
+    let fake = Fake::start().await;
+    let transport = fake.transport();
+    fake.script(
+        "/open-apis/im/v1/messages/om_parent",
+        200,
+        json!({"code": 0, "data": {"items": [
+            {"message_id": "om_parent", "msg_type": "text",
+             "body": {"content": json!({"text": "ship it?"}).to_string()}},
+        ]}}),
+    );
+    let quoted = transport
+        .resolve("om_1", r#"{"parent":"om_parent"}"#)
+        .await
+        .unwrap();
+    assert_eq!(quoted.context, "[Quoting: ship it?]");
+    assert!(quoted.media.is_empty());
+
+    fake.script(
+        "/open-apis/im/v1/messages/om_bundle",
+        200,
+        json!({"code": 0, "data": {"items": [
+            {"message_id": "om_bundle", "msg_type": "merge_forward",
+             "body": {"content": "Merged and Forwarded Message"}},
+            {"message_id": "om_a", "msg_type": "text", "upper_message_id": "om_bundle",
+             "body": {"content": json!({"text": "first"}).to_string()}},
+            {"message_id": "om_b", "msg_type": "file", "upper_message_id": "om_bundle",
+             "body": {"content": json!({"file_key": "file_b", "file_name": "b.txt"}).to_string()}},
+        ]}}),
+    );
+    let forwarded = transport
+        .resolve("om_bundle", r#"{"forward":true}"#)
+        .await
+        .unwrap();
+    assert_eq!(forwarded.context, "[The forwarded messages:]\n- first");
+    assert_eq!(forwarded.media.len(), 1);
+    let resource: api::Resource = serde_json::from_str(&forwarded.media[0].source).unwrap();
+    // Each file is fetched from the message that holds it.
+    assert_eq!(
+        (resource.message_id.as_str(), resource.key.as_str()),
+        ("om_b", "file_b")
+    );
+}
+
+#[tokio::test]
+async fn files_upload_then_go_out_as_image_or_file_messages() {
+    let mut fake = Fake::start().await;
+    let transport = fake.transport();
+    let directory = tempfile::tempdir().unwrap();
+    let png = directory.path().join("chart.png");
+    std::fs::write(&png, b"\x89PNGchart").unwrap();
+    fake.script(
+        "/open-apis/im/v1/images",
+        200,
+        json!({"code": 0, "data": {"image_key": "img_up"}}),
+    );
+    let outcome = transport
+        .send_file(
+            &OutboundFile {
+                to: "ou_owner",
+                reply_to: "om_1",
+                part: 1,
+                path: &png,
+                name: "chart.png",
+                mime: "image/png",
+                kind: MediaKind::Image,
+                client_id: "file-1",
+            },
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, SendOutcome::Delivered);
+    let upload = fake.request("/open-apis/im/v1/images").await;
+    let form = upload.body.as_str().unwrap();
+    assert!(
+        form.contains("name=\"image_type\"\r\n\r\nmessage"),
+        "{form}"
+    );
+    assert!(form.contains("filename=\"chart.png\""), "{form}");
+    assert!(form.contains("\u{fffd}PNGchart"), "{form}");
+    let message = fake.request("/open-apis/im/v1/messages/om_1/reply").await;
+    assert_eq!(message.body["msg_type"], "image");
+    assert_eq!(message.body["uuid"], "file-1");
+    assert_eq!(
+        message.body["content"],
+        json!({"image_key": "img_up"}).to_string()
+    );
+
+    let report = directory.path().join("report.pdf");
+    std::fs::write(&report, b"%PDF").unwrap();
+    fake.script(
+        "/open-apis/im/v1/files",
+        200,
+        json!({"code": 0, "data": {"file_key": "file_up"}}),
+    );
+    let file = OutboundFile {
+        to: "ou_owner",
+        reply_to: "",
+        part: 0,
+        path: &report,
+        name: "report.pdf",
+        mime: "application/pdf",
+        kind: MediaKind::File,
+        client_id: "file-2",
+    };
+    assert_eq!(
+        transport.send_file(&file, &|_| {}).await.unwrap(),
+        SendOutcome::Delivered
+    );
+    let upload = fake.request("/open-apis/im/v1/files").await;
+    let form = upload.body.as_str().unwrap();
+    assert!(form.contains("name=\"file_type\"\r\n\r\npdf"), "{form}");
+    let message = fake.request("/open-apis/im/v1/messages?").await;
+    assert_eq!(message.body["receive_id"], "ou_owner");
+    assert_eq!(message.body["msg_type"], "file");
+    assert_eq!(
+        message.body["content"],
+        json!({"file_key": "file_up"}).to_string()
+    );
+
+    // A refused upload is final.
+    fake.script("/open-apis/im/v1/files", 400, json!({"code": 234041}));
+    assert_eq!(
+        transport.send_file(&file, &|_| {}).await.unwrap(),
+        SendOutcome::Rejected
+    );
 }

@@ -3,13 +3,17 @@
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use scv_channels::{Batch, Inbound, Message, Outbound, SendOutcome, Transport};
+use scv_channels::{
+    Batch, Downloaded, Inbound, Media, MediaOptions, Message, Outbound, OutboundFile, SendOutcome,
+    Transport,
+};
 pub use scv_channels::{ToolOwner, owner_turn_timeout};
 
 /// The channel name this crate serves: `scv channels <command> wechat`.
 pub const CHANNEL: &str = "wechat";
 
 pub mod bridge;
+pub mod media;
 pub mod state;
 
 use serde_json::Value;
@@ -105,6 +109,7 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
         workspace,
         &scv_client::default_socket_path()?,
         None,
+        &state::media_options(account, scv_channels::MediaSettings::default())?,
         CancellationToken::new(),
         Arc::new(|_| {}),
         scv_channels::hub::Link::detached(),
@@ -117,8 +122,9 @@ pub async fn run(token: &str, base_url: &str, account: &str, workspace: &Path) -
 /// no adapter tasks are spawned. The caller supplies any external stop timeout.
 ///
 /// `tool_owner` is the authenticated owner when the account grants its owner
-/// remote tools; every other sender stays tool-free. `link` connects the
-/// account to the daemon's hub.
+/// remote tools; every other sender stays tool-free. `media` is where files
+/// go and how large they may be, and `link` connects the account to the
+/// daemon's hub.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
     token: &str,
@@ -127,6 +133,7 @@ pub async fn run_supervised(
     workspace: &Path,
     socket: &Path,
     tool_owner: Option<&ToolOwner>,
+    media: &MediaOptions,
     cancellation: CancellationToken,
     report: Arc<dyn Fn(bool) + Send + Sync>,
     link: scv_channels::hub::Link,
@@ -142,6 +149,7 @@ pub async fn run_supervised(
             workspace,
             socket,
             tool_owner,
+            media.clone(),
             &store,
             report.as_ref(),
             &link,
@@ -210,6 +218,7 @@ async fn run_loop(
     workspace: &Path,
     socket: &Path,
     tool_owner: Option<&ToolOwner>,
+    media: MediaOptions,
     store: &state::Store,
     report: &(dyn Fn(bool) + Send + Sync),
 ) -> Result<()> {
@@ -220,6 +229,7 @@ async fn run_loop(
         workspace,
         socket,
         tool_owner,
+        media,
         store,
         report,
         &scv_channels::hub::Link::detached(),
@@ -236,6 +246,7 @@ async fn run_loop_linked(
     workspace: &Path,
     socket: &Path,
     tool_owner: Option<&ToolOwner>,
+    media: MediaOptions,
     store: &state::Store,
     report: &(dyn Fn(bool) + Send + Sync),
     link: &scv_channels::hub::Link,
@@ -251,6 +262,7 @@ async fn run_loop_linked(
         workspace,
         socket,
         tool_owner,
+        &media,
         store,
         |saved| state::runs_as(saved, token, base_url),
         report,
@@ -322,20 +334,94 @@ impl Transport for Ilink<'_> {
         let body = bridge::reply_body(message.to, context_token, message.text, message.client_id);
         bridge::send_reply_request(&self.client, self.token, self.base_url, &body, report).await
     }
+
+    async fn download(&self, media: &Media, max_bytes: u64) -> Result<Downloaded> {
+        let source: media::Source =
+            serde_json::from_str(&media.source).map_err(|_| anyhow!("bad media source"))?;
+        let bytes = media::download(&self.client, &source, max_bytes).await?;
+        Ok(Downloaded { bytes, mime: None })
+    }
+
+    /// Upload the file to the CDN, then send a message pointing at it. Like
+    /// text, only the reply's first message carries the context token.
+    async fn send_file(
+        &self,
+        file: &OutboundFile<'_>,
+        report: &(dyn Fn(bool) + Send + Sync),
+    ) -> Result<SendOutcome> {
+        let path = file.path.to_owned();
+        let plain = tokio::task::spawn_blocking(move || {
+            scv_channels::media::read_bounded(&path, scv_channels::media::MAX_REPLY_FILE_BYTES)
+        })
+        .await??;
+        let upload = media::Upload::new(&plain, file.kind);
+        drop(plain);
+        let download_param = match bridge::upload(
+            &self.client,
+            self.token,
+            self.base_url,
+            file.to,
+            &upload,
+            report,
+        )
+        .await?
+        {
+            Some(param) => param,
+            None => return Ok(SendOutcome::Rejected),
+        };
+        let context_token = if file.part == 0 { file.reply_to } else { "" };
+        let body = bridge::item_body(
+            file.to,
+            context_token,
+            upload.item(&download_param, file.name),
+            file.client_id,
+        );
+        bridge::send_reply_request(&self.client, self.token, self.base_url, &body, report).await
+    }
 }
 
-/// An iLink message the bridge can identify: user text with a sender and a
-/// context token to answer, or else one it only marks as seen.
+/// An iLink message the bridge can identify: a user's text, files, or
+/// both, with a sender and a context token to answer, or else one it only
+/// marks as seen. A quoted message's text comes first, and its file is
+/// fetched like the message's own.
 fn inbound(msg: &Value) -> Option<Inbound> {
     let id = message_id(msg)?;
-    let text = msg
+    let items = msg
         .get("item_list")
         .and_then(Value::as_array)
-        .and_then(|xs| {
-            xs.iter()
-                .find_map(|x| x.get("text_item")?.get("text")?.as_str())
-        })
-        .filter(|text| !text.trim().is_empty());
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut text = String::new();
+    let mut files = Vec::new();
+    for item in items {
+        if let Some(quoted) = item.get("ref_msg") {
+            let mut parts = Vec::new();
+            if let Some(title) = quoted
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| !title.trim().is_empty())
+            {
+                parts.push(title.trim().to_owned());
+            }
+            if let Some(quoted_item) = quoted.get("message_item") {
+                if let Some(label) = media::item_label(quoted_item) {
+                    parts.push(label);
+                }
+                files.extend(media::item_media(quoted_item));
+            }
+            if !parts.is_empty() {
+                text.push_str(&format!("[Quoting: {}]\n", parts.join(" | ")));
+            }
+        }
+        match item.get("type").and_then(Value::as_i64) {
+            Some(media::TEXT) | None => {
+                if let Some(value) = item.pointer("/text_item/text").and_then(Value::as_str) {
+                    text.push_str(value);
+                }
+            }
+            _ => files.extend(media::item_media(item)),
+        }
+    }
     let sender = msg
         .get("from_user_id")
         .and_then(Value::as_str)
@@ -344,14 +430,14 @@ fn inbound(msg: &Value) -> Option<Inbound> {
         .get("context_token")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
-    let (Some(text), Some(sender), Some(ctx), Some(1)) = (
-        text,
-        sender,
-        ctx,
-        msg.get("message_type").and_then(Value::as_i64),
-    ) else {
+    let (Some(sender), Some(ctx), Some(1)) =
+        (sender, ctx, msg.get("message_type").and_then(Value::as_i64))
+    else {
         return Some(Inbound::Ignored { id });
     };
+    if text.trim().is_empty() && files.is_empty() {
+        return Some(Inbound::Ignored { id });
+    }
     let group = match msg.get("group_id") {
         None | Some(Value::Null) => None,
         Some(Value::String(group)) if group.is_empty() => None,
@@ -361,9 +447,11 @@ fn inbound(msg: &Value) -> Option<Inbound> {
     Some(Inbound::Text(Message {
         id,
         sender: sender.into(),
-        text: text.into(),
+        text: text.trim().to_owned(),
         reply_to: ctx.into(),
         group,
+        media: files,
+        reference: None,
     }))
 }
 
@@ -528,6 +616,48 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    fn parsed(items: serde_json::Value) -> Option<Message> {
+        match inbound(&serde_json::json!({"message_id":"m", "message_type":1,
+            "from_user_id":"u", "context_token":"c", "item_list":items}))?
+        {
+            Inbound::Text(message) => Some(message),
+            Inbound::Ignored { .. } => None,
+        }
+    }
+
+    #[test]
+    fn voice_transcripts_quotes_and_files_come_through() {
+        use base64::Engine as _;
+        let key = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+        let voice = parsed(serde_json::json!([{"type":3,"voice_item":{"encode_type":6,
+            "text":"call me","media":{"encrypt_query_param":"p","aes_key":key}}}]))
+        .unwrap();
+        assert_eq!(voice.text, "");
+        assert_eq!(voice.media.len(), 1);
+        assert_eq!(voice.media[0].transcript.as_deref(), Some("call me"));
+
+        let quote = parsed(
+            serde_json::json!([{"type":1,"text_item":{"text":"and this?"},
+            "ref_msg":{"title":"Alex","message_item":{"type":2,"image_item":{
+                "media":{"encrypt_query_param":"q","aes_key":key}}}}}]),
+        )
+        .unwrap();
+        assert_eq!(quote.text, "[Quoting: Alex | [image]]\nand this?");
+        // The quoted image is fetched like the message's own.
+        assert_eq!(quote.media.len(), 1);
+        assert_eq!(quote.media[0].kind, scv_channels::MediaKind::Image);
+
+        let quoted_text = parsed(serde_json::json!([{"type":1,"text_item":{"text":"yes"},
+            "ref_msg":{"message_item":{"type":1,"text_item":{"text":"ready?"}}}}]))
+        .unwrap();
+        assert_eq!(quoted_text.text, "[Quoting: ready?]\nyes");
+        assert!(quoted_text.media.is_empty());
+
+        // Items without text or a file leave nothing to answer.
+        assert!(parsed(serde_json::json!([{"type":11,"tool_call_start_item":{}}])).is_none());
+        assert!(parsed(serde_json::json!([{"type":2,"image_item":{"media":{}}}])).is_none());
     }
 
     #[test]

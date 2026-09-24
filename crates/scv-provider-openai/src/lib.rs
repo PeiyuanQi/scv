@@ -1,13 +1,21 @@
 //! Streaming OpenAI-compatible Responses provider.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures_util::StreamExt;
 use reqwest::Client;
 use scv_core::{
-    AssistantResponse, Message, Provider, ProviderError, ProviderErrorKind, ProviderRequest,
-    TextDeltaSink, ToolCall, Usage,
+    AssistantResponse, ImageInput, Message, Provider, ProviderError, ProviderErrorKind,
+    ProviderRequest, TextDeltaSink, ToolCall, Usage,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -51,6 +59,13 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 /// Provider-supplied error text is bounded before it reaches clients.
 const MAX_ERROR_CHARS: usize = 300;
 
+/// The largest image file sent inline; a bigger one is described instead.
+pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+/// Images one request shows, newest first; older ones are described.
+const MAX_REQUEST_IMAGES: usize = 8;
+/// Image types the Responses API reads.
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
 /// Why one request attempt failed, and whether another attempt may help.
 struct AttemptFailure {
     error: ProviderError,
@@ -92,6 +107,9 @@ pub struct OpenAiProvider {
     /// Provider-executed tools, such as hosted web search, sent alongside the
     /// function tools.
     hosted_tools: Vec<Value>,
+    /// Whether images in user messages are sent as image input. Cleared for
+    /// the provider's lifetime once the endpoint rejects an image.
+    image_input: AtomicBool,
 }
 
 impl OpenAiProvider {
@@ -125,7 +143,15 @@ impl OpenAiProvider {
             limits,
             headers,
             hosted_tools: Vec::new(),
+            image_input: AtomicBool::new(true),
         })
+    }
+
+    /// Whether images in user messages go to the model as image input
+    /// (the default) or only as a short note naming each one.
+    pub fn with_image_input(self, enabled: bool) -> Self {
+        self.image_input.store(enabled, Ordering::Relaxed);
+        self
     }
 
     /// Offers the endpoint's hosted Responses `web_search` tool. The provider
@@ -135,8 +161,10 @@ impl OpenAiProvider {
         self
     }
 
-    fn request_body(&self, request: &ProviderRequest) -> Value {
-        let input = response_input(&request.messages);
+    /// The request, and whether it carries image input.
+    fn request_body(&self, request: &ProviderRequest) -> (Value, bool) {
+        let images = self.image_input.load(Ordering::Relaxed);
+        let (input, shown) = response_input(&request.messages, images);
         // Tool schemas leave optional fields out of `required`. Strict mode,
         // the Responses default, would make the model fill every field anyway.
         let mut tools: Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
@@ -145,7 +173,7 @@ impl OpenAiProvider {
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
-        body
+        (body, shown > 0)
     }
 
     async fn response_error(
@@ -521,7 +549,7 @@ impl Provider for OpenAiProvider {
         deltas: Arc<dyn TextDeltaSink>,
         cancellation: CancellationToken,
     ) -> Result<AssistantResponse, ProviderError> {
-        let body = self.request_body(&request);
+        let (mut body, mut with_images) = self.request_body(&request);
         let mut retry = 0;
         loop {
             let mut emitted = false;
@@ -532,6 +560,17 @@ impl Provider for OpenAiProvider {
                 Ok(response) => return Ok(response),
                 Err(failure) => failure,
             };
+            // An endpoint or model without image input rejects the request;
+            // describe images from then on and ask again.
+            if with_images && !emitted && !failure.transient && rejects_images(&failure.error) {
+                tracing::warn!(
+                    "provider rejected image input ({}); sending image notes instead",
+                    failure.error.message
+                );
+                self.image_input.store(false, Ordering::Relaxed);
+                (body, with_images) = self.request_body(&request);
+                continue;
+            }
             let attempts = retry + 1;
             // A retry after streamed output would repeat it, so only a
             // failure before any output is retried.
@@ -573,17 +612,41 @@ fn gave_up(error: ProviderError, attempts: usize) -> ProviderError {
     )
 }
 
-/// Replays the conversation as Responses input items.
+/// Whether a provider error is about image input, such as a model without
+/// vision or an image it cannot read.
+fn rejects_images(error: &ProviderError) -> bool {
+    error.message.to_ascii_lowercase().contains("image")
+}
+
+/// Replays the conversation as Responses input items, and counts the images
+/// it shows.
 ///
 /// The Responses API answers a `function_call_output` only when the input also
 /// carries its `function_call`, and rejects a `function_call` that has no
 /// output, so every call and output are emitted as a pair. A turn cancelled
 /// between a call and its result leaves an unanswered call in history, which
 /// is closed with a synthetic failure before the next message.
-fn response_input(messages: &[Message]) -> Vec<Value> {
+///
+/// With `images`, the newest [`MAX_REQUEST_IMAGES`] images of user messages
+/// go as `input_image` items; the rest, and every image without `images`,
+/// become a note in the message text.
+fn response_input(messages: &[Message], images: bool) -> (Vec<Value>, usize) {
     let mut input = Vec::with_capacity(messages.len());
     let mut unanswered: Vec<&str> = Vec::new();
-    for message in messages {
+    let mut budget = if images { MAX_REQUEST_IMAGES } else { 0 };
+    // Newest images first: count back from the end to know which to show.
+    let mut show = vec![false; messages.len()];
+    for (index, message) in messages.iter().enumerate().rev() {
+        if let Message::User { images, .. } = message
+            && !images.is_empty()
+            && budget >= images.len()
+        {
+            budget -= images.len();
+            show[index] = true;
+        }
+    }
+    let mut shown = 0;
+    for (index, message) in messages.iter().enumerate() {
         match message {
             Message::Tool {
                 call_id,
@@ -615,14 +678,62 @@ fn response_input(messages: &[Message]) -> Vec<Value> {
                     unanswered.push(&call.id);
                 }
             }
-            Message::User { content } | Message::HistoryNote { content } => {
+            Message::User { content, images } if !images.is_empty() => {
+                close_unanswered(&mut input, &mut unanswered);
+                let (item, count) = user_with_images(content, images, show[index]);
+                shown += count;
+                input.push(item);
+            }
+            Message::User { content, .. } | Message::HistoryNote { content } => {
                 close_unanswered(&mut input, &mut unanswered);
                 input.push(json!({"role":"user","content":content}));
             }
         }
     }
     close_unanswered(&mut input, &mut unanswered);
-    input
+    (input, shown)
+}
+
+/// A user message with images: `input_text` plus one `input_image` per image
+/// when `show`, each read from disk now. An image that cannot be shown is
+/// named in the text instead, and the count says how many were shown.
+fn user_with_images(content: &str, images: &[ImageInput], show: bool) -> (Value, usize) {
+    let mut notes = String::new();
+    let mut parts = Vec::new();
+    for image in images {
+        let name = image
+            .path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        let data = show.then(|| image_data_url(image)).flatten();
+        match data {
+            Some(url) => parts.push(json!({"type":"input_image","image_url":url})),
+            None if !show => notes.push_str(&format!("\n[image {name}: not shown to you here]")),
+            None => notes.push_str(&format!("\n[image {name}: could not be read]")),
+        }
+    }
+    let shown = parts.len();
+    let mut content_parts = vec![json!({"type":"input_text","text":format!("{content}{notes}")})];
+    content_parts.extend(parts);
+    (json!({"role":"user","content":content_parts}), shown)
+}
+
+/// `data:` URL of an image the Responses API reads, or `None` when the file
+/// is gone, too large, or of another type.
+fn image_data_url(image: &ImageInput) -> Option<String> {
+    if !IMAGE_TYPES.contains(&image.mime.as_str()) {
+        return None;
+    }
+    let metadata = std::fs::metadata(&image.path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(&image.path).ok()?;
+    Some(format!(
+        "data:{};base64,{}",
+        image.mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 fn close_unanswered(input: &mut Vec<Value>, unanswered: &mut Vec<&str>) {
@@ -870,9 +981,7 @@ mod tests {
     }
 
     fn user(content: &str) -> Message {
-        Message::User {
-            content: content.into(),
-        }
+        Message::user(content)
     }
 
     fn assistant(content: &str, tool_calls: Vec<ToolCall>) -> Message {
@@ -902,7 +1011,7 @@ mod tests {
             user("thanks"),
         ];
         assert_eq!(
-            response_input(&messages),
+            response_input(&messages, true).0,
             vec![
                 json!({"role":"user","content":"summarize README"}),
                 fc("c1", "read", r#"{"path":"README.md"}"#),
@@ -930,7 +1039,7 @@ mod tests {
             tool("b", "read", "B"),
         ];
         assert_eq!(
-            response_input(&messages),
+            response_input(&messages, true).0,
             vec![
                 json!({"role":"user","content":"compare"}),
                 json!({"role":"assistant","content":"Reading both."}),
@@ -956,7 +1065,7 @@ mod tests {
             tool("a", "bash", "ok"),
             user("never mind"),
         ];
-        let input = response_input(&messages);
+        let input = response_input(&messages, true).0;
         assert_eq!(input[3], out("a", "ok"));
         assert_eq!(input[4]["type"], "function_call_output");
         assert_eq!(input[4]["call_id"], "b");
@@ -980,7 +1089,7 @@ mod tests {
             assistant("", Vec::new()),
         ];
         assert_eq!(
-            response_input(&messages),
+            response_input(&messages, true).0,
             vec![
                 json!({"role":"user","content":"[earlier]"}),
                 fc("x", "read", "{}"),
@@ -1001,7 +1110,7 @@ mod tests {
             Default::default(),
         )
         .unwrap();
-        let body = provider.request_body(&ProviderRequest {
+        let (body, _) = provider.request_body(&ProviderRequest {
             system_prompt: "system".into(),
             messages: vec![
                 user("hi"),
@@ -1032,7 +1141,7 @@ mod tests {
             "required":["path"],
             "additionalProperties":false
         });
-        let body = provider.request_body(&ProviderRequest {
+        let (body, _) = provider.request_body(&ProviderRequest {
             system_prompt: String::new(),
             messages: vec![user("hi")],
             tools: vec![scv_core::ToolSpec {
@@ -1051,6 +1160,65 @@ mod tests {
                 "strict":false
             }])
         );
+    }
+
+    fn image_message(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Message {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        Message::User {
+            content: format!("look at {name}"),
+            images: vec![ImageInput {
+                path,
+                mime: "image/png".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn user_images_become_input_images_read_at_request_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let messages = vec![image_message(dir.path(), "a.png", b"png-bytes")];
+        let (input, shown) = response_input(&messages, true);
+        assert_eq!(shown, 1);
+        assert_eq!(
+            input[0],
+            json!({"role":"user","content":[
+                {"type":"input_text","text":"look at a.png"},
+                {"type":"input_image","image_url":"data:image/png;base64,cG5nLWJ5dGVz"},
+            ]})
+        );
+        // Without image input, or once the file is gone, the model gets a note.
+        let (input, shown) = response_input(&messages, false);
+        assert_eq!(shown, 0);
+        assert_eq!(
+            input[0]["content"][0]["text"],
+            "look at a.png\n[image a.png: not shown to you here]"
+        );
+        std::fs::remove_file(dir.path().join("a.png")).unwrap();
+        let (input, shown) = response_input(&messages, true);
+        assert_eq!(shown, 0);
+        assert_eq!(
+            input[0]["content"][0]["text"],
+            "look at a.png\n[image a.png: could not be read]"
+        );
+    }
+
+    #[test]
+    fn only_the_newest_images_are_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let messages: Vec<_> = (0..MAX_REQUEST_IMAGES + 2)
+            .map(|index| image_message(dir.path(), &format!("{index}.png"), b"x"))
+            .collect();
+        let (input, shown) = response_input(&messages, true);
+        assert_eq!(shown, MAX_REQUEST_IMAGES);
+        assert_eq!(input[0]["content"].as_array().unwrap().len(), 1);
+        assert!(
+            input[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("not shown to you here]")
+        );
+        assert_eq!(input.last().unwrap()["content"][1]["type"], "input_image");
     }
 
     mod stream_errors {
@@ -1208,6 +1376,78 @@ mod tests {
         }
 
         const FAST: Duration = Duration::from_millis(10);
+
+        #[tokio::test]
+        async fn a_rejected_image_is_described_instead_and_the_request_repeated() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&bodies);
+            let rejection = status(
+                "400 Bad Request",
+                "",
+                r#"{"error":{"message":"Invalid content type. image_url is only supported by certain models.","code":null}}"#,
+            );
+            tokio::spawn(async move {
+                for response in [rejection, hello(), hello()] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 8192];
+                    let body = loop {
+                        let read = stream.read(&mut buffer).await.unwrap();
+                        request.extend_from_slice(&buffer[..read]);
+                        let text = String::from_utf8_lossy(&request).into_owned();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length: usize = text[..end]
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse().unwrap())
+                                })
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break serde_json::from_slice::<Value>(&request[end + 4..])
+                                    .unwrap();
+                            }
+                        }
+                    };
+                    seen.lock().unwrap().push(body);
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    let _ = stream.shutdown().await;
+                }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let messages = vec![super::image_message(dir.path(), "a.png", b"png")];
+            let provider = provider(base, 2, FAST);
+            let complete = |messages: Vec<Message>| {
+                provider.complete(
+                    ProviderRequest {
+                        system_prompt: String::new(),
+                        messages,
+                        tools: Vec::new(),
+                    },
+                    Arc::new(Recorder::default()) as Arc<dyn TextDeltaSink>,
+                    CancellationToken::new(),
+                )
+            };
+            complete(messages.clone()).await.unwrap();
+            // The session remembers: the next request describes the image.
+            complete(messages).await.unwrap();
+            let bodies = bodies.lock().unwrap();
+            assert_eq!(bodies.len(), 3);
+            assert_eq!(bodies[0]["input"][0]["content"][1]["type"], "input_image");
+            for body in &bodies[1..] {
+                let content = body["input"][0]["content"].as_array().unwrap();
+                assert_eq!(content.len(), 1, "{body}");
+                assert!(
+                    content[0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("[image a.png: not shown to you here]")
+                );
+            }
+        }
 
         #[tokio::test]
         async fn an_overload_is_retried_and_the_second_attempt_succeeds() {
@@ -1568,14 +1808,14 @@ mod tests {
             messages: vec![user("latest serde?")],
             tools,
         };
-        let body = provider.request_body(&request(vec![scv_core::ToolSpec {
+        let (body, _) = provider.request_body(&request(vec![scv_core::ToolSpec {
             name: "read".into(),
             description: "Read".into(),
             parameters: json!({"type":"object"}),
         }]));
         assert_eq!(body["tools"][0]["name"], "read");
         assert_eq!(body["tools"][1], json!({"type":"web_search"}));
-        let body = provider.request_body(&request(Vec::new()));
+        let (body, _) = provider.request_body(&request(Vec::new()));
         assert_eq!(body["tools"], json!([{"type":"web_search"}]));
     }
 

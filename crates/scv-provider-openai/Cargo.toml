@@ -9,6 +9,7 @@ description = "OpenAI-compatible streaming provider for SCV"
 readme = "../../README.md"
 
 [dependencies]
+base64.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 scv-core.workspace = true
@@ -18,3 +19,6 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -213,6 +213,7 @@ impl Server {
             request_id: "turn".into(),
             session_id,
             prompt: prompt.into(),
+            attachments: Vec::new(),
         })
         .await;
     }

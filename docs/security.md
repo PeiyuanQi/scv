@@ -303,6 +303,24 @@ forwarded as diagnostics to the chat. Status reports identity and live health,
 with sanitized errors and successful-contact timestamps, never bearer tokens.
 Saved credentials alone do not establish connectivity.
 
+Files chat users send are untrusted input. The bridge downloads them only
+from the platform (HTTPS on the WeChat CDN's `qq.com` hosts, or the Feishu
+resource API on the brand's own host), within per-account size limits, and
+from senders other than the owner only images; it saves them with mode `0600`
+under `$SCV_HOME/state/media` behind random prefixes and sanitized names,
+never executes them, and removes them after the retention period. A
+tool-free session's model never sees their paths. Images reach the model as
+image input and can carry injected instructions like any other content.
+
+The owner's model may send files back with `chat_attach`. Because a prompt
+could ask it to mail out secrets, the tool refuses the SCV instance directory
+(except received media), credential and key locations in the user's home,
+host secrets, and secret-like names, all after resolving symlinks, and sends
+only a private copy it makes in the media outbox; the bridge sends nothing
+from anywhere else. With `bash` available the model could still copy data
+out another way, so this narrows accidents and simple injections rather than
+isolating anything; see [tools](tools.md#sending-files-to-a-chat-chat_attach).
+
 Delivery state is bound to a SHA-256 fingerprint of the account's identity:
 for WeChat the normalized API origin and authenticated bot/user IDs, for
 Feishu the brand, app ID, and owner `open_id` (a rotated app secret keeps the

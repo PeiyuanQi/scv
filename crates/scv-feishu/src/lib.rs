@@ -7,9 +7,12 @@
 //! socket events are acknowledged only once the bridge has made their claims
 //! durable, which is when it asks for the next batch.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use scv_channels::{Batch, Inbound, Outbound, SendOutcome, Transport};
+use scv_channels::{
+    Batch, Downloaded, Inbound, Media, MediaKind, MediaOptions, Outbound, OutboundFile, Resolved,
+    SendOutcome, Transport,
+};
 pub use scv_channels::{ToolOwner, owner_turn_timeout};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
@@ -22,7 +25,7 @@ pub mod login;
 pub mod socket;
 pub mod state;
 
-use api::{Api, Attempt, Endpoints, Refusal};
+use api::{Api, Attempt, Endpoints, Refusal, Resource, UploadKind, Uploaded};
 use inbound::{Checkpoint, Event, Received};
 
 /// The channel name this crate serves: `scv channels <command> feishu`.
@@ -38,13 +41,20 @@ const CATCH_UP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// Chats listed, and pages of 50 messages per chat, in one catch-up.
 const CATCH_UP_CHATS: usize = 32;
 const CATCH_UP_PAGES: usize = 4;
+/// Messages taken from one forwarded bundle.
+const MAX_FORWARDED: usize = 50;
+/// Longest context a quoted or forwarded message adds, in bytes.
+const MAX_CONTEXT_BYTES: usize = 16 * 1024;
+/// Largest image Feishu accepts for sending; bigger ones go as files.
+const MAX_SEND_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Run one account until cancelled. Only a live connection reports healthy.
 /// Cancellation drops all owned I/O and sessions; no tasks are spawned.
 ///
 /// `tool_owner` is the authenticated owner when the account grants its owner
-/// remote tools; every other sender stays tool-free. `link` connects the
-/// account to the daemon's hub.
+/// remote tools; every other sender stays tool-free. `media` is where files
+/// go and how large they may be, and `link` connects the account to the
+/// daemon's hub.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
     credentials: &state::Account,
@@ -52,6 +62,7 @@ pub async fn run_supervised(
     workspace: &Path,
     socket: &Path,
     tool_owner: Option<&ToolOwner>,
+    media: &MediaOptions,
     cancellation: CancellationToken,
     report: Arc<dyn Fn(bool) + Send + Sync>,
     link: scv_channels::hub::Link,
@@ -67,6 +78,7 @@ pub async fn run_supervised(
             workspace,
             socket,
             tool_owner,
+            media,
             &store,
             |saved| Ok(saved == credentials),
             report.as_ref(),
@@ -301,6 +313,184 @@ impl Transport for Feishu {
         }
         unreachable!("delivery loop returns after success or final attempt")
     }
+
+    async fn download(&self, media: &Media, max_bytes: u64) -> Result<Downloaded> {
+        let resource: Resource =
+            serde_json::from_str(&media.source).map_err(|_| anyhow!("bad media source"))?;
+        let (bytes, mime) = self.api.download(&resource, max_bytes).await?;
+        Ok(Downloaded { bytes, mime })
+    }
+
+    /// Fetch the message a reply quotes, and the messages a forwarded bundle
+    /// holds, as text before the message and their files.
+    async fn resolve(&self, message_id: &str, reference: &str) -> Result<Resolved> {
+        let reference: inbound::Reference =
+            serde_json::from_str(reference).map_err(|_| anyhow!("bad message reference"))?;
+        let mut resolved = Resolved::default();
+        if let Some(parent) = &reference.parent {
+            let items = self.api.message(parent).await?;
+            if let Some((text, media)) = items.first().and_then(item_content) {
+                let text = match (text.is_empty(), media.first()) {
+                    (false, _) => text,
+                    (true, Some(file)) => match file.kind {
+                        MediaKind::Image => "an image".into(),
+                        MediaKind::Audio => "a voice message".into(),
+                        MediaKind::Video => "a video".into(),
+                        MediaKind::File => "a file".into(),
+                    },
+                    (true, None) => "a message".into(),
+                };
+                resolved.context = format!("[Quoting: {}]", bounded(&text, MAX_CONTEXT_BYTES));
+                resolved.media.extend(media);
+            }
+        }
+        if reference.forward {
+            let items = self.api.message(message_id).await?;
+            let mut lines = vec!["[The forwarded messages:]".to_owned()];
+            let mut bytes = 0;
+            for item in items
+                .iter()
+                .filter(|item| {
+                    item.get("upper_message_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(message_id)
+                })
+                .take(MAX_FORWARDED)
+            {
+                let Some((text, media)) = item_content(item) else {
+                    continue;
+                };
+                if bytes + text.len() > MAX_CONTEXT_BYTES {
+                    lines.push("[more forwarded messages were left out]".into());
+                    break;
+                }
+                bytes += text.len();
+                if !text.is_empty() {
+                    lines.push(format!("- {text}"));
+                }
+                resolved.media.extend(media);
+            }
+            if !resolved.context.is_empty() {
+                resolved.context.push_str("\n\n");
+            }
+            resolved.context.push_str(&lines.join("\n"));
+        }
+        Ok(resolved)
+    }
+
+    /// Upload the file, then send it like a text part: replying to its
+    /// message, or to the user directly, with the file's stable `uuid`.
+    async fn send_file(
+        &self,
+        file: &OutboundFile<'_>,
+        report: &(dyn Fn(bool) + Send + Sync),
+    ) -> Result<SendOutcome> {
+        let path = file.path.to_owned();
+        let bytes = tokio::task::spawn_blocking(move || {
+            scv_channels::media::read_bounded(&path, scv_channels::media::MAX_REPLY_FILE_BYTES)
+        })
+        .await??;
+        let image = file.kind == MediaKind::Image && bytes.len() as u64 <= MAX_SEND_IMAGE_BYTES;
+        let upload_kind = if image {
+            UploadKind::Image
+        } else {
+            UploadKind::File(file_type(file.name))
+        };
+        let mut delay = Duration::from_secs(1);
+        let mut key = None;
+        for attempt in 0..3 {
+            match self.api.upload(upload_kind, file.name, bytes.clone()).await {
+                Uploaded::Key(uploaded) => {
+                    key = Some(uploaded);
+                    break;
+                }
+                Uploaded::Refused(reason) => {
+                    tracing::warn!("Feishu refused a file upload ({reason}); not retrying");
+                    return Ok(SendOutcome::Rejected);
+                }
+                Uploaded::Retry(reason) => {
+                    tracing::warn!(attempt, "Feishu file upload failed: {reason}")
+                }
+            }
+            report(false);
+            if attempt == 2 {
+                anyhow::bail!("Feishu could not upload the file");
+            }
+            tokio::time::sleep(delay).await;
+            delay *= 2;
+        }
+        let key = key.ok_or_else(|| anyhow!("Feishu could not upload the file"))?;
+        let (msg_type, content) = if image {
+            ("image", serde_json::json!({"image_key": key}))
+        } else {
+            ("file", serde_json::json!({"file_key": key}))
+        };
+        let mut delay = Duration::from_secs(1);
+        for attempt in 0..3 {
+            match self
+                .api
+                .send_message(file.to, file.reply_to, msg_type, &content, file.client_id)
+                .await
+            {
+                Attempt::Delivered => return Ok(SendOutcome::Delivered),
+                Attempt::Refused(reason) => {
+                    tracing::warn!("Feishu refused a file message ({reason}); not retrying");
+                    return Ok(SendOutcome::Rejected);
+                }
+                Attempt::Retry(reason) => {
+                    tracing::warn!(attempt, "Feishu file message failed: {reason}")
+                }
+            }
+            report(false);
+            if attempt == 2 {
+                anyhow::bail!("Feishu could not deliver the file");
+            }
+            tokio::time::sleep(delay).await;
+            delay *= 2;
+        }
+        unreachable!("delivery loop returns after success or final attempt")
+    }
+}
+
+/// The text and files of a message from the message API.
+fn item_content(item: &serde_json::Value) -> Option<(String, Vec<Media>)> {
+    let id = item.get("message_id").and_then(serde_json::Value::as_str)?;
+    let kind = item.get("msg_type").and_then(serde_json::Value::as_str)?;
+    let content = item
+        .pointer("/body/content")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|content| serde_json::from_str(content).ok())
+        .unwrap_or_default();
+    let parsed = inbound::parse_content(id, kind, &content)?;
+    Some((parsed.text.trim().to_owned(), parsed.media))
+}
+
+/// Feishu's `file_type` for a file named `name`.
+fn file_type(name: &str) -> &'static str {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match extension.as_str() {
+        "pdf" => "pdf",
+        "doc" | "docx" => "doc",
+        "xls" | "xlsx" => "xls",
+        "ppt" | "pptx" => "ppt",
+        _ => "stream",
+    }
+}
+
+/// `text` cut to at most `max` bytes on a character boundary.
+fn bounded(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 fn batch(messages: Vec<Inbound>, before: &Checkpoint, after: &Checkpoint) -> Batch {

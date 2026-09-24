@@ -5,6 +5,7 @@
 //! state and locks under `state/channels/<channel>`. The channel supplies the
 //! credential type and how credentials bind delivery state.
 
+use crate::media::{MediaKind, MediaSettings};
 use anyhow::{Result, anyhow, bail};
 use scv_client::Layout;
 pub use scv_protocol::RemoteTools;
@@ -28,6 +29,9 @@ pub struct AccountSettings {
     pub workspace: Option<PathBuf>,
     /// Remote tool authority; only local CLI/daemon control can change it.
     pub remote_tools: RemoteTools,
+    /// Limits on files senders send.
+    #[serde(skip_serializing_if = "MediaSettings::is_default")]
+    pub media: MediaSettings,
 }
 
 impl Default for AccountSettings {
@@ -36,6 +40,7 @@ impl Default for AccountSettings {
             enabled: true,
             workspace: None,
             remote_tools: RemoteTools::None,
+            media: MediaSettings::default(),
         }
     }
 }
@@ -67,6 +72,28 @@ pub struct PendingDelivery {
     /// A notice that is not worth holding when the transport refuses it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transient: bool,
+    /// Files sent after the text, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PendingFile>,
+    /// The first file not yet sent.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub next_file: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// A file waiting to be sent: a private copy in the media outbox, removed
+/// once it is sent or refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingFile {
+    pub path: String,
+    pub name: String,
+    pub mime: String,
+    pub kind: MediaKind,
+    /// Stable across retries of this file, including after a restart.
+    pub client_id: String,
 }
 
 /// Written before connecting or submitting a turn. Recovery must never replay it.
@@ -536,6 +563,18 @@ impl<C: Credentials> Store<C> {
                     RemoteTools::None => "none",
                     RemoteTools::Owner => "owner",
                 });
+                // Default media limits stay out of the file.
+                if settings.media.is_default() {
+                    table.remove("media");
+                } else {
+                    let number =
+                        |value: u64| toml_edit::value(i64::try_from(value).unwrap_or(i64::MAX));
+                    let mut media = Table::new();
+                    media["owner_max_mib"] = number(settings.media.owner_max_mib);
+                    media["others_image_max_mib"] = number(settings.media.others_image_max_mib);
+                    media["keep_days"] = number(settings.media.keep_days);
+                    table["media"] = Item::Table(media);
+                }
             }
             None => {
                 let Some(channels) = document.get_mut("channels").and_then(Item::as_table_mut)
@@ -844,9 +883,26 @@ mod tests {
             enabled: false,
             workspace: Some(directory.path().join("workspace")),
             remote_tools: RemoteTools::Owner,
+            media: MediaSettings::default(),
         };
         store.save_settings("default", &settings).unwrap();
         assert!(store.settings("default").unwrap() == settings);
+        // Default media limits are not written; changed ones round-trip.
+        assert!(!std::fs::read_to_string(&config).unwrap().contains("media"));
+        let limited = AccountSettings {
+            media: MediaSettings {
+                owner_max_mib: 10,
+                others_image_max_mib: 0,
+                keep_days: 2,
+            },
+            ..settings.clone()
+        };
+        store.save_settings("default", &limited).unwrap();
+        assert!(store.settings("default").unwrap() == limited);
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.contains("owner_max_mib = 10"), "{text}");
+        store.save_settings("default", &settings).unwrap();
+
         let text = std::fs::read_to_string(&config).unwrap();
         assert!(text.starts_with(original), "{text}");
         assert!(
