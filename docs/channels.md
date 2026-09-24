@@ -1,23 +1,32 @@
-# ClawBot / WeChat iLink
+# Channels
 
-Status: supported local bridge for the SCV daemon
+Status: supported local bridges for the SCV daemon
 
-SCV connects a local workspace to WeChat ClawBot through the iLink HTTP API.
-The bridge runs as a supervised component inside the single SCV daemon, which
-remains authoritative for sessions, provider selection, policy, and turn
+A channel connects chat accounts to a local workspace. One command manages
+every channel: `scv channels <command> <channel>`. WeChat, through its ClawBot
+iLink HTTP API, is the channel today; Feishu/Lark is planned in the
+[channels plan](channels-plan.md).
+
+Each account runs as a supervised component inside the single SCV daemon,
+which remains authoritative for sessions, provider selection, policy, and turn
 execution. `scv-server` depends on `scv-clawbot`, which uses `scv-client` and
 `scv-protocol`; the bridge does not depend on the server crate.
 
 ## User workflow
 
 ```text
-scv clawbot login [--account NAME]
-scv clawbot run --workspace PATH [--account NAME] [--remote-tools none|owner]
-scv clawbot stop [--account NAME]
-scv clawbot status [--account NAME]
-scv clawbot logout [--account NAME]
+scv channels login wechat [--account NAME] [--login-url URL]
+scv channels run wechat --workspace PATH [--account NAME] [--remote-tools none|owner]
+scv channels stop wechat [--account NAME]
+scv channels status [wechat] [--account NAME]
+scv channels logout wechat [--account NAME]
 scv reload
 ```
+
+`--account` defaults to `default`, except for `status`, which lists every
+channel and account unless narrowed. `--login-url` is WeChat's iLink login
+origin (default `https://ilinkai.weixin.qq.com`). Daemon status names each
+account `<channel>:<account>`, such as `wechat:default`, with a `channel` field.
 
 `login` is explicit: it renders the QR code and stores credentials without
 printing the token. Saved accounts autostart under the daemon by default;
@@ -35,7 +44,7 @@ it persists disablement, cancels and joins the component, then removes local
 credentials, delivery state, and settings. The API has no documented remote
 token-revocation operation.
 
-`status` queries the running daemon, showing its PID/version and the selected
+`status` queries the running daemon, showing its PID/version and each selected
 account's identity, enabled setting, effective `remote_tools` authority, health
 state, restart count, sanitized error, and last successful authenticated,
 validated `getupdates` timestamp.
@@ -51,8 +60,8 @@ updated credentials or settings. Unexpected exits retry with exponential
 backoff from 1 to 60 seconds. SIGTERM and Ctrl+C cancel and join components and daemon sessions with
 bounded shutdown. All long-running integrations use server supervision.
 
-Settings live at `$SCV_HOME/clawbot/settings/<account>.json` (`SCV_HOME` defaults
-to `~/.scv`):
+Settings live at `$SCV_HOME/channels/wechat/settings/<account>.json`
+(`SCV_HOME` defaults to `~/.scv`):
 
 ```json
 {"enabled":true,"workspace":"/absolute/path/to/workspace"}
@@ -62,7 +71,7 @@ Missing settings default to enabled. An omitted or null workspace uses the
 daemon workspace. `run --account NAME --workspace PATH` persists an explicit
 workspace. To opt out offline, create or edit the settings to contain
 `{"enabled":false}` before starting the daemon. Keep the file mode `0600` and
-its ClawBot parent directories mode `0700`. Login honors this opt-out.
+its channel parent directories mode `0700`. Login honors this opt-out.
 
 Settings reject unknown fields. The supervisor reads credentials and settings
 together through `state::account_snapshot` under a short transaction lock.
@@ -100,7 +109,22 @@ five seconds, so they wait out a running bridge's state commit instead of
 failing. Lock files remain in place after logout so open descriptors cannot
 refer to different lock inodes.
 
-## iLink contract
+## State saved before channels
+
+Releases before `0.1.35` kept WeChat state in `$SCV_HOME/clawbot`. The daemon,
+at every reconciliation, and each `scv channels` command move that directory to
+`$SCV_HOME/channels/wechat` in one rename, so credentials, settings, cursor,
+deduplicated IDs, claims, pending and held replies, and the credential binding
+arrive unchanged. The move holds every account's lifetime and transaction locks
+from the old directory: a bridge or login of an older binary still using them
+makes it fail with a retry message instead of racing it. When both directories
+exist, nothing moves: the daemon reports a failed `wechat:discovery-error`
+component and stops its accounts, and `scv channels status` prints both paths
+so the user can keep one and move the other aside. The earliest single-file
+credentials, `$SCV_HOME/clawbot.toml`, still become the `default` account on
+first read.
+
+## WeChat iLink contract
 
 Use the returned `baseurl` after login, falling back to
 `https://ilinkai.weixin.qq.com`. Login uses `GET
@@ -243,17 +267,17 @@ CLI or daemon control can change:
   configuration when the component starts. Logout resets the setting
   to `none` before deleting credentials, so a later login never inherits it.
 
-`scv clawbot run --remote-tools owner` reports whether the daemon actually
-applied the grant; an older daemon or a login without an owner ID leaves it
-inactive with a warning. Delegated `agent_claude` and `agent_codex` calls need
+`scv channels run wechat --remote-tools owner` reports whether the daemon
+actually applied the grant; a login without an owner ID leaves it inactive with
+a warning. Delegated `agent_claude` and `agent_codex` calls need
 their CLIs signed in for SCV first; see `scv agents login` in the
 [tools reference](tools.md#signing-in-delegated-agents).
 
 The bridge never invokes `scv exec --yes`.
 
-Credentials are stored at `$SCV_HOME/clawbot/accounts/<account>.json`; cursor
-and message IDs, in-flight claims, pending replies, and held replies are stored
-at `$SCV_HOME/clawbot/state/<account>.json`. Claims and pending replies keep the
+Credentials are stored at `$SCV_HOME/channels/wechat/accounts/<account>.json`;
+cursor and message IDs, in-flight claims, pending replies, and held replies are
+stored at `$SCV_HOME/channels/wechat/state/<account>.json`. Claims and pending replies keep the
 single-object form older bridges wrote while at most one of each exists, and
 become lists when several do; a bridge older than `0.1.23` cannot read state
 that holds several. Credentials, settings, and delivery

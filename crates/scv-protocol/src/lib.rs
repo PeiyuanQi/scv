@@ -21,6 +21,9 @@ pub enum ComponentState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComponentHealth {
     pub id: String,
+    /// The chat channel this account belongs to, such as `wechat`.
+    #[serde(default)]
+    pub channel: String,
     pub account: String,
     pub bot_id: Option<String>,
     pub user_id: Option<String>,
@@ -96,7 +99,10 @@ pub struct DelegationInfo {
 pub enum DaemonCommand {
     Status,
     Reload,
-    ClawbotSet {
+    /// Enable or disable one channel account, optionally changing its
+    /// workspace and remote tool grant.
+    ChannelSet {
+        channel: String,
         account: String,
         enabled: bool,
         workspace: Option<String>,
@@ -104,7 +110,9 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remote_tools: Option<RemoteTools>,
     },
-    ClawbotLogout {
+    /// Stop one channel account and remove its credentials and state.
+    ChannelLogout {
+        channel: String,
         account: String,
     },
     /// List running delegations; `all` includes orphans awaiting cleanup.
@@ -693,17 +701,18 @@ mod tests {
     #[test]
     fn remote_tools_fields_are_additive() {
         let legacy: DaemonCommand = serde_json::from_str(
-            r#"{"action":"clawbot_set","account":"a","enabled":true,"workspace":null}"#,
+            r#"{"action":"channel_set","channel":"wechat","account":"a","enabled":true,"workspace":null}"#,
         )
         .unwrap();
         assert!(matches!(
             legacy,
-            DaemonCommand::ClawbotSet {
+            DaemonCommand::ChannelSet {
                 remote_tools: None,
                 ..
             }
         ));
-        let owner = DaemonCommand::ClawbotSet {
+        let owner = DaemonCommand::ChannelSet {
+            channel: "wechat".into(),
             account: "a".into(),
             enabled: true,
             workspace: None,
@@ -720,6 +729,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(health.remote_tools, RemoteTools::None);
+        // Daemons before channels reported no channel.
+        assert!(health.channel.is_empty());
     }
 
     #[test]

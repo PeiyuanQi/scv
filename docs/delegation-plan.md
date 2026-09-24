@@ -71,7 +71,7 @@ approval summary. The built-in default stays `default`.
 - Every child gets `SCV_PARENT=<instance>/<session>/<handle>` and
   `SCV_DELEGATION_DEPTH`. Delegation is refused at
   `agent.max_delegation_depth` (default 2; `[agents]` holds only per-adapter
-  tables). `scv run/start/stop/restart/update/clawbot` are refused at
+  tables). `scv run/start/stop/restart/update/channels` are refused at
   depth > 0.
 - `$SCV_HOME/run/delegations/<handle>.json` (0600, atomic) is written at spawn
   and removed at reap. The daemon reconciles at startup and every 60 seconds,
@@ -165,7 +165,7 @@ approval summary. The built-in default stays `default`.
 - Checked with the owner first (2026-09-23): iLink delivers a `sendmessage`
   without a `context_token` (an unprompted message) and a first reply sent two
   minutes late, but silently drops a second send on one `context_token` while
-  answering it exactly like a success. See [ClawBot](clawbot.md#ilink-contract).
+  answering it exactly like a success. See [channels](channels.md#wechat-ilink-contract).
 - `agent_* {background: true}` returns `{"job","status":"running"}` at once;
   the job runs the same call in its conversation, detached from the turn and
   with relayed approvals denied. `agent_wait {job, timeout_seconds?}` and

@@ -38,7 +38,7 @@ if grep -q "/$unit" /proc/self/cgroup; then
   systemd-run --user --quiet --collect --on-active="$restart_delay" \
     --unit="scv-deploy-restart-$$" systemctl --user restart "$unit"
   echo "Running inside $unit: its restart is scheduled in ${restart_delay}s."
-  echo "Afterwards check: scv status; scv clawbot status"
+  echo "Afterwards check: scv status; scv channels status"
   exit 0
 fi
 
@@ -64,7 +64,7 @@ if ! $daemon_ready; then
   exit 1
 fi
 
-# Enabled ClawBot accounts need one long poll (up to ~35s) to connect.
+# Enabled channel accounts need one long poll (up to ~35s) to connect.
 connected=false
 for _ in $(seq 1 40); do
   waiting=$(status | grep '"enabled":true' | grep -cv '"state":"connected"' || true)
@@ -76,7 +76,7 @@ for _ in $(seq 1 40); do
 done
 scv status
 if ! $connected; then
-  echo "deploy.sh: an enabled component has not connected yet; check 'scv clawbot status'" >&2
+  echo "deploy.sh: an enabled component has not connected yet; check 'scv channels status'" >&2
 fi
 warnings=$(journalctl --user -u "$unit" --since "@$started" --no-pager -o cat 2>/dev/null |
   grep -E ' (WARN|ERROR) ' | tail -20 || true)

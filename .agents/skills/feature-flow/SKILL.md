@@ -31,7 +31,7 @@ stage 0.
   minutes); pass a larger `timeout_seconds`, up to `tools.max_timeout_seconds`
   (14400), when CI reruns are likely. The agent needs `permissions = "full"`
   in its `[agents.<name>]` user config to run commands and edit files unprompted.
-- **Secrets:** never print `~/.scv/config.toml`, `~/.scv/clawbot/accounts/`,
+- **Secrets:** never print `~/.scv/config.toml`, `~/.scv/channels/*/accounts/`,
   `~/.scv/adapters/*/auth.json`, or `~/.cargo/credentials.toml`.
 
 ## 1. Develop in a sibling worktree
@@ -161,12 +161,12 @@ scripts/deploy.sh <version>
 - Restarts `scv.service` with `systemctl --user`. Do not use `scv restart`: it
   demands sudo verification. Never pass `--allow-sudo` without the user's
   consent. Set `SCV_UNIT` for a custom-profile unit.
-- Waits for the daemon to report the new version and for enabled ClawBot
+- Waits for the daemon to report the new version and for enabled channel
   accounts to reconnect, then prints recent journal warnings.
 - **Delegated by SCV:** restarting the daemon would kill this agent mid-turn.
   The script instead schedules the restart 60 seconds out, via a transient
   `systemd-run` timer outside the daemon, and skips verification. Tell the
-  user to check `scv status` and `scv clawbot status` afterwards.
+  user to check `scv status` and `scv channels status` afterwards.
 
 ## 8. Clean up and report
 
@@ -177,6 +177,6 @@ scripts/deploy.sh <version>
 - Report:
   - the commit(s) now on `main`;
   - the version published and the version installed;
-  - daemon and ClawBot status;
+  - daemon and channel status;
   - gates run or skipped;
   - the CI result.

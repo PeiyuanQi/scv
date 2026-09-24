@@ -19,11 +19,11 @@ interactive starts ask whether to continue and non-interactive starts fail.
 - User configuration and an approval response express policy but are not
   additional filesystem or process isolation.
 - Each SCV instance is isolated by its `SCV_HOME` root. Its socket, service
-  unit, configuration, skills, credentials, ClawBot state, and nested-agent
+  unit, configuration, skills, credentials, channel state, and nested-agent
   state remain within that profile; custom homes do not fall back to `~/.scv`.
 - Provider credentials are secrets. They remain server-side and are sent only
   to the configured provider endpoint, never to the TUI.
-- ClawBot tokens and delivery state are secrets. Inbound sender IDs, cursors,
+- Channel tokens and delivery state are secrets. Inbound sender IDs, cursors,
   and message content are untrusted remote input and are kept out of logs.
 - Project configuration cannot select the provider endpoint, credential
   variable, user skill root, or native-agent executable/arguments. Those values
@@ -91,7 +91,7 @@ a delegated CLI its own full-autonomy switches (for example Claude Code's
 `--dangerously-bypass-approvals-and-sandbox`), turning off that CLI's approval
 prompts and sandbox and enabling web search where the CLI gates it. It is off
 by default, only user-level configuration can set it, and every approval
-summary for such an agent states `FULL PERMISSIONS`. Combined with ClawBot's
+summary for such an agent states `FULL PERMISSIONS`. Combined with the WeChat channel's
 owner tools, it lets the owner's WeChat account run unattended development
 work, equivalent to the owner running those agents unprompted in a terminal.
 
@@ -123,7 +123,7 @@ exited.
 
 Delegation depth is bounded by `agent.max_delegation_depth`, and at any depth
 above zero the `scv` CLI refuses to run, start, stop, restart, or update a
-daemon or manage ClawBot, so an SCV started by a delegated agent cannot manage
+daemon or manage channels, so an SCV started by a delegated agent cannot manage
 its parent. Conversation handles belong to one SCV session and are checked
 against it, so the model cannot reach another session's conversation or pass a
 CLI session ID of its choosing; a continued conversation keeps its original
@@ -211,8 +211,8 @@ not mean silently execute them.
 
 ## Network and protocol
 
-Outbound network clients include the configured model provider, the ClawBot
-iLink adapter, and the web tools (`web_fetch` and a configured search
+Outbound network clients include the configured model provider, the WeChat
+channel's iLink adapter, and the web tools (`web_fetch` and a configured search
 backend). The updater delegates registry downloads to Cargo. Project
 configuration cannot provide inline credentials or redirect these authorities.
 
@@ -223,7 +223,7 @@ network service. A process running as the same user can access that authority.
 The stdio endpoint remains available for one-shot local clients and does not
 support component management. Both transports require the versioned handshake.
 
-The opt-in ClawBot bridge is an outbound HTTPS client of iLink, not a server
+The opt-in WeChat channel is an outbound HTTPS client of iLink, not a server
 transport; it opens no listening port. It accepts only trusted iLink origins,
 validates response envelopes, persists state atomically, and never reports
 bearer tokens. Remote sessions are tool-free unless the account grants its owner
@@ -239,14 +239,15 @@ assistant text, 256 KiB per tool argument object, and 32 tool calls per model
 response. A limit violation cancels the response and fails the turn before any
 not-yet-started call from that response is executed. Provider error text is
 redacted of the credential, flattened, and bounded before it reaches clients or
-logs; ClawBot senders receive only a generic failure reply.
+logs; channel senders receive only a generic failure reply.
 
 ## Supervised remote bridge
 
-QR login is explicit. Saved ClawBot accounts are enabled by default and start
+QR login is explicit. Saved channel accounts are enabled by default and start
 under the daemon; login honors a saved opt-out. To opt out before daemon startup,
 set `enabled: false` in the private per-account settings file. Credentials,
-delivery state, and settings under `$SCV_HOME/clawbot/{accounts,state,settings}`
+delivery state, and settings under
+`$SCV_HOME/channels/wechat/{accounts,state,settings}`
 use mode `0600`, atomic writes, and mode `0700` parent directories. Project
 configuration cannot choose bridge accounts, workspaces, or remote authority.
 

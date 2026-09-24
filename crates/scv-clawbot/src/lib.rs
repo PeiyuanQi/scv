@@ -2,6 +2,9 @@
 
 use anyhow::{Result, anyhow, bail};
 
+/// The channel name this crate serves: `scv channels <command> wechat`.
+pub const CHANNEL: &str = "wechat";
+
 pub mod bridge;
 pub mod protocol;
 pub mod state;
@@ -44,7 +47,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(300);
     loop {
         if Instant::now() >= deadline {
-            bail!("ClawBot QR login timed out; run `scv clawbot login` again")
+            bail!("WeChat QR login timed out; run `scv channels login wechat` again")
         }
         let status = response_json(
             client
@@ -82,7 +85,7 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
                 println!("ClawBot login confirmed for {bot_id} at {host}.");
                 return Ok(());
             }
-            "expired" => bail!("ClawBot QR code expired; run `scv clawbot login` again"),
+            "expired" => bail!("WeChat QR code expired; run `scv channels login wechat` again"),
             _ => {}
         }
         tokio::time::sleep(Duration::from_secs(2)).await;

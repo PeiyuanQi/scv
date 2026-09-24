@@ -59,7 +59,7 @@ fn inbound() -> Value {
 }
 
 fn saved_store(directory: &Path, base_url: &str) -> state::Store {
-    let store = state::Store::new(directory.join("clawbot"));
+    let store = state::Store::new(directory.join("channels/wechat"));
     store
         .save_account(
             "default",
@@ -77,7 +77,7 @@ fn saved_store(directory: &Path, base_url: &str) -> state::Store {
 #[test]
 fn interrupted_recovery_is_durable_and_preserves_retry_identity() {
     let directory = tempfile::tempdir().unwrap();
-    let store = state::Store::new(directory.path().join("clawbot"));
+    let store = state::Store::new(directory.path().join("channels/wechat"));
     let original = state::BridgeState {
         in_flight: vec![state::InFlight {
             message_id: "incoming".into(),

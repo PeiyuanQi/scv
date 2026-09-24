@@ -114,7 +114,7 @@ search service the user configured, not to a host the model picks. A backend
 failure returns a failed result with a hint for the common SearXNG and Brave
 setup errors.
 
-Tool-free sessions, such as ClawBot senders without remote tools, get neither
+Tool-free sessions, such as WeChat senders without remote tools, get neither
 web tool nor hosted search. Fetch tests use local servers with a port-aware
 address check to cover HTML conversion, content-type and size limits, paging,
 redirect limits, and loopback, metadata, name-resolved, and redirected private
@@ -334,15 +334,15 @@ agent, conversation, status, and bounded reply, and asks the model to tell the
 user. That turn's `turn.started` and final event carry
 `"origin":{"kind":"background","jobs":[...]}` (see
 [protocol](protocol.md#server-started-turns)); one turn reports up to four jobs.
-ClawBot sends the owner the answer as an unprompted message; `scv exec`
+The WeChat channel sends the owner the answer as an unprompted message; `scv exec`
 prints it and stays open until every job it started has been reported; the
 TUI shows it like any turn.
 
 A job cannot ask for approval: approval requests a nested agent relays (over
 ACP or from a nested SCV) are denied, so background work relies on the
 agent's own permissions, such as `permissions = "full"`. Jobs belong to their
-session: closing it (a TUI or `scv exec` exiting, an idle ClawBot conversation
-ending) cancels every job still running and kills its processes. A ClawBot
+session: closing it (a TUI or `scv exec` exiting, an idle channel conversation
+ending) cancels every job still running and kills its processes. A channel
 conversation stays open while its jobs run.
 
 ### Tracking and cleanup
@@ -378,7 +378,7 @@ scv agents kill --orphans
 `scv status` shows the running count and how many orphans the daemon has
 stopped. Agent tools are offered only while the session's own depth is below
 `agent.max_delegation_depth` (default 2), and a delegated run may not start,
-stop, restart, update, or run a daemon, or manage ClawBot. This is cooperative:
+stop, restart, update, or run a daemon, or manage channels. This is cooperative:
 see [Delegated runs](security.md#delegated-runs).
 
 By default SCV adds nothing to an agent's own permission settings, and in
@@ -450,7 +450,7 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
 - The nested SCV runs one delegation level deeper and declares that depth in
   `session.start`, so `agent.max_delegation_depth` applies on both sides: the
   default of 2 lets it delegate once more, and it cannot start, restart, or
-  update a daemon or manage ClawBot. It has no parent daemon socket.
+  update a daemon or manage channels. It has no parent daemon socket.
 
 `agent_scv` needs the `scv` executable (searched on `PATH` and in
 `~/.cargo/bin`, where `cargo install` puts it) and a provider in its private

@@ -17,7 +17,7 @@ and provides a responsive Rust TUI for coding work.
 - Configurable, bounded context selection and deterministic compaction
 - Server-enforced approvals, timeouts, output caps, and cancellation
 - A Unix-socket daemon with a Ratatui client, plus a stdio server for one-shot clients
-- Daemon-supervised ClawBot accounts with persistent enablement and live health
+- Daemon-supervised chat channels (WeChat) with persistent enablement and live health
 - Interactive TUI plus a headless `scv exec` mode
 - Linux and macOS support on ARM64 and x86-64
 
@@ -88,7 +88,7 @@ scv server --stdio
 
 The stdio protocol is intentionally local and one-session-per-connection.
 
-## Daemon and ClawBot / WeChat iLink
+## Daemon and channels (WeChat)
 
 SCV has one long-running daemon. Run it attached to the terminal with
 `scv run --workspace /path/to/workspace`, or let the user service supervise the
@@ -104,7 +104,7 @@ scv stop
 
 Each SCV instance owns an explicit profile root. Use `--scv-home PATH` (or
 `SCV_HOME`) to run independent daemons with separate provider/model settings,
-sockets, credentials, skills, ClawBot state, and systemd units:
+sockets, credentials, skills, channel state, and systemd units:
 
 ```bash
 scv --scv-home ~/.scv/work --model gpt-4.1-mini start --workspace /path/to/workspace
@@ -139,11 +139,14 @@ scv --model gpt-4.1-mini
 scv --provider local --model llama3.1 --base-url http://localhost:11434/v1
 ```
 
-Authenticate the WeChat ClawBot bridge once with `scv clawbot login`. The QR
-login stores the bearer token at `$SCV_HOME/clawbot/accounts/<account>.json`
-(normally under `~/.scv`) with mode `0600`; the token is never printed. Saved
-accounts are enabled by default and start under the daemon automatically.
-Login remains explicit and honors an account's saved opt-out.
+Chat channels connect chat accounts to the daemon, all through
+`scv channels <command> <channel>`. Authenticate the WeChat ClawBot bridge once
+with `scv channels login wechat`. The QR login stores the bearer token at
+`$SCV_HOME/channels/wechat/accounts/<account>.json` (normally under `~/.scv`)
+with mode `0600`; the token is never printed. Saved accounts are enabled by
+default and start under the daemon automatically. Login remains explicit and
+honors an account's saved opt-out. WeChat state saved by releases before
+`0.1.35` in `$SCV_HOME/clawbot` moves there automatically.
 
 Delivery state is bound to the account identity and API origin. Token rotation
 for the same known identity preserves state; changing identity or origin
@@ -151,24 +154,25 @@ requires explicit logout first, including replacement of legacy credentials
 without known identity. Stop any old `0.1.9` standalone ClawBot process before
 enabling the supervised account; those processes do not honor the new locks.
 
-`scv clawbot run --account NAME --workspace /path/to/workspace` persistently
-enables the account in the running daemon and returns. WeChat sessions are
-tool-free by default; add `--remote-tools owner` to give the bot's own WeChat
-account every SCV tool, including delegated Claude Code and Codex, with
-approvals granted automatically. That equals shell access from that WeChat
-account; `--remote-tools none` revokes it. `scv clawbot stop
+`scv channels run wechat --account NAME --workspace /path/to/workspace`
+persistently enables the account in the running daemon and returns. WeChat
+sessions are tool-free by default; add `--remote-tools owner` to give the bot's
+own WeChat account every SCV tool, including delegated Claude Code and Codex,
+with approvals granted automatically. That equals shell access from that WeChat
+account; `--remote-tools none` revokes it. `scv channels stop wechat
 --account NAME` persistently disables it while retaining credentials.
-`scv clawbot status --account NAME` queries live daemon health, including
-identity and last successful contact; saved credentials alone do not mean
-connected. `scv clawbot logout --account NAME` requires a live daemon and joins
-the component before deleting credentials, delivery state, and settings.
+`scv channels status` queries live daemon health of every channel account,
+including identity and last successful contact; saved credentials alone do not
+mean connected. `scv channels logout wechat --account NAME` requires a live
+daemon and joins the component before deleting credentials, delivery state, and
+settings.
 
-Account settings live at `$SCV_HOME/clawbot/settings/<account>.json`, with
+Account settings live at `$SCV_HOME/channels/wechat/settings/<account>.json`, with
 `enabled` defaulting to `true`, `remote_tools` defaulting to `"none"`, and an
 optional workspace defaulting to the daemon workspace. The daemon reconciles accounts and settings every two seconds
 or immediately on `scv reload`. To opt out while offline, set `enabled` to
 `false` in the private settings file before daemon startup. See the
-[ClawBot contract](docs/clawbot.md) for permissions and recovery behavior.
+[channels contract](docs/channels.md) for permissions and recovery behavior.
 
 ## Quick start
 
