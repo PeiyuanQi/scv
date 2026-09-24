@@ -43,7 +43,7 @@ table and may be developed in parallel with others; landings stay sequential.
 | 5 | Progress events and protocol v3 (done, 0.1.30) | 3 |
 | 6a | Live mode: SCV to SCV (`agent_scv`) (done, 0.1.31) | 5 |
 | 6b | Live mode: ACP adapter (done, 0.1.33) | 6a |
-| 7 | Background delegations | 6, iLink check |
+| 7 | Background delegations (done, 0.1.35) | 6, iLink check |
 
 ### 0b. Adapter table and full-work defaults
 
@@ -162,12 +162,26 @@ approval summary. The built-in default stays `default`.
 
 ### 7. Background delegations
 
-- First, with the owner present, check whether iLink accepts a message that is
-  not a reply, or a reply with an old `context_token`.
-- `agent_* {background: true}` returns a running handle. `agent_wait` and
-  `agent_status` observe it. Completion queues a turn in the parent session.
-- WeChat sends the result directly when iLink allows it, otherwise with the
-  owner's next message. `agents.max_background` defaults to 2 per session.
+- Checked with the owner first (2026-09-23): iLink delivers a `sendmessage`
+  without a `context_token` (an unprompted message) and a first reply sent two
+  minutes late, but silently drops a second send on one `context_token` while
+  answering it exactly like a success. See [ClawBot](clawbot.md#ilink-contract).
+- `agent_* {background: true}` returns `{"job","status":"running"}` at once;
+  the job runs the same call in its conversation, detached from the turn and
+  with relayed approvals denied. `agent_wait {job, timeout_seconds?}` and
+  `agent_status {job?}` observe jobs (the handle is a job, not a conversation:
+  a job may continue a conversation, and some agents have none).
+- `agent.max_background` (not `agents.*`, which holds per-agent tables)
+  defaults to 2 per session; 0 turns it off. Closing the session cancels its
+  jobs.
+- A finished job the model has not seen is reported in a turn the server
+  starts once the session is idle, marked by `origin` on `turn.started` and
+  the terminal event (optional, so protocol v3 stays).
+- ClawBot sends the report to the owner as an unprompted message, keeps a
+  session with running jobs open and past its idle limit, cancels (rather
+  than replaces) a timed-out owner turn while jobs run, and never sends twice
+  on one context token: long replies continue unprompted. `scv exec` stays
+  open until its jobs are reported.
 
 ## Testing
 

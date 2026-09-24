@@ -60,6 +60,7 @@ system_prompt = "You are SCV, a concise and careful coding agent."
 max_delegation_depth = 2
 max_conversations = 8
 conversation_idle_seconds = 86400
+max_background = 2
 
 [session]
 max_history_bytes = 16777216
@@ -223,7 +224,10 @@ cannot set. `agent.max_conversations` (default 8) and
 `agent.conversation_idle_seconds` (default 86400) bound how many delegated
 conversations a session remembers and for how long; see
 [Conversations](tools.md#conversations). Both must be positive, and project
-configuration may only lower them.
+configuration may only lower them. `agent.max_background` (default 2, at most
+16) bounds how many background agent jobs (`background: true`) a session runs
+at once; `0` turns background delegation off, and project configuration may
+only lower it. See [Background jobs](tools.md#background-jobs).
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,
 including its streamed response, not just idle time, so it must cover the
 longest single response. Project configuration may lower all of these but not

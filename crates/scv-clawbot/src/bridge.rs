@@ -35,14 +35,15 @@ pub async fn send_reply(
     reply: &str,
     max_bytes: usize,
 ) -> Result<()> {
-    for chunk in crate::split_utf8(reply, max_bytes) {
+    // One message per context token: later parts go out unprompted.
+    for (index, chunk) in crate::split_utf8(reply, max_bytes).iter().enumerate() {
         send_reply_chunk(
             client,
             token,
             base_url,
             to_user_id,
-            context_token,
-            &chunk,
+            if index == 0 { context_token } else { "" },
+            chunk,
             &Uuid::new_v4().to_string(),
         )
         .await?;
@@ -90,7 +91,12 @@ pub(crate) fn reply_body(
     chunk: &str,
     client_id: &str,
 ) -> Value {
-    serde_json::json!({"msg":{"from_user_id":"","to_user_id":to_user_id,"client_id":client_id,"message_type":2,"message_state":2,"context_token":context_token,"item_list":[{"type":1,"text_item":{"text":chunk}}]},"base_info":{"channel_version":"1.0.0"}})
+    let mut body = serde_json::json!({"msg":{"from_user_id":"","to_user_id":to_user_id,"client_id":client_id,"message_type":2,"message_state":2,"item_list":[{"type":1,"text_item":{"text":chunk}}]},"base_info":{"channel_version":"1.0.0"}});
+    // Without a context token the message is unprompted: it answers nothing.
+    if !context_token.is_empty() {
+        body["msg"]["context_token"] = context_token.into();
+    }
+    body
 }
 
 pub(crate) async fn send_reply_request(

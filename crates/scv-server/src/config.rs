@@ -22,6 +22,8 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_TOOL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 /// Retries multiply provider load and turn latency, so they stay small.
 const MAX_PROVIDER_RETRIES: usize = 10;
+/// The most background agent jobs `agent.max_background` may allow.
+const MAX_BACKGROUND_JOBS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -150,6 +152,9 @@ pub struct AgentConfig {
     pub max_conversations: usize,
     /// A delegated conversation unused this long is forgotten.
     pub conversation_idle_seconds: u64,
+    /// Background agent jobs (`background: true`) a session may run at once;
+    /// 0 turns background delegation off.
+    pub max_background: usize,
 }
 
 impl Default for AgentConfig {
@@ -159,6 +164,7 @@ impl Default for AgentConfig {
             max_delegation_depth: 2,
             max_conversations: 8,
             conversation_idle_seconds: 86400,
+            max_background: 2,
             system_prompt: "You are SCV, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
         }
     }
@@ -626,6 +632,8 @@ impl Config {
                 idle: Duration::from_secs(self.agent.conversation_idle_seconds),
             },
             delegation: None,
+            max_background: self.agent.max_background,
+            background: None,
         }
     }
 
@@ -1003,6 +1011,9 @@ impl Config {
         if self.provider_limits.max_sse_event_bytes > self.provider_limits.max_response_bytes {
             bail!("provider SSE event limit exceeds provider response limit");
         }
+        if self.agent.max_background > MAX_BACKGROUND_JOBS {
+            bail!("agent.max_background must be at most {MAX_BACKGROUND_JOBS}");
+        }
         if self.provider_limits.max_retries > MAX_PROVIDER_RETRIES {
             bail!("provider_limits.max_retries must be at most {MAX_PROVIDER_RETRIES}");
         }
@@ -1250,6 +1261,10 @@ fn validate_project_not_weaker(user: &Config, project: &Config) -> Result<()> {
             project.agent.conversation_idle_seconds
         ),
         "agent.conversation_idle_seconds"
+    );
+    no_larger!(
+        (user.agent.max_background, project.agent.max_background),
+        "agent.max_background"
     );
     no_larger!(
         (
@@ -1584,6 +1599,25 @@ command = "/tmp/fake"
             raise(&mut higher);
             assert!(validate_project_not_weaker(&user, &higher).is_err());
         }
+    }
+
+    #[test]
+    fn background_jobs_are_bounded_and_projects_may_only_lower_them() {
+        let user = Config::default();
+        assert_eq!(user.agent.max_background, 2);
+        assert_eq!(user.tools().max_background, 2);
+        let mut off = Config::default();
+        off.agent.max_background = 0;
+        assert!(off.validate().is_ok(), "0 turns background delegation off");
+        let mut many = Config::default();
+        many.agent.max_background = MAX_BACKGROUND_JOBS + 1;
+        assert!(many.validate().is_err());
+        let mut lower = user.clone();
+        lower.agent.max_background = 1;
+        assert!(validate_project_not_weaker(&user, &lower).is_ok());
+        let mut higher = user.clone();
+        higher.agent.max_background = 3;
+        assert!(validate_project_not_weaker(&user, &higher).is_err());
     }
 
     #[test]

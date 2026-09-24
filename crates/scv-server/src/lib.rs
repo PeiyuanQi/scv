@@ -273,11 +273,13 @@ use scv_core::{
 };
 use scv_protocol::{
     ClientMessage, DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary,
-    PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, Usage,
+    ORIGIN_BACKGROUND, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, TurnOrigin, Usage,
 };
 use scv_provider_openai::OpenAiProvider;
 use scv_tools::{
-    DelegationContext, SkillMap, builtin_registry,
+    DelegationContext, SkillMap,
+    background::{self, BackgroundJobs},
+    builtin_registry,
     delegation::{self as delegations, DelegationRegistry},
 };
 use tokio::{
@@ -592,6 +594,9 @@ where
     let mut initialized = false;
     let mut session: Option<Session> = None;
     let mut active: Option<ActiveTurn> = None;
+    // Woken when a background job finishes; set until its report turn starts.
+    let mut background_rx: Option<mpsc::UnboundedReceiver<()>> = None;
+    let mut background_ready = false;
     let mut fatal = false;
     let mut writer_finished = false;
 
@@ -676,7 +681,8 @@ where
                             no_tools: no_tools.unwrap_or(overrides.no_tools),
                         };
                         match build_session(&cwd, session_overrides, delegation_depth.unwrap_or(0), &registry).await {
-                            Ok(new_session) => {
+                            Ok((new_session, finished)) => {
+                                background_rx = finished;
                                 output_tx.ensure_capacity(output_queue_bytes(
                                     new_session.config.protocol.max_server_frame_bytes,
                                 )?)?;
@@ -734,50 +740,8 @@ where
                             }, current.config.protocol.max_server_frame_bytes).await?;
                             continue;
                         }
-                        let turn_id = Uuid::new_v4().to_string();
-                        let cancellation = cancellation.child_token();
-                        let meta = TurnMeta {
-                            request_id: request_id.clone(),
-                            session_id: current.id.clone(),
-                            turn_id: turn_id.clone(),
-                            seq: Arc::clone(&current.seq),
-                            max_server_frame: current.config.protocol.max_server_frame_bytes,
-                        };
-                        send_event(&output_tx, ServerEvent::TurnStarted {
-                            request_id: request_id.clone(),
-                            session_id: current.id.clone(),
-                            turn_id: turn_id.clone(),
-                            seq: next_seq(&current.seq),
-                        }, current.config.protocol.max_server_frame_bytes).await?;
-                        let runtime = Arc::clone(&current.runtime);
-                        let history = Arc::clone(&current.history);
-                        let sink: Arc<dyn EventSink> = Arc::new(ProtocolSink {
-                            meta: meta.clone(),
-                            output: output_tx.clone(),
-                            cancellation: cancellation.clone(),
-                        });
-                        let gate: Arc<dyn ApprovalGate> = Arc::new(ProtocolApprovalGate {
-                            policy: current.config.tools.approval_policy,
-                            broker: Arc::clone(&approvals),
-                            meta,
-                            output: output_tx.clone(),
-                        });
-                        let task_cancel = cancellation.clone();
-                        let task_done = done_tx.clone();
-                        let task_request = request_id.clone();
-                        let task_session = current.id.clone();
-                        let task_turn = turn_id.clone();
-                        let task = tasks.spawn(async move {
-                            let mut history = history.lock().await;
-                            let result = runtime.run_turn(&mut history, prompt, sink, gate, task_cancel).await;
-                            let _ = task_done.send(TurnDone {
-                                request_id: task_request,
-                                session_id: task_session,
-                                turn_id: task_turn,
-                                result,
-                            }).await;
-                        });
-                        active = Some(ActiveTurn { turn_id, cancellation, task });
+                        let starter = TurnStarter { output: &output_tx, approvals: &approvals, done: &done_tx, tasks: &tasks, cancellation: &cancellation };
+                        active = Some(starter.start(current, Uuid::new_v4().to_string(), request_id, prompt, None).await?);
                     }
                     ClientMessage::QueueUpdate { request_id, session_id, queue_id, revision, prompt } => {
                         let Some(current) = session.as_ref() else { send_error(&output_tx, &request_id, "session_not_found", "start a session first", false, server_frame_limit(&session)).await?; continue; };
@@ -848,6 +812,18 @@ where
                 writer.context("join protocol writer")??;
                 break;
             }
+            Some(()) = recv_background(&mut background_rx) => {
+                background_ready = true;
+                if active.is_none()
+                    && let Some(current) = session.as_ref()
+                    && !current.paused.load(Ordering::Acquire)
+                    && current.queue.lock().await.is_empty()
+                {
+                    let starter = TurnStarter { output: &output_tx, approvals: &approvals, done: &done_tx, tasks: &tasks, cancellation: &cancellation };
+                    active = starter.report_background(current).await?;
+                    background_ready = active.is_some();
+                }
+            }
             done = done_rx.recv(), if active.is_some() => {
                 if let Some(done) = done {
                     if let Some(current) = session.as_ref() {
@@ -860,12 +836,14 @@ where
                                 seq,
                                 steps: outcome.steps,
                                 usage: Usage { input_tokens: outcome.usage.input_tokens, output_tokens: outcome.usage.output_tokens },
+                                origin: done.origin,
                             },
                             Err(AgentError::Cancelled) => ServerEvent::TurnCancelled {
                                 request_id: done.request_id,
                                 session_id: done.session_id,
                                 turn_id: done.turn_id,
                                 seq,
+                                origin: done.origin,
                             },
                             Err(error) => ServerEvent::TurnFailed {
                                 request_id: done.request_id,
@@ -874,6 +852,7 @@ where
                                 seq,
                                 code: error.code().into(),
                                 message: error.to_string(),
+                                origin: done.origin,
                             },
                         };
                         send_event(&output_tx, event, current.config.protocol.max_server_frame_bytes).await?;
@@ -886,7 +865,6 @@ where
                         && let Some(entry) = current.queue.lock().await.pop_front()
                     {
                         let turn_id = Uuid::new_v4().to_string();
-                        let cancellation = cancellation.child_token();
                         send_event(&output_tx, ServerEvent::QueueDequeued {
                             request_id: entry.submitter.clone(),
                             session_id: current.id.clone(),
@@ -894,31 +872,16 @@ where
                             queue_id: entry.queue_id,
                             turn_id: turn_id.clone(),
                         }, current.config.protocol.max_server_frame_bytes).await?;
-                        send_event(&output_tx, ServerEvent::TurnStarted {
-                            request_id: entry.submitter.clone(),
-                            session_id: current.id.clone(),
-                            turn_id: turn_id.clone(),
-                            seq: next_seq(&current.seq),
-                        }, current.config.protocol.max_server_frame_bytes).await?;
-                        let meta = TurnMeta {
-                            request_id: entry.submitter.clone(), session_id: current.id.clone(), turn_id: turn_id.clone(),
-                            seq: Arc::clone(&current.seq), max_server_frame: current.config.protocol.max_server_frame_bytes,
-                        };
-                        let sink: Arc<dyn EventSink> = Arc::new(ProtocolSink { meta: meta.clone(), output: output_tx.clone(), cancellation: cancellation.clone() });
-                        let gate: Arc<dyn ApprovalGate> = Arc::new(ProtocolApprovalGate { policy: current.config.tools.approval_policy, broker: Arc::clone(&approvals), meta, output: output_tx.clone() });
-                        let runtime = Arc::clone(&current.runtime);
-                        let history = Arc::clone(&current.history);
-                        let task_done = done_tx.clone();
-                        let task_request = entry.submitter;
-                        let task_session = current.id.clone();
-                        let task_turn = turn_id.clone();
-                        let task_cancel = cancellation.clone();
-                        let task = tasks.spawn(async move {
-                            let mut history = history.lock().await;
-                            let result = runtime.run_turn(&mut history, entry.prompt, sink, gate, task_cancel).await;
-                            let _ = task_done.send(TurnDone { request_id: task_request, session_id: task_session, turn_id: task_turn, result }).await;
-                        });
-                        active = Some(ActiveTurn { turn_id, cancellation, task });
+                        let starter = TurnStarter { output: &output_tx, approvals: &approvals, done: &done_tx, tasks: &tasks, cancellation: &cancellation };
+                        active = Some(starter.start(current, turn_id, entry.submitter, entry.prompt, None).await?);
+                    }
+                    // Report finished background jobs once the user's own work is done.
+                    if active.is_none() && background_ready
+                        && let Some(current) = session.as_ref()
+                    {
+                        let starter = TurnStarter { output: &output_tx, approvals: &approvals, done: &done_tx, tasks: &tasks, cancellation: &cancellation };
+                        active = starter.report_background(current).await?;
+                        background_ready = active.is_some();
                     }
                 }
             }
@@ -1202,6 +1165,8 @@ struct Session {
     seq: Arc<AtomicU64>,
     queue: Arc<Mutex<VecDeque<QueueEntry>>>,
     paused: Arc<std::sync::atomic::AtomicBool>,
+    /// Background agent jobs, shared with the session's tools.
+    background: Option<Arc<BackgroundJobs>>,
 }
 
 impl Session {
@@ -1370,7 +1335,122 @@ struct TurnDone {
     request_id: String,
     session_id: String,
     turn_id: String,
+    origin: Option<TurnOrigin>,
     result: Result<scv_core::TurnOutcome, AgentError>,
+}
+
+/// What a connection needs to start a turn in its session.
+struct TurnStarter<'a> {
+    output: &'a OutboundSender,
+    approvals: &'a Arc<ApprovalBroker>,
+    done: &'a mpsc::Sender<TurnDone>,
+    tasks: &'a TaskTracker,
+    cancellation: &'a CancellationToken,
+}
+
+impl TurnStarter<'_> {
+    /// Announce and run one turn of `current` for `prompt`.
+    async fn start(
+        &self,
+        current: &Session,
+        turn_id: String,
+        request_id: String,
+        prompt: String,
+        origin: Option<TurnOrigin>,
+    ) -> Result<ActiveTurn> {
+        let cancellation = self.cancellation.child_token();
+        send_event(
+            self.output,
+            ServerEvent::TurnStarted {
+                request_id: request_id.clone(),
+                session_id: current.id.clone(),
+                turn_id: turn_id.clone(),
+                seq: next_seq(&current.seq),
+                origin: origin.clone(),
+            },
+            current.config.protocol.max_server_frame_bytes,
+        )
+        .await?;
+        let meta = TurnMeta {
+            request_id: request_id.clone(),
+            session_id: current.id.clone(),
+            turn_id: turn_id.clone(),
+            seq: Arc::clone(&current.seq),
+            max_server_frame: current.config.protocol.max_server_frame_bytes,
+        };
+        let sink: Arc<dyn EventSink> = Arc::new(ProtocolSink {
+            meta: meta.clone(),
+            output: self.output.clone(),
+            cancellation: cancellation.clone(),
+        });
+        let gate: Arc<dyn ApprovalGate> = Arc::new(ProtocolApprovalGate {
+            policy: current.config.tools.approval_policy,
+            broker: Arc::clone(self.approvals),
+            meta,
+            output: self.output.clone(),
+        });
+        let runtime = Arc::clone(&current.runtime);
+        let history = Arc::clone(&current.history);
+        let done = self.done.clone();
+        let session_id = current.id.clone();
+        let task_turn = turn_id.clone();
+        let task_cancel = cancellation.clone();
+        let task = self.tasks.spawn(async move {
+            let mut history = history.lock().await;
+            let result = runtime
+                .run_turn(&mut history, prompt, sink, gate, task_cancel)
+                .await;
+            let _ = done
+                .send(TurnDone {
+                    request_id,
+                    session_id,
+                    turn_id: task_turn,
+                    origin,
+                    result,
+                })
+                .await;
+        });
+        Ok(ActiveTurn {
+            turn_id,
+            cancellation,
+            task,
+        })
+    }
+
+    /// Start a turn reporting background jobs the model has not seen yet,
+    /// or `None` when every finished job was already seen.
+    async fn report_background(&self, current: &Session) -> Result<Option<ActiveTurn>> {
+        let Some(jobs) = &current.background else {
+            return Ok(None);
+        };
+        let reports = jobs.take_unreported();
+        if reports.is_empty() {
+            return Ok(None);
+        }
+        let origin = TurnOrigin {
+            kind: ORIGIN_BACKGROUND.into(),
+            jobs: reports.iter().map(|report| report.job.clone()).collect(),
+        };
+        let prompt = background::report_prompt(&reports);
+        let request_id = format!("background:{}", Uuid::new_v4());
+        self.start(
+            current,
+            Uuid::new_v4().to_string(),
+            request_id,
+            prompt,
+            Some(origin),
+        )
+        .await
+        .map(Some)
+    }
+}
+
+/// The next background-job wake-up, or never without a receiver.
+async fn recv_background(receiver: &mut Option<mpsc::UnboundedReceiver<()>>) -> Option<()> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 #[derive(Clone)]
@@ -1393,7 +1473,7 @@ async fn build_session(
     overrides: ConfigOverrides,
     delegation_depth: u32,
     registry: &Arc<DelegationRegistry>,
-) -> Result<Session> {
+) -> Result<(Session, Option<mpsc::UnboundedReceiver<()>>)> {
     let id = Uuid::new_v4().to_string();
     let workspace = std::fs::canonicalize(cwd).with_context(|| format!("resolve cwd {cwd}"))?;
     if !workspace.is_dir() {
@@ -1422,6 +1502,18 @@ async fn build_session(
         provider = provider.with_web_search();
     }
     let provider = Arc::new(provider);
+    let (background, finished) = if !no_tools && config.agent.max_background > 0 {
+        let (finished_tx, finished_rx) = mpsc::unbounded_channel();
+        (
+            Some(Arc::new(BackgroundJobs::new(
+                config.agent.max_background,
+                Some(finished_tx),
+            ))),
+            Some(finished_rx),
+        )
+    } else {
+        (None, None)
+    };
     let tools = if no_tools {
         Arc::new(ToolRegistry::default())
     } else {
@@ -1431,6 +1523,7 @@ async fn build_session(
             session: id.clone(),
             depth: delegation_depth,
         });
+        tools.background = background.clone();
         let mut registry = builtin_registry(
             tools,
             skills.map,
@@ -1451,16 +1544,20 @@ async fn build_session(
         config.core_agent(system_prompt),
         workspace.clone(),
     ));
-    Ok(Session {
-        id,
-        workspace,
-        config,
-        runtime,
-        history: Arc::new(Mutex::new(Vec::new())),
-        seq: Arc::new(AtomicU64::new(0)),
-        queue: Arc::new(Mutex::new(VecDeque::new())),
-        paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    })
+    Ok((
+        Session {
+            id,
+            workspace,
+            config,
+            runtime,
+            history: Arc::new(Mutex::new(Vec::new())),
+            seq: Arc::new(AtomicU64::new(0)),
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            background,
+        },
+        finished,
+    ))
 }
 
 fn build_system_prompt(

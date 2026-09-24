@@ -64,7 +64,7 @@ To publish from a clean checkout, authenticate with `cargo login` and publish
 the workspace in dependency order (Cargo will refuse a package whose local
 dependencies are not already on crates.io):
 
-All packages use version `0.1.34`, with exact `=0.1.34` pins for dependencies
+All packages use version `0.1.35`, with exact `=0.1.35` pins for dependencies
 between workspace packages.
 
 ```bash
@@ -279,7 +279,11 @@ them with `scv agents ps`, stop one with `scv agents kill <handle>`, and the
 daemon stops runs left behind by a killed SCV process within a minute.
 Claude Code, Codex, and pi keep multi-turn conversations: a result's `session`
 handle continues the same conversation, and `scv agents gc` clears old
-transcripts. Claude Code, Codex, Grok Build, and DeepSeek Harness run over the
+transcripts. Any agent call may set `background: true` to return a job handle
+at once while the agent keeps working; `agent_wait` and `agent_status` observe
+jobs, and when one finishes SCV reports it in a turn of its own (over WeChat,
+as an unprompted message to the owner). A session runs at most
+`agent.max_background` (default 2) jobs, and closing it cancels them. Claude Code, Codex, Grok Build, and DeepSeek Harness run over the
 Agent Client Protocol when its server is installed (`claude-agent-acp` and
 `codex-acp` from npm `@agentclientprotocol/*`, or the built-in `grok agent
 stdio` and `dsh --profile acp`): one server per conversation whose permission

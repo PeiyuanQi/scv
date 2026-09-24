@@ -90,6 +90,10 @@ pub async fn login(base: &str, account: &str) -> Result<()> {
 }
 
 const MAX_REPLY_BYTES: usize = 16 * 1024;
+/// A turn's whole answer. Beyond one message it is sent in parts: the first
+/// as the reply, the rest as unprompted messages, since iLink silently drops
+/// a second send on one context token.
+const MAX_TOTAL_REPLY_BYTES: usize = 4 * MAX_REPLY_BYTES;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESSAGE_ID_BYTES: usize = 256;
 const MAX_BATCH_MESSAGES: usize = 4096;
@@ -282,7 +286,7 @@ async fn run_loop(
         tokio::select! {
             result = &mut poll => return result,
             result = &mut deliver => return result,
-            Some((owner, jobs)) = started.recv() => conversations.push(bridge.converse(owner, jobs)),
+            Some((owner, recipient, jobs)) = started.recv() => conversations.push(bridge.converse(owner, recipient, jobs)),
             Some(result) = conversations.next(), if !conversations.is_empty() => result?,
         }
     }
@@ -343,7 +347,7 @@ impl Bridge<'_> {
     async fn poll(
         &self,
         tool_owner: Option<&ToolOwner>,
-        start: &mpsc::UnboundedSender<(bool, mpsc::UnboundedReceiver<Job>)>,
+        start: &mpsc::UnboundedSender<(bool, Option<String>, mpsc::UnboundedReceiver<Job>)>,
     ) -> Result<()> {
         let mut conversations: HashMap<String, Conversation> = HashMap::new();
         let mut backoff = Duration::from_secs(1);
@@ -400,7 +404,7 @@ impl Bridge<'_> {
         msg: &Value,
         tool_owner: Option<&ToolOwner>,
         conversations: &mut HashMap<String, Conversation>,
-        start: &mpsc::UnboundedSender<(bool, mpsc::UnboundedReceiver<Job>)>,
+        start: &mpsc::UnboundedSender<(bool, Option<String>, mpsc::UnboundedReceiver<Job>)>,
     ) -> Result<()> {
         let Some(id) = message_id(msg) else {
             return Ok(());
@@ -526,8 +530,10 @@ impl Bridge<'_> {
                 }
             } else {
                 let (jobs, queue) = mpsc::unbounded_channel();
+                // Only a direct chat can receive unprompted background reports.
+                let recipient = group.is_none().then(|| sender.to_owned());
                 start
-                    .send((owner, queue))
+                    .send((owner, recipient, queue))
                     .map_err(|_| anyhow!("ClawBot conversation runner stopped"))?;
                 conversations.insert(
                     key.clone(),
@@ -540,13 +546,63 @@ impl Bridge<'_> {
         }
     }
 
-    /// Run one conversation's turns in order on its own SCV session. A failed
-    /// or timed-out turn resets only this session.
-    async fn converse(&self, owner: bool, mut jobs: mpsc::UnboundedReceiver<Job>) -> Result<()> {
+    /// Run one conversation's turns in order on its own SCV session. A turn
+    /// that fails on the server keeps the session; a broken or timed-out one
+    /// resets it. While background jobs the session started are running,
+    /// the conversation stays open and sends each finished job's report to
+    /// `recipient` as an unprompted message.
+    async fn converse(
+        &self,
+        owner: bool,
+        recipient: Option<String>,
+        mut jobs: mpsc::UnboundedReceiver<Job>,
+    ) -> Result<()> {
+        enum Next {
+            Job(Option<Job>),
+            Idle,
+            Report(Result<String>),
+        }
         let mut session: Option<protocol::Session> = None;
         loop {
-            let Ok(Some(job)) = tokio::time::timeout(SESSION_IDLE, jobs.recv()).await else {
-                return Ok(());
+            let watching = recipient.is_some()
+                && session
+                    .as_ref()
+                    .is_some_and(|session| session.background_jobs() > 0 || session.has_reports());
+            let next = {
+                let message = async {
+                    if watching {
+                        Next::Job(jobs.recv().await)
+                    } else {
+                        match tokio::time::timeout(SESSION_IDLE, jobs.recv()).await {
+                            Ok(job) => Next::Job(job),
+                            Err(_) => Next::Idle,
+                        }
+                    }
+                };
+                let report = async {
+                    match session.as_mut() {
+                        Some(session) if watching => Next::Report(session.next_report().await),
+                        _ => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    next = message => next,
+                    next = report => next,
+                }
+            };
+            let job = match next {
+                Next::Idle | Next::Job(None) => return Ok(()),
+                Next::Report(Ok(report)) => {
+                    if let Some(recipient) = &recipient {
+                        self.queue_unprompted(recipient, &report).await?;
+                    }
+                    continue;
+                }
+                Next::Report(Err(_)) => {
+                    session = None;
+                    continue;
+                }
+                Next::Job(Some(job)) => job,
             };
             let reply = {
                 let _turn = self
@@ -566,14 +622,33 @@ impl Bridge<'_> {
                     session
                         .as_mut()
                         .expect("session was just connected")
-                        .turn(&job.text, MAX_REPLY_BYTES)
+                        .turn(&job.text, MAX_TOTAL_REPLY_BYTES)
                         .await
                 })
                 .await;
                 match result {
                     Ok(Ok(reply)) => reply,
-                    Ok(Err(_)) | Err(_) => {
-                        session = None;
+                    Ok(Err(_)) => {
+                        // A turn the server failed leaves a healthy session,
+                        // and with it any background jobs it runs.
+                        if session.as_ref().is_none_or(protocol::Session::is_broken) {
+                            session = None;
+                        }
+                        FAILURE_REPLY.into()
+                    }
+                    Err(_) => {
+                        // Out of time: cancel the turn but keep a session
+                        // that has background jobs running.
+                        let keep = match session.as_mut() {
+                            Some(session) if session.background_jobs() > 0 => {
+                                session.cancel_current().await.unwrap_or(false)
+                                    && !session.is_broken()
+                            }
+                            _ => false,
+                        };
+                        if !keep {
+                            session = None;
+                        }
                         FAILURE_REPLY.into()
                     }
                 }
@@ -596,7 +671,31 @@ impl Bridge<'_> {
             self.save(&state).await?;
             drop(state);
             self.replies.notify_one();
+            // Background reports that finished during the turn follow it.
+            let reports = session
+                .as_mut()
+                .map(protocol::Session::take_reports)
+                .unwrap_or_default();
+            if let Some(recipient) = &recipient {
+                for report in reports {
+                    self.queue_unprompted(recipient, &report).await?;
+                }
+            }
         }
+    }
+
+    /// Queue a message to `recipient` that answers no inbound message, such
+    /// as a finished background job's report. It is sent without a context
+    /// token, durably and with stable client IDs like any reply.
+    async fn queue_unprompted(&self, recipient: &str, text: &str) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let mut pending = new_pending("", recipient, "", text, MAX_REPLY_BYTES);
+        pending.key = recipient.to_owned();
+        state.pending.push(pending);
+        self.save(&state).await?;
+        drop(state);
+        self.replies.notify_one();
+        Ok(())
     }
 
     /// Deliver every queued reply before polling starts. A reply that still
@@ -654,9 +753,16 @@ impl Bridge<'_> {
         let mut refused = false;
         while pending.next_chunk < chunks.len() {
             let index = pending.next_chunk;
+            // iLink delivers one message per context token and silently drops
+            // any further send on it, so later parts go out unprompted.
+            let context_token = if index == 0 {
+                pending.context_token.as_str()
+            } else {
+                ""
+            };
             let body = bridge::reply_body(
                 &pending.to_user_id,
-                &pending.context_token,
+                context_token,
                 &chunks[index],
                 &pending.client_ids[index],
             );
