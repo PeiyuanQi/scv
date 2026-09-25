@@ -961,7 +961,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot h
     assert!(output.is_error);
     let value: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(value["status"], "declined");
-    assert_eq!(value["note"], output::DECLINED_NOTE);
+    assert_eq!(value["note"], output::DECLINED_NOTE_TRY_GROK);
     for absent in ["fallback", "hint", "error"] {
         assert!(value.get(absent).is_none(), "{absent} in {value}");
     }

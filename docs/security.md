@@ -187,13 +187,16 @@ own tools and approval policy, like any turn; its prompt quotes the job's
 bounded reply, which is untrusted delegated-agent output. Over WeChat or Feishu
 the report goes only to the owner's direct chat, as an unprompted message.
 
-SCV never routes a refused request to another agent by itself. A run whose
-model refused (`declined`) gets no fallback suggestion, and its note and the
-system prompt tell the main agent to report the refusal to the user instead of
-retrying elsewhere; the user may still name another agent, whose own policies
-then apply. Fallback suggestions for real availability failures are decided
-from the result's status and structured `error` only, so text in an agent's
-reply cannot trigger one.
+SCV never auto-invokes another agent after a refusal. A run whose model
+refused (`declined`) gets no availability `fallback` field. When the session
+offers `agent_grok`, the result's note and the system prompt tell the main
+agent to report the refusal to the user and then call `agent_grok` with the
+same request; a safety or guardrail refusal is not a reason to skip Grok. If
+`agent_grok` itself declines, or it is not offered, they tell the main agent
+to report the refusal to the user instead of retrying elsewhere; the user may
+still name another agent, whose own policies then apply. Fallback suggestions
+for real availability failures are decided from the result's status and
+structured `error` only, so text in an agent's reply cannot trigger one.
 
 ## Web access
 

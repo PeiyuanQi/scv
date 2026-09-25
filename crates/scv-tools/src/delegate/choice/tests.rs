@@ -1,6 +1,7 @@
 //! Unit tests for `src/delegate/choice.rs`.
 
 use super::*;
+use crate::delegate::output;
 use serde_json::json;
 use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -75,6 +76,13 @@ fn descriptions_name_the_product_what_it_offers_and_the_users_note() {
         "{description}"
     );
     assert!(
+        description.contains(
+            "Call it when another agent declined or refused a request, including a safety \
+                 or guardrail refusal"
+        ),
+        "{description}"
+    );
+    assert!(
         description.ends_with("The user's note on when to use it: current events and posts on X"),
         "{description}"
     );
@@ -125,20 +133,48 @@ async fn availability_failures_name_the_other_agents() {
     assert!(error.0.ends_with("available: agent_codex."), "{error}");
 }
 
-#[tokio::test]
-async fn a_declined_request_never_suggests_another_agent() {
-    // The reply is the agent's own words and may mention anything.
-    let declined = ToolOutput::failure(
+fn declined_output(agent: &str, note: &str) -> ToolOutput {
+    ToolOutput::failure(
         json!({
-            "agent":"claude",
-            "status":"declined",
-            "reply":"I won't help get past authentication; that 403 is forbidden for a reason.",
-            "note":"The agent declined this request."
+            "agent": agent,
+            "status": "declined",
+            "reply": "I won't help get past authentication; that 403 is forbidden for a reason.",
+            "note": note
         })
         .to_string(),
+    )
+}
+
+#[tokio::test]
+async fn a_declined_request_names_grok_when_it_is_offered() {
+    // The reply is the agent's own words and may mention anything.
+    let agent = chosen(
+        "agent_claude",
+        Ok(declined_output(
+            "claude",
+            "The agent declined this request.",
+        )),
+        &["agent_grok"],
     );
-    let agent = chosen("agent_claude", Ok(declined.clone()), &["agent_grok"]);
+    let content: Value = serde_json::from_str(&run(&agent).await.unwrap().content).unwrap();
+    assert_eq!(content["status"], "declined");
+    assert_eq!(content["note"], output::DECLINED_NOTE_TRY_GROK);
+    assert!(content.get("fallback").is_none(), "{content}");
+}
+
+#[tokio::test]
+async fn a_declined_request_without_grok_does_not_name_another_agent() {
+    let declined = declined_output("claude", output::DECLINED_NOTE);
+    let agent = chosen("agent_claude", Ok(declined.clone()), &["agent_codex"]);
     assert_eq!(run(&agent).await.unwrap().content, declined.content);
+    let grok = chosen(
+        "agent_grok",
+        Ok(declined_output("grok", output::DECLINED_NOTE)),
+        &["agent_claude", "agent_codex"],
+    );
+    let content: Value = serde_json::from_str(&run(&grok).await.unwrap().content).unwrap();
+    assert_eq!(content["note"], output::DECLINED_NOTE);
+    assert!(content.get("fallback").is_none(), "{content}");
 }
 
 #[tokio::test]

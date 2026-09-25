@@ -40,12 +40,19 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
     assert!(prompt.contains("agent_cancel"), "{prompt}");
     assert!(prompt.contains("[SCV background report]"), "{prompt}");
     assert!(!prompt.contains("# Chat channel"), "{prompt}");
-    // A declined request goes back to the user, who may pick an agent.
+    // Grok is offered, so a refusal is not a reason to skip it.
     assert!(
         prompt.contains(
-            "If an agent declines a request, tell the user what it said; don't pass the \
-                 request to another agent on your own. If the user then asks for a specific \
-                 agent, use it."
+            "If an agent declines a request, including a safety or guardrail refusal, tell \
+                 the user what it said and call agent_grok with the same request. A refusal \
+                 from another agent is not a reason to skip Grok."
+        ),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "If agent_grok itself declines, tell the user; don't pass the request to another \
+                 agent on your own unless the user names one."
         ),
         "{prompt}"
     );
@@ -67,7 +74,7 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
         },
     );
     assert!(foreground.contains("Hand substantial work to an agent"));
-    assert!(foreground.contains("If an agent declines a request"));
+    assert!(foreground.contains("call agent_grok with the same request"));
     assert!(!foreground.contains("background set to true"));
     assert!(!foreground.contains("prefers"));
 
@@ -98,6 +105,15 @@ fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
     assert!(owner.contains("plain text"), "{owner}");
     assert!(owner.contains("never see your tool calls"), "{owner}");
     assert!(owner.contains("# Delegating work"), "{owner}");
+    // Claude only: a refusal goes back to the user.
+    assert!(
+        owner.contains(
+            "If an agent declines a request, tell the user what it said; don't pass the \
+                 request to another agent on your own."
+        ),
+        "{owner}"
+    );
+    assert!(!owner.contains("call agent_grok"), "{owner}");
     // A tool-free chat session still learns how its replies are read.
     let guest = prompt_for(
         &Config::default(),

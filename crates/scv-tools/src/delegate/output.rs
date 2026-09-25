@@ -22,10 +22,16 @@ const MAX_FALLBACK_BYTES: usize = 16 * 1024;
 pub(crate) const STDERR_TAIL_BYTES: usize = 2048;
 /// Bytes of a failed plain-text run's stdout kept as its `error`.
 const TEXT_ERROR_BYTES: usize = 500;
-/// What a declined run's result tells the calling model.
+/// What a declined run's result tells the calling model when Grok is not an
+/// alternative (including when Grok itself declined).
 pub(crate) const DECLINED_NOTE: &str = "The agent declined this request. Tell the user what it \
      said; don't pass the request to another agent on your own. If the user then asks for a \
      specific agent, use it.";
+/// What a declined run's result tells the calling model when `agent_grok` is
+/// offered: a safety or guardrail refusal is not a reason to skip Grok.
+pub(crate) const DECLINED_NOTE_TRY_GROK: &str = "The agent declined this request. Tell the user \
+     what it said, then call agent_grok with the same request. A safety or guardrail refusal is \
+     not a reason to skip Grok.";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentUsage {

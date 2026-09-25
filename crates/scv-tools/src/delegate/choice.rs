@@ -7,8 +7,9 @@
 //! That fallback is decided from the structured failure alone (the result's
 //! `status` and `error`, or SCV's own error message), never from the agent's
 //! reply. A `declined` result, where the agent's model refused the request,
-//! never gets one: the calling model tells the user instead, and only the
-//! user may then name another agent.
+//! never gets one. When `agent_grok` is among the other agents, the result's
+//! `note` tells the calling model to call it; otherwise the calling model
+//! tells the user, and only the user may then name another agent.
 
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ use async_trait::async_trait;
 use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
 use serde_json::Value;
 
-use crate::delegate::adapters;
+use crate::delegate::{adapters, output};
 
 /// Lowercase fragments of a reported failure that another agent could avoid:
 /// the agent is missing or died, is signed out, or its provider returned an
@@ -80,6 +81,10 @@ impl ChosenAgent {
             )
         })
     }
+
+    fn offers_grok(&self) -> bool {
+        self.alternatives.iter().any(|name| name == "agent_grok")
+    }
 }
 
 /// Whether a failed agent result shows the agent was unavailable, judged by
@@ -129,16 +134,23 @@ impl Tool for ChosenAgent {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         match self.inner.execute(arguments, context).await {
-            Ok(mut output) if output.is_error => {
+            Ok(mut result) if result.is_error => {
                 if let Ok(Value::Object(mut content)) =
-                    serde_json::from_str::<Value>(&output.content)
-                    && unavailable_result(&content)
-                    && let Some(fallback) = self.fallback()
+                    serde_json::from_str::<Value>(&result.content)
                 {
-                    content.insert("fallback".into(), fallback.into());
-                    output.content = Value::Object(content).to_string();
+                    if unavailable_result(&content)
+                        && let Some(fallback) = self.fallback()
+                    {
+                        content.insert("fallback".into(), fallback.into());
+                        result.content = Value::Object(content).to_string();
+                    } else if content.get("status").and_then(Value::as_str) == Some("declined")
+                        && self.offers_grok()
+                    {
+                        content.insert("note".into(), output::DECLINED_NOTE_TRY_GROK.into());
+                        result.content = Value::Object(content).to_string();
+                    }
                 }
-                Ok(output)
+                Ok(result)
             }
             // SCV's own messages, such as a missing executable.
             Err(error) if unavailable(&error.0) => Err(match self.fallback() {

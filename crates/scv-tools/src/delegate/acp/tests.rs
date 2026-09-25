@@ -448,7 +448,7 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
     assert_eq!(value["note"], crate::delegate::output::DECLINED_NOTE);
     assert!(value.get("error").is_none(), "{value}");
     assert!(value.get("hint").is_none(), "{value}");
-    // Chosen among several agents, it still names no fallback.
+    // Chosen among several agents, Grok is named in the note, not as fallback.
     let chosen = crate::delegate::choice::ChosenAgent {
         inner: Arc::new(tool),
         use_for: None,
@@ -460,6 +460,10 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
         .unwrap();
     let value = json(&refused);
     assert_eq!(value["status"], "declined");
+    assert_eq!(
+        value["note"],
+        crate::delegate::output::DECLINED_NOTE_TRY_GROK
+    );
     assert!(value.get("fallback").is_none(), "{value}");
 
     let auth_dir = tempfile::tempdir().unwrap();
