@@ -14,7 +14,6 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
-    io::Write as _,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -31,7 +30,7 @@ use crate::{process::ProcessGroup, sync::lock};
 /// Environment variable carrying the delegation chain.
 pub const PARENT_VARIABLE: &str = "SCV_PARENT";
 /// Environment variable carrying how deeply this process is delegated.
-pub const DEPTH_VARIABLE: &str = "SCV_DELEGATION_DEPTH";
+pub use scv_client::DELEGATION_DEPTH_VARIABLE as DEPTH_VARIABLE;
 /// Grace between TERM and KILL when stopping delegated processes.
 pub(crate) const STOP_GRACE: Duration = Duration::from_secs(2);
 /// Largest record file read.
@@ -41,10 +40,7 @@ const ZOMBIE_MIN_AGE: Duration = Duration::from_secs(10);
 
 /// Delegation depth of the current process: 0 unless an SCV started it.
 pub fn current_depth() -> u32 {
-    std::env::var(DEPTH_VARIABLE)
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0)
+    scv_client::inherited_delegation_depth().unwrap_or(0)
 }
 
 /// A process, identified by PID plus start time so a reused PID never matches.
@@ -407,7 +403,9 @@ impl DelegationGuard {
         let dir = &self.registry.record_dir;
         if let Some(mut record) = read_record(&dir.join(format!("{}.json", self.handle))) {
             record.turn = Some(turn);
-            let _ = write_record(dir, &record);
+            if let Err(error) = write_record(dir, &record) {
+                tracing::debug!(handle = %record.handle, %error, "could not update a delegation record");
+            }
         }
     }
 
@@ -554,39 +552,54 @@ pub(crate) fn write_private_json(
     name: &str,
     value: &impl Serialize,
 ) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir)?;
     if let Some(run) = dir.parent() {
         std::fs::set_permissions(run, std::fs::Permissions::from_mode(0o700))?;
     }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
-    let temporary = dir.join(format!(".{name}.tmp"));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&temporary, dir.join(name))
+    scv_client::fs::replace_private(&dir.join(name), &bytes)
 }
 
 fn read_record(path: &Path) -> Option<DelegationRecord> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_RECORD_BYTES), &mut bytes)
-        .ok()?;
-    let record: DelegationRecord = serde_json::from_slice(&bytes).ok()?;
+    let bytes = match std::fs::File::open(path).and_then(|file| {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_RECORD_BYTES), &mut bytes)
+            .map(|_| bytes)
+    }) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // A record removed between listing and reading is normal.
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(path = %path.display(), %error, "unreadable delegation record");
+            }
+            return None;
+        }
+    };
+    let record: DelegationRecord = match serde_json::from_slice(&bytes) {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), %error, "malformed delegation record");
+            return None;
+        }
+    };
     // Only a record named after its own handle is trusted.
-    (path.file_stem().and_then(|stem| stem.to_str()) == Some(record.handle.as_str()))
-        .then_some(record)
+    if path.file_stem().and_then(|stem| stem.to_str()) == Some(record.handle.as_str()) {
+        Some(record)
+    } else {
+        tracing::debug!(path = %path.display(), "delegation record named for another handle");
+        None
+    }
 }
 
 fn remove_record(dir: &Path, handle: &str) {
-    let _ = std::fs::remove_file(dir.join(format!("{handle}.json")));
+    let path = dir.join(format!("{handle}.json"));
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(path = %path.display(), %error, "could not remove a delegation record");
+    }
 }
 
 /// Make this process the reaper of orphaned descendants (Linux), so processes
@@ -640,7 +653,7 @@ pub fn reap_orphaned_zombies() -> usize {
             let mut status = 0;
             // SAFETY: `status` is a live local that waitpid(2) writes one
             // int into; WNOHANG keeps the call from blocking.
-            if unsafe { libc::waitpid(info.pid as i32, &mut status, libc::WNOHANG) }
+            if unsafe { libc::waitpid(info.pid as i32, &raw mut status, libc::WNOHANG) }
                 == info.pid as i32
             {
                 reaped += 1;

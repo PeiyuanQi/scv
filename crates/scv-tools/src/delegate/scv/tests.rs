@@ -40,6 +40,16 @@ fn fake_scv(dir: &Path, mode: &str) -> PathBuf {
     path
 }
 
+/// Open conversation `scv-1` with a turn that finishes at once, under the
+/// default timeout.
+async fn warm_up(tool: &ScvAgentTool, dir: &Path) {
+    let output = tool
+        .execute(json!({"prompt":"warm up"}), context(dir, None))
+        .await
+        .unwrap();
+    assert_eq!(json(&output)["session"], "scv-1", "{}", output.content);
+}
+
 fn tool(
     script: &Path,
     conversations: Arc<ConversationStore>,
@@ -240,9 +250,12 @@ async fn a_child_ignoring_turn_cancel_is_killed_at_the_timeout() {
     let script = fake_scv(dir.path(), "hang");
     let conversations = store(Duration::from_secs(3600));
     let tool = tool(&script, Arc::clone(&conversations), None);
+    // Start the child first, so the one-second timeout covers the prompt
+    // alone, not bash start-up and the handshake.
+    warm_up(&tool, dir.path()).await;
     let output = tool
         .execute(
-            json!({"prompt":"slow","timeout_seconds":1}),
+            json!({"prompt":"slow","session":"scv-1","timeout_seconds":1}),
             context(dir.path(), None),
         )
         .await
@@ -268,9 +281,10 @@ async fn a_timed_out_turn_that_settles_stays_resumable() {
     let script = fake_scv(dir.path(), "cancellable");
     let conversations = store(Duration::from_secs(3600));
     let tool = tool(&script, Arc::clone(&conversations), None);
+    warm_up(&tool, dir.path()).await;
     let output = tool
         .execute(
-            json!({"prompt":"slow","timeout_seconds":1}),
+            json!({"prompt":"slow","session":"scv-1","timeout_seconds":1}),
             context(dir.path(), None),
         )
         .await

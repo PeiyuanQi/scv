@@ -68,6 +68,7 @@ impl Frame {
 
     /// The acknowledgement of this event frame: the same frame, with the
     /// handling time and a success response as its payload.
+    #[must_use]
     pub fn acknowledgement(mut self, handled_in: Duration) -> Self {
         self.headers.push(Header {
             key: "biz_rt".into(),

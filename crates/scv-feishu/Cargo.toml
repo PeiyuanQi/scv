@@ -19,6 +19,7 @@ prost.workspace = true
 qrcode.workspace = true
 reqwest.workspace = true
 scv-channels.workspace = true
+scv-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

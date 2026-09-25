@@ -100,7 +100,7 @@ impl Tool for ReadTool {
         });
         let (bytes, total_bytes, start) = tokio::select! {
             result = read => result.map_err(|error| ToolError(format!("read task failed: {error}")))??,
-            _ = context.cancellation.cancelled() => return Err(ToolError("read cancelled".into())),
+            () = context.cancellation.cancelled() => return Err(ToolError("read cancelled".into())),
         };
         let content = std::str::from_utf8(&bytes)
             .map_err(|_| ToolError(format!("selected range of {} is not UTF-8", args.path)))?;
@@ -242,7 +242,7 @@ impl Tool for WriteTool {
             let write_result = (|| {
                 temporary
                     .write_all(args.content.as_bytes())
-                    .and_then(|_| temporary.sync_all())
+                    .and_then(|()| temporary.sync_all())
                     .map_err(|error| ToolError(format!("write {}: {error}", args.path)))?;
                 if cancellation.is_cancelled() {
                     return Err(ToolError("write cancelled".into()));

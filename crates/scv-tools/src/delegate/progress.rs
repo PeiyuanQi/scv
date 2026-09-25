@@ -170,7 +170,7 @@ fn strip_shell(command: &str) -> String {
                 .or_else(|| rest.strip_prefix("-c "))
                 .map(str::trim)
         })
-        .map(|rest| {
+        .map_or(trimmed, |rest| {
             for quote in ['\'', '"'] {
                 if let Some(unquoted) = rest
                     .strip_prefix(quote)
@@ -180,8 +180,7 @@ fn strip_shell(command: &str) -> String {
                 }
             }
             rest
-        })
-        .unwrap_or(trimmed);
+        });
     detail(inner)
 }
 

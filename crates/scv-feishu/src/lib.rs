@@ -98,7 +98,7 @@ pub async fn run_supervised(
     };
     tokio::select! {
         biased;
-        _ = cancellation.cancelled() => Ok(()),
+        () = cancellation.cancelled() => Ok(()),
         result = work => result,
     }
 }
@@ -214,7 +214,7 @@ impl Transport for Feishu {
                     Err(error) => {
                         tracing::warn!(
                             "Feishu bot info unavailable; group messages go unanswered: {error:#}"
-                        )
+                        );
                     }
                 }
             }
@@ -469,11 +469,7 @@ fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &text[..end])
+    format!("{}…", scv_client::text::utf8_prefix(text, max))
 }
 
 fn batch(messages: Vec<Inbound>, before: &Checkpoint, after: &Checkpoint) -> Batch {

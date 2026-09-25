@@ -26,9 +26,10 @@ use std::{
 };
 
 use scv_core::ToolError;
+use scv_protocol::{Frame, FrameDecoder, Overflow};
 use serde::Serialize;
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+    io::{AsyncWriteExt as _, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{Mutex, mpsc, watch},
 };
@@ -213,17 +214,14 @@ impl Drop for LiveChild {
         }
         let stdin = self.stdin.get_mut().take();
         let pid = self.pid;
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(shut_down(pid, stdin, self.life.clone()));
-            }
-            Err(_) => {
-                // No runtime to wait in, so the reaper is gone too: kill at
-                // once. The guard's drop sweeps tagged leftovers.
-                kill_group(pid);
-                records::untrack_spawned(pid);
-                drop(lock(&self.guard).take());
-            }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(shut_down(pid, stdin, self.life.clone()));
+        } else {
+            // No runtime to wait in, so the reaper is gone too: kill at
+            // once. The guard's drop sweeps tagged leftovers.
+            kill_group(pid);
+            records::untrack_spawned(pid);
+            drop(lock(&self.guard).take());
         }
     }
 }
@@ -270,36 +268,22 @@ async fn reap(
     let _ = life.send(Life::Finished);
 }
 
-/// Split `stdout` into lines of at most `max_bytes` for the protocol client.
+/// Split `stdout` into lines of at most `max_bytes`, counting the line
+/// ending, for the protocol client.
 async fn read_lines(stdout: ChildStdout, sender: mpsc::Sender<LiveLine>, max_bytes: usize) {
     let mut reader = BufReader::new(stdout);
+    let mut decoder = FrameDecoder::new(max_bytes, Overflow::Stop);
     loop {
-        let mut line = Vec::new();
-        loop {
-            let buffer = match reader.fill_buf().await {
-                Ok(buffer) => buffer,
-                Err(_) => return,
-            };
-            if buffer.is_empty() {
-                // End of output; a partial last line is not a message.
-                return;
-            }
-            let take = buffer
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(buffer.len(), |index| index + 1);
-            if line.len() + take > max_bytes {
+        let line = match scv_client::read_frame(&mut reader, &mut decoder).await {
+            Ok(Frame::Line(line)) => LiveLine::Line(line),
+            Ok(Frame::TooLarge) => {
                 let _ = sender.send(LiveLine::TooLong).await;
                 return;
             }
-            line.extend_from_slice(&buffer[..take]);
-            reader.consume(take);
-            if line.last() == Some(&b'\n') {
-                break;
-            }
-        }
-        line.pop();
-        if sender.send(LiveLine::Line(line)).await.is_err() {
+            // End of output; a partial last line is not a message.
+            Ok(Frame::End | Frame::Truncated(_)) | Err(_) => return,
+        };
+        if sender.send(line).await.is_err() {
             return;
         }
     }

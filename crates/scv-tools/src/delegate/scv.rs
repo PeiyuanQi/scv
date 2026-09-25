@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, ServerEvent};
 use serde_json::{Value, json};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -156,15 +156,8 @@ impl ScvAgentTool {
             registration,
         )?;
         let handshake = async {
-            live.send(&ClientMessage::Initialize {
-                request_id: "scv-agent-init".into(),
-                protocol_version: PROTOCOL_VERSION,
-                client: PeerInfo {
-                    name: "scv-agent".into(),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                },
-            })
-            .await?;
+            live.send(&ClientMessage::initialize("scv-agent-init", "scv-agent"))
+                .await?;
             loop {
                 match next_event(&live, deadline, cancellation).await {
                     Ok(ServerEvent::Initialized {
@@ -321,12 +314,9 @@ impl ScvAgentTool {
                             return TurnEnd::Cancelled { settled };
                         }
                     };
-                    let approved = match approved {
-                        Ok(approved) => approved,
-                        Err(_) => {
-                            let settled = cancel_turn(child, turn_id.as_deref(), &request_id).await;
-                            return TurnEnd::Cancelled { settled };
-                        }
+                    let Ok(approved) = approved else {
+                        let settled = cancel_turn(child, turn_id.as_deref(), &request_id).await;
+                        return TurnEnd::Cancelled { settled };
                     };
                     if let Err(error) = child
                         .live
@@ -649,38 +639,35 @@ impl Tool for ScvAgentTool {
         let mut turn = self
             .conversations
             .begin(AGENT, args.session.as_deref(), &cwd, false)?;
-        let child: Arc<ScvChild> = match turn.attachment() {
-            Some(Attachment(attachment)) => {
-                let Ok(child) = Arc::clone(attachment).downcast::<ScvChild>() else {
-                    turn.forget();
-                    return Err(ToolError("conversation has no nested SCV".into()));
-                };
-                if !child.live.is_running() {
-                    let handle = turn.handle.clone();
-                    turn.forget();
-                    return Err(ToolError(format!(
-                        "conversation {handle} ended: its nested SCV exited; omit session to \
-                         start a new one"
-                    )));
-                }
-                child
+        let child: Arc<ScvChild> = if let Some(Attachment(attachment)) = turn.attachment() {
+            let Ok(child) = Arc::clone(attachment).downcast::<ScvChild>() else {
+                turn.forget();
+                return Err(ToolError("conversation has no nested SCV".into()));
+            };
+            if !child.live.is_running() {
+                let handle = turn.handle.clone();
+                turn.forget();
+                return Err(ToolError(format!(
+                    "conversation {handle} ended: its nested SCV exited; omit session to \
+                     start a new one"
+                )));
             }
-            None => {
-                let child = self
-                    .start(
-                        &turn,
-                        &cwd,
-                        args.model.as_deref(),
-                        deadline,
-                        &context.cancellation,
-                    )
-                    .await?;
-                let child = Arc::new(child);
-                turn.attach(Attachment(
-                    Arc::clone(&child) as Arc<dyn std::any::Any + Send + Sync>
-                ));
-                child
-            }
+            child
+        } else {
+            let child = self
+                .start(
+                    &turn,
+                    &cwd,
+                    args.model.as_deref(),
+                    deadline,
+                    &context.cancellation,
+                )
+                .await?;
+            let child = Arc::new(child);
+            turn.attach(Attachment(
+                Arc::clone(&child) as Arc<dyn std::any::Any + Send + Sync>
+            ));
+            child
         };
         child.live.set_turn(turn.turn);
         let handle = turn.handle.clone();
@@ -716,11 +703,11 @@ impl Tool for ScvAgentTool {
                 )
             }
             TurnEnd::Cancelled { settled } => {
-                if !settled {
+                if settled {
+                    drop(turn.finish(Some(child.session_id.clone()), false));
+                } else {
                     child.live.close().await;
                     turn.forget();
-                } else {
-                    drop(turn.finish(Some(child.session_id.clone()), false));
                 }
                 return Err(ToolError("nested SCV turn cancelled".into()));
             }

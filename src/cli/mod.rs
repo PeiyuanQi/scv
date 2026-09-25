@@ -27,9 +27,13 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf) -> Result<()> {
         model: cli.model.clone(),
         provider: cli.provider.clone(),
         base_url: cli.base_url.clone(),
-        approval_policy: cli
-            .approval_policy
-            .map(|value| value.to_possible_value().unwrap().get_name().to_owned()),
+        approval_policy: cli.approval_policy.map(|value| {
+            value
+                .to_possible_value()
+                .expect("every ApprovalArg has a value name")
+                .get_name()
+                .to_owned()
+        }),
     };
     let overrides = ConfigOverrides {
         provider: cli.provider.clone(),

@@ -70,6 +70,7 @@ impl Config {
                             .brave_api_key_env
                             .as_deref()
                             .and_then(|name| std::env::var(name).ok())
+                            .map(scv_client::Secret::from)
                     })
                     .filter(|key| !key.trim().is_empty());
                 if api_key.is_none() {
@@ -79,7 +80,7 @@ impl Config {
                 }
                 api_key.map(|api_key| SearchBackend::Brave {
                     url: self.web.brave_url.clone(),
-                    api_key,
+                    api_key: api_key.into_inner(),
                 })
             }
         };

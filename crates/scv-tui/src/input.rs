@@ -36,8 +36,8 @@ pub(crate) async fn handle_connected_key(
 ) -> Result<()> {
     if let Some(approval) = &app.pending_approval {
         let approved = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
+            KeyCode::Char('y' | 'Y') => Some(true),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(false),
             _ => None,
         };
         if let Some(approved) = approved {
@@ -84,7 +84,7 @@ pub(crate) async fn handle_connected_key(
                 return Ok(());
             }
             KeyCode::Char('x') if app.turn.is_some() && app.queue_selected.is_some() => {
-                let index = app.queue_selected.unwrap();
+                let index = app.queue_selected.expect("guarded by the match arm");
                 if let Some(entry) = app.queue.get(index).cloned() {
                     client
                         .send(&ClientMessage::QueueRemove {

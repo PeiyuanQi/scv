@@ -146,6 +146,7 @@ impl OpenAiProvider {
 
     /// Whether images in user messages go to the model as image input
     /// (the default) or only as a short note naming each one.
+    #[must_use]
     pub fn with_image_input(self, enabled: bool) -> Self {
         self.image_input.store(enabled, Ordering::Relaxed);
         self
@@ -153,6 +154,7 @@ impl OpenAiProvider {
 
     /// Offers the endpoint's hosted Responses `web_search` tool. The provider
     /// runs the searches itself; only the answer and its citations return.
+    #[must_use]
     pub fn with_web_search(mut self) -> Self {
         self.hosted_tools.push(json!({"type":"web_search"}));
         self
@@ -190,7 +192,7 @@ impl OpenAiProvider {
         while bytes.len() < 4096 {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = cancellation.cancelled() => return AttemptFailure::fatal(cancelled()),
+                () = cancellation.cancelled() => return AttemptFailure::fatal(cancelled()),
             };
             let Some(chunk) = chunk else {
                 break;
@@ -281,7 +283,7 @@ impl OpenAiProvider {
                         retry_after: None,
                     }
                 })?,
-            _ = cancellation.cancelled() => return Err(cancelled().into()),
+            () = cancellation.cancelled() => return Err(cancelled().into()),
         };
         if !response.status().is_success() {
             return Err(self.response_error(response, cancellation).await);
@@ -306,7 +308,7 @@ impl OpenAiProvider {
         while !state.done {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = cancellation.cancelled() => return Err(cancelled().into()),
+                () = cancellation.cancelled() => return Err(cancelled().into()),
             };
             let Some(chunk) = chunk else { break };
             let chunk = chunk.map_err(|error| AttemptFailure {
@@ -451,7 +453,7 @@ impl Provider for OpenAiProvider {
             );
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
-                _ = cancellation.cancelled() => return Err(cancelled()),
+                () = cancellation.cancelled() => return Err(cancelled()),
             }
             retry += 1;
         }

@@ -467,7 +467,7 @@ impl Tool for WebFetchTool {
         );
         let response = tokio::select! {
             result = request.send() => result.map_err(|error| ToolError(format!("fetch {url}: {}", error_chain(&error))))?,
-            _ = context.cancellation.cancelled() => return Err(ToolError("web fetch cancelled".into())),
+            () = context.cancellation.cancelled() => return Err(ToolError("web fetch cancelled".into())),
         };
         let status = response.status();
         let final_url = response.url().clone();
@@ -492,7 +492,7 @@ impl Tool for WebFetchTool {
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = context.cancellation.cancelled() => return Err(ToolError("web fetch cancelled".into())),
+                () = context.cancellation.cancelled() => return Err(ToolError("web fetch cancelled".into())),
             };
             let Some(chunk) = chunk else { break };
             let chunk = chunk
@@ -754,7 +754,7 @@ impl Tool for WebSearchTool {
         };
         let response = tokio::select! {
             result = request.send() => result.map_err(|error| ToolError(format!("{} request failed: {}", self.backend_name(), error_chain(&error))))?,
-            _ = context.cancellation.cancelled() => return Err(ToolError("web search cancelled".into())),
+            () = context.cancellation.cancelled() => return Err(ToolError("web search cancelled".into())),
         };
         let status = response.status();
         let mut stream = response.bytes_stream();
@@ -762,7 +762,7 @@ impl Tool for WebSearchTool {
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = context.cancellation.cancelled() => return Err(ToolError("web search cancelled".into())),
+                () = context.cancellation.cancelled() => return Err(ToolError("web search cancelled".into())),
             };
             let Some(chunk) = chunk else { break };
             let chunk = chunk.map_err(|error| {

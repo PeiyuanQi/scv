@@ -191,26 +191,12 @@ pub(crate) fn save_plan(path: &Path, plan: &Plan) -> Result<()> {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent", path.display()))?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("write {}", path.display()))?;
-    Ok(())
+    scv_client::fs::replace_private(path, bytes)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 fn unix_now() -> u64 {
@@ -465,14 +451,15 @@ impl Notifier {
         if let Some(list) = &self.list {
             return list.clone();
         }
-        crate::Config::load_user(crate::ConfigOverrides::default())
-            .map(|config| config.notify.owner)
-            .unwrap_or_else(|error| {
+        crate::Config::load_user(crate::ConfigOverrides::default()).map_or_else(
+            |error| {
                 tracing::warn!(
                     "Notices use the owner's last chat; configuration failed: {error:#}"
                 );
                 Vec::new()
-            })
+            },
+            |config| config.notify.owner,
+        )
     }
 
     /// The notify list, or else the chat the owner last wrote from.
@@ -561,8 +548,8 @@ impl Notifier {
                 return None;
             }
             tokio::select! {
-                _ = cancel.cancelled() => return None,
-                _ = tokio::time::sleep(self.poll) => {}
+                () = cancel.cancelled() => return None,
+                () = tokio::time::sleep(self.poll) => {}
             }
         }
     }
@@ -770,8 +757,8 @@ impl Restarter {
         loop {
             tokio::select! {
                 // The daemon is stopping: the next one finds the plan waiting.
-                _ = self.cancel.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                () = self.cancel.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
             let waiting = self.waiting_for(&plan);
             clear = if waiting.is_none() { clear + 1 } else { 0 };
@@ -1193,8 +1180,8 @@ pub(crate) async fn announce(
                 Decision::Wait => {}
             }
             tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
             match load_plan(&path) {
                 Ok(Some(reloaded)) if reloaded.id == plan.id => plan = reloaded,
@@ -1240,8 +1227,8 @@ pub(crate) async fn monitor(notifier: Notifier, cancel: CancellationToken) {
     let mut down: HashMap<String, (tokio::time::Instant, bool)> = HashMap::new();
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(MONITOR_INTERVAL) => {}
+            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(MONITOR_INTERVAL) => {}
         }
         let states = notifier.states.get().await;
         down.retain(|id, _| {

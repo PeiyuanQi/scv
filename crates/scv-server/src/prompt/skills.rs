@@ -51,7 +51,7 @@ pub(crate) fn discover_skills(
             .with_context(|| format!("read skill root {}", canonical.display()))?
             .filter_map(Result::ok)
             .collect();
-        entries.sort_by_key(|entry| entry.file_name());
+        entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             if skills.len() >= config.skills.max_skills {
                 break;
@@ -154,7 +154,7 @@ pub(crate) fn discover_project_skills(
                 .filter_map(Result::ok)
                 .take(MAX_WORKSPACE_ENTRIES)
                 .collect();
-            entries.sort_by_key(|entry| entry.file_name());
+            entries.sort_by_key(std::fs::DirEntry::file_name);
             for entry in entries {
                 if skills.len() >= config.skills.max_skills {
                     break 'projects;

@@ -435,22 +435,11 @@ fn unix_now() -> u64 {
 
 /// Write `value` as JSON readable only by the user, replacing the file whole.
 fn write_private(path: &std::path::Path, value: &impl Serialize) -> anyhow::Result<()> {
-    use std::io::Write as _;
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent", path.display()))?;
     std::fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    temporary.write_all(&serde_json::to_vec(value)?)?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
+    scv_client::fs::replace_private(path, &serde_json::to_vec(value)?)?;
     Ok(())
 }
 

@@ -7,11 +7,12 @@ use std::sync::{Arc, atomic::Ordering};
 use anyhow::{Context, Result, anyhow};
 use scv_core::AgentError;
 use scv_protocol::{
-    Attachment, ClientMessage, DaemonCommand, PROTOCOL_VERSION, PeerInfo, ServerEvent, Usage,
+    Attachment, ClientMessage, DaemonCommand, Frame, FrameDecoder, Overflow, PROTOCOL_VERSION,
+    PeerInfo, ServerEvent, Usage, trim_line,
 };
 use scv_tools::delegation::DelegationRegistry;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncWriteExt, BufReader},
     sync::{Mutex, mpsc},
     task::JoinHandle,
 };
@@ -42,6 +43,7 @@ const PROMPT_LIMIT_BYTES: usize = 256 * 1024;
 
 /// Serve one client until it disconnects, the server shuts down, or it
 /// speaks an unsupported protocol version.
+#[tracing::instrument(name = "connection", skip_all, fields(session = tracing::field::Empty))]
 pub(crate) async fn run_managed<R, W>(
     reader: R,
     writer: W,
@@ -99,7 +101,7 @@ where
             connection.track_activity();
             let frame_limit = connection.client_frame_limit();
             tokio::select! {
-                _ = cancellation.cancelled() => break,
+                () = cancellation.cancelled() => break,
                 read = frames.read(&mut reader, frame_limit) => {
                     let read = read.context("read protocol input")?;
                     if let Flow::Stop = connection.on_read(read).await? {
@@ -445,7 +447,7 @@ impl Connection {
         };
         let result = tokio::select! {
             biased;
-            _ = self.cancellation.cancelled() => return Ok(Flow::Stop),
+            () = self.cancellation.cancelled() => return Ok(Flow::Stop),
             result = daemon_control(components, &self.registry, command) => result,
         };
         match result {
@@ -560,6 +562,7 @@ impl Connection {
             &session.id,
             session.background.as_ref(),
         ));
+        tracing::Span::current().record("session", session.id.as_str());
         self.session = Some(session);
         Ok(())
     }
@@ -980,13 +983,22 @@ pub(crate) enum FrameRead {
 }
 
 /// A persistent decoder keeps consumed partial bytes across select cancellation.
-#[derive(Default)]
 pub(crate) struct FrameBuffer {
-    bytes: Vec<u8>,
-    oversized: bool,
+    decoder: FrameDecoder,
+}
+
+impl Default for FrameBuffer {
+    fn default() -> Self {
+        Self {
+            decoder: FrameDecoder::new(0, Overflow::Skip),
+        }
+    }
 }
 
 impl FrameBuffer {
+    /// The next client frame of at most `max_bytes`, not counting its line
+    /// ending (`\n` or `\r\n`). A frame over the limit is skipped whole and
+    /// reported, so the connection can go on.
     pub(crate) async fn read<R>(
         &mut self,
         reader: &mut R,
@@ -995,38 +1007,16 @@ impl FrameBuffer {
     where
         R: AsyncBufRead + Unpin,
     {
-        loop {
-            let available = reader.fill_buf().await?;
-            let eof = available.is_empty();
-            let end = available.iter().position(|b| *b == b'\n');
-            let take = end.map_or(available.len(), |n| n + 1);
-            if !self.oversized {
-                if self.bytes.len().saturating_add(take) > max_bytes.saturating_add(2) {
-                    self.oversized = true;
-                    self.bytes.clear();
-                } else {
-                    self.bytes.extend_from_slice(&available[..take]);
+        self.decoder.set_limit(max_bytes.saturating_add(2));
+        Ok(
+            match scv_client::read_frame(reader, &mut self.decoder).await? {
+                Frame::End => FrameRead::Eof,
+                Frame::TooLarge => FrameRead::TooLarge,
+                Frame::Line(line) | Frame::Truncated(line) => {
+                    trim_line(line, max_bytes).map_or(FrameRead::TooLarge, FrameRead::Frame)
                 }
-            }
-            reader.consume(take);
-            if end.is_some() || eof {
-                if std::mem::take(&mut self.oversized) {
-                    return Ok(FrameRead::TooLarge);
-                }
-                if eof && self.bytes.is_empty() {
-                    return Ok(FrameRead::Eof);
-                }
-                let mut bytes = std::mem::take(&mut self.bytes);
-                while matches!(bytes.last(), Some(b'\n' | b'\r')) {
-                    bytes.pop();
-                }
-                return Ok(if bytes.len() > max_bytes {
-                    FrameRead::TooLarge
-                } else {
-                    FrameRead::Frame(bytes)
-                });
-            }
-        }
+            },
+        )
     }
 }
 
@@ -1034,16 +1024,13 @@ async fn shutdown_writer(
     mut writer: JoinHandle<std::io::Result<()>>,
     grace: std::time::Duration,
 ) -> Result<()> {
-    match tokio::time::timeout(grace, &mut writer).await {
-        Ok(result) => {
-            result.context("join protocol writer")??;
-            Ok(())
-        }
-        Err(_) => {
-            writer.abort();
-            let _ = writer.await;
-            Err(anyhow!("protocol writer shutdown timed out"))
-        }
+    if let Ok(result) = tokio::time::timeout(grace, &mut writer).await {
+        result.context("join protocol writer")??;
+        Ok(())
+    } else {
+        writer.abort();
+        let _ = writer.await;
+        Err(anyhow!("protocol writer shutdown timed out"))
     }
 }
 

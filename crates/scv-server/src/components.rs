@@ -29,7 +29,10 @@ pub struct HealthReporter(Arc<Mutex<ComponentHealth>>);
 
 impl HealthReporter {
     pub fn contact(&self, connected: bool) {
-        let mut health = self.0.lock().unwrap();
+        let mut health = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(
             health.state,
             ComponentState::Stopping | ComponentState::Stopped
@@ -53,13 +56,19 @@ impl HealthReporter {
     }
 
     fn transition(&self, state: ComponentState, error: Option<&str>) {
-        let mut health = self.0.lock().unwrap();
+        let mut health = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         health.state = state;
         health.error = error.map(str::to_owned);
     }
 
     fn snapshot(&self) -> ComponentHealth {
-        self.0.lock().unwrap().clone()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -114,7 +123,7 @@ impl Supervisor {
                     tokio::spawn(async move { instance.run(child_cancel, child_report).await });
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => {
+                    () = cancel.cancelled() => {
                         report.transition(ComponentState::Stopping, None);
                         if tokio::time::timeout(grace, &mut child).await.is_err() {
                             child.abort();
@@ -128,13 +137,17 @@ impl Supervisor {
                     ComponentState::Backoff,
                     Some("Component stopped unexpectedly; retrying"),
                 );
-                report.0.lock().unwrap().restarts += 1;
+                report
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .restarts += 1;
                 if started.elapsed() >= Duration::from_secs(60) {
                     delay = initial_backoff;
                 }
                 tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tokio::time::sleep(delay) => {}
+                    () = cancel.cancelled() => break,
+                    () = tokio::time::sleep(delay) => {}
                 }
                 delay = (delay * 2).min(Duration::from_secs(60));
             }
@@ -396,7 +409,7 @@ impl Components {
             version: env!("CARGO_PKG_VERSION").into(),
             pid: std::process::id(),
             components,
-            delegations: Default::default(),
+            delegations: scv_protocol::DelegationSummary::default(),
             restart: None,
         }
     }
@@ -609,12 +622,13 @@ impl Components {
 /// The longest tool call an owner session in `workspace` may make, from the
 /// configuration its sessions load. Read at each (re)start of the component.
 fn max_tool_timeout(workspace: &std::path::Path) -> std::time::Duration {
-    let seconds = crate::Config::load(workspace, crate::ConfigOverrides::default())
-        .map(|config| config.tools.max_timeout_seconds)
-        .unwrap_or_else(|error| {
+    let seconds = crate::Config::load(workspace, crate::ConfigOverrides::default()).map_or_else(
+        |error| {
             tracing::warn!("Channel owner turns use the default tool timeout ceiling: {error:#}");
             crate::config::ToolConfig::default().max_timeout_seconds
-        });
+        },
+        |config| config.tools.max_timeout_seconds,
+    );
     std::time::Duration::from_secs(seconds)
 }
 

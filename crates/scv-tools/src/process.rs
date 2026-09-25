@@ -154,10 +154,10 @@ pub(crate) async fn supervise(
     }
     let completion = tokio::select! {
         status = child.wait() => Completion::Exited(status.map_err(|error| ToolError(format!("wait for child: {error}")))?),
-        _ = cancellation.cancelled() => {
+        () = cancellation.cancelled() => {
             Completion::Cancelled
         },
-        _ = sleep_until(deadline) => Completion::TimedOut,
+        () = sleep_until(deadline) => Completion::TimedOut,
     };
 
     let (status, timed_out, drain_deadline) = match completion {

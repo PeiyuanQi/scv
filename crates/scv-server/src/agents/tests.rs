@@ -406,7 +406,8 @@ fn the_nested_scv_gets_a_private_copy_of_the_provider() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join("config.toml");
     std::fs::write(&path, "[agent]\nmax_steps = 7\n").unwrap();
-    let headers = std::collections::HashMap::from([("X-Team".to_owned(), "core".to_owned())]);
+    let headers =
+        std::collections::HashMap::from([("X-Team".to_owned(), scv_client::Secret::from("core"))]);
     let key = "sk-nested-secret-0123456789";
     let lines = configure_scv_child(
         home.path(),

@@ -1,25 +1,35 @@
 //! What every local client of the SCV daemon needs, without depending on the
 //! server: the instance [`Layout`] (every path under `SCV_HOME`), the
 //! [`default_socket_path`], the delegation-depth variable a delegated SCV
-//! inherits, and [`control`] for daemon management requests.
+//! inherits, framed reading and writing ([`Connection`], [`read_frame`]),
+//! private instance files ([`fs::replace_private`]), [`Secret`] values
+//! that never print, byte-bounded text
+//! ([`text::utf8_prefix`]), and [`control`] for daemon management requests.
 
 #![forbid(unsafe_code)]
 
+pub mod connection;
+pub mod fs;
 pub mod layout;
+pub mod secret;
+pub mod text;
+pub use connection::{Connection, read_frame, write_message};
 pub use layout::Layout;
+pub use secret::Secret;
 
 use anyhow::{Context, Result, bail};
 use scv_protocol::{
-    ClientMessage, DaemonCommand, DaemonStatus, PROTOCOL_VERSION, PeerInfo, ServerEvent,
+    ClientMessage, DaemonCommand, DaemonStatus, Frame, FrameDecoder, Overflow, PROTOCOL_VERSION,
+    ServerEvent,
 };
 use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
-};
+use tokio::{io::BufReader, net::UnixStream};
+
+/// Largest management reply, counting its line ending.
+const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Environment variable carrying a delegated process's depth; SCV sets it on
 /// every agent it starts.
@@ -49,44 +59,27 @@ pub async fn control(path: &Path, command: DaemonCommand) -> Result<DaemonStatus
         let stream = UnixStream::connect(path)
             .await
             .context("SCV daemon unavailable; start it with `scv start` or `scv run`")?;
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
+        let (reader, writer) = stream.into_split();
+        let mut connection = Connection::new(
+            BufReader::new(reader),
+            writer,
+            FrameDecoder::new(MAX_CONTROL_FRAME_BYTES, Overflow::Stop),
+        );
         for message in [
-            ClientMessage::Initialize {
-                request_id: "init".into(),
-                protocol_version: PROTOCOL_VERSION,
-                client: PeerInfo {
-                    name: "scv-control".into(),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                },
-            },
+            ClientMessage::initialize("init", "scv-control"),
             ClientMessage::DaemonControl {
                 request_id: "control".into(),
                 command,
             },
         ] {
-            let mut frame = serde_json::to_vec(&message)?;
-            frame.push(b'\n');
-            writer.write_all(&frame).await?;
-            let mut bytes = Vec::new();
-            loop {
-                let buf = reader.fill_buf().await?;
-                if buf.is_empty() {
-                    bail!("SCV daemon closed the management connection");
+            connection.send(&message).await?;
+            let bytes = match connection.read().await? {
+                Frame::Line(bytes) => bytes,
+                Frame::TooLarge => bail!("SCV status exceeds frame limit"),
+                Frame::End | Frame::Truncated(_) => {
+                    bail!("SCV daemon closed the management connection")
                 }
-                let take = buf
-                    .iter()
-                    .position(|b| *b == b'\n')
-                    .map_or(buf.len(), |n| n + 1);
-                if bytes.len() + take > 1024 * 1024 {
-                    bail!("SCV status exceeds frame limit");
-                }
-                bytes.extend_from_slice(&buf[..take]);
-                reader.consume(take);
-                if bytes.last() == Some(&b'\n') {
-                    break;
-                }
-            }
+            };
             match serde_json::from_slice::<ServerEvent>(&bytes)? {
                 ServerEvent::Initialized {
                     protocol_version: PROTOCOL_VERSION,

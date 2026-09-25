@@ -14,7 +14,7 @@ pub type Store = scv_channels::state::Store<Account>;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
-    pub token: String,
+    pub token: scv_client::Secret,
     pub base_url: String,
     #[serde(default)]
     pub bot_id: Option<String>,
@@ -49,7 +49,7 @@ pub fn runs_as(saved: &Account, token: &str, base_url: &str) -> Result<bool> {
         base_url: base_url.into(),
         ..saved.clone()
     };
-    Ok(saved.token == token && supplied.fingerprint()? == saved.fingerprint()?)
+    Ok(saved.token.expose() == token && supplied.fingerprint()? == saved.fingerprint()?)
 }
 
 /// The WeChat channel's account store in the instance selected by `SCV_HOME`.

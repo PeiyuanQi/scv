@@ -170,23 +170,7 @@ fn systemd_path(value: &std::ffi::OsStr) -> String {
 }
 
 fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path has no parent"))?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).context("create temporary systemd unit")?;
-    temporary
-        .write_all(contents)
-        .context("write temporary systemd unit")?;
-    temporary
-        .as_file()
-        .sync_all()
-        .context("sync temporary systemd unit")?;
-    temporary
-        .persist(path)
-        .map(|_| ())
-        .map_err(|error| error.error)
-        .context("install systemd unit")
+    scv_client::fs::replace_private(path, contents).context("install systemd unit")
 }
 
 fn stop_legacy_instance(service: &str) -> Result<()> {

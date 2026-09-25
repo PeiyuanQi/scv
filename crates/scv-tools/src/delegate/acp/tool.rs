@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::*;
+use super::{AcpChild, TurnEnd};
 
 pub(crate) struct AcpAgentTool {
     pub(super) name: String,
@@ -38,7 +38,7 @@ pub(crate) struct AcpAgentTool {
 }
 
 impl AcpAgentTool {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "one field per adapter setting")]
     pub(crate) fn new(
         name: String,
         adapter: &AgentAdapterConfig,

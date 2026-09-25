@@ -151,15 +151,12 @@ impl AgentStream {
         if trimmed.is_empty() {
             return;
         }
-        match serde_json::from_slice::<Value>(trimmed) {
-            Ok(Value::Object(event)) => {
-                self.parsed_events += 1;
-                self.event(&Value::Object(event));
-            }
-            _ => {
-                self.push_text(trimmed);
-                self.push_text(b"\n");
-            }
+        if let Ok(Value::Object(event)) = serde_json::from_slice::<Value>(trimmed) {
+            self.parsed_events += 1;
+            self.event(&Value::Object(event));
+        } else {
+            self.push_text(trimmed);
+            self.push_text(b"\n");
         }
     }
 
@@ -480,14 +477,10 @@ fn add_usage(total: Option<AgentUsage>, turn: Option<AgentUsage>) -> Option<Agen
 }
 
 pub(crate) fn truncate_utf8(value: &str, limit: usize) -> (&str, bool) {
-    if value.len() <= limit {
-        return (value, false);
-    }
-    let mut end = limit;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    (&value[..end], true)
+    (
+        scv_client::text::utf8_prefix(value, limit),
+        value.len() > limit,
+    )
 }
 
 /// Point a failed agent run whose reported error reads like a missing

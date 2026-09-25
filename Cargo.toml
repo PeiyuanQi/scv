@@ -25,11 +25,46 @@ rust_2018_idioms = { level = "deny", priority = -1 }
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that do not pay for themselves here.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+unreadable_literal = "allow"
+struct_field_names = "allow"
+doc_markdown = "allow"
+verbose_bit_mask = "allow"
+# Next ratchet (docs/quality.md): these still have hits that need a
+# hand-written change each. Remove one line at a time with its cleanup.
+assigning_clones = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+format_collect = "allow"
+format_push_string = "allow"
+implicit_hasher = "allow"
+items_after_statements = "allow"
+large_futures = "allow"
+large_stack_arrays = "allow"
+match_same_arms = "allow"
+missing_fields_in_debug = "allow"
+needless_pass_by_value = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
+unnecessary_debug_formatting = "allow"
+unused_self = "allow"
+allow_attributes_without_reason = "deny"
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "warn"
 dbg_macro = "deny"
 todo = "deny"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -68,16 +103,16 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 which = "8.0.0"
 
-scv-core = { version = "=0.2.1", path = "crates/scv-core" }
-scv-client = { version = "=0.2.1", path = "crates/scv-client" }
-scv-channels = { version = "=0.2.1", path = "crates/scv-channels" }
-scv-clawbot = { version = "=0.2.1", path = "crates/scv-clawbot" }
-scv-feishu = { version = "=0.2.1", path = "crates/scv-feishu" }
-scv-protocol = { version = "=0.2.1", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "=0.2.1", path = "crates/scv-provider-openai" }
-scv-server = { version = "=0.2.1", path = "crates/scv-server" }
-scv-tools = { version = "=0.2.1", path = "crates/scv-tools" }
-scv-tui = { version = "=0.2.1", path = "crates/scv-tui" }
+scv-core = { version = "=0.2.2", path = "crates/scv-core" }
+scv-client = { version = "=0.2.2", path = "crates/scv-client" }
+scv-channels = { version = "=0.2.2", path = "crates/scv-channels" }
+scv-clawbot = { version = "=0.2.2", path = "crates/scv-clawbot" }
+scv-feishu = { version = "=0.2.2", path = "crates/scv-feishu" }
+scv-protocol = { version = "=0.2.2", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.2.2", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.2.2", path = "crates/scv-server" }
+scv-tools = { version = "=0.2.2", path = "crates/scv-tools" }
+scv-tui = { version = "=0.2.2", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true

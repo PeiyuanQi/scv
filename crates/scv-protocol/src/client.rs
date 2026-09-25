@@ -179,6 +179,19 @@ pub enum ClientMessage {
 }
 
 impl ClientMessage {
+    /// The `initialize` request every client sends first, declaring this
+    /// release's [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION).
+    pub fn initialize(request_id: impl Into<String>, client_name: impl Into<String>) -> Self {
+        Self::Initialize {
+            request_id: request_id.into(),
+            protocol_version: crate::PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: client_name.into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+        }
+    }
+
     /// The client-chosen ID that answering events carry.
     pub fn request_id(&self) -> &str {
         match self {

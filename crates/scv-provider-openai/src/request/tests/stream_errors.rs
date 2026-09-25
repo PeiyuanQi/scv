@@ -113,7 +113,7 @@ fn provider_with_timeout(
             retry_base_delay,
             ..ProviderLimits::default()
         },
-        Default::default(),
+        std::collections::HashMap::default(),
     )
     .unwrap()
 }

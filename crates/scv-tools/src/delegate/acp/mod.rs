@@ -19,7 +19,12 @@ mod tool;
 
 pub(crate) use tool::AcpAgentTool;
 // The submodules share one namespace through `use super::*`.
-use {permission::*, progress::*, rpc::*, session::*};
+use {
+    permission::{choose_option, describe_permission},
+    progress::Progress,
+    rpc::{CallError, Incoming, Interrupt, Rpc, describe_rpc_error},
+    session::{AcpChild, TurnEnd},
+};
 
 #[cfg(test)]
 mod tests;

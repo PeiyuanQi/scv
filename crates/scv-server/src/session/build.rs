@@ -86,7 +86,7 @@ pub(crate) async fn build_session(
     }
     let provider_config = config.provider.clone();
     let api_key = provider_config.api_key.clone().or_else(|| {
-        provider_config.api_key_env.as_deref().and_then(|name| std::env::var(name).ok())
+        provider_config.api_key_env.as_deref().and_then(|name| std::env::var(name).ok()).map(scv_client::Secret::from)
     }).filter(|key| !key.trim().is_empty()).ok_or_else(|| anyhow!("provider credential is not configured; set provider.api_key or provider.api_key_env"))?;
     let skills = discover_skills(&workspace, &config, !no_tools)?;
     let listings = SkillListings {
@@ -96,10 +96,14 @@ pub(crate) async fn build_session(
     let mut provider = OpenAiProvider::new(
         provider_config.model.clone(),
         provider_config.base_url.clone(),
-        api_key,
+        api_key.into_inner(),
         Duration::from_secs(provider_config.timeout_seconds),
         config.provider_limits(),
-        provider_config.headers.clone(),
+        provider_config
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.expose().to_owned()))
+            .collect(),
     )?
     .with_image_input(provider_config.image_input);
     if !no_tools && config.hosted_web_search() {

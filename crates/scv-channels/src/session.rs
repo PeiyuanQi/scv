@@ -1,13 +1,15 @@
 //! A channel conversation's session on the single SCV Unix-socket daemon.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
+use scv_client::Connection;
 use scv_protocol::{
-    Attachment, ClientMessage, PROTOCOL_VERSION, PeerInfo, ReplyAttachment, ServerEvent,
+    Attachment, ClientMessage, Frame, FrameDecoder, Overflow, PROTOCOL_VERSION, ReplyAttachment,
+    ServerEvent,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::net::{
     UnixStream,
     unix::{OwnedReadHalf, OwnedWriteHalf},
@@ -30,13 +32,15 @@ impl Reply {
     }
 }
 
+/// Largest frame the daemon may send a channel session, counting its line
+/// ending.
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
 pub struct Session {
-    stdin: OwnedWriteHalf,
-    stdout: BufReader<OwnedReadHalf>,
-    /// The part of a frame read so far, kept here so a read can be abandoned
-    /// (while waiting for either a message or a background report) and
-    /// resumed without losing bytes.
-    partial: Vec<u8>,
+    /// The daemon connection. Its decoder keeps a partly read frame, so a
+    /// read can be abandoned (while waiting for either a message or a
+    /// background report) and resumed without losing bytes.
+    connection: Connection<BufReader<OwnedReadHalf>, OwnedWriteHalf>,
     pub session_id: String,
     pub last_used: Instant,
     /// Owner sessions run with tools and approve their requests; others have
@@ -85,9 +89,11 @@ impl Session {
         })?;
         let (reader, writer) = stream.into_split();
         let mut session = Self {
-            stdin: writer,
-            stdout: BufReader::new(reader),
-            partial: Vec::new(),
+            connection: Connection::new(
+                BufReader::new(reader),
+                writer,
+                FrameDecoder::new(MAX_FRAME_BYTES, Overflow::Stop),
+            ),
             session_id: String::new(),
             last_used: Instant::now(),
             tools,
@@ -100,18 +106,10 @@ impl Session {
             tasks: HashMap::new(),
             broken: false,
         };
-        write(
-            &mut session.stdin,
-            &ClientMessage::Initialize {
-                request_id: "channel-init".into(),
-                protocol_version: PROTOCOL_VERSION,
-                client: PeerInfo {
-                    name: "scv-channels".into(),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                },
-            },
-        )
-        .await?;
+        session
+            .connection
+            .send(&ClientMessage::initialize("channel-init", "scv-channels"))
+            .await?;
         match session.event().await? {
             ServerEvent::Initialized {
                 protocol_version, ..
@@ -121,9 +119,9 @@ impl Session {
             }
             _ => bail!("channel protocol initialization failed"),
         }
-        write(
-            &mut session.stdin,
-            &ClientMessage::SessionStart {
+        session
+            .connection
+            .send(&ClientMessage::SessionStart {
                 request_id: "channel-session".into(),
                 cwd: workspace.display().to_string(),
                 provider: None,
@@ -136,9 +134,8 @@ impl Session {
                 // (and a tool-free one makes none), so background jobs may
                 // get the same answer without a turn to carry it.
                 auto_approve: Some(tools),
-            },
-        )
-        .await?;
+            })
+            .await?;
         loop {
             match session.event().await? {
                 ServerEvent::SessionStarted { session_id, .. } => {
@@ -165,30 +162,19 @@ impl Session {
     }
 
     async fn read_event(&mut self) -> Result<ServerEvent> {
-        loop {
-            let buf = self.stdout.fill_buf().await?;
-            if buf.is_empty() {
-                bail!("SCV server closed the channel session")
-            }
-            let take = buf
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(buf.len(), |index| index + 1);
-            if self.partial.len() + take > 8 * 1024 * 1024 {
-                bail!("channel protocol frame exceeds limit")
-            }
-            self.partial.extend_from_slice(&buf[..take]);
-            self.stdout.consume(take);
-            if self.partial.last() == Some(&b'\n') {
-                break;
-            }
+        match self.connection.read().await? {
+            Frame::Line(line) => serde_json::from_slice(&line).context("decode SCV protocol event"),
+            Frame::TooLarge => bail!("channel protocol frame exceeds limit"),
+            Frame::End | Frame::Truncated(_) => bail!("SCV server closed the channel session"),
         }
-        let line = std::mem::take(&mut self.partial);
-        serde_json::from_slice(&line).context("decode SCV protocol event")
     }
 
     async fn send(&mut self, message: &ClientMessage) -> Result<()> {
-        let result = write(&mut self.stdin, message).await;
+        let result = self
+            .connection
+            .send(message)
+            .await
+            .map_err(anyhow::Error::from);
         if result.is_err() {
             self.broken = true;
         }
@@ -440,7 +426,7 @@ impl Session {
                     append_capped(&mut answer, &content, max_bytes);
                 }
                 ServerEvent::AssistantDelta { content, .. } => {
-                    append_capped(&mut answer, &content, max_bytes)
+                    append_capped(&mut answer, &content, max_bytes);
                 }
                 ServerEvent::ApprovalRequested { approval_id, .. } => {
                     self.send(&ClientMessage::ApprovalResolve {
@@ -538,20 +524,11 @@ fn append_capped(answer: &mut String, content: &str, max_bytes: usize) {
         answer.push_str(content);
         return;
     }
-    let mut end = room.saturating_sub(TRUNCATED_NOTE.len());
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    answer.push_str(&content[..end]);
+    answer.push_str(scv_client::text::utf8_prefix(
+        content,
+        room.saturating_sub(TRUNCATED_NOTE.len()),
+    ));
     answer.push_str(TRUNCATED_NOTE);
-}
-
-async fn write(writer: &mut OwnedWriteHalf, message: &ClientMessage) -> Result<()> {
-    let mut bytes = serde_json::to_vec(message).map_err(|error| anyhow!(error))?;
-    bytes.push(b'\n');
-    writer.write_all(&bytes).await?;
-    writer.flush().await?;
-    Ok(())
 }
 
 #[cfg(test)]

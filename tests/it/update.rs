@@ -10,7 +10,7 @@ fn update(install_succeeds: bool) -> (std::process::Output, String) {
         &cargo,
         format!(
             "#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" >> \"$SCV_TEST_LOG\"\nexit {}\n",
-            if install_succeeds { 0 } else { 1 }
+            i32::from(!install_succeeds)
         ),
     )
     .unwrap();
