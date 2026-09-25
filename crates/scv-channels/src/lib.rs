@@ -350,6 +350,11 @@ pub async fn run<C: state::Credentials, T: Transport>(
     clippy::too_many_arguments,
     reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
 )]
+#[tracing::instrument(
+    name = "channel",
+    skip_all,
+    fields(channel = transport.channel(), account = account)
+)]
 pub async fn run_linked<C: state::Credentials, T: Transport>(
     transport: &T,
     account: &str,
@@ -585,7 +590,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     batch
                 }
                 Err(error) => {
-                    tracing::warn!("{} poll failed: {error}", self.transport.label());
+                    tracing::warn!(error = %error, "poll failed");
                     (self.report)(false);
                     backoff.wait().await;
                     continue;
@@ -672,10 +677,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 || conversations.len() < MAX_SESSIONS
                 || evict.is_some());
         if !room {
-            tracing::warn!(
-                "{} is at its work limit; asking a sender to retry later",
-                self.transport.label()
-            );
+            tracing::warn!("at the work limit; asking a sender to retry later");
             let mut busy = new_pending(id, sender, ctx, BUSY_REPLY, MAX_REPLY_BYTES);
             busy.key = key;
             busy.transient = true;
@@ -844,10 +846,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     };
                     if session.is_none() {
                         if owner {
-                            tracing::info!(
-                                "{} owner session starts with remote tools",
-                                self.transport.label()
-                            );
+                            tracing::info!("owner session starts with remote tools");
                         }
                         session = Some(
                             session::Session::connect(
@@ -939,10 +938,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     media.extend(resolved.media);
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(
-                        "{} could not resolve a message reference: {error}",
-                        self.transport.label()
-                    );
+                    tracing::warn!(error = %error, "could not resolve a message reference");
                     context = "[The message this refers to could not be loaded.]".into();
                 }
                 Err(_) => context = "[The message this refers to could not be loaded.]".into(),
@@ -1058,14 +1054,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         {
             Ok(Ok(downloaded)) => downloaded,
             Ok(Err(error)) => {
-                tracing::warn!(
-                    "{} could not download a {noun}: {error}",
-                    self.transport.label()
-                );
+                tracing::warn!(error = %error, noun, "could not download a file");
                 return Err(failed());
             }
             Err(_) => {
-                tracing::warn!("{} timed out downloading a {noun}", self.transport.label());
+                tracing::warn!(noun, "timed out downloading a file");
                 return Err(failed());
             }
         };
@@ -1101,10 +1094,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         let path = match saved {
             Ok(path) => path,
             Err(error) => {
-                tracing::warn!(
-                    "{} could not save a {noun}: {error}",
-                    self.transport.label()
-                );
+                tracing::warn!(error = %error, noun, "could not save a file");
                 return Err(failed());
             }
         };
@@ -1159,7 +1149,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             });
         }
         if dropped > 0 {
-            tracing::warn!(dropped, "{} dropped attached files", self.transport.label());
+            tracing::warn!(dropped, "dropped attached files");
             text.push_str(&format!("\n\n[{dropped} attached files could not be sent]"));
         }
         (text, files)
@@ -1171,11 +1161,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         let removed =
             media::prune(&self.media.inbox, keep) + media::prune(&self.media.outbox, keep);
         if removed > 0 {
-            tracing::info!(
-                removed,
-                "{} removed old media files",
-                self.transport.label()
-            );
+            tracing::info!(removed, "removed old media files");
         }
     }
 
@@ -1283,25 +1269,19 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 kind: file.kind,
                 client_id: &file.client_id,
             };
-            if !media::is_inside(&self.media.outbox, &path) {
-                tracing::warn!(
-                    "{} skipped a file that left its outbox",
-                    self.transport.label()
-                );
-            } else {
+            if media::is_inside(&self.media.outbox, &path) {
                 match self.transport.send_file(&outbound, self.report).await {
                     Ok(SendOutcome::Delivered) => {}
                     Ok(SendOutcome::Rejected) => {
-                        tracing::warn!("{} refused an attached file", self.transport.label());
+                        tracing::warn!("the platform refused an attached file");
                     }
                     Err(error) => {
-                        tracing::warn!(
-                            "{} could not send an attached file: {error}",
-                            self.transport.label()
-                        );
+                        tracing::warn!(error = %error, "could not send an attached file");
                         return Ok(Step::Retry);
                     }
                 }
+            } else {
+                tracing::warn!("skipped a file that left its outbox");
             }
             pending.next_file += 1;
             let mut state = self.state.lock().await;
@@ -1317,8 +1297,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             if !pending.files.is_empty() {
                 tracing::warn!(
                     files = pending.files.len(),
-                    "{} dropped the files of a refused reply",
-                    self.transport.label()
+                    "dropped the files of a refused reply"
                 );
             }
             hold_refused(&mut state, &pending, &chunks, unix_now());
@@ -1439,11 +1418,8 @@ fn truncate_held(reply: String) -> String {
     if reply.len() <= MAX_HELD_REPLY_BYTES {
         return reply;
     }
-    let mut end = MAX_HELD_REPLY_BYTES - MARKER.len();
-    while !reply.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{MARKER}", &reply[..end])
+    let kept = scv_client::text::utf8_prefix(&reply, MAX_HELD_REPLY_BYTES - MARKER.len());
+    format!("{kept}{MARKER}")
 }
 
 /// Drop held replies past their age, then the oldest beyond each

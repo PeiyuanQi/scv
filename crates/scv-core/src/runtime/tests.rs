@@ -17,7 +17,7 @@ struct ScriptedProvider {
 
 #[async_trait]
 impl Provider for ScriptedProvider {
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "test-model"
     }
 

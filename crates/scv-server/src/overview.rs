@@ -16,7 +16,7 @@ use crate::config::{Config, ConfigOverrides};
 pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Result<String> {
     let layout = Layout::from_env()?;
     let home = crate::config::user_home_path()
-        .map_or_else(|| layout.home().to_owned(), |home| home.to_owned());
+        .map_or_else(|| layout.home().to_owned(), |home| home.clone());
     let layout = Layout::new(home);
     let mut out = String::new();
     let selected = if std::env::var_os("SCV_HOME").is_some() {

@@ -40,13 +40,16 @@ fn fake_agent_with_prompt_args(
     let script_path = workspace.join("fake-agent.sh");
     std::fs::write(&script_path, script).unwrap();
     let mut fixed = vec![script_path.display().to_string()];
-    fixed.extend(args.iter().map(|arg| arg.to_string()));
+    fixed.extend(args.iter().map(std::string::ToString::to_string));
     NativeAgentTool::new(
         name.into(),
         AgentAdapterConfig {
             command: "bash".into(),
             args: fixed,
-            prompt_args: prompt_args.iter().map(|arg| arg.to_string()).collect(),
+            prompt_args: prompt_args
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             full_permission_args: None,
             model_args: vec!["--model".into(), "{model}".into()],
             effort_args: vec!["--effort".into(), "{effort}".into()],
@@ -534,7 +537,10 @@ fn structured_agent(
 
 /// Like [`structured_agent`], continuing conversations as `resume` says,
 /// in `conversations` (shared by one session's tools).
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test fixture mirrors the tool's settings"
+)]
 fn conversing_agent(
     workspace: &Path,
     name: &str,

@@ -1,6 +1,7 @@
 //! Feishu channel credentials and where the channel keeps its state.
 
 use anyhow::{Result, bail};
+use scv_client::Secret;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -42,7 +43,7 @@ impl Brand {
 #[serde(deny_unknown_fields)]
 pub struct Account {
     pub app_id: String,
-    pub app_secret: String,
+    pub app_secret: Secret,
     #[serde(default)]
     pub brand: Brand,
     /// The owner's `open_id` for this app, recorded at sign-in. Feishu

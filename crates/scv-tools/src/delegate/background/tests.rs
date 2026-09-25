@@ -44,11 +44,11 @@ impl Tool for FakeAgent {
     ) -> Result<ToolOutput, ToolError> {
         context.progress.report("$ step one");
         tokio::select! {
-            _ = self.release.notified() => Ok(ToolOutput::success(
+            () = self.release.notified() => Ok(ToolOutput::success(
                 json!({"agent":"fake","status":"completed","reply":"all done","session":"fake-1"})
                     .to_string(),
             )),
-            _ = context.cancellation.cancelled() => {
+            () = context.cancellation.cancelled() => {
                 self.cancelled.store(true, Ordering::SeqCst);
                 Err(ToolError("cancelled".into()))
             }

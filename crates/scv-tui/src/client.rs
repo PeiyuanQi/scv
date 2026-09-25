@@ -4,9 +4,10 @@
 use std::{io, path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_client::{read_frame, write_message};
+use scv_protocol::{ClientMessage, Frame, FrameDecoder, Overflow, ServerEvent, trim_line};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncWriteExt, BufReader},
     net::{
         UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
@@ -47,7 +48,8 @@ pub(crate) struct Client {
     stdin: ClientOutput,
     stdout: ClientInput,
     max_server_frame: usize,
-    frame: Vec<u8>,
+    /// Keeps a partly read frame: select! cancels reads on every UI tick.
+    decoder: FrameDecoder,
 }
 
 pub(crate) enum ClientOutput {
@@ -88,7 +90,7 @@ impl Client {
                 stdin: ClientOutput::Socket(writer),
                 stdout: ClientInput::Socket(BufReader::new(reader)),
                 max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
-                frame: Vec::new(),
+                decoder: frame_decoder(DEFAULT_SERVER_FRAME_LIMIT),
             };
             client.initialize(cwd, options).await
         })
@@ -125,7 +127,7 @@ impl Client {
             stdin: ClientOutput::Child(stdin),
             stdout: ClientInput::Child(BufReader::new(stdout)),
             max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
-            frame: Vec::new(),
+            decoder: frame_decoder(DEFAULT_SERVER_FRAME_LIMIT),
         };
         client.initialize(cwd, options).await
     }
@@ -135,15 +137,8 @@ impl Client {
         cwd: &Path,
         options: &LaunchOptions,
     ) -> Result<(Self, SessionInfo)> {
-        self.send(&ClientMessage::Initialize {
-            request_id: "initialize".into(),
-            protocol_version: PROTOCOL_VERSION,
-            client: PeerInfo {
-                name: "scv-tui".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-        })
-        .await?;
+        self.send(&ClientMessage::initialize("initialize", "scv-tui"))
+            .await?;
         match self.read_event().await? {
             Some(ServerEvent::Initialized { .. }) => {}
             Some(ServerEvent::Error { code, message, .. }) => {
@@ -192,27 +187,22 @@ impl Client {
             other => bail!("unexpected session startup response: {other:?}"),
         };
         self.max_server_frame = session.max_server_frame_bytes;
+        self.decoder
+            .set_limit(self.max_server_frame.saturating_add(2));
         Ok((self, session))
     }
 
     pub(crate) async fn send(&mut self, message: &ClientMessage) -> Result<()> {
-        let bytes = serde_json::to_vec(message).context("encode client message")?;
         match &mut self.stdin {
-            ClientOutput::Child(writer) => {
-                writer.write_all(&bytes).await?;
-                writer.write_all(b"\n").await?;
-                writer.flush().await?;
-            }
+            ClientOutput::Child(writer) => write_message(writer, message).await?,
             ClientOutput::Socket(writer) => {
                 // A partial write has an unknown outcome. Drop the connection on
                 // timeout; retrying the message could execute a prompt twice.
-                tokio::time::timeout(SOCKET_TIMEOUT, async {
-                    writer.write_all(&bytes).await?;
-                    writer.write_all(b"\n").await?;
-                    writer.flush().await
-                })
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "server write timed out"))??;
+                tokio::time::timeout(SOCKET_TIMEOUT, write_message(writer, message))
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "server write timed out")
+                    })??;
             }
         }
         Ok(())
@@ -221,10 +211,10 @@ impl Client {
     pub(crate) async fn read_event(&mut self) -> Result<Option<ServerEvent>> {
         let frame = match &mut self.stdout {
             ClientInput::Child(reader) => {
-                read_bounded_frame(reader, &mut self.frame, self.max_server_frame).await?
+                read_bounded_frame(reader, &mut self.decoder, self.max_server_frame).await?
             }
             ClientInput::Socket(reader) => {
-                read_bounded_frame(reader, &mut self.frame, self.max_server_frame).await?
+                read_bounded_frame(reader, &mut self.decoder, self.max_server_frame).await?
             }
         };
         let Some(frame) = frame else {
@@ -282,45 +272,33 @@ pub(crate) fn is_transport_error(error: &anyhow::Error) -> bool {
     })
 }
 
+/// A decoder for server frames of at most `max_bytes` before the line
+/// ending.
+pub(crate) fn frame_decoder(max_bytes: usize) -> FrameDecoder {
+    FrameDecoder::new(max_bytes.saturating_add(2), Overflow::Stop)
+}
+
 pub(crate) async fn read_bounded_frame<R>(
     reader: &mut R,
-    frame: &mut Vec<u8>,
+    decoder: &mut FrameDecoder,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>>
 where
     R: AsyncBufRead + Unpin,
 {
-    // Keep partial frames on Client: select! cancels reads on every UI tick.
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            if frame.is_empty() {
-                return Ok(None);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "server disconnected during a frame",
-            )
-            .into());
-        }
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let count = newline.map_or(available.len(), |index| index + 1);
-        if frame.len().saturating_add(count) > max_bytes.saturating_add(2) {
-            bail!("server frame exceeded configured client limit");
-        }
-        frame.extend_from_slice(&available[..count]);
-        reader.consume(count);
-        if newline.is_some() {
-            break;
-        }
+    match read_frame(reader, decoder).await? {
+        Frame::End => Ok(None),
+        Frame::Truncated(_) => Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "server disconnected during a frame",
+        )
+        .into()),
+        Frame::TooLarge => bail!("server frame exceeded configured client limit"),
+        Frame::Line(line) => match trim_line(line, max_bytes) {
+            Some(line) => Ok(Some(line)),
+            None => bail!("server frame exceeded configured client limit"),
+        },
     }
-    while matches!(frame.last(), Some(b'\n' | b'\r')) {
-        frame.pop();
-    }
-    if frame.len() > max_bytes {
-        bail!("server frame exceeded configured client limit");
-    }
-    Ok(Some(std::mem::take(frame)))
 }
 
 pub(crate) fn new_id() -> String {

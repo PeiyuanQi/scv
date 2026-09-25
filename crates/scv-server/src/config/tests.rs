@@ -337,7 +337,7 @@ fn web_defaults_offer_fetch_without_search_and_validate_their_settings() {
     for (mutate, message) in [
         (
             (|config: &mut Config| {
-                config.web.auto_approve_domains = vec!["https://docs.rs/".into()]
+                config.web.auto_approve_domains = vec!["https://docs.rs/".into()];
             }) as fn(&mut Config),
             "web.auto_approve_domains",
         ),

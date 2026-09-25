@@ -500,7 +500,7 @@ fn renders_the_primary_terminal_regions() {
     let contents = buffer
         .content
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
     assert!(contents.contains("SCV"));
     assert!(contents.contains("connected"));
@@ -518,7 +518,7 @@ fn running_tools_show_their_latest_progress_line() {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>()
     };
     let meta = |seq| (String::from("r"), String::from("s"), String::from("t"), seq);
@@ -595,7 +595,7 @@ fn running_tools_show_their_latest_progress_line() {
 #[tokio::test]
 async fn client_reader_rejects_frames_before_unbounded_allocation() {
     let mut reader = BufReader::new(Cursor::new(format!("{}\n", "x".repeat(32))));
-    let error = read_bounded_frame(&mut reader, &mut Vec::new(), 8)
+    let error = read_bounded_frame(&mut reader, &mut frame_decoder(8), 8)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("exceeded"));

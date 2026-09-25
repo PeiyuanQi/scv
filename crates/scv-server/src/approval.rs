@@ -112,7 +112,7 @@ impl ApprovalGate for ProtocolApprovalGate {
         }
         tokio::select! {
             result = receiver => result.map_err(|_| AgentError::Cancelled),
-            _ = cancellation.cancelled() => {
+            () = cancellation.cancelled() => {
                 self.broker.remove(&approval_id).await;
                 Err(AgentError::Cancelled)
             }

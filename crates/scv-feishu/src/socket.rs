@@ -89,7 +89,7 @@ impl Link {
             let wake = until.min(self.next_ping).min(silent_since);
             let message = tokio::select! {
                 message = self.socket.next() => message,
-                _ = tokio::time::sleep_until(wake) => {
+                () = tokio::time::sleep_until(wake) => {
                     if Instant::now() >= until {
                         return Ok(None);
                     }

@@ -113,6 +113,7 @@ impl BackgroundJobs {
 
     /// Decide running jobs' nested approval requests with `gate`, which must
     /// never grant more than the session's foreground would.
+    #[must_use]
     pub fn with_approvals(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
         self.approvals = Some(gate);
         self
@@ -237,7 +238,7 @@ impl BackgroundJobs {
             .map(|candidate| candidate.done.clone())
             .ok_or_else(|| unknown_job(job))?;
         tokio::select! {
-            _ = cancellation.cancelled() => return Err(ToolError("wait cancelled".into())),
+            () = cancellation.cancelled() => return Err(ToolError("wait cancelled".into())),
             _ = tokio::time::timeout(limit, done.wait_for(|finished| *finished)) => {}
         }
         self.describe(Some(job))
@@ -381,17 +382,16 @@ fn result_value(output: &ToolOutput) -> Value {
 }
 
 fn job_status(output: &ToolOutput, result: &Value) -> String {
-    result
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
+    result.get("status").and_then(Value::as_str).map_or_else(
+        || {
             if output.is_error {
                 "failed".into()
             } else {
                 "completed".into()
             }
-        })
+        },
+        str::to_owned,
+    )
 }
 
 fn unknown_job(job: &str) -> ToolError {

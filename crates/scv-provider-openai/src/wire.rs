@@ -108,10 +108,7 @@ impl ErrorDetails {
 /// behind a `data:` prefix, from bytes that are not a complete event stream.
 pub(crate) fn error_details(bytes: &[u8]) -> Option<ErrorDetails> {
     let text = std::str::from_utf8(bytes).ok()?.trim();
-    let text = text
-        .strip_prefix("data:")
-        .map(str::trim_start)
-        .unwrap_or(text);
+    let text = text.strip_prefix("data:").map_or(text, str::trim_start);
     let value: Value = serde_json::from_str(text).ok()?;
     let details = ErrorDetails::from_value(value.get("error").unwrap_or(&value));
     (details.message.is_some() || details.code.is_some()).then_some(details)

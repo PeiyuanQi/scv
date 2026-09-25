@@ -6,6 +6,7 @@ use std::{
 };
 
 use scv_channels::state::AccountSettings;
+use scv_client::Secret;
 use scv_core::ContextConfig;
 use scv_provider_openai::ProviderLimits;
 use serde::{Deserialize, Serialize};
@@ -46,10 +47,11 @@ pub struct ProviderConfig {
     pub wire_api: String,
     pub model: String,
     pub base_url: String,
-    pub api_key: Option<String>,
+    pub api_key: Option<Secret>,
     pub api_key_env: Option<String>,
     pub timeout_seconds: u64,
-    pub headers: HashMap<String, String>,
+    /// Extra request headers; their values may carry credentials.
+    pub headers: HashMap<String, Secret>,
     /// Show images users attach to the model as image input. Turn it off
     /// for a model without vision; SCV also stops for the session after the
     /// provider rejects an image.
@@ -327,7 +329,7 @@ pub struct WebConfig {
     pub search: WebSearchMode,
     pub searxng_url: Option<String>,
     pub brave_url: String,
-    pub brave_api_key: Option<String>,
+    pub brave_api_key: Option<Secret>,
     pub brave_api_key_env: Option<String>,
     pub max_search_results: usize,
 }

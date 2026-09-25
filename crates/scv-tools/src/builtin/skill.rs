@@ -77,7 +77,7 @@ impl Tool for ReadSkillTool {
                 .map_err(|error| ToolError(format!("load skill {skill_name}: {error}")))?;
                 Ok::<_, ToolError>(bytes)
             }) => result.map_err(|error| ToolError(format!("skill read task failed: {error}")))??,
-            _ = context.cancellation.cancelled() => return Err(ToolError("skill read cancelled".into())),
+            () = context.cancellation.cancelled() => return Err(ToolError("skill read cancelled".into())),
         };
         let end = bytes.len().min(self.max_bytes);
         let content = std::str::from_utf8(&bytes[..end])

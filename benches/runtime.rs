@@ -1,3 +1,10 @@
+//! Micro-benchmarks for protocol encoding and context selection.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "benchmark inputs are fixed and known to be valid"
+)]
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use scv_core::{BudgetContextPolicy, ContextConfig, ContextPolicy, Message};
 use scv_protocol::{ClientMessage, ServerEvent};
@@ -12,10 +19,10 @@ fn protocol(c: &mut Criterion) {
     };
     let encoded = serde_json::to_vec(&event).unwrap();
     c.bench_function("protocol_encode", |b| {
-        b.iter(|| serde_json::to_vec(black_box(&event)).unwrap())
+        b.iter(|| serde_json::to_vec(black_box(&event)).unwrap());
     });
     c.bench_function("protocol_decode", |b| {
-        b.iter(|| serde_json::from_slice::<ServerEvent>(black_box(&encoded)).unwrap())
+        b.iter(|| serde_json::from_slice::<ServerEvent>(black_box(&encoded)).unwrap());
     });
 
     let request = ClientMessage::TurnStart {
@@ -28,7 +35,7 @@ fn protocol(c: &mut Criterion) {
         b.iter(|| {
             let bytes = serde_json::to_vec(black_box(&request)).unwrap();
             serde_json::from_slice::<ClientMessage>(&bytes).unwrap()
-        })
+        });
     });
 }
 
@@ -53,7 +60,7 @@ fn context(c: &mut Criterion) {
     })
     .unwrap();
     c.bench_function("context_select_10000_messages", |b| {
-        b.iter(|| policy.select(black_box(&history), "system", &[]).unwrap())
+        b.iter(|| policy.select(black_box(&history), "system", &[]).unwrap());
     });
 }
 

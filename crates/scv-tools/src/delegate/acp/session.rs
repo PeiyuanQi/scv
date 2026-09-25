@@ -27,7 +27,10 @@ use crate::{
     },
 };
 
-use super::*;
+use super::{
+    AcpAgentTool, CallError, Incoming, Interrupt, Progress, Rpc, choose_option,
+    describe_permission, describe_rpc_error,
+};
 use crate::sync::lock;
 
 /// The ACP major version SCV speaks.

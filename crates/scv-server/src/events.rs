@@ -13,13 +13,8 @@ use crate::{
 /// Cut progress text to `MAX_PROGRESS_EVENT_BYTES` on a character boundary.
 pub(crate) fn bounded_progress(mut text: String) -> String {
     let limit = scv_core::MAX_PROGRESS_EVENT_BYTES;
-    if text.len() > limit {
-        let mut end = limit;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
+    let end = scv_client::text::utf8_prefix(&text, limit).len();
+    text.truncate(end);
     text
 }
 

@@ -129,7 +129,7 @@ impl OutboundSender {
         let permit = if let Some(cancellation) = cancellation {
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => return Err(OutboundSendError::Cancelled),
+                () = cancellation.cancelled() => return Err(OutboundSendError::Cancelled),
                 permit = acquire => permit.map_err(|_| OutboundSendError::Closed)?,
             }
         } else {
@@ -145,7 +145,7 @@ impl OutboundSender {
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => Err(OutboundSendError::Cancelled),
+                () = cancellation.cancelled() => Err(OutboundSendError::Cancelled),
                 result = self.frames.send(frame) => result.map_err(|_| OutboundSendError::Closed),
             }
         } else {

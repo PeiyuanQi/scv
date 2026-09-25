@@ -1,7 +1,8 @@
 //! Dependency-light wire types shared by SCV clients and the server.
 //!
 //! [`ClientMessage`] is everything a client sends and [`ServerEvent`]
-//! everything the server answers, one JSON object per line. Additive fields
+//! everything the server answers, one JSON object per line ([`FrameDecoder`]
+//! bounds each line). Additive fields
 //! keep [`PROTOCOL_VERSION`]; a breaking change bumps it. This crate holds no
 //! runtime policy and does no I/O.
 
@@ -12,6 +13,7 @@ mod attachment;
 mod background;
 mod client;
 mod daemon;
+mod frame;
 mod server;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,7 @@ pub use daemon::{
     ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, DelegationInfo,
     DelegationSummary, RemoteTools, RestartInfo,
 };
+pub use frame::{Frame, FrameDecoder, Overflow, Step, encode_frame, trim_line};
 pub use server::ServerEvent;
 
 /// The protocol version. Client and server must speak the same one.

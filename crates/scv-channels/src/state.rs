@@ -80,6 +80,10 @@ pub struct PendingDelivery {
     pub next_file: usize,
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
 fn is_zero(value: &usize) -> bool {
     *value == 0
 }
@@ -270,22 +274,13 @@ fn replace_file(path: &Path, contents: &str) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("state path has no parent"))?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    use std::io::Write;
-    temp.write_all(contents.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o600))?;
-    }
-    temp.as_file().sync_all()?;
-    temp.persist(path)
-        .map_err(|e| anyhow!("atomic state replace failed: {}", e.error))?;
-    // Persist the rename and any newly created directories (the file's own,
-    // `channels`, `state` or `credentials`, and the SCV home) before starting
-    // a turn.
-    for directory in parent.ancestors().take(4) {
-        std::fs::File::open(directory)?.sync_all()?;
+    scv_client::fs::replace_private(path, contents.as_bytes())
+        .map_err(|e| anyhow!("atomic state replace failed: {e}"))?;
+    // The file's own directory is synced with the rename. Persist any newly
+    // created directories above it (`channels`, `state` or `credentials`,
+    // and the SCV home) too before starting a turn.
+    for directory in parent.ancestors().skip(1).take(3) {
+        scv_client::fs::sync_directory(directory)?;
     }
     Ok(())
 }
@@ -391,7 +386,10 @@ impl<C: Credentials> Store<C> {
     fn file_lock(&self, path: &Path) -> Result<std::fs::File> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
-        private_directory(&self.home, path.parent().unwrap())?;
+        private_directory(
+            &self.home,
+            path.parent().expect("store paths are files in a directory"),
+        )?;
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -401,9 +399,9 @@ impl<C: Credentials> Store<C> {
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
         check_private(path, "lock")?;
+        let flags = libc::LOCK_EX | libc::LOCK_NB;
         // SAFETY: the descriptor is valid for this call; flock neither retains
         // pointers nor closes it. Dropping the file releases the lock.
-        let flags = libc::LOCK_EX | libc::LOCK_NB;
         if unsafe { libc::flock(file.as_raw_fd(), flags) } != 0 {
             return Err(anyhow::Error::new(std::io::Error::last_os_error())
                 .context("channel account is busy or cannot be locked; retry shortly"));
@@ -412,7 +410,10 @@ impl<C: Credentials> Store<C> {
     }
 
     fn write_private(&self, path: &Path, contents: &str) -> Result<()> {
-        private_directory(&self.home, path.parent().unwrap())?;
+        private_directory(
+            &self.home,
+            path.parent().expect("store paths are files in a directory"),
+        )?;
         atomic_write(path, contents)
     }
 
@@ -527,76 +528,72 @@ impl<C: Credentials> Store<C> {
             table.set_implicit(true);
             Item::Table(table)
         };
-        match value {
-            Some(settings) => {
-                let accounts = document
-                    .entry("channels")
-                    .or_insert_with(implicit)
-                    .as_table_mut()
-                    .ok_or_else(|| anyhow!("[channels] in config.toml must be a table"))?
-                    .entry(&self.channel)
-                    .or_insert_with(implicit)
-                    .as_table_mut()
-                    .ok_or_else(|| {
-                        anyhow!("[channels.{}] in config.toml must be a table", self.channel)
-                    })?;
-                let table = accounts
-                    .entry(name)
-                    .or_insert_with(|| Item::Table(Table::new()))
-                    .as_table_mut()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "[channels.{}.{name}] in config.toml must be a table",
-                            self.channel
-                        )
-                    })?;
-                table["enabled"] = toml_edit::value(settings.enabled);
-                match &settings.workspace {
-                    Some(path) => {
-                        let path = path
-                            .to_str()
-                            .ok_or_else(|| anyhow!("channel workspace path is not UTF-8"))?;
-                        table["workspace"] = toml_edit::value(path);
-                    }
-                    None => {
-                        table.remove("workspace");
-                    }
+        if let Some(settings) = value {
+            let accounts = document
+                .entry("channels")
+                .or_insert_with(implicit)
+                .as_table_mut()
+                .ok_or_else(|| anyhow!("[channels] in config.toml must be a table"))?
+                .entry(&self.channel)
+                .or_insert_with(implicit)
+                .as_table_mut()
+                .ok_or_else(|| {
+                    anyhow!("[channels.{}] in config.toml must be a table", self.channel)
+                })?;
+            let table = accounts
+                .entry(name)
+                .or_insert_with(|| Item::Table(Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "[channels.{}.{name}] in config.toml must be a table",
+                        self.channel
+                    )
+                })?;
+            table["enabled"] = toml_edit::value(settings.enabled);
+            match &settings.workspace {
+                Some(path) => {
+                    let path = path
+                        .to_str()
+                        .ok_or_else(|| anyhow!("channel workspace path is not UTF-8"))?;
+                    table["workspace"] = toml_edit::value(path);
                 }
-                table["remote_tools"] = toml_edit::value(match settings.remote_tools {
-                    RemoteTools::None => "none",
-                    RemoteTools::Owner => "owner",
-                });
-                // Default media limits stay out of the file.
-                if settings.media.is_default() {
-                    table.remove("media");
-                } else {
-                    let number =
-                        |value: u64| toml_edit::value(i64::try_from(value).unwrap_or(i64::MAX));
-                    let mut media = Table::new();
-                    media["owner_max_mib"] = number(settings.media.owner_max_mib);
-                    media["others_image_max_mib"] = number(settings.media.others_image_max_mib);
-                    media["keep_days"] = number(settings.media.keep_days);
-                    table["media"] = Item::Table(media);
+                None => {
+                    table.remove("workspace");
                 }
             }
-            None => {
-                let Some(channels) = document.get_mut("channels").and_then(Item::as_table_mut)
-                else {
-                    return Ok(());
-                };
-                let Some(accounts) = channels.get_mut(&self.channel).and_then(Item::as_table_mut)
-                else {
-                    return Ok(());
-                };
-                if accounts.remove(name).is_none() {
-                    return Ok(());
-                }
-                if accounts.is_empty() {
-                    channels.remove(&self.channel);
-                }
-                if channels.is_empty() {
-                    document.remove("channels");
-                }
+            table["remote_tools"] = toml_edit::value(match settings.remote_tools {
+                RemoteTools::None => "none",
+                RemoteTools::Owner => "owner",
+            });
+            // Default media limits stay out of the file.
+            if settings.media.is_default() {
+                table.remove("media");
+            } else {
+                let number =
+                    |value: u64| toml_edit::value(i64::try_from(value).unwrap_or(i64::MAX));
+                let mut media = Table::new();
+                media["owner_max_mib"] = number(settings.media.owner_max_mib);
+                media["others_image_max_mib"] = number(settings.media.others_image_max_mib);
+                media["keep_days"] = number(settings.media.keep_days);
+                table["media"] = Item::Table(media);
+            }
+        } else {
+            let Some(channels) = document.get_mut("channels").and_then(Item::as_table_mut) else {
+                return Ok(());
+            };
+            let Some(accounts) = channels.get_mut(&self.channel).and_then(Item::as_table_mut)
+            else {
+                return Ok(());
+            };
+            if accounts.remove(name).is_none() {
+                return Ok(());
+            }
+            if accounts.is_empty() {
+                channels.remove(&self.channel);
+            }
+            if channels.is_empty() {
+                document.remove("channels");
             }
         }
         // Write through a symlinked config.toml rather than replacing the

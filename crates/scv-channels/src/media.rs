@@ -283,11 +283,7 @@ pub fn safe_name(name: &str) -> String {
         })
         .collect();
     let cleaned = cleaned.trim().trim_start_matches('.').trim();
-    let mut end = cleaned.len().min(MAX_NAME_BYTES);
-    while !cleaned.is_char_boundary(end) {
-        end -= 1;
-    }
-    cleaned[..end].to_owned()
+    scv_client::text::utf8_prefix(cleaned, MAX_NAME_BYTES).to_owned()
 }
 
 /// Save `bytes` as a new private file in `dir`, named after `name` behind a

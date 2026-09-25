@@ -190,7 +190,7 @@ async fn until_cancelled(
 ) -> Result<()> {
     tokio::select! {
         biased;
-        _ = cancellation.cancelled() => Ok(()),
+        () = cancellation.cancelled() => Ok(()),
         result = work => result,
     }
 }
@@ -322,7 +322,12 @@ impl Transport for Ilink<'_> {
             .post(format!("{}/ilink/bot/getupdates", self.base_url))
             .headers(bridge::auth_headers(
                 self.token,
-                u32::from_le_bytes(*Uuid::new_v4().as_bytes().first_chunk::<4>().unwrap()),
+                u32::from_le_bytes(
+                    *Uuid::new_v4()
+                        .as_bytes()
+                        .first_chunk::<4>()
+                        .expect("a UUID has 16 bytes"),
+                ),
             ))
             .json(&serde_json::json!({"get_updates_buf":cursor,"base_info":{"channel_version":"1.0.0"}}))
             .timeout(LONG_POLL_TIMEOUT)
@@ -383,7 +388,7 @@ impl Transport for Ilink<'_> {
         .await??;
         let upload = media::Upload::new(&plain, file.kind);
         drop(plain);
-        let download_param = match bridge::upload(
+        let Some(download_param) = bridge::upload(
             &self.client,
             self.token,
             self.base_url,
@@ -392,9 +397,8 @@ impl Transport for Ilink<'_> {
             report,
         )
         .await?
-        {
-            Some(param) => param,
-            None => return Ok(SendOutcome::Rejected),
+        else {
+            return Ok(SendOutcome::Rejected);
         };
         let context_token = if file.part == 0 { file.reply_to } else { "" };
         let body = bridge::item_body(

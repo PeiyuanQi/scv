@@ -148,7 +148,7 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         loop {
             tokio::select! {
                 biased;
-                _ = delegation_cancel.cancelled() => break,
+                () = delegation_cancel.cancelled() => break,
                 _ = interval.tick() => {
                     reconcile_delegations(Arc::clone(&delegation_registry)).await;
                     let zombies = delegations::reap_orphaned_zombies();
@@ -169,11 +169,11 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         loop {
             tokio::select! {
                 biased;
-                _ = refresh_cancel.cancelled() => break,
+                () = refresh_cancel.cancelled() => break,
                 _ = refresh.tick() => {
                     tokio::select! {
                         biased;
-                        _ = refresh_cancel.cancelled() => break,
+                        () = refresh_cancel.cancelled() => break,
                         result = async { refresh_components.lock().await.reconcile().await } => {
                             if result.is_err() { tracing::warn!("Component account discovery failed"); }
                         }
@@ -195,8 +195,8 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
                 let tasks = tasks.clone();
                 clients.spawn(async move {
                     let (reader, writer) = stream.into_split();
-                    if run_managed(reader, writer, child_overrides, Some(components), registry, cancellation, tasks).await.is_err() {
-                        tracing::warn!("SCV socket client stopped");
+                    if let Err(error) = run_managed(reader, writer, child_overrides, Some(components), registry, cancellation, tasks).await {
+                        tracing::warn!(error = format!("{error:#}"), "SCV socket client stopped");
                     }
                 });
             }

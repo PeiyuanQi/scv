@@ -200,14 +200,13 @@ pub fn check_cdn_url(url: &str) -> Result<reqwest::Url> {
 
 /// The download address of `source`.
 pub fn download_url(source: &Source) -> Result<reqwest::Url> {
-    match &source.url {
-        Some(url) => check_cdn_url(url),
-        None => {
-            let mut url = check_cdn_url(&format!("{CDN_BASE}/download"))?;
-            url.query_pairs_mut()
-                .append_pair("encrypted_query_param", &source.param);
-            Ok(url)
-        }
+    if let Some(url) = &source.url {
+        check_cdn_url(url)
+    } else {
+        let mut url = check_cdn_url(&format!("{CDN_BASE}/download"))?;
+        url.query_pairs_mut()
+            .append_pair("encrypted_query_param", &source.param);
+        Ok(url)
     }
 }
 

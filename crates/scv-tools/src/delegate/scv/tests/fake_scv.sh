@@ -15,6 +15,13 @@ while IFS= read -r line; do
       echo turn >> "@TURNS@"
       turns=$((turns+1)); turn_request=$id
       emit '{"type":"turn.started","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":1}'
+      # A "warm up" turn finishes at once in every mode, so a test can start
+      # the child before timing the turn it cares about.
+      if [[ $line == *'"prompt":"warm up"'* ]]; then
+        emit '{"type":"assistant.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":2,"content":"warm"}'
+        emit '{"type":"turn.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":3,"steps":1,"usage":{}}'
+        continue
+      fi
       case "@MODE@" in
         echo)
           emit '{"type":"assistant.delta","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":2,"content":"thinking\n"}'

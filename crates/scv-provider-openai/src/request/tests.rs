@@ -64,7 +64,7 @@ fn request_body_carries_the_paired_input() {
         "key".into(),
         Duration::from_secs(1),
         ProviderLimits::default(),
-        Default::default(),
+        std::collections::HashMap::default(),
     )
     .unwrap();
     let (body, _) = provider.request_body(&ProviderRequest {
@@ -89,7 +89,7 @@ fn tools_are_sent_non_strict_so_optional_fields_stay_optional() {
         "key".into(),
         Duration::from_secs(1),
         ProviderLimits::default(),
-        Default::default(),
+        std::collections::HashMap::default(),
     )
     .unwrap();
     let parameters = json!({
@@ -127,7 +127,7 @@ fn hosted_web_search_is_offered_beside_function_tools() {
         "key".into(),
         Duration::from_secs(1),
         ProviderLimits::default(),
-        Default::default(),
+        std::collections::HashMap::default(),
     )
     .unwrap()
     .with_web_search();
@@ -203,7 +203,7 @@ async fn a_searched_answer_streams_with_its_cited_sources() {
         "key".into(),
         Duration::from_secs(5),
         ProviderLimits::default(),
-        Default::default(),
+        std::collections::HashMap::default(),
     )
     .unwrap()
     .with_web_search();

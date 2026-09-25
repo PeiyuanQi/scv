@@ -39,7 +39,7 @@ pub fn import_codex(source: &Path, destination: &Path) -> Result<Vec<String>> {
     }
     let table = config
         .as_deref()
-        .map(|text| text.parse::<toml::Table>())
+        .map(str::parse::<toml::Table>)
         .transpose()
         .context("parse Codex config.toml")?;
     let auth_kind = auth.as_deref().map(classify_auth).transpose()?;
@@ -374,9 +374,9 @@ impl StoredStatus {
 }
 
 fn grok_status(auth: &Path, config: &Path, home: &Path) -> Result<StoredStatus> {
-    let entries = read_json_object(auth)?
-        .map(|object| object.values().filter(|value| !value.is_null()).count())
-        .unwrap_or(0);
+    let entries = read_json_object(auth)?.map_or(0, |object| {
+        object.values().filter(|value| !value.is_null()).count()
+    });
     if entries > 0 {
         return Ok(StoredStatus::ready(format!(
             "signed in ({})",
@@ -411,20 +411,8 @@ fn grok_status(auth: &Path, config: &Path, home: &Path) -> Result<StoredStatus> 
 }
 
 fn write_private(path: &Path, contents: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("import path has no parent"))?;
-    // Named temporary files are created with mode 0600.
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).context("create temporary import file")?;
-    temporary
-        .write_all(contents.as_bytes())
-        .context("write imported file")?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| anyhow!("replace {}: {}", path.display(), error.error))?;
-    Ok(())
+    scv_client::fs::replace_private(path, contents.as_bytes())
+        .with_context(|| format!("replace {}", path.display()))
 }
 
 /// Longest API key or endpoint field SCV accepts.
@@ -497,7 +485,7 @@ impl EchoOff {
         let mut silent = original;
         silent.c_lflag &= !libc::ECHO;
         // SAFETY: a valid descriptor and a termios derived from its own settings.
-        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &silent) } != 0 {
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const silent) } != 0 {
             bail!("disable terminal echo: {}", std::io::Error::last_os_error());
         }
         Ok(Self(original))
@@ -507,7 +495,7 @@ impl EchoOff {
 impl Drop for EchoOff {
     fn drop(&mut self) {
         // SAFETY: restores the settings read from the same descriptor.
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const self.0) };
     }
 }
 
@@ -637,7 +625,7 @@ pub struct ScvChildProvider<'a> {
     pub model: &'a str,
     pub base_url: &'a str,
     pub timeout_seconds: u64,
-    pub headers: &'a std::collections::HashMap<String, String>,
+    pub headers: &'a std::collections::HashMap<String, scv_client::Secret>,
     /// Offer the endpoint's hosted web search, as SCV's own config does.
     pub hosted_web_search: bool,
 }
@@ -683,7 +671,7 @@ pub fn configure_scv_child(
         let headers: toml::Table = provider
             .headers
             .iter()
-            .map(|(name, value)| (name.clone(), value.clone().into()))
+            .map(|(name, value)| (name.clone(), value.expose().into()))
             .collect();
         profile.insert("headers".into(), headers.into());
     }

@@ -131,7 +131,10 @@ fn single_entries_keep_the_legacy_shape_and_many_become_lists() {
 fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
     let directory = tempfile::tempdir().unwrap();
     let store = store(directory.path());
-    assert!(store.settings("default").unwrap() == AccountSettings::default());
+    assert_eq!(
+        store.settings("default").unwrap(),
+        AccountSettings::default()
+    );
     let empty: AccountSettings = serde_json::from_str("{}").unwrap();
     assert!(empty.enabled);
     assert!(empty.workspace.is_none());
@@ -147,7 +150,7 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
         media: MediaSettings::default(),
     };
     store.save_settings("default", &settings).unwrap();
-    assert!(store.settings("default").unwrap() == settings);
+    assert_eq!(store.settings("default").unwrap(), settings);
     // Default media limits are not written; changed ones round-trip.
     assert!(!std::fs::read_to_string(&config).unwrap().contains("media"));
     let limited = AccountSettings {
@@ -159,7 +162,7 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
         ..settings.clone()
     };
     store.save_settings("default", &limited).unwrap();
-    assert!(store.settings("default").unwrap() == limited);
+    assert_eq!(store.settings("default").unwrap(), limited);
     let text = std::fs::read_to_string(&config).unwrap();
     assert!(text.contains("owner_max_mib = 10"), "{text}");
     store.save_settings("default", &settings).unwrap();

@@ -173,15 +173,21 @@ package opts into the workspace `[workspace.lints]` table with
 comment.
 
 The workspace lints are a ratchet: a lint joins the table only once it has no
-findings, so CI's `-D warnings` stays green. The next lints to adopt, each
-after the cleanup that clears it, are Clippy's `pedantic` group (without its
-`missing_errors_doc`, `missing_panics_doc`, `must_use_candidate`,
-`module_name_repetitions`, `similar_names`, `unreadable_literal`,
-`struct_field_names`, and `doc_markdown` lints), `too_many_lines` at the
-`clippy.toml` threshold, `undocumented_unsafe_blocks`,
-`allow_attributes_without_reason`, `unwrap_used` outside tests, and
-`unreachable_pub`; `missing_docs` follows crate by crate as each crate's public
-items are documented.
+findings, so CI's `-D warnings` stays green. Clippy's `pedantic` group is on,
+without the lints that do not pay for themselves here (`missing_errors_doc`,
+`missing_panics_doc`, `must_use_candidate`, `module_name_repetitions`,
+`similar_names`, `unreadable_literal`, `struct_field_names`, `doc_markdown`,
+`verbose_bit_mask`). `undocumented_unsafe_blocks` and
+`allow_attributes_without_reason` deny, and `unwrap_used` warns outside tests:
+state an invariant with `expect("…")` instead.
+
+The next ratchet steps are the pedantic lints still allowed under the "Next
+ratchet" comment in `Cargo.toml`, such as `format_push_string`,
+`items_after_statements`, `needless_pass_by_value`, the `cast_*` lints, and
+`too_many_lines` at the `clippy.toml` threshold. Each still has findings that
+need a hand-written change; remove its line together with that cleanup. Then
+come `unreachable_pub`, and `missing_docs` crate by crate as each crate's
+public items are documented.
 
 The suite is a foundation, not a claim of exhaustive terminal or provider
 compatibility. Snapshot coverage for every TUI state, randomized protocol

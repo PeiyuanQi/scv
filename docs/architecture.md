@@ -31,12 +31,14 @@ flowchart LR
     clawbot --> channels
     clawbot --> client
     feishu --> channels
+    feishu --> client
     channels --> client
     channels --> protocol
     tui --> client
     tui --> protocol
     client --> protocol
     tools --> core
+    tools --> client
     tools --> protocol
     provider --> core
 ```
@@ -76,8 +78,8 @@ The repository is one Cargo workspace with these packages:
 
 | Package | Responsibility |
 | --- | --- |
-| `scv-protocol` | Wire messages and the protocol version. It contains no runtime policy. |
-| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`), the default socket path, and a bounded daemon control helper; depends on protocol, not server. |
+| `scv-protocol` | Wire messages, the protocol version, and the bounded line framing (`FrameDecoder`) every connection uses. It contains no runtime policy and does no I/O. |
+| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`), the default socket path, framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
@@ -94,7 +96,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.2.1` and exact workspace dependency pins.
+`0.2.2` and exact workspace dependency pins.
 
 The WeChat and Feishu transports are accepted to move into `scv-channels` as
 its `wechat` and `feishu` modules, retiring the `scv-clawbot` and

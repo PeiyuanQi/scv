@@ -211,7 +211,7 @@ fn a_full_session_table_never_closes_a_conversation_with_background_work() {
         let (jobs, _queue) = mpsc::unbounded_channel();
         Conversation {
             jobs,
-            last_used: now - Duration::from_secs(age),
+            last_used: now.checked_sub(Duration::from_secs(age)).unwrap(),
             watching: Arc::new(AtomicBool::new(watching)),
         }
     };

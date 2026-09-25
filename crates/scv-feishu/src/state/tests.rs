@@ -65,7 +65,7 @@ fn saved_accounts_are_private_and_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(&scv_channels::Layout::new(dir.path()), crate::CHANNEL);
     store.save_account("default", &account()).unwrap();
-    assert!(store.account("default").unwrap() == Some(account()));
+    assert_eq!(store.account("default").unwrap(), Some(account()));
     use std::os::unix::fs::PermissionsExt as _;
     let mode = std::fs::metadata(store.credentials_path("default").unwrap())
         .unwrap()
