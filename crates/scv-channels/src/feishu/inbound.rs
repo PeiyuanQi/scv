@@ -12,15 +12,15 @@ const MAX_CARD_CHARS: usize = 2000;
 
 const MAX_ID_BYTES: usize = 256;
 /// Chats the checkpoint remembers for catch-up, most recently active first.
-pub const MAX_CHATS: usize = 64;
+pub(crate) const MAX_CHATS: usize = 64;
 
 /// A received message and where it belongs in the checkpoint.
-pub struct Received {
-    pub inbound: Inbound,
-    pub chat_id: String,
-    pub group: bool,
+pub(crate) struct Received {
+    pub(crate) inbound: Inbound,
+    pub(crate) chat_id: String,
+    pub(crate) group: bool,
     /// Creation time in Unix milliseconds.
-    pub created_ms: u64,
+    pub(crate) created_ms: u64,
 }
 
 /// What a socket event carried.
@@ -28,7 +28,7 @@ pub struct Received {
     clippy::large_enum_variant,
     reason = "events are handled one at a time, so the message variant's size does not matter"
 )]
-pub enum Event {
+pub(crate) enum Event {
     Message(Received),
     /// Another event type, such as `im.message.message_read_v1`.
     Other,
@@ -36,7 +36,7 @@ pub enum Event {
 
 /// Parse an event payload. Errors mean a malformed event, which is
 /// acknowledged and dropped.
-pub fn parse_event(payload: &[u8], bot_open_id: Option<&str>) -> Option<Event> {
+pub(crate) fn parse_event(payload: &[u8], bot_open_id: Option<&str>) -> Option<Event> {
     let value: Value = serde_json::from_slice(payload).ok()?;
     if value.pointer("/header/event_type").and_then(Value::as_str) != Some("im.message.receive_v1")
     {
@@ -80,7 +80,11 @@ pub fn parse_event(payload: &[u8], bot_open_id: Option<&str>) -> Option<Event> {
 
 /// Parse one item of a chat's history. `group` is the chat's kind, which
 /// history items do not repeat.
-pub fn parse_history(item: &Value, group: bool, bot_open_id: Option<&str>) -> Option<Received> {
+pub(crate) fn parse_history(
+    item: &Value,
+    group: bool,
+    bot_open_id: Option<&str>,
+) -> Option<Received> {
     if item.get("deleted").and_then(Value::as_bool) == Some(true) {
         return None;
     }
@@ -202,26 +206,26 @@ fn received(
 /// What a message refers to, resolved before its turn: the message it
 /// quotes, and for a forwarded bundle the messages inside it.
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reference {
+pub(crate) struct Reference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
+    pub(crate) parent: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub forward: bool,
+    pub(crate) forward: bool,
 }
 
 /// A message's content as the bridge takes it: text, including markers for
 /// what has no file, and the files to fetch.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct Content {
-    pub text: String,
-    pub media: Vec<Media>,
+pub(crate) struct Content {
+    pub(crate) text: String,
+    pub(crate) media: Vec<Media>,
     /// A forwarded bundle, whose messages are fetched before the turn.
-    pub forward: bool,
+    pub(crate) forward: bool,
 }
 
 /// Parse the content of message `id` of `kind`, or `None` for a system
 /// message, which is only marked seen.
-pub fn parse_content(id: &str, kind: &str, content: &Value) -> Option<Content> {
+pub(crate) fn parse_content(id: &str, kind: &str, content: &Value) -> Option<Content> {
     let text = |key: &str| content.get(key).and_then(Value::as_str).unwrap_or_default();
     let resource = |key: &str, resource: &str| Resource {
         message_id: id.to_owned(),
@@ -435,21 +439,21 @@ fn post(id: &str, content: &Value) -> (String, Vec<Media>) {
 /// What the transport has received, per chat: the newest creation time it
 /// handed to the bridge. Catch-up lists each chat's history from there.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Checkpoint {
+pub(crate) struct Checkpoint {
     #[serde(default)]
-    pub chats: BTreeMap<String, ChatMark>,
+    pub(crate) chats: BTreeMap<String, ChatMark>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChatMark {
-    pub group: bool,
-    pub last_ms: u64,
+pub(crate) struct ChatMark {
+    pub(crate) group: bool,
+    pub(crate) last_ms: u64,
 }
 
 impl Checkpoint {
     /// An unreadable checkpoint starts empty: catch-up then has nothing to
     /// list, and deduplication still drops repeats.
-    pub fn parse(value: &str) -> Self {
+    pub(crate) fn parse(value: &str) -> Self {
         if value.is_empty() {
             return Self::default();
         }
@@ -459,7 +463,7 @@ impl Checkpoint {
         })
     }
 
-    pub fn observe(&mut self, received: &Received) {
+    pub(crate) fn observe(&mut self, received: &Received) {
         let mark = self
             .chats
             .entry(received.chat_id.clone())
@@ -480,7 +484,7 @@ impl Checkpoint {
         }
     }
 
-    pub fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
 }

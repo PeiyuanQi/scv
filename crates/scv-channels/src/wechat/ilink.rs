@@ -9,7 +9,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub fn auth_headers(token: &str, uin: u32) -> HeaderMap {
+pub(crate) fn auth_headers(token: &str, uin: u32) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         "AuthorizationType",
@@ -192,7 +192,7 @@ fn rand_u32() -> u32 {
     )
 }
 
-pub fn validate_confirmed_login(status: &Value) -> Result<(&str, &str, &str)> {
+pub(crate) fn validate_confirmed_login(status: &Value) -> Result<(&str, &str, &str)> {
     let token = status
         .get("bot_token")
         .and_then(Value::as_str)
@@ -211,7 +211,7 @@ pub fn validate_confirmed_login(status: &Value) -> Result<(&str, &str, &str)> {
     Ok((token, bot_id, user_id))
 }
 
-pub fn validate_origin_pair(expected: &str, returned: &str) -> Result<()> {
+pub(crate) fn validate_origin_pair(expected: &str, returned: &str) -> Result<()> {
     let expected = reqwest::Url::parse(expected)?;
     let returned = reqwest::Url::parse(returned)?;
     // iLink may direct a successful login to a regional host. Keep the
@@ -239,7 +239,7 @@ pub fn validate_origin_pair(expected: &str, returned: &str) -> Result<()> {
 /// Parse and validate a fake or real iLink JSON response without exposing
 /// bearer tokens or server diagnostics to callers.
 #[cfg(test)]
-pub fn parse_response(body: &[u8]) -> Result<Value> {
+pub(crate) fn parse_response(body: &[u8]) -> Result<Value> {
     if body.len() > crate::wechat::MAX_RESPONSE_BYTES {
         bail!("iLink response exceeds limit")
     }

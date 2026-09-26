@@ -87,15 +87,16 @@ fn inbound() -> Value {
 /// Media directories inside a test's temporary directory.
 fn media(root: &Path) -> crate::MediaOptions {
     crate::MediaOptions::new(
-        &crate::Layout::new(root),
+        &scv_client::Layout::new(root),
         "wechat",
         "default",
-        crate::MediaSettings::default(),
+        crate::media::MediaSettings::default(),
     )
 }
 
 fn saved_store(directory: &Path, base_url: &str) -> credentials::Store {
-    let store = credentials::Store::new(&crate::Layout::new(directory), crate::wechat::CHANNEL);
+    let store =
+        credentials::Store::new(&scv_client::Layout::new(directory), crate::wechat::CHANNEL);
     store
         .save_account(
             "default",
@@ -661,7 +662,7 @@ async fn oversized_responses_are_rejected_before_parsing() {
 async fn login_validates_account_before_network_or_url() {
     assert_eq!(
         login(
-            &Store::new(&crate::Layout::new(Path::new("/missing")), CHANNEL),
+            &Store::new(&scv_client::Layout::new(Path::new("/missing")), CHANNEL),
             "invalid",
             "../invalid"
         )

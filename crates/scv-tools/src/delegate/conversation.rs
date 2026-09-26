@@ -1,6 +1,6 @@
 //! Multi-turn conversations with delegated agents.
 //!
-//! A session's conversations live in one [`ConversationStore`] shared by its
+//! A session's conversations live in one `ConversationStore` shared by its
 //! `agent_*` tools, and end with the session. The model sees only SCV-issued
 //! handles such as `codex-2`; the CLI's own session IDs stay here and are
 //! never accepted from the model. While a conversation exists, a marker file
@@ -29,7 +29,7 @@ use crate::{
 
 /// Transcripts younger than this are never removed, so a turn that is still
 /// running (and so still writing its transcript) is safe from `gc`.
-pub const MIN_GC_AGE: Duration = Duration::from_secs(3600);
+pub(crate) const MIN_GC_AGE: Duration = Duration::from_secs(3600);
 
 /// Longest handle accepted from the model.
 const MAX_HANDLE_BYTES: usize = 64;
@@ -47,7 +47,7 @@ pub struct ConversationLimits {
 /// process. Dropping the last reference (when the conversation is forgotten,
 /// expires, or its session ends) is what shuts the child down.
 #[derive(Clone)]
-pub(crate) struct Attachment(pub Arc<dyn Any + Send + Sync>);
+pub(crate) struct Attachment(pub(crate) Arc<dyn Any + Send + Sync>);
 
 impl fmt::Debug for Attachment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -76,7 +76,7 @@ struct Inner {
 
 /// One session's conversations with its delegated agents.
 #[derive(Debug)]
-pub struct ConversationStore {
+pub(crate) struct ConversationStore {
     limits: ConversationLimits,
     marker_dir: Option<PathBuf>,
     owner: Option<ProcessIdentity>,
@@ -96,10 +96,10 @@ struct Marker {
 #[derive(Debug)]
 pub(crate) struct TurnGuard {
     store: Arc<ConversationStore>,
-    pub handle: String,
-    pub turn: u32,
+    pub(crate) handle: String,
+    pub(crate) turn: u32,
     /// Continuing: the known session ID. Starting: the ID SCV chose, if any.
-    pub vendor: Option<String>,
+    pub(crate) vendor: Option<String>,
     /// Continuing: what the conversation kept. Starting: what
     /// [`TurnGuard::attach`] set, stored when the turn finishes.
     attachment: Option<Attachment>,
@@ -108,7 +108,7 @@ pub(crate) struct TurnGuard {
 
 /// Whether `value` has the shape of an SCV conversation handle
 /// (`<agent>-<number>`). CLI session IDs never do.
-pub fn is_handle(value: &str) -> bool {
+pub(crate) fn is_handle(value: &str) -> bool {
     value.len() <= MAX_HANDLE_BYTES
         && value.split_once('-').is_some_and(|(agent, number)| {
             !agent.is_empty()
@@ -122,7 +122,7 @@ pub fn is_handle(value: &str) -> bool {
 
 impl ConversationStore {
     /// `marker_dir` is `$SCV_HOME/state/conversations`; `None` keeps no markers.
-    pub fn new(limits: ConversationLimits, marker_dir: Option<PathBuf>) -> Self {
+    pub(crate) fn new(limits: ConversationLimits, marker_dir: Option<PathBuf>) -> Self {
         Self {
             limits,
             marker_dir,
@@ -287,8 +287,9 @@ impl ConversationStore {
         }
     }
 
-    /// Handles this session remembers, for tests and diagnostics.
-    pub fn handles(&self) -> Vec<String> {
+    /// Handles this session remembers, for tests.
+    #[cfg(test)]
+    pub(crate) fn handles(&self) -> Vec<String> {
         let mut handles: Vec<_> = lock(&self.inner).conversations.keys().cloned().collect();
         handles.sort();
         handles
@@ -447,7 +448,7 @@ pub fn collect_garbage(
 /// Remove markers whose owning SCV process no longer runs, returning how
 /// many were removed. A short-lived `scv exec` leaves its markers behind when
 /// it exits; the daemon's reconcile pass clears them.
-pub fn remove_stale_markers(marker_dir: &Path) -> usize {
+pub(crate) fn remove_stale_markers(marker_dir: &Path) -> usize {
     let before = marker_count(marker_dir);
     let live = live_sessions(marker_dir, false).len();
     before.saturating_sub(live)

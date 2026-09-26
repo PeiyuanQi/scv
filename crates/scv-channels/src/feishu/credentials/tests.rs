@@ -63,7 +63,7 @@ fn ids_are_checked_before_use() {
 #[test]
 fn saved_accounts_are_private_and_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::new(&crate::Layout::new(dir.path()), crate::feishu::CHANNEL);
+    let store = Store::new(&scv_client::Layout::new(dir.path()), crate::feishu::CHANNEL);
     store.save_account("default", &account()).unwrap();
     assert_eq!(store.account("default").unwrap(), Some(account()));
     use std::os::unix::fs::PermissionsExt as _;

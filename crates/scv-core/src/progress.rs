@@ -13,7 +13,7 @@ pub const MAX_PROGRESS_LINE_BYTES: usize = 200;
 /// event, with older ones dropped first.
 pub const MAX_PROGRESS_EVENT_BYTES: usize = 512;
 /// Minimum spacing of one call's progress events (at most two a second).
-pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+pub(crate) const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Where a running tool reports short status lines, such as a delegated
 /// agent's commands. Each report becomes one bounded line; the runtime

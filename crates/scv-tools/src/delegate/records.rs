@@ -48,7 +48,7 @@ pub fn current_depth() -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessIdentity {
     pub pid: u32,
-    pub start_time: u64,
+    pub(crate) start_time: u64,
 }
 
 impl ProcessIdentity {
@@ -148,8 +148,8 @@ pub struct DelegationRegistry {
 
 /// A delegation about to start: its handle and the environment tagging it.
 pub(crate) struct PendingDelegation {
-    pub handle: String,
-    pub environment: Vec<(OsString, OsString)>,
+    pub(crate) handle: String,
+    pub(crate) environment: Vec<(OsString, OsString)>,
     agent: String,
     session: String,
     cwd: PathBuf,
@@ -182,7 +182,7 @@ impl DelegationRegistry {
     }
 
     /// This process's own delegation depth.
-    pub fn depth(&self) -> u32 {
+    pub(crate) fn depth(&self) -> u32 {
         self.depth
     }
 
@@ -814,11 +814,11 @@ fn process_start_time(pid: u32) -> Option<u64> {
 #[cfg(target_os = "linux")]
 mod linux {
     pub(super) struct Stat {
-        pub pid: u32,
-        pub ppid: u32,
-        pub pgid: u32,
-        pub state: char,
-        pub start_time: u64,
+        pub(crate) pid: u32,
+        pub(crate) ppid: u32,
+        pub(crate) pgid: u32,
+        pub(crate) state: char,
+        pub(crate) start_time: u64,
     }
 
     pub(super) fn stat(pid: u32) -> Option<Stat> {

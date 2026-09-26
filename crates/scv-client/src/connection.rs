@@ -71,13 +71,9 @@ where
     }
 
     /// The decoder, to change its limit once the peer declares one.
-    pub fn decoder_mut(&mut self) -> &mut FrameDecoder {
+    #[cfg(test)]
+    pub(crate) fn decoder_mut(&mut self) -> &mut FrameDecoder {
         &mut self.decoder
-    }
-
-    /// The writer, for shutting it down.
-    pub fn writer_mut(&mut self) -> &mut W {
-        &mut self.writer
     }
 }
 

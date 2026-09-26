@@ -9,13 +9,13 @@
 
 #![forbid(unsafe_code)]
 
-pub mod connection;
+mod connection;
 pub mod fs;
-pub mod layout;
-pub mod secret;
+mod layout;
+mod secret;
 pub mod text;
 pub use connection::{Connection, read_frame, write_message};
-pub use layout::Layout;
+pub use layout::{Layout, Stray};
 pub use secret::Secret;
 
 use anyhow::Result;

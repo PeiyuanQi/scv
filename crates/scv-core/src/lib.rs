@@ -26,10 +26,9 @@ pub use context::{
 };
 pub use event::{CoreEvent, EventSink};
 pub use history::HistoryLimits;
-pub use message::{IMAGE_TOKENS, ImageInput, Message, ToolCall, TurnInput};
-pub use progress::{
-    MAX_PROGRESS_EVENT_BYTES, MAX_PROGRESS_LINE_BYTES, PROGRESS_INTERVAL, ProgressSink,
-};
+pub use message::{ImageInput, Message, ToolCall, TurnInput};
+pub(crate) use progress::PROGRESS_INTERVAL;
+pub use progress::{MAX_PROGRESS_EVENT_BYTES, MAX_PROGRESS_LINE_BYTES, ProgressSink};
 pub use provider::{
     AssistantResponse, Provider, ProviderError, ProviderErrorKind, ProviderRequest, TextDeltaSink,
     Usage,

@@ -53,13 +53,13 @@ const LINE_QUEUE: usize = 256;
 
 /// How to start a live child.
 pub(crate) struct LiveSpec {
-    pub executable: OsString,
-    pub args: Vec<OsString>,
-    pub cwd: PathBuf,
+    pub(crate) executable: OsString,
+    pub(crate) args: Vec<OsString>,
+    pub(crate) cwd: PathBuf,
     /// The adapter environment plus the delegation tags.
-    pub environment: Vec<(OsString, OsString)>,
+    pub(crate) environment: Vec<(OsString, OsString)>,
     /// Longest stdout line accepted; a longer one ends the child.
-    pub max_line_bytes: usize,
+    pub(crate) max_line_bytes: usize,
 }
 
 /// One line from a live child's stdout.

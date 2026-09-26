@@ -22,9 +22,18 @@ launches no process and spawns no tasks: dropping its future drops active
 requests and protocol sessions, and callers enforce an external bounded stop
 timeout. The health callback reports `true` only after a successful receive,
 and `false` when receiving, sending, or the run fails. Nothing in the crate
-reads `SCV_HOME`: accounts, their state, and their media (`MediaOptions`, under
+reads `SCV_HOME`: accounts, their state, and their media (under
 `Layout::media`, with the shared `Layout::outbox`) are found through the
 `Layout` the caller passes.
+
+Beyond those, the public API is the `hub` module (below); the account
+settings the daemon validates and edits (`state::AccountSettings`,
+`state::validate_name`, `media::MediaSettings`); `state::Credentials`, which
+a channel's credentials implement; the reply-file size limit
+(`media::MAX_REPLY_FILE_BYTES`); `owner_turn_timeout`; and each channel's
+`CHANNEL` name, `Account` credentials, and `Login` (plus Feishu's `Brand`).
+Everything else, including the bridge, the transports, and the store, is
+crate-private.
 
 Inside the crate each channel supplies a `Transport` (receive a batch of
 messages after a checkpoint, send one part of a message) and
@@ -58,8 +67,9 @@ newest 4096 IDs, including replies recovered before the first receive.
 Conversations run their turns in order, at most four at once, with bounded
 queues answered by a busy notice beyond them.
 
-`state::Store<C>` keeps one channel's accounts where the instance layout puts
-them: credentials in `<SCV home>/credentials/<channel>/<account>.json`,
+Inside the crate, `state::Store<C>` keeps one channel's accounts where the
+instance layout puts them: credentials in
+`<SCV home>/credentials/<channel>/<account>.json`,
 settings as `[channels.<channel>.<account>]` in `<SCV home>/config.toml`
 (edited in place, keeping the rest of the file and its comments), and delivery
 state with its `.lock` and `.transaction` files in

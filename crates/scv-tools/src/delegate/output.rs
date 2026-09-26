@@ -37,8 +37,8 @@ pub(crate) const DECLINED_NOTE_TRY_GROK: &str = "The agent declined this request
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 /// The final state of one delegated run.
@@ -364,16 +364,16 @@ pub(crate) enum RunExit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentResult {
-    pub status: RunStatus,
-    pub reply: String,
+    pub(crate) status: RunStatus,
+    pub(crate) reply: String,
     /// Why the run failed, as the CLI, the agent's protocol, or SCV reported
     /// it; never taken from the model's reply. Fallback advice and sign-in
     /// hints are decided from this and the status alone.
-    pub error: Option<String>,
-    pub usage: Option<AgentUsage>,
-    pub truncated: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) usage: Option<AgentUsage>,
+    pub(crate) truncated: bool,
     /// The session ID the CLI reported, if any.
-    pub session: Option<String>,
+    pub(crate) session: Option<String>,
 }
 
 impl AgentResult {

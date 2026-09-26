@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// The CDN iLink files live on, when a message gives no full URL.
-pub const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
+pub(crate) const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 /// iLink item types.
-pub const TEXT: i64 = 1;
-pub const IMAGE: i64 = 2;
-pub const VOICE: i64 = 3;
-pub const FILE: i64 = 4;
-pub const VIDEO: i64 = 5;
+pub(crate) const TEXT: i64 = 1;
+pub(crate) const IMAGE: i64 = 2;
+pub(crate) const VOICE: i64 = 3;
+pub(crate) const FILE: i64 = 4;
+pub(crate) const VIDEO: i64 = 5;
 
 /// `getuploadurl` media types.
 const UPLOAD_IMAGE: u8 = 1;
@@ -33,21 +33,21 @@ const UPLOAD_FILE: u8 = 3;
 /// Where one CDN file is and how to decrypt it; kept as a message's media
 /// source until its turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Source {
+pub(crate) struct Source {
     /// The CDN's full download URL, when the message had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    pub(crate) url: Option<String>,
     /// The encrypted query parameter the download URL is built from.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub param: String,
+    pub(crate) param: String,
     /// The raw 16-byte AES key, base64; absent for a plain file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
+    pub(crate) key: Option<String>,
 }
 
 /// The media of one iLink message item, or `None` for text and anything
 /// without a file.
-pub fn item_media(item: &Value) -> Option<Media> {
+pub(crate) fn item_media(item: &Value) -> Option<Media> {
     let kind = item.get("type").and_then(Value::as_i64)?;
     let (field, kind) = match kind {
         IMAGE => ("image_item", MediaKind::Image),
@@ -152,7 +152,7 @@ fn key_from_base64(value: &str) -> Option<[u8; 16]> {
 }
 
 /// A short label for a quoted item, such as its text or `[image]`.
-pub fn item_label(item: &Value) -> Option<String> {
+pub(crate) fn item_label(item: &Value) -> Option<String> {
     match item.get("type").and_then(Value::as_i64) {
         Some(TEXT) => item
             .pointer("/text_item/text")
@@ -180,7 +180,7 @@ pub fn item_label(item: &Value) -> Option<String> {
 
 /// Where a download or upload may go: HTTPS on a Tencent host. The address
 /// comes from iLink, but a message should never make SCV fetch elsewhere.
-pub fn check_cdn_url(url: &str) -> Result<reqwest::Url> {
+pub(crate) fn check_cdn_url(url: &str) -> Result<reqwest::Url> {
     let parsed = reqwest::Url::parse(url).map_err(|_| anyhow!("invalid CDN address"))?;
     let host = parsed.host_str().unwrap_or_default();
     // Lifecycle tests serve a fake CDN on loopback.
@@ -199,7 +199,7 @@ pub fn check_cdn_url(url: &str) -> Result<reqwest::Url> {
 }
 
 /// The download address of `source`.
-pub fn download_url(source: &Source) -> Result<reqwest::Url> {
+pub(crate) fn download_url(source: &Source) -> Result<reqwest::Url> {
     if let Some(url) = &source.url {
         check_cdn_url(url)
     } else {
@@ -211,7 +211,7 @@ pub fn download_url(source: &Source) -> Result<reqwest::Url> {
 }
 
 /// Download `source`, decrypting it, and fail beyond `max_bytes`.
-pub async fn download(
+pub(crate) async fn download(
     client: &reqwest::Client,
     source: &Source,
     max_bytes: u64,
@@ -262,7 +262,7 @@ pub async fn download(
 }
 
 /// AES-128-ECB with PKCS#7 padding.
-pub fn encrypt(plain: &[u8], key: &[u8; 16]) -> Vec<u8> {
+pub(crate) fn encrypt(plain: &[u8], key: &[u8; 16]) -> Vec<u8> {
     let cipher = Aes128::new(GenericArray::from_slice(key));
     let pad = 16 - plain.len() % 16;
     let mut data = Vec::with_capacity(plain.len() + pad);
@@ -274,7 +274,7 @@ pub fn encrypt(plain: &[u8], key: &[u8; 16]) -> Vec<u8> {
     data
 }
 
-pub fn decrypt(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>> {
+pub(crate) fn decrypt(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>> {
     if data.is_empty() || !data.len().is_multiple_of(16) {
         bail!("encrypted file has a bad length")
     }
@@ -298,17 +298,17 @@ pub fn decrypt(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>> {
 
 /// A file prepared for upload: its encrypted bytes and what the upload and
 /// the message need to name it.
-pub struct Upload {
-    pub kind: MediaKind,
-    pub filekey: String,
-    pub key: [u8; 16],
-    pub raw_size: u64,
-    pub raw_md5: String,
-    pub encrypted: Vec<u8>,
+pub(crate) struct Upload {
+    pub(crate) kind: MediaKind,
+    pub(crate) filekey: String,
+    pub(crate) key: [u8; 16],
+    pub(crate) raw_size: u64,
+    pub(crate) raw_md5: String,
+    pub(crate) encrypted: Vec<u8>,
 }
 
 impl Upload {
-    pub fn new(plain: &[u8], kind: MediaKind) -> Self {
+    pub(crate) fn new(plain: &[u8], kind: MediaKind) -> Self {
         // Two random UUIDs hashed give a full 128 random bits.
         use sha2::{Digest as _, Sha256};
         let seed = Sha256::new()
@@ -332,7 +332,7 @@ impl Upload {
     }
 
     /// The `getuploadurl` request body.
-    pub fn request(&self, to_user_id: &str) -> Value {
+    pub(crate) fn request(&self, to_user_id: &str) -> Value {
         let media_type = match self.kind {
             MediaKind::Image => UPLOAD_IMAGE,
             MediaKind::Video => UPLOAD_VIDEO,
@@ -352,7 +352,7 @@ impl Upload {
     }
 
     /// Where to post the encrypted bytes, from a `getuploadurl` reply.
-    pub fn target(&self, reply: &Value) -> Result<reqwest::Url> {
+    pub(crate) fn target(&self, reply: &Value) -> Result<reqwest::Url> {
         if let Some(full) = reply
             .get("upload_full_url")
             .and_then(Value::as_str)
@@ -375,7 +375,7 @@ impl Upload {
 
     /// The message item that sends the uploaded file, from the CDN's
     /// download parameter.
-    pub fn item(&self, download_param: &str, name: &str) -> Value {
+    pub(crate) fn item(&self, download_param: &str, name: &str) -> Value {
         let media = json!({
             "encrypt_query_param": download_param,
             // The key's hex digits, base64: the form iLink's own clients send.
@@ -399,7 +399,7 @@ impl Upload {
 
 /// The key a sent item carries, for tests that decrypt uploads.
 #[cfg(test)]
-pub fn tests_key(aes_key: &str) -> [u8; 16] {
+pub(crate) fn tests_key(aes_key: &str) -> [u8; 16] {
     key_from_base64(aes_key).expect("a valid key")
 }
 

@@ -420,7 +420,7 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
 pub const MAX_FIELD_BYTES: usize = 4096;
 
 /// The pi provider id SCV writes for an OpenAI-compatible endpoint.
-pub const PI_PROVIDER: &str = "scv";
+pub(crate) const PI_PROVIDER: &str = "scv";
 
 /// Which OpenAI wire protocol an endpoint speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,7 +566,7 @@ pub fn remove_stored(store: KeyStore, home: &Path) -> Result<Vec<String>> {
 }
 
 /// The provider profile name `scv agents import scv` writes for the nested SCV.
-pub const SCV_CHILD_PROVIDER: &str = "scv";
+pub(crate) const SCV_CHILD_PROVIDER: &str = "scv";
 
 /// The parts of SCV's own provider that the nested SCV copies.
 pub struct ScvChildProvider<'a> {
@@ -580,9 +580,10 @@ pub struct ScvChildProvider<'a> {
 }
 
 /// Write the nested SCV's `config.toml` in `home` (mode 0600): SCV's own
-/// provider as profile [`SCV_CHILD_PROVIDER`], with `key` stored in the file
-/// because delegated agents never inherit key variables. Other settings
-/// already in the file are kept. Returns display lines without the key.
+/// provider as profile `scv` (`SCV_CHILD_PROVIDER`), with `key` stored in
+/// the file because delegated agents never inherit key variables. Other
+/// settings already in the file are kept. Returns display lines without the
+/// key.
 pub fn configure_scv_child(
     home: &Path,
     provider: &ScvChildProvider<'_>,
@@ -708,8 +709,9 @@ fn scv_child_status(path: &Path) -> Result<StoredStatus> {
     })
 }
 
-/// Point pi at an OpenAI-compatible endpoint as provider [`PI_PROVIDER`]
-/// and make it pi's default, storing the key in pi's `auth.json`.
+/// Point pi at an OpenAI-compatible endpoint as provider `scv`
+/// (`PI_PROVIDER`) and make it pi's default, storing the key in pi's
+/// `auth.json`.
 pub fn configure_pi_endpoint(dir: &Path, endpoint: &Endpoint, key: &str) -> Result<Vec<String>> {
     validate_secret(key)?;
     let base_url = validate_base_url(&endpoint.base_url)?;

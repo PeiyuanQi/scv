@@ -76,7 +76,7 @@ pub struct DelegationContext {
 
 impl DelegationContext {
     /// The depth delegated runs of this session start from.
-    pub fn owner_depth(&self) -> u32 {
+    pub(crate) fn owner_depth(&self) -> u32 {
         self.registry.depth().max(self.depth)
     }
 }

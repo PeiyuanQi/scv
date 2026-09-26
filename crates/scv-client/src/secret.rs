@@ -16,7 +16,8 @@ pub struct Secret(String);
 
 impl Secret {
     /// Wrap a secret value.
-    pub fn new(value: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 

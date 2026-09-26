@@ -24,7 +24,7 @@ const DEFAULT_PING: Duration = Duration::from_secs(120);
 const SILENCE_GRACE: Duration = Duration::from_secs(30);
 
 /// One connected socket.
-pub struct Link {
+pub(crate) struct Link {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     service: i32,
     ping_every: Duration,
@@ -34,15 +34,15 @@ pub struct Link {
 }
 
 /// An event received on the socket, whole, with the frame to acknowledge.
-pub struct Delivery {
-    pub frame: Frame,
-    pub payload: Vec<u8>,
-    pub received: Instant,
+pub(crate) struct Delivery {
+    pub(crate) frame: Frame,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) received: Instant,
 }
 
 impl Link {
     /// Ask Feishu for a socket address, check it, and connect.
-    pub async fn connect(api: &Api) -> Result<Self> {
+    pub(crate) async fn connect(api: &Api) -> Result<Self> {
         let (url, ping) = api.socket_endpoint().await?;
         let service = url
             .query_pairs()
@@ -76,7 +76,7 @@ impl Link {
 
     /// The next whole event, or `None` once `until` passes. Pings go out
     /// when due; pongs and other control frames are consumed here.
-    pub async fn next(&mut self, until: Instant) -> Result<Option<Delivery>> {
+    pub(crate) async fn next(&mut self, until: Instant) -> Result<Option<Delivery>> {
         loop {
             let silent_since = self.last_heard + self.ping_every * 2 + SILENCE_GRACE;
             if Instant::now() >= silent_since {
@@ -133,7 +133,7 @@ impl Link {
     }
 
     /// Tell Feishu an event was handled.
-    pub async fn acknowledge(&mut self, delivery: Delivery) -> Result<()> {
+    pub(crate) async fn acknowledge(&mut self, delivery: Delivery) -> Result<()> {
         let handled_in = delivery.received.elapsed();
         self.write(delivery.frame.acknowledgement(handled_in)).await
     }

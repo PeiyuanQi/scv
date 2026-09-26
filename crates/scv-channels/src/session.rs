@@ -18,13 +18,13 @@ use uuid::Uuid;
 
 /// A turn's answer: its text and the files the model attached to it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Reply {
-    pub text: String,
-    pub files: Vec<ReplyAttachment>,
+pub(crate) struct Reply {
+    pub(crate) text: String,
+    pub(crate) files: Vec<ReplyAttachment>,
 }
 
 impl Reply {
-    pub fn text(text: impl Into<String>) -> Self {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             files: Vec::new(),
@@ -36,16 +36,16 @@ impl Reply {
 /// ending.
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
-pub struct Session {
+pub(crate) struct Session {
     /// The daemon connection. Its decoder keeps a partly read frame, so a
     /// read can be abandoned (while waiting for either a message or a
     /// background report) and resumed without losing bytes.
     connection: Connection<BufReader<OwnedReadHalf>, OwnedWriteHalf>,
-    pub session_id: String,
-    pub last_used: Instant,
+    pub(crate) session_id: String,
+    pub(crate) last_used: Instant,
     /// Owner sessions run with tools and approve their requests; others have
     /// no tools and deny any approval request.
-    pub tools: bool,
+    pub(crate) tools: bool,
     /// This client's turn in progress: its request ID and, once started, its
     /// turn ID.
     current: Option<(String, Option<String>)>,
@@ -69,7 +69,7 @@ impl Session {
     /// Start a session for a conversation on `channel` (its user-facing
     /// name, such as `WeChat`), so the model knows it is answering a chat
     /// and, with tools, may attach files to its replies.
-    pub async fn connect(
+    pub(crate) async fn connect(
         socket: &Path,
         workspace: &Path,
         tools: bool,
@@ -175,33 +175,33 @@ impl Session {
     }
 
     /// Whether a read or write failed, so the session must be replaced.
-    pub fn is_broken(&self) -> bool {
+    pub(crate) fn is_broken(&self) -> bool {
         self.broken
     }
 
     /// Background jobs started here and not yet reported.
-    pub fn background_jobs(&self) -> usize {
+    pub(crate) fn background_jobs(&self) -> usize {
         self.background.len()
     }
 
     /// Whether finished background reports are waiting to be sent.
-    pub fn has_reports(&self) -> bool {
+    pub(crate) fn has_reports(&self) -> bool {
         !self.reports.is_empty()
     }
 
     /// Whether a turn the server started (a background report) is running.
-    pub fn reporting(&self) -> bool {
+    pub(crate) fn reporting(&self) -> bool {
         !self.server_turns.is_empty()
     }
 
     /// Background work whose report has not been handed over yet: running
     /// or unreported jobs, report turns, and finished reports.
-    pub fn pending_work(&self) -> usize {
+    pub(crate) fn pending_work(&self) -> usize {
         self.background.len() + self.server_turns.len() + self.reports.len()
     }
 
     /// The background jobs this session runs and has not reported, by handle.
-    pub fn jobs(&self) -> Vec<(String, JobInfo)> {
+    pub(crate) fn jobs(&self) -> Vec<(String, JobInfo)> {
         let mut jobs: Vec<_> = self
             .background
             .iter()
@@ -212,13 +212,13 @@ impl Session {
     }
 
     /// Answers of background reports that finished during `turn`.
-    pub fn take_reports(&mut self) -> Vec<Reply> {
+    pub(crate) fn take_reports(&mut self) -> Vec<Reply> {
         self.reports.drain(..).collect()
     }
 
     /// Wait for the next background report while no turn of ours runs.
     /// Cancel-safe.
-    pub async fn next_report(&mut self) -> Result<Reply> {
+    pub(crate) async fn next_report(&mut self) -> Result<Reply> {
         loop {
             if let Some(report) = self.reports.pop_front() {
                 return Ok(report);
@@ -355,7 +355,7 @@ impl Session {
     /// Abandon the current turn (its time ran out): ask the server to cancel
     /// it and ignore its late events. `false` when it had not started, so
     /// it cannot be cancelled and the session should be replaced.
-    pub async fn cancel_current(&mut self) -> Result<bool> {
+    pub(crate) async fn cancel_current(&mut self) -> Result<bool> {
         let Some((request, started)) = self.current.take() else {
             return Ok(true);
         };
@@ -375,7 +375,7 @@ impl Session {
     /// Run one turn and return its answer, at most `max_bytes` (a longer
     /// answer is cut with a note), and the files the model attached.
     /// Background reports finishing meanwhile wait in `take_reports`.
-    pub async fn turn(
+    pub(crate) async fn turn(
         &mut self,
         prompt: &str,
         attachments: Vec<Attachment>,
@@ -458,11 +458,11 @@ impl Session {
 
 /// A background job this session started, as a restart describes it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct JobInfo {
+pub(crate) struct JobInfo {
     /// The delegating tool, such as `agent_codex`.
-    pub tool: String,
+    pub(crate) tool: String,
     /// The first line of the delegated prompt, shortened.
-    pub task: String,
+    pub(crate) task: String,
 }
 
 /// Answers from a background report turn, like any reply, are bounded.

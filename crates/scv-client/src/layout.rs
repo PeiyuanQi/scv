@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Top-level entries of an instance home, in display order.
-pub const ENTRIES: [&str; 5] = ["config.toml", "credentials", "agents", "skills", "state"];
+pub(crate) const ENTRIES: [&str; 5] = ["config.toml", "credentials", "agents", "skills", "state"];
 
 /// Paths earlier releases used, which SCV no longer reads.
 const LEGACY: [&str; 7] = [

@@ -1,7 +1,7 @@
 //! Unit tests for `src/message.rs`.
 
 use super::*;
-use crate::IMAGE_TOKENS;
+use crate::message::IMAGE_TOKENS;
 
 #[test]
 fn images_cost_a_fixed_amount_of_context_whatever_their_size() {

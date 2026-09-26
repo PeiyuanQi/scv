@@ -54,7 +54,7 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     /// Arguments that select this format, placed after the fixed arguments.
-    pub fn args(self) -> &'static [&'static str] {
+    pub(crate) fn args(self) -> &'static [&'static str] {
         match self {
             Self::Text => &[],
             Self::ClaudeStreamJson => &["--output-format", "stream-json", "--verbose"],
@@ -76,13 +76,6 @@ pub enum Transport {
     ScvProtocol,
 }
 
-impl Transport {
-    /// Whether one child process lives for a whole conversation.
-    pub fn is_live(self) -> bool {
-        !matches!(self, Self::Process)
-    }
-}
-
 /// How to start an agent's Agent Client Protocol (ACP) server: a long-running
 /// process speaking JSON-RPC 2.0 over stdio, one conversation per ACP session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +84,8 @@ pub struct AcpLaunch {
     pub command: &'static str,
     /// Its arguments; a `{full}` entry is replaced by `full_args` for
     /// `permissions = "full"` and dropped otherwise.
-    pub args: &'static [&'static str],
-    pub full_args: &'static [&'static str],
+    pub(crate) args: &'static [&'static str],
+    pub(crate) full_args: &'static [&'static str],
     /// The ACP session mode selected for `permissions = "full"`, for agents
     /// whose permission level is a session mode.
     pub full_mode: Option<&'static str>,
@@ -138,12 +131,12 @@ pub enum Resume {
 }
 
 impl Resume {
-    pub fn is_supported(self) -> bool {
+    pub(crate) fn is_supported(self) -> bool {
         matches!(self, Self::Supported { .. })
     }
 
     /// Whether SCV chooses the vendor session ID when a conversation starts.
-    pub fn assigns_id(self) -> bool {
+    pub(crate) fn assigns_id(self) -> bool {
         matches!(self, Self::Supported { start, .. } if !start.is_empty())
     }
 }
@@ -152,8 +145,8 @@ impl Resume {
 /// files with `extension` anywhere below `dir`, named after their session ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConversationFiles {
-    pub dir: &'static str,
-    pub extension: &'static str,
+    pub(crate) dir: &'static str,
+    pub(crate) extension: &'static str,
 }
 
 /// How SCV condenses a CLI's own status output. The raw output names the
@@ -206,7 +199,7 @@ pub struct AdapterDescriptor {
     pub product: &'static str,
     /// What this harness offers, as one factual clause for the tool
     /// description, so the model can choose between agents.
-    pub offers: &'static str,
+    pub(crate) offers: &'static str,
     pub command: &'static str,
     pub args: &'static [&'static str],
     /// Placed immediately before the prompt, for CLIs whose prompt is a flag
@@ -223,7 +216,7 @@ pub struct AdapterDescriptor {
     pub fixed_environment: &'static [(&'static str, &'static str)],
     /// Credential, endpoint, and state-location variables no delegated agent
     /// inherits. A trailing `*` matches a prefix.
-    pub removed_environment: &'static [&'static str],
+    pub(crate) removed_environment: &'static [&'static str],
     /// Added after `args` when `[agents.<name>] permissions = "full"`: the
     /// CLI's own switches that turn off its approval prompts and sandbox and
     /// enable web search where the CLI gates it. Empty when the CLI has no
@@ -235,7 +228,7 @@ pub struct AdapterDescriptor {
     /// user's home, as a login shell orders them. A user service's `PATH`
     /// omits them, so without this the daemon would miss or pick a different
     /// install than the user's shell.
-    pub search_dirs: &'static [&'static str],
+    pub(crate) search_dirs: &'static [&'static str],
     pub login: Login,
     pub status: Status,
     /// How a [`Status::Command`] result is summarized.

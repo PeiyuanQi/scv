@@ -48,6 +48,9 @@
 
 - Use stable Rust 1.88 or newer, Rust 2024 edition, `cargo fmt`, and Clippy with
   warnings denied.
+- Make an item `pub(crate)` or private unless another workspace package, the
+  root package, `tests/it`, or a documented extension surface uses it
+  (`unreachable_pub` warns; `docs/quality.md`, "Lints and formatting").
 - Keep protocol types and framing in `scv-protocol`, the instance layout
   (every path, the socket, the service unit name) and daemon control helpers
   in `scv-client`, loop and extension traits

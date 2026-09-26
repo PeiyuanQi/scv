@@ -71,7 +71,7 @@ fn channel_accounts_are_user_only_and_validated() {
             .unwrap();
     assert_eq!(
         parsed.channels["wechat"]["default"].remote_tools,
-        scv_channels::state::RemoteTools::Owner
+        scv_protocol::RemoteTools::Owner
     );
     assert!(toml::from_str::<Config>("[channels.wechat.default]\nenabeld = true\n").is_err());
 }

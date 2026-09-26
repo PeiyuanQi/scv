@@ -7,42 +7,42 @@ use std::{
 };
 
 /// Control frames carry ping and pong.
-pub const METHOD_CONTROL: i32 = 0;
+pub(crate) const METHOD_CONTROL: i32 = 0;
 /// Data frames carry events and card callbacks.
-pub const METHOD_DATA: i32 = 1;
+pub(crate) const METHOD_DATA: i32 = 1;
 
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct Header {
+pub(crate) struct Header {
     #[prost(string, required, tag = "1")]
-    pub key: String,
+    pub(crate) key: String,
     #[prost(string, required, tag = "2")]
-    pub value: String,
+    pub(crate) value: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct Frame {
+pub(crate) struct Frame {
     #[prost(uint64, required, tag = "1")]
-    pub seq_id: u64,
+    pub(crate) seq_id: u64,
     #[prost(uint64, required, tag = "2")]
-    pub log_id: u64,
+    pub(crate) log_id: u64,
     #[prost(int32, required, tag = "3")]
-    pub service: i32,
+    pub(crate) service: i32,
     #[prost(int32, required, tag = "4")]
-    pub method: i32,
+    pub(crate) method: i32,
     #[prost(message, repeated, tag = "5")]
-    pub headers: Vec<Header>,
+    pub(crate) headers: Vec<Header>,
     #[prost(string, optional, tag = "6")]
-    pub payload_encoding: Option<String>,
+    pub(crate) payload_encoding: Option<String>,
     #[prost(string, optional, tag = "7")]
-    pub payload_type: Option<String>,
+    pub(crate) payload_type: Option<String>,
     #[prost(bytes = "vec", optional, tag = "8")]
-    pub payload: Option<Vec<u8>>,
+    pub(crate) payload: Option<Vec<u8>>,
     #[prost(string, optional, tag = "9")]
-    pub log_id_new: Option<String>,
+    pub(crate) log_id_new: Option<String>,
 }
 
 impl Frame {
-    pub fn header(&self, key: &str) -> Option<&str> {
+    pub(crate) fn header(&self, key: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|header| header.key == key)
@@ -54,7 +54,7 @@ impl Frame {
     }
 
     /// A ping for the connection's service.
-    pub fn ping(service: i32) -> Self {
+    pub(crate) fn ping(service: i32) -> Self {
         Self {
             service,
             method: METHOD_CONTROL,
@@ -69,7 +69,7 @@ impl Frame {
     /// The acknowledgement of this event frame: the same frame, with the
     /// handling time and a success response as its payload.
     #[must_use]
-    pub fn acknowledgement(mut self, handled_in: Duration) -> Self {
+    pub(crate) fn acknowledgement(mut self, handled_in: Duration) -> Self {
         self.headers.push(Header {
             key: "biz_rt".into(),
             value: handled_in.as_millis().to_string(),
@@ -86,7 +86,7 @@ const MAX_PARTIAL: usize = 64;
 /// Parts of one event.
 const MAX_PARTS: usize = 64;
 /// Bytes of one reassembled event.
-pub const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
 struct Partial {
     started: Instant,
@@ -96,14 +96,14 @@ struct Partial {
 
 /// Reassembles events split by the `sum` and `seq` headers, within bounds.
 #[derive(Default)]
-pub struct Fragments {
+pub(crate) struct Fragments {
     partial: HashMap<String, Partial>,
 }
 
 impl Fragments {
     /// The event's whole payload once every part has arrived, or `None`
     /// while parts are missing or when the frame cannot be used.
-    pub fn accept(&mut self, frame: &Frame) -> Option<Vec<u8>> {
+    pub(crate) fn accept(&mut self, frame: &Frame) -> Option<Vec<u8>> {
         let payload = frame.payload.clone().unwrap_or_default();
         let sum = frame.header_number("sum").unwrap_or(1);
         if sum <= 1 {

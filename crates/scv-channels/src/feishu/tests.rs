@@ -615,7 +615,7 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
     let mut fake = Fake::start().await;
     let directory = tempfile::tempdir().unwrap();
     let store = credentials::Store::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         crate::feishu::CHANNEL,
     );
     store.save_account("default", &account()).unwrap();
@@ -647,10 +647,10 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
     let reports = StdMutex::new(Vec::new());
     let report = |healthy| reports.lock().unwrap().push(healthy);
     let media = crate::MediaOptions::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         "feishu",
         "default",
-        crate::MediaSettings::default(),
+        crate::media::MediaSettings::default(),
     );
     let detached = crate::hub::Link::detached();
     let run = crate::serve(
@@ -703,7 +703,7 @@ async fn full_bridge_answers_the_owners_voice_message_with_the_voice_reply() {
     let mut fake = Fake::start().await;
     let directory = tempfile::tempdir().unwrap();
     let store = credentials::Store::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         crate::feishu::CHANNEL,
     );
     store.save_account("default", &account()).unwrap();
@@ -735,10 +735,10 @@ async fn full_bridge_answers_the_owners_voice_message_with_the_voice_reply() {
     // No daemon listens here: a turn would fail with the failure reply.
     let socket = directory.path().join("missing.sock");
     let media = crate::MediaOptions::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         "feishu",
         "default",
-        crate::MediaSettings::default(),
+        crate::media::MediaSettings::default(),
     );
     let detached = crate::hub::Link::detached();
     let run = crate::serve(
@@ -1023,7 +1023,6 @@ async fn files_upload_then_go_out_as_image_or_file_messages() {
                 part: 1,
                 path: &png,
                 name: "chart.png",
-                mime: "image/png",
                 kind: MediaKind::Image,
                 client_id: "file-1",
             },
@@ -1061,7 +1060,6 @@ async fn files_upload_then_go_out_as_image_or_file_messages() {
         part: 0,
         path: &report,
         name: "report.pdf",
-        mime: "application/pdf",
         kind: MediaKind::File,
         client_id: "file-2",
     };

@@ -172,7 +172,7 @@ fn check_literal(url: &Url, allowed: &AddressCheck) -> Result<(), String> {
 }
 
 /// Case-insensitive host match against the allowlist.
-pub fn domain_listed(domains: &[String], host: &str) -> bool {
+pub(crate) fn domain_listed(domains: &[String], host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     domains.iter().any(|entry| {
         let entry = entry.trim_end_matches('.').to_ascii_lowercase();
@@ -188,7 +188,7 @@ pub fn domain_listed(domains: &[String], host: &str) -> bool {
 /// Whether an address is a routable public one: not loopback, private,
 /// link-local, shared (CGNAT), multicast, documentation, reserved, or an IPv6
 /// form that embeds such an IPv4 address.
-pub fn is_public(ip: IpAddr) -> bool {
+pub(crate) fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_public_v4(ip),
         IpAddr::V6(ip) => is_public_v6(ip),

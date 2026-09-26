@@ -57,7 +57,7 @@ impl Message {
 
 /// What one image costs in context, whatever its size: providers scale
 /// images down to a bounded number of tiles.
-pub const IMAGE_TOKENS: usize = 1600;
+pub(crate) const IMAGE_TOKENS: usize = 1600;
 
 /// An image file shown to the model with a user message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

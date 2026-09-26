@@ -71,7 +71,8 @@ impl FrameDecoder {
     }
 
     /// Whether no partial line is buffered or being discarded.
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.partial.is_empty() && !self.discarding
     }
 

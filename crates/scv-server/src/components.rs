@@ -25,15 +25,15 @@ const BUSY_RETRY: Duration = Duration::from_secs(5);
 /// Components must observe cancellation and must not detach child tasks.
 /// Return on failure; the supervisor owns retries and bounded shutdown.
 #[async_trait]
-pub trait Component: Send + Sync + 'static {
+pub(crate) trait Component: Send + Sync + 'static {
     async fn run(&self, cancellation: CancellationToken, health: HealthReporter) -> Result<()>;
 }
 
 #[derive(Clone)]
-pub struct HealthReporter(Arc<Mutex<ComponentHealth>>);
+pub(crate) struct HealthReporter(Arc<Mutex<ComponentHealth>>);
 
 impl HealthReporter {
-    pub fn contact(&self, connected: bool) {
+    pub(crate) fn contact(&self, connected: bool) {
         let mut health = self
             .0
             .lock()
@@ -77,7 +77,7 @@ impl HealthReporter {
     }
 }
 
-pub struct Supervisor {
+pub(crate) struct Supervisor {
     tasks: BTreeMap<String, RunningComponent>,
     grace: Duration,
     initial_backoff: Duration,
@@ -101,7 +101,7 @@ impl Default for Supervisor {
 
 impl Supervisor {
     /// Idempotent start: replacement must first stop and join the old instance.
-    pub fn start(&mut self, component: Arc<dyn Component>, health: ComponentHealth) {
+    pub(crate) fn start(&mut self, component: Arc<dyn Component>, health: ComponentHealth) {
         if self.tasks.contains_key(&health.id) {
             return;
         }
@@ -168,14 +168,14 @@ impl Supervisor {
         );
     }
 
-    pub fn health(&self) -> Vec<ComponentHealth> {
+    pub(crate) fn health(&self) -> Vec<ComponentHealth> {
         self.tasks
             .values()
             .map(|task| task.health.snapshot())
             .collect()
     }
 
-    pub async fn stop(&mut self, id: &str) {
+    pub(crate) async fn stop(&mut self, id: &str) {
         if let Some(running) = self.tasks.get_mut(id) {
             running.cancellation.cancel();
             // The runner owns abort/join of its child, so never abort the runner first.
@@ -184,7 +184,7 @@ impl Supervisor {
         self.tasks.remove(id);
     }
 
-    pub async fn shutdown(&mut self) {
+    pub(crate) async fn shutdown(&mut self) {
         for task in self.tasks.values() {
             task.cancellation.cancel();
         }
@@ -270,11 +270,11 @@ pub(crate) struct Components {
 
 impl Components {
     #[cfg(test)]
-    pub fn new(instance: Instance, workspace: PathBuf) -> Self {
+    pub(crate) fn new(instance: Instance, workspace: PathBuf) -> Self {
         Self::with_hub(instance, workspace, scv_channels::hub::Hub::new(None))
     }
 
-    pub fn with_hub(
+    pub(crate) fn with_hub(
         instance: Instance,
         workspace: PathBuf,
         hub: Arc<scv_channels::hub::Hub>,
@@ -312,7 +312,7 @@ impl Components {
         self.confirmer.clone()
     }
 
-    pub fn status(&self) -> DaemonStatus {
+    pub(crate) fn status(&self) -> DaemonStatus {
         let mut components = self.supervisor.health();
         components.extend(self.inactive.values().cloned());
         components.sort_by(|a, b| a.id.cmp(&b.id));
@@ -329,7 +329,7 @@ impl Components {
     /// Match running components to every channel's saved accounts. A channel
     /// whose accounts cannot be discovered stops its own components and
     /// reports why; other channels keep running.
-    pub async fn reconcile(&mut self) -> Result<()> {
+    pub(crate) async fn reconcile(&mut self) -> Result<()> {
         let mut failed = false;
         for &channel in ChannelKind::ALL {
             match account_names(&self.accounts(channel)) {
@@ -461,7 +461,7 @@ impl Components {
         self.inactive.insert(id, health);
     }
 
-    pub async fn control(&mut self, command: DaemonCommand) -> Result<DaemonStatus> {
+    pub(crate) async fn control(&mut self, command: DaemonCommand) -> Result<DaemonStatus> {
         match command {
             // Delegations, restarts, and questions belong to the connection
             // handler, which adds them.
@@ -538,7 +538,7 @@ impl Components {
         Ok(self.status())
     }
 
-    pub async fn shutdown(&mut self) {
+    pub(crate) async fn shutdown(&mut self) {
         self.supervisor.shutdown().await;
     }
 }
