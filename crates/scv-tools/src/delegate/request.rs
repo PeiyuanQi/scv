@@ -62,13 +62,21 @@ pub(crate) fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<P
     Ok(resolved)
 }
 
+/// Effort values the built-in adapters accept.
+pub const AGENT_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 /// Model names are passed as one argument, so only reject values that could
 /// read as a flag, name an `@file` argument, or carry unexpected characters.
-pub(crate) fn valid_model_name(value: &str) -> bool {
+pub fn valid_model_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && !value.starts_with(['-', '@'])
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "._:/@[]-".contains(c))
+}
+
+/// Whether `value` is one of [`AGENT_EFFORTS`].
+pub fn valid_effort(value: &str) -> bool {
+    AGENT_EFFORTS.contains(&value)
 }

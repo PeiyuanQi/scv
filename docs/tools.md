@@ -198,19 +198,28 @@ what that harness offers, so the model can choose between them:
 | `agent_scv` | SCV: a nested session for a self-contained sub-task kept out of this context, or work in another project |
 
 The user steers the choice in their own configuration (projects cannot set
-either key):
+these keys):
 
 ```toml
 [agent]
 prefer = ["codex", "claude"]   # named in the system prompt, in order; no default
+
+[agents.claude]
+use_for = "coding"
+model = "opus-5.5"
+effort = "xhigh"
 
 [agents.grok]
 use_for = "current events, and anything that needs posts on X"
 ```
 
 `use_for` (one line, at most 500 bytes) is appended to that tool's
-description; `prefer` names only agents the session offers, and an unknown
-name fails configuration validation. When a call fails in a way another agent
+description. `model` and `effort` are the values to pass when the work matches
+that note; other work omits them so the agent uses its own default. Without
+`use_for`, they apply whenever that agent is called, unless the user asks for
+another. `prefer` names only agents the session offers, and an unknown
+name fails configuration validation. A `model` or `effort` on an agent that
+does not offer that selection is a configuration error. When a call fails in a way another agent
 could avoid (the executable is missing or exits, it is signed out, or its
 provider returned an HTTP 401, 403, 404, 429, or 5xx, a quota error, or an
 unknown model), the result gains a `fallback` field naming the other agents
@@ -253,8 +262,9 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 `model_args` or `effort_args`. Their schema descriptions name the adapter's
 model family (Claude aliases such as `sonnet` for `agent_claude`, OpenAI model
 IDs for `agent_codex`, Grok model IDs for `agent_grok`, pi model patterns or
-`provider/id` for `agent_pi`) and tell the model to set them only when the user asks,
-so an omitted value leaves the agent's own configured default in place. A
+`provider/id` for `agent_pi`) and tell the model to set them when the user asks
+or when the work matches a configured `use_for` default; an omitted value leaves
+the agent's own configured default in place. A
 blank `cwd`, `model`, or `effort` counts as omitted, since models often send
 `""` for an optional field they mean to leave unset. A model is 1-128 ASCII letters, digits, or
 `._:/@[]-` and cannot start with `-` or `@`; an effort is `low`, `medium`, `high`,
@@ -478,7 +488,8 @@ never closes it to make room.
 When a session offers agent tools, the system prompt adds a *Delegating work*
 section, generated from the tools actually offered (so it applies even when
 `agent.system_prompt` is replaced). It names each offered agent with its
-product, adds `agent.prefer`, and, when background jobs are on, asks the main
+product, adds `agent.prefer` and any `[agents.<name>] use_for` / `model` /
+`effort` defaults, and, when background jobs are on, asks the main
 agent to stay available: answer quick things (short reads, lookups, status
 checks) itself, and hand real work (changes, multi-step investigation, builds,
 tests, releases, anything likely to take more than about a minute) to a

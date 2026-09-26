@@ -421,6 +421,8 @@ fn the_registry_offers_agent_scv_only_below_the_depth_limit() {
         transport: crate::delegate::adapters::Transport::ScvProtocol,
         acp: None,
         use_for: None,
+        model: None,
+        effort: None,
     };
     let home = tempfile::tempdir().unwrap();
     for (depth, offered) in [(0, true), (1, true), (2, false)] {

@@ -367,8 +367,8 @@ declared `auto_approve`, else a denial), and returns a job handle;
 `agent_wait` and `agent_status` read the store and `agent_cancel` cancels one
 job's token. Beneath it, `ChosenAgent` (`delegate/choice.rs`) prefixes each
 agent tool's description with its product and what it offers, appends the
-user's `use_for`, and names the other offered agents on availability
-failures. A
+user's `use_for` and any default `model`/`effort` for that work, and names the
+other offered agents on availability failures. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a

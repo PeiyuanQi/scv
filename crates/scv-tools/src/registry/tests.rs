@@ -34,6 +34,8 @@ fn uninstalled_agents_are_not_offered() {
         transport: Transport::Process,
         acp: None,
         use_for: None,
+        model: None,
+        effort: None,
     };
     let registry = builtin_registry(
         ToolsConfig::default(),
@@ -71,6 +73,8 @@ fn agents_are_not_offered_at_the_delegation_depth_limit() {
         transport: Transport::Process,
         acp: None,
         use_for: None,
+        model: None,
+        effort: None,
     };
     let home = tempfile::tempdir().unwrap();
     for (max_depth, offered) in [(0, false), (1, true)] {

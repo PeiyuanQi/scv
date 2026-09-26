@@ -209,13 +209,19 @@ fn agent_choice_settings_are_validated_and_user_only() {
     let mut config = Config::default();
     config.agent.prefer = vec!["codex".into(), "claude".into()];
     config.agents.0.get_mut("grok").unwrap().use_for = Some("current events and X posts".into());
+    config.agents.0.get_mut("claude").unwrap().use_for = Some("coding".into());
+    config.agents.0.get_mut("claude").unwrap().model = Some("opus-5.5".into());
+    config.agents.0.get_mut("claude").unwrap().effort = Some("xhigh".into());
     assert!(config.validate().is_ok());
     let adapters = config.adapters();
     assert_eq!(
         adapters["agent_grok"].use_for.as_deref(),
         Some("current events and X posts")
     );
+    assert_eq!(adapters["agent_claude"].model.as_deref(), Some("opus-5.5"));
+    assert_eq!(adapters["agent_claude"].effort.as_deref(), Some("xhigh"));
     assert_eq!(adapters["agent_codex"].use_for, None);
+    assert_eq!(adapters["agent_codex"].model, None);
     let mut unknown = Config::default();
     unknown.agent.prefer = vec!["zcode".into()];
     assert!(unknown.validate().is_err());
@@ -223,6 +229,21 @@ fn agent_choice_settings_are_validated_and_user_only() {
         let mut config = Config::default();
         config.agents.0.get_mut("codex").unwrap().use_for = Some(bad.to_owned());
         assert!(config.validate().is_err(), "{bad:?}");
+    }
+    for (agent, model, effort) in [
+        ("claude", Some("--oops"), None),
+        ("claude", Some("@file"), None),
+        ("claude", None, Some("extreme")),
+        ("dsh", Some("deepseek-chat"), None),
+        ("dsh", None, Some("high")),
+    ] {
+        let mut config = Config::default();
+        config.agents.0.get_mut(agent).unwrap().model = model.map(str::to_owned);
+        config.agents.0.get_mut(agent).unwrap().effort = effort.map(str::to_owned);
+        assert!(
+            config.validate().is_err(),
+            "{agent} model={model:?} effort={effort:?}"
+        );
     }
     let project: toml::Value = toml::from_str("[agent]\nprefer = [\"pi\"]\n").unwrap();
     assert!(validate_project_keys(&project).is_err());

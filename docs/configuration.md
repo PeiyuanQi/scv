@@ -151,7 +151,7 @@ timeout_seconds = 600
 
 [agent]
 max_steps = 128
-system_prompt = "You are SCV, a concise and careful coding agent."
+system_prompt = "You are SCV, a concise and careful agent."
 max_delegation_depth = 2
 max_conversations = 8
 conversation_idle_seconds = 86400
@@ -223,6 +223,9 @@ args = ["-p"]
 permissions = "default"
 model_args = ["--model", "{model}"]
 effort_args = ["--effort", "{effort}"]
+# use_for = "coding"
+# model = "opus-5.5"
+# effort = "xhigh"
 
 [agents.codex]
 command = "codex"
@@ -264,8 +267,8 @@ Every table also accepts `prompt_args` (default `[]` except Grok),
 `permissions` (default `"default"`; see [Agent permissions](#agent-permissions)),
 `transport` (default `"auto"`; see [Agent transport](#agent-transport)), and
 `use_for`, an optional one-line note (at most 500 bytes) on when to choose that
-agent, added to its tool description (see
-[Choosing an agent](tools.md#choosing-an-agent)). The agent
+agent, added to its tool description, and optional `model` and `effort` defaults
+for that work (see [Choosing an agent](tools.md#choosing-an-agent)). The agent
 names are fixed; an unknown `[agents.<name>]` is a startup error that lists the
 known ones.
 
@@ -338,7 +341,8 @@ background jobs; see [Background jobs](tools.md#background-jobs).
 `agent.prefer` (default empty) lists the agents the user prefers, in order,
 such as `["codex", "claude"]`; the system prompt names the ones a session
 offers. Unknown names fail validation, and project configuration cannot set
-it.
+it. `[agents.<name>] use_for`, `model`, and `effort` add per-agent defaults
+for a kind of work (see [Choosing an agent](tools.md#choosing-an-agent)).
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,
 including its streamed response, not just idle time, so it must cover the
 longest single response. Project configuration may lower all of these but not

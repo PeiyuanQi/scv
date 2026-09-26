@@ -125,7 +125,7 @@ impl Default for AgentConfig {
             // available, so a few may run at once.
             max_background: 4,
             prefer: Vec::new(),
-            system_prompt: "You are SCV, a concise and careful coding agent. Use tools to inspect, change, and verify the workspace.".into(),
+            system_prompt: "You are SCV, a concise and careful agent. Use tools to inspect, change, and verify.".into(),
         }
     }
 }
@@ -380,6 +380,11 @@ pub struct AdapterConfig {
     /// When to choose this agent, in the user's words; added to its tool
     /// description so the model can pick between agents.
     pub use_for: Option<String>,
+    /// Model to pass when the work matches `use_for`. Without `use_for`, pass
+    /// it whenever this agent is called, unless the user asks for another.
+    pub model: Option<String>,
+    /// Effort to pass the same way as `model`.
+    pub effort: Option<String>,
 }
 
 /// How SCV talks to a delegated agent that has an ACP server.
@@ -430,6 +435,8 @@ impl Default for AgentsConfig {
                             effort_args: strings(adapter.effort_args),
                             transport: AgentTransport::Auto,
                             use_for: None,
+                            model: None,
+                            effort: None,
                         },
                     )
                 })

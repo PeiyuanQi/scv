@@ -117,6 +117,11 @@ pub struct AgentAdapterConfig {
     /// The user's note on when to choose this agent (`[agents.<name>]
     /// use_for`), added to its tool description.
     pub use_for: Option<String>,
+    /// Default model to pass when the work matches `use_for` (or on every
+    /// call to this agent, when `use_for` is unset).
+    pub model: Option<String>,
+    /// Default effort to pass the same way as `model`.
+    pub effort: Option<String>,
 }
 
 /// An agent's Agent Client Protocol server, resolved from its adapter-table

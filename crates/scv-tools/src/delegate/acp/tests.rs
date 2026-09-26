@@ -73,6 +73,8 @@ fn adapter(full: bool) -> AgentAdapterConfig {
         transport: Transport::Process,
         acp: None,
         use_for: None,
+        model: None,
+        effort: None,
     }
 }
 
@@ -452,6 +454,8 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
     let chosen = crate::delegate::choice::ChosenAgent {
         inner: Arc::new(tool),
         use_for: None,
+        model: None,
+        effort: None,
         alternatives: vec!["agent_codex".into(), "agent_grok".into()],
     };
     let refused = chosen
@@ -486,6 +490,8 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
     let chosen = crate::delegate::choice::ChosenAgent {
         inner: Arc::new(tool),
         use_for: None,
+        model: None,
+        effort: None,
         alternatives: vec!["agent_codex".into()],
     };
     let output = chosen

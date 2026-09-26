@@ -22,7 +22,10 @@ use crate::{
         conversation::{self, ConversationStore},
         output::{self, AgentStream, RunExit, STDERR_TAIL_BYTES, TailBuffer, add_sign_in_hint},
         records::{self, DelegationGuard, DelegationRegistry},
-        request::{AgentArgs, resolve_agent_cwd, valid_model_name, validate_agent_cwd},
+        request::{
+            AGENT_EFFORTS, AgentArgs, resolve_agent_cwd, valid_effort, valid_model_name,
+            validate_agent_cwd,
+        },
     },
     process::{ProcessSpec, child_pid, drain_output, spawn_process, supervise},
 };
@@ -48,9 +51,6 @@ pub(crate) struct NativeAgentTool {
     delegation: Option<DelegationContext>,
     conversations: Arc<ConversationStore>,
 }
-
-/// Effort levels accepted by the built-in adapters' CLIs.
-const AGENT_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 impl NativeAgentTool {
     /// The fixed arguments, validated model and effort selections, and the
@@ -101,7 +101,7 @@ impl NativeAgentTool {
             let valid = if field == "model" {
                 valid_model_name(value)
             } else {
-                AGENT_EFFORTS.contains(&value.as_str())
+                valid_effort(value)
             };
             if !valid {
                 return Err(ToolError(format!("invalid {field} {value:?}")));
@@ -214,8 +214,8 @@ impl Tool for NativeAgentTool {
             properties["model"] = json!({
                 "type":"string",
                 "description":format!(
-                    "{} Set only when the user asks for a specific model; \
-                     omit to use the agent's configured default.",
+                    "{} Set when the user asks, or when the work matches a configured \
+                     use_for default; omit to use the agent's configured default.",
                     self.model_hint
                 )
             });
@@ -224,8 +224,8 @@ impl Tool for NativeAgentTool {
             properties["effort"] = json!({
                 "type":"string",
                 "enum":AGENT_EFFORTS,
-                "description":"Reasoning effort. Set only when the user asks for one; \
-                    omit to use the agent's configured default."
+                "description":"Reasoning effort. Set when the user asks, or when the work \
+                    matches a configured use_for default; omit to use the agent's configured default."
             });
         }
         ToolSpec {

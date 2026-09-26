@@ -90,6 +90,45 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
 }
 
 #[test]
+fn the_prompt_names_per_agent_task_defaults() {
+    let mut config = Config::default();
+    config.agents.0.get_mut("claude").unwrap().use_for = Some("coding".into());
+    config.agents.0.get_mut("claude").unwrap().model = Some("opus-5.5".into());
+    config.agents.0.get_mut("claude").unwrap().effort = Some("xhigh".into());
+    config.agents.0.get_mut("grok").unwrap().use_for =
+        Some("current events, and anything that needs posts on X".into());
+    let agents = ["agent_claude".to_owned(), "agent_grok".to_owned()];
+    let prompt = prompt_for(
+        &config,
+        &PromptContext {
+            agents: &agents,
+            background: false,
+            channel: None,
+        },
+    );
+    assert!(
+        prompt.starts_with("You are SCV, a concise and careful agent."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("For coding, prefer agent_claude with model opus-5.5 and effort xhigh."),
+        "{prompt}"
+    );
+    assert!(
+        prompt
+            .contains("For current events, and anything that needs posts on X, prefer agent_grok."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "When the work does not match a note, omit model and effort so the agent uses \
+             its own default."
+        ),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
     let agents = ["agent_claude".to_owned()];
     let owner = prompt_for(

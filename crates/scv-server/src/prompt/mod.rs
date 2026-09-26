@@ -122,6 +122,7 @@ pub(crate) fn delegation_guidance(config: &Config, context: &PromptContext<'_>) 
             preferred.join(", ")
         ));
     }
+    text.push_str(&task_defaults_guidance(config, context));
     if context.background {
         text.push_str(
             "\n\nStay available to the user: while one of your turns runs, they cannot reach \
@@ -165,6 +166,74 @@ pub(crate) fn delegation_guidance(config: &Config, context: &PromptContext<'_>) 
         );
     }
     text
+}
+
+/// Per-agent `use_for` / model / effort defaults, as one calm paragraph.
+fn task_defaults_guidance(config: &Config, context: &PromptContext<'_>) -> String {
+    let mut matched = Vec::new();
+    let mut always = Vec::new();
+    let mut any_match_defaults = false;
+    for tool in context.agents {
+        let Some(name) = tool.strip_prefix("agent_") else {
+            continue;
+        };
+        let Some(adapter) = config.agents.0.get(name) else {
+            continue;
+        };
+        let defaults = scv_tools::agent_choice::model_effort_phrase(
+            adapter.model.as_deref(),
+            adapter.effort.as_deref(),
+        );
+        match adapter.use_for.as_deref() {
+            Some(use_for) => {
+                let mut clause = format!("for {use_for}, prefer {tool}");
+                if let Some(defaults) = &defaults {
+                    clause.push_str(" with ");
+                    clause.push_str(defaults);
+                    any_match_defaults = true;
+                }
+                matched.push(clause);
+            }
+            None => {
+                if let Some(defaults) = defaults {
+                    always.push(format!(
+                        "when calling {tool}, pass {defaults} unless the user asks for another"
+                    ));
+                }
+            }
+        }
+    }
+    if matched.is_empty() && always.is_empty() {
+        return String::new();
+    }
+    let mut text = String::new();
+    let mut first = true;
+    for clause in matched.iter().chain(always.iter()) {
+        if first {
+            text.push(' ');
+            text.push_str(&capitalize_ascii(clause));
+            first = false;
+        } else {
+            text.push_str(". ");
+            text.push_str(&capitalize_ascii(clause));
+        }
+    }
+    text.push('.');
+    if any_match_defaults {
+        text.push_str(
+            " When the work does not match a note, omit model and effort so the agent uses \
+             its own default.",
+        );
+    }
+    text
+}
+
+fn capitalize_ascii(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 pub(crate) fn read_prefix(path: &Path, max_bytes: usize) -> std::io::Result<(Vec<u8>, bool)> {

@@ -207,6 +207,8 @@ impl Config {
                                 required: config.transport == AgentTransport::Acp,
                             }),
                         use_for: config.use_for.clone(),
+                        model: config.model.clone(),
+                        effort: config.effort.clone(),
                     },
                 ))
             })

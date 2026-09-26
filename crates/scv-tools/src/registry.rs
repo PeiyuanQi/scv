@@ -74,7 +74,7 @@ pub fn builtin_registry(
     });
     // Agents are registered together once all are known, so each can name
     // the others as fallbacks.
-    let mut found: Vec<(String, Arc<dyn Tool>, Option<String>)> = Vec::new();
+    let mut found: Vec<FoundAgent> = Vec::new();
     // One store per session, shared by its agent tools and dropped with it.
     let conversations = Arc::new(ConversationStore::new(
         config.conversations,
@@ -84,9 +84,20 @@ pub fn builtin_registry(
             .map(|context| context.registry.conversation_dir()),
     ));
     for (name, adapter) in adapters {
-        let (tool_name, use_for) = (name.clone(), adapter.use_for.clone());
+        let (tool_name, use_for, model, effort) = (
+            name.clone(),
+            adapter.use_for.clone(),
+            adapter.model.clone(),
+            adapter.effort.clone(),
+        );
         let mut register_agent = |_: &mut ToolRegistry, tool: Arc<dyn Tool>| {
-            found.push((tool_name.clone(), tool, use_for.clone()));
+            found.push(FoundAgent {
+                name: tool_name.clone(),
+                tool,
+                use_for: use_for.clone(),
+                model: model.clone(),
+                effort: effort.clone(),
+            });
             Ok::<(), ToolError>(())
         };
         if adapter.transport == Transport::ScvProtocol {
@@ -157,16 +168,18 @@ pub fn builtin_registry(
             register_agent(&mut registry, Arc::new(tool))?;
         }
     }
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    let names: Vec<String> = found.iter().map(|(name, ..)| name.clone()).collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<String> = found.iter().map(|agent| agent.name.clone()).collect();
     let agents = found.len();
-    for (name, tool, use_for) in found {
+    for agent in found {
         let tool: Arc<dyn Tool> = Arc::new(choice::ChosenAgent {
-            inner: tool,
-            use_for,
+            inner: agent.tool,
+            use_for: agent.use_for,
+            model: agent.model,
+            effort: agent.effort,
             alternatives: names
                 .iter()
-                .filter(|other| **other != name)
+                .filter(|other| **other != agent.name)
                 .cloned()
                 .collect(),
         });
@@ -192,6 +205,14 @@ pub fn builtin_registry(
         registry.register(Arc::new(background::CancelTool { jobs }))?;
     }
     Ok(registry)
+}
+
+struct FoundAgent {
+    name: String,
+    tool: Arc<dyn Tool>,
+    use_for: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 #[cfg(test)]

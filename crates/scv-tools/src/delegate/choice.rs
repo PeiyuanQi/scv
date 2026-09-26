@@ -67,8 +67,39 @@ pub(crate) struct ChosenAgent {
     pub(crate) inner: Arc<dyn Tool>,
     /// The user's `[agents.<name>] use_for` note.
     pub(crate) use_for: Option<String>,
+    /// `[agents.<name>] model`, passed when the work matches `use_for`.
+    pub(crate) model: Option<String>,
+    /// `[agents.<name>] effort`, passed the same way as `model`.
+    pub(crate) effort: Option<String>,
     /// The other agent tools offered in this session.
     pub(crate) alternatives: Vec<String>,
+}
+
+/// `model opus-5.5 and effort xhigh`, when either default is set.
+pub fn model_effort_phrase(model: Option<&str>, effort: Option<&str>) -> Option<String> {
+    match (model, effort) {
+        (Some(model), Some(effort)) => Some(format!("model {model} and effort {effort}")),
+        (Some(model), None) => Some(format!("model {model}")),
+        (None, Some(effort)) => Some(format!("effort {effort}")),
+        (None, None) => None,
+    }
+}
+
+/// Tool-description suffix for `use_for` and configured model/effort defaults.
+fn choice_note(use_for: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Option<String> {
+    let defaults = model_effort_phrase(model, effort);
+    match (use_for, defaults) {
+        (Some(use_for), Some(defaults)) => Some(format!(
+            " The user's note on when to use it: {use_for}. For that work, pass {defaults}; \
+             omit model and effort for other work so the agent uses its own default."
+        )),
+        (Some(use_for), None) => Some(format!(" The user's note on when to use it: {use_for}")),
+        (None, Some(defaults)) => Some(format!(
+            " Pass {defaults} unless the user asks for another; omit them to use the agent's \
+             own default."
+        )),
+        (None, None) => None,
+    }
 }
 
 impl ChosenAgent {
@@ -113,9 +144,12 @@ impl Tool for ChosenAgent {
                 descriptor.product, descriptor.offers, spec.description
             );
         }
-        if let Some(use_for) = &self.use_for {
-            spec.description
-                .push_str(&format!(" The user's note on when to use it: {use_for}"));
+        if let Some(note) = choice_note(
+            self.use_for.as_deref(),
+            self.model.as_deref(),
+            self.effort.as_deref(),
+        ) {
+            spec.description.push_str(&note);
         }
         spec
     }

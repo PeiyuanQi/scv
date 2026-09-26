@@ -585,8 +585,9 @@ impl Tool for ScvAgentTool {
                     },
                     "model":{
                         "type":"string",
-                        "description":"Model for a new nested session. Set only when the user asks for one; \
-                            omit to use the nested SCV's configured model."
+                        "description":"Model for a new nested session. Set when the user asks, or when \
+                            the work matches a configured use_for default; omit to use the nested \
+                            SCV's configured model."
                     },
                     "timeout_seconds":timeout_schema(self.timeouts)
                 },

@@ -6,7 +6,11 @@ use super::*;
 use crate::{
     ToolsConfig,
     builtin::shell::BashTool,
-    delegate::{adapters::Transport, choice, request::MAX_AGENT_CWD_BYTES},
+    delegate::{
+        adapters::Transport,
+        choice,
+        request::{AGENT_EFFORTS, MAX_AGENT_CWD_BYTES},
+    },
 };
 
 fn test_conversations() -> Arc<ConversationStore> {
@@ -67,6 +71,8 @@ fn fake_agent_with_prompt_args(
             transport: Transport::Process,
             acp: None,
             use_for: None,
+            model: None,
+            effort: None,
         },
         Timeouts {
             default: Duration::from_secs(2),
@@ -163,6 +169,8 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
             transport: Transport::Process,
             acp: None,
             use_for: None,
+            model: None,
+            effort: None,
         },
         Timeouts {
             default: Duration::from_secs(2),
@@ -572,6 +580,8 @@ fn conversing_agent(
             transport: Transport::Process,
             acp: None,
             use_for: None,
+            model: None,
+            effort: None,
         },
         Timeouts {
             default: timeout,
@@ -945,6 +955,8 @@ async fn cli_refusals_are_declined_and_only_availability_failures_offer_other_ag
     let chosen = |tool: NativeAgentTool| choice::ChosenAgent {
         inner: Arc::new(tool),
         use_for: None,
+        model: None,
+        effort: None,
         alternatives: vec!["agent_codex".into(), "agent_grok".into()],
     };
     // Claude Code relays the API's `refusal` stop reason; the reply

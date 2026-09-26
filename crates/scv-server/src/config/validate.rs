@@ -221,6 +221,27 @@ impl Config {
                      {MAX_USE_FOR_BYTES} bytes"
                 );
             }
+            if let Some(model) = &adapter.model {
+                if !scv_tools::valid_model_name(model) {
+                    bail!("agents.{agent}.model is not a valid model name");
+                }
+                if adapter.model_args.is_empty() && agent != "scv" {
+                    bail!("agents.{agent}.model is set but {agent} does not offer model selection");
+                }
+            }
+            if let Some(effort) = &adapter.effort {
+                if !scv_tools::valid_effort(effort) {
+                    bail!(
+                        "agents.{agent}.effort must be one of {}",
+                        scv_tools::AGENT_EFFORTS.join(", ")
+                    );
+                }
+                if adapter.effort_args.is_empty() {
+                    bail!(
+                        "agents.{agent}.effort is set but {agent} does not offer effort selection"
+                    );
+                }
+            }
             if adapter.transport == AgentTransport::Acp
                 && scv_tools::adapters::adapter(agent)
                     .is_some_and(|descriptor| descriptor.acp.is_none())

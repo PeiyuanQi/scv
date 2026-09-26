@@ -141,15 +141,17 @@ impl Tool for AcpAgentTool {
                     "model":{
                         "type":"string",
                         "description":format!(
-                            "{} Set only when the user asks for a specific model; omit to use the \
-                             agent's configured default. An unoffered value fails with the list of choices.",
+                            "{} Set when the user asks, or when the work matches a configured \
+                             use_for default; omit to use the agent's configured default. An \
+                             unoffered value fails with the list of choices.",
                             self.model_hint
                         )
                     },
                     "effort":{
                         "type":"string",
-                        "description":"Reasoning effort, such as low, medium, or high. Set only when the user \
-                            asks for one; omit to use the agent's configured default."
+                        "description":"Reasoning effort, such as low, medium, or high. Set when the user \
+                            asks, or when the work matches a configured use_for default; omit to use \
+                            the agent's configured default."
                     },
                     "timeout_seconds":timeout_schema(self.timeouts)
                 },

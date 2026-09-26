@@ -50,6 +50,8 @@ fn chosen(
             result: Mutex::new(Some(result)),
         }),
         use_for: Some("current events and posts on X".into()),
+        model: None,
+        effort: None,
         alternatives: alternatives.iter().map(|name| (*name).to_owned()).collect(),
     }
 }
@@ -91,6 +93,33 @@ fn descriptions_name_the_product_what_it_offers_and_the_users_note() {
     assert!(other.spec().description.starts_with("Runs as"));
     assert_eq!(product("agent_codex"), "Codex");
     assert_eq!(product("agent_fake"), "agent_fake");
+}
+
+#[test]
+fn descriptions_name_task_defaults_for_matching_work() {
+    let mut grok = chosen("agent_grok", Ok(ToolOutput::success("")), &[]);
+    grok.model = Some("grok-4.7".into());
+    grok.effort = Some("high".into());
+    let description = grok.spec().description;
+    assert!(
+        description.contains(
+            "The user's note on when to use it: current events and posts on X. For that work, \
+             pass model grok-4.7 and effort high; omit model and effort for other work so the \
+             agent uses its own default."
+        ),
+        "{description}"
+    );
+    let mut claude = chosen("agent_claude", Ok(ToolOutput::success("")), &[]);
+    claude.use_for = None;
+    claude.model = Some("sonnet".into());
+    let description = claude.spec().description;
+    assert!(
+        description.contains(
+            "Pass model sonnet unless the user asks for another; omit them to use the agent's \
+             own default."
+        ),
+        "{description}"
+    );
 }
 
 fn failed(error: &str) -> ToolOutput {
