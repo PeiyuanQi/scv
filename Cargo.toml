@@ -64,7 +64,7 @@ dbg_macro = "deny"
 todo = "deny"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -103,14 +103,14 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 which = "8.0.0"
 
-scv-core = { version = "=0.3.0", path = "crates/scv-core" }
-scv-client = { version = "=0.3.0", path = "crates/scv-client" }
-scv-channels = { version = "=0.3.0", path = "crates/scv-channels" }
-scv-protocol = { version = "=0.3.0", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "=0.3.0", path = "crates/scv-provider-openai" }
-scv-server = { version = "=0.3.0", path = "crates/scv-server" }
-scv-tools = { version = "=0.3.0", path = "crates/scv-tools" }
-scv-tui = { version = "=0.3.0", path = "crates/scv-tui" }
+scv-core = { version = "=0.3.1", path = "crates/scv-core" }
+scv-client = { version = "=0.3.1", path = "crates/scv-client" }
+scv-channels = { version = "=0.3.1", path = "crates/scv-channels" }
+scv-protocol = { version = "=0.3.1", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.3.1", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.3.1", path = "crates/scv-server" }
+scv-tools = { version = "=0.3.1", path = "crates/scv-tools" }
+scv-tui = { version = "=0.3.1", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true

@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.0`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.0` pins.
+The current workspace release is `0.3.1`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.1` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,44 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.1
+
+`0.3.1` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.0` checks the new release and can roll it back.
+Configuration is unchanged.
+
+What changes for a person running SCV:
+
+- **One `agent` tool delegates to every agent.** The model calls `agent` with
+  the agent's name (`claude`, `codex`, `grok`, `dsh`, `pi`, or `scv`) instead
+  of one `agent_<name>` tool per agent; the old names are gone, with no
+  aliases. `agent_wait`, `agent_status`, and `agent_cancel` keep their names.
+  A call that names no agent uses the first offered agent in `[agent] prefer`.
+  Update skills, `AGENTS.md` files, and prompts that name `agent_codex` or
+  `agent_claude` to say the `agent` tool with agent `codex` or `claude`.
+  DeepSeek Harness over ACP no longer takes `model` or `effort`, which its
+  configuration already rejected.
+- **SCV's own WeChat messages** (notices, busy and failure replies, and
+  questions) go out in a Markdown code block that starts with `system msg:`.
+  Model answers are sent exactly as written, and Feishu is unchanged.
+- **Planned restarts** stop waiting for a live delegated agent that is between
+  turns, but keep waiting while a nested SCV's own background jobs run or wait
+  to be reported. The daemon that schedules a restart applies its own rules,
+  so the restart into `0.3.1` still follows those of `0.3.0`.
+- **`scv status`** counts live agents between turns as idle
+  (`Delegations: 1 running, 2 idle, …`).
+
+A rollback to `0.3.0` reads everything `0.3.1` saves; its notice of stopped
+background jobs names a job `0.3.1` recorded as `agent` instead of the agent.
+
+What changes for code that embeds SCV's crates:
+
+- `JobChange` has an `agent` field, and its `tool` is `agent` for jobs the
+  `agent` tool starts. Readers fall back to the `agent_` prefix of `tool` for
+  jobs from older releases.
+- Daemon status adds `idle` to the delegation summary, and
+  `idle_since_unix_seconds` and `background_jobs` to each delegation entry.
 
 ## Upgrading to 0.3.0
 
