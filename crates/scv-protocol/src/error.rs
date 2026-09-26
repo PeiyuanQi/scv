@@ -134,7 +134,7 @@ pub enum ToolErrorKind {
 
 impl ToolErrorKind {
     /// The kind as it appears on the wire, such as `denied`.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Denied => "denied",
             Self::Cancelled => "cancelled",

@@ -27,7 +27,7 @@ mod session;
 mod test_support;
 
 pub use daemon::{run_socket, run_stdio};
-pub use restart::{BuildInfo, CONFIG_LAYOUT, build_info, watchdog as restart_watchdog};
+pub use restart::{BuildInfo, build_info, watchdog as restart_watchdog};
 
 #[cfg(test)]
 mod tests;

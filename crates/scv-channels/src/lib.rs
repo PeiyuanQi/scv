@@ -36,30 +36,29 @@ use uuid::Uuid;
 
 use intake::{Conversation, Verdict};
 
-pub use scv_client::Layout;
 mod channel;
 #[cfg(feature = "feishu")]
 pub mod feishu;
 pub mod hub;
 mod intake;
 pub mod media;
-pub mod retry;
-pub mod session;
+mod retry;
+mod session;
 pub mod state;
 #[cfg(feature = "wechat")]
 pub mod wechat;
 
 pub use channel::{AccountRun, Accounts, Channel, ChannelCredentials, ChannelKind, run};
-pub use media::{MediaKind, MediaOptions, MediaSettings};
+pub(crate) use media::{MediaKind, MediaOptions};
 
 /// Bytes in one outbound message; longer replies go out in parts.
-pub const MAX_REPLY_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_REPLY_BYTES: usize = 16 * 1024;
 /// A turn's whole answer. Beyond one message it is sent in parts.
-pub const MAX_TOTAL_REPLY_BYTES: usize = 4 * MAX_REPLY_BYTES;
-pub const FAILURE_REPLY: &str = "SCV could not complete that request.";
+pub(crate) const MAX_TOTAL_REPLY_BYTES: usize = 4 * MAX_REPLY_BYTES;
+pub(crate) const FAILURE_REPLY: &str = "SCV could not complete that request.";
 
 /// The reply to a message whose turn a planned restart interrupted.
-pub fn restarted_reply(restart: &hub::Restart) -> String {
+pub(crate) fn restarted_reply(restart: &hub::Restart) -> String {
     format!(
         "SCV restarted to update to v{} before finishing this; ask again if you still need it.",
         restart.to_version
@@ -69,7 +68,10 @@ pub fn restarted_reply(restart: &hub::Restart) -> String {
 /// The notice telling a direct chat which of its background jobs stopped
 /// with the previous run: a planned restart when `restart` is set,
 /// otherwise an unexpected stop of the daemon or the account's bridge.
-pub fn stopped_jobs_notice(restart: Option<&hub::Restart>, jobs: &[state::RunningJob]) -> String {
+pub(crate) fn stopped_jobs_notice(
+    restart: Option<&hub::Restart>,
+    jobs: &[state::RunningJob],
+) -> String {
     let mut notice = match restart {
         Some(restart) => format!(
             "SCV restarted to update to v{}, which stopped background work that was still running:",
@@ -91,13 +93,13 @@ pub fn stopped_jobs_notice(restart: Option<&hub::Restart>, jobs: &[state::Runnin
 }
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Owner turns may run tools and delegated agents, which take longer.
-pub const OWNER_TURN_TIMEOUT: Duration = Duration::from_secs(1800);
+pub(crate) const OWNER_TURN_TIMEOUT: Duration = Duration::from_secs(1800);
 /// Model time an owner turn keeps beyond its longest single tool call.
 const OWNER_TURN_MARGIN: Duration = Duration::from_secs(300);
 /// Senders whose turns may run at once.
-pub const MAX_CONCURRENT_TURNS: usize = 4;
+pub(crate) const MAX_CONCURRENT_TURNS: usize = 4;
 /// Claimed messages one conversation may have waiting or running.
-pub const MAX_QUEUED_PER_CONVERSATION: usize = 8;
+pub(crate) const MAX_QUEUED_PER_CONVERSATION: usize = 8;
 /// Claimed messages across all conversations.
 const MAX_CLAIMS: usize = 64;
 /// Live sender sessions.
@@ -106,17 +108,17 @@ const MAX_SESSIONS: usize = 32;
 const SESSION_IDLE: Duration = Duration::from_secs(1800);
 /// How long a state write waits out a daemon command's transaction.
 const STATE_BUSY_RETRY: Duration = Duration::from_secs(5);
-pub const BUSY_REPLY: &str =
+pub(crate) const BUSY_REPLY: &str =
     "SCV is still working on your earlier messages. Please send this one again later.";
 /// The reply to a voice message that has no transcript and nothing else.
-pub const VOICE_REPLY: &str =
+pub(crate) const VOICE_REPLY: &str =
     "SCV cannot listen to voice messages yet. Please type your message instead.";
 /// The reply to an owner who answered a question yes.
-pub const ANSWERED_YES: &str = "OK, going ahead.";
+pub(crate) const ANSWERED_YES: &str = "OK, going ahead.";
 /// The reply to an owner who answered a question no.
-pub const ANSWERED_NO: &str = "OK, stopped.";
-pub const HELD_HEADER: &str = "[Earlier reply that could not be delivered at the time]\n";
-pub const LATEST_HEADER: &str = "[Reply to your latest message]\n";
+pub(crate) const ANSWERED_NO: &str = "OK, stopped.";
+pub(crate) const HELD_HEADER: &str = "[Earlier reply that could not be delivered at the time]\n";
+pub(crate) const LATEST_HEADER: &str = "[Reply to your latest message]\n";
 /// Refused replies are delivered with the conversation's next reply for a week.
 const HELD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const HELD_MAX_PER_CONVERSATION: usize = 4;
@@ -133,11 +135,11 @@ const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// The account owner granted remote tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolOwner {
+pub(crate) struct ToolOwner {
     /// The owner's authenticated sender ID on the channel.
-    pub user_id: String,
+    pub(crate) user_id: String,
     /// How long one owner turn may run; see [`owner_turn_timeout`].
-    pub turn_timeout: Duration,
+    pub(crate) turn_timeout: Duration,
 }
 
 /// An owner turn outlasts the longest tool call the session allows
@@ -150,15 +152,15 @@ pub fn owner_turn_timeout(max_tool_timeout: Duration) -> Duration {
 }
 
 /// What a transport received in one wait.
-pub struct Batch {
-    pub messages: Vec<Inbound>,
+pub(crate) struct Batch {
+    pub(crate) messages: Vec<Inbound>,
     /// The checkpoint to resume from, saved once every claim in the batch is
     /// durable. `None` keeps the previous one.
-    pub checkpoint: Option<String>,
+    pub(crate) checkpoint: Option<String>,
 }
 
 /// One received message with an ID.
-pub enum Inbound {
+pub(crate) enum Inbound {
     /// Not something to answer (a system message, or missing a field a
     /// reply needs); it is only recorded as seen.
     Ignored { id: String },
@@ -177,27 +179,34 @@ impl Inbound {
 
 /// A message to answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Message {
-    pub id: String,
-    pub sender: String,
+pub(crate) struct Message {
+    pub(crate) id: String,
+    pub(crate) sender: String,
     /// The text, with markers such as `[sticker]` for content that has no
     /// file to fetch; may be empty when the message is only files.
-    pub text: String,
+    pub(crate) text: String,
     /// The transport's handle for replying to this message.
-    pub reply_to: String,
+    pub(crate) reply_to: String,
     /// The group chat it was sent in. Group messages never carry owner
     /// authority and never share the sender's direct-chat session.
-    pub group: Option<String>,
+    pub(crate) group: Option<String>,
     /// Files the message carries, fetched before its turn.
-    pub media: Vec<Media>,
+    pub(crate) media: Vec<Media>,
     /// What the message refers to, such as a quoted message, for the
     /// transport to resolve before the turn; opaque to the bridge.
-    pub reference: Option<String>,
+    pub(crate) reference: Option<String>,
 }
 
 impl Message {
     /// A text message with no files or references.
-    pub fn text(id: &str, sender: &str, text: &str, reply_to: &str, group: Option<&str>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn text(
+        id: &str,
+        sender: &str,
+        text: &str,
+        reply_to: &str,
+        group: Option<&str>,
+    ) -> Self {
         Self {
             id: id.into(),
             sender: sender.into(),
@@ -212,70 +221,77 @@ impl Message {
 
 /// A file a received message carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Media {
-    pub kind: MediaKind,
+pub(crate) struct Media {
+    pub(crate) kind: MediaKind,
     /// The sender's file name; empty when the platform gives none.
-    pub name: String,
+    pub(crate) name: String,
     /// The size the platform announced, when it did.
-    pub size: Option<u64>,
+    pub(crate) size: Option<u64>,
     /// The type the platform declared, when it did.
-    pub mime: Option<String>,
+    pub(crate) mime: Option<String>,
     /// What a voice message said, when the platform transcribed it.
-    pub transcript: Option<String>,
+    pub(crate) transcript: Option<String>,
     /// How the transport fetches it; opaque to the bridge.
-    pub source: String,
+    pub(crate) source: String,
 }
 
 /// A downloaded file.
 #[derive(Debug)]
-pub struct Downloaded {
-    pub bytes: Vec<u8>,
+pub(crate) struct Downloaded {
+    pub(crate) bytes: Vec<u8>,
     /// The type the platform declared while serving it, if any.
-    pub mime: Option<String>,
+    pub(crate) mime: Option<String>,
 }
 
 /// What a message's reference resolved to.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct Resolved {
+pub(crate) struct Resolved {
     /// Text shown to the model before the message, such as the quoted
     /// message or the forwarded ones.
-    pub context: String,
+    pub(crate) context: String,
     /// Files the referenced messages carry.
-    pub media: Vec<Media>,
+    pub(crate) media: Vec<Media>,
 }
 
 /// A file sent as its own message after a reply's text.
-pub struct OutboundFile<'a> {
-    pub to: &'a str,
+pub(crate) struct OutboundFile<'a> {
+    pub(crate) to: &'a str,
     /// The inbound message's reply handle; empty for a message that answers
     /// nothing.
-    pub reply_to: &'a str,
+    pub(crate) reply_to: &'a str,
     /// Which message of the reply this is, counting its text parts first.
-    pub part: usize,
-    pub path: &'a Path,
-    pub name: &'a str,
-    pub mime: &'a str,
-    pub kind: MediaKind,
+    #[cfg_attr(
+        not(feature = "wechat"),
+        allow(dead_code, reason = "only WeChat treats later parts differently")
+    )]
+    pub(crate) part: usize,
+    pub(crate) path: &'a Path,
+    pub(crate) name: &'a str,
+    pub(crate) kind: MediaKind,
     /// Stable across retries of this file, including after a restart.
-    pub client_id: &'a str,
+    pub(crate) client_id: &'a str,
 }
 
 /// One part of an outbound message.
-pub struct Outbound<'a> {
-    pub to: &'a str,
+pub(crate) struct Outbound<'a> {
+    pub(crate) to: &'a str,
     /// The inbound message's reply handle; empty for a message that answers
     /// nothing, such as a background report.
-    pub reply_to: &'a str,
+    pub(crate) reply_to: &'a str,
     /// Which part of the message this is, from 0.
-    pub part: usize,
-    pub text: &'a str,
+    #[cfg_attr(
+        not(feature = "wechat"),
+        allow(dead_code, reason = "only WeChat treats later parts differently")
+    )]
+    pub(crate) part: usize,
+    pub(crate) text: &'a str,
     /// Stable across retries of this part, including after a restart.
-    pub client_id: &'a str,
+    pub(crate) client_id: &'a str,
 }
 
 /// How the transport answered a send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendOutcome {
+pub(crate) enum SendOutcome {
     Delivered,
     /// The platform explicitly refused the message. Retrying the same
     /// request cannot succeed, so the refusal is final for that reply.
@@ -1338,7 +1354,6 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 part: chunks.len() + index,
                 path: &path,
                 name: &file.name,
-                mime: &file.mime,
                 kind: file.kind,
                 client_id: &file.client_id,
             };
@@ -1528,9 +1543,9 @@ fn prune_held(state: &mut state::BridgeState, now: u64) {
     }
 }
 
-/// Turn every claim an interrupted run left into a failure reply, durably.
-/// Interrupted work is never resubmitted.
-pub fn recover_interrupted<C: state::Credentials>(
+/// [`recover_interrupted_after`] without a planned restart.
+#[cfg(test)]
+pub(crate) fn recover_interrupted<C: state::Credentials>(
     store: &state::Store<C>,
     account: &str,
     state: &mut state::BridgeState,
@@ -1538,11 +1553,12 @@ pub fn recover_interrupted<C: state::Credentials>(
     recover_interrupted_after(store, account, state, None)
 }
 
-/// [`recover_interrupted`], describing the interruption: after a planned
-/// `restart`, claims get [`restarted_reply`] instead of [`FAILURE_REPLY`].
+/// Turn every claim an interrupted run left into a failure reply, durably;
+/// interrupted work is never resubmitted. After a planned `restart`, claims
+/// get [`restarted_reply`] instead of [`FAILURE_REPLY`].
 /// Each direct chat whose background jobs the previous run left running is
 /// told which stopped. Everything is saved in one write.
-pub fn recover_interrupted_after<C: state::Credentials>(
+pub(crate) fn recover_interrupted_after<C: state::Credentials>(
     store: &state::Store<C>,
     account: &str,
     state: &mut state::BridgeState,
@@ -1579,7 +1595,7 @@ pub fn recover_interrupted_after<C: state::Credentials>(
 }
 
 /// A pending delivery of `reply` with a fresh client ID per part.
-pub fn new_pending(
+pub(crate) fn new_pending(
     message_id: &str,
     to_user_id: &str,
     context_token: &str,
@@ -1608,7 +1624,7 @@ fn mark_seen(state: &mut state::BridgeState, id: &str) {
 
 /// Split `value` into parts of at most `max` bytes on character boundaries;
 /// a character longer than `max` is its own part.
-pub fn split_utf8(value: &str, max: usize) -> Vec<String> {
+pub(crate) fn split_utf8(value: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = value;
     let max = max.max(1);

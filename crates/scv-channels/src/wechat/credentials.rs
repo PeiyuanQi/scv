@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The WeChat channel's account store.
-pub type Store = crate::state::Store<Account>;
+pub(crate) type Store = crate::state::Store<Account>;
 
 /// A WeChat account's saved iLink sign-in.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ impl crate::state::Credentials for Account {
 
 /// Whether a runner holding `token` for `base_url` runs as `saved`: the
 /// same token, and the same identity at the same normalized origin.
-pub fn runs_as(saved: &Account, token: &str, base_url: &str) -> Result<bool> {
+pub(crate) fn runs_as(saved: &Account, token: &str, base_url: &str) -> Result<bool> {
     use crate::state::Credentials as _;
     let supplied = Account {
         token: token.into(),

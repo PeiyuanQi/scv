@@ -18,18 +18,18 @@ const TOKEN_CODES: [i64; 4] = [99991661, 99991663, 99991664, 99991668];
 /// Codes that mean "slow down": the same request can succeed later.
 const RATE_CODES: [i64; 4] = [99991400, 230020, 11232, 11233];
 /// The app lacks a permission scope; adding it needs the developer console.
-pub const SCOPE_CODE: i64 = 99991672;
+pub(crate) const SCOPE_CODE: i64 = 99991672;
 /// How long downloading or uploading one file may take.
 const FILE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Where one brand's services live, and which hosts its long connection may
 /// use.
 #[derive(Clone, Debug)]
-pub struct Endpoints {
+pub(crate) struct Endpoints {
     /// The Open Platform API origin, such as `https://open.feishu.cn`.
-    pub open: String,
+    pub(crate) open: String,
     /// The accounts origin that runs app registration.
-    pub accounts: String,
+    pub(crate) accounts: String,
     /// The long connection's host must be this domain or below it.
     socket_domain: String,
     /// Production requires TLS; local fakes in tests do not.
@@ -37,7 +37,7 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
-    pub fn for_brand(brand: Brand) -> Self {
+    pub(crate) fn for_brand(brand: Brand) -> Self {
         let (open, accounts, domain) = match brand {
             Brand::Feishu => (
                 "https://open.feishu.cn",
@@ -71,7 +71,7 @@ impl Endpoints {
 
     /// Accept only a long-connection URL on the brand's domain over TLS on
     /// the standard port, without credentials in the authority.
-    pub fn check_socket_url(&self, url: &str) -> Result<reqwest::Url> {
+    pub(crate) fn check_socket_url(&self, url: &str) -> Result<reqwest::Url> {
         let parsed = reqwest::Url::parse(url).map_err(|_| anyhow!("invalid Feishu socket URL"))?;
         let host = parsed.host_str().unwrap_or_default();
         let on_domain =
@@ -93,7 +93,7 @@ impl Endpoints {
     }
 }
 
-pub fn http_client() -> Result<reqwest::Client> {
+pub(crate) fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
@@ -101,7 +101,7 @@ pub fn http_client() -> Result<reqwest::Client> {
 
 /// Read a bounded JSON body whatever the status: Feishu explains errors in
 /// the body of 4xx responses. Server diagnostics are never returned.
-pub async fn read_json(mut response: reqwest::Response) -> Result<Value> {
+pub(crate) async fn read_json(mut response: reqwest::Response) -> Result<Value> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -124,7 +124,7 @@ fn code(value: &Value) -> Option<i64> {
 
 /// The outcome of one send attempt.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Attempt {
+pub(crate) enum Attempt {
     Delivered,
     /// Feishu refused the message; resending the same request cannot help.
     Refused(String),
@@ -153,15 +153,15 @@ impl From<Uploaded> for crate::retry::Attempt<String> {
 }
 
 /// One page of a chat's history, oldest first.
-pub struct HistoryPage {
-    pub items: Vec<Value>,
-    pub next: Option<String>,
+pub(crate) struct HistoryPage {
+    pub(crate) items: Vec<Value>,
+    pub(crate) next: Option<String>,
 }
 
 /// A failure the Open Platform reported with a code, as opposed to a
 /// transport failure.
 #[derive(Debug)]
-pub struct Refusal(pub i64);
+pub(crate) struct Refusal(pub(crate) i64);
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -181,16 +181,16 @@ impl std::fmt::Display for Refusal {
 /// Where a received file is: the message holding it, its key, and whether
 /// the resource API serves it as an `image` or a `file`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Resource {
-    pub message_id: String,
-    pub key: String,
+pub(crate) struct Resource {
+    pub(crate) message_id: String,
+    pub(crate) key: String,
     #[serde(rename = "type")]
-    pub kind: String,
+    pub(crate) kind: String,
 }
 
 /// The outcome of one upload attempt.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Uploaded {
+pub(crate) enum Uploaded {
     /// The key to send the file by.
     Key(String),
     /// Feishu refused the file; uploading it again cannot help.
@@ -201,7 +201,7 @@ pub enum Uploaded {
 impl std::error::Error for Refusal {}
 
 /// One app's authenticated Open Platform client.
-pub struct Api {
+pub(crate) struct Api {
     client: reqwest::Client,
     endpoints: Endpoints,
     app_id: String,
@@ -211,7 +211,7 @@ pub struct Api {
 }
 
 impl Api {
-    pub fn new(endpoints: Endpoints, app_id: &str, app_secret: &str) -> Result<Self> {
+    pub(crate) fn new(endpoints: Endpoints, app_id: &str, app_secret: &str) -> Result<Self> {
         Ok(Self {
             client: http_client()?,
             endpoints,
@@ -269,7 +269,7 @@ impl Api {
     }
 
     /// Check the app ID and secret by fetching a fresh tenant token.
-    pub async fn validate(&self) -> Result<()> {
+    pub(crate) async fn validate(&self) -> Result<()> {
         self.forget_token().await;
         self.tenant_token().await.map(drop)
     }
@@ -302,7 +302,7 @@ impl Api {
 
     /// The bot's own `open_id`, used to tell whether a group message
     /// mentions it.
-    pub async fn bot_open_id(&self) -> Result<String> {
+    pub(crate) async fn bot_open_id(&self) -> Result<String> {
         let (_, value) = self
             .call(|client, open| client.get(format!("{open}/open-apis/bot/v3/info")))
             .await?;
@@ -321,7 +321,13 @@ impl Api {
     /// Send one text message: a reply to `reply_to` when it is set, or else
     /// a new message to the user `to`. `uuid` makes resends of the same
     /// part idempotent for an hour.
-    pub async fn send_text(&self, to: &str, reply_to: &str, text: &str, uuid: &str) -> Attempt {
+    pub(crate) async fn send_text(
+        &self,
+        to: &str,
+        reply_to: &str,
+        text: &str,
+        uuid: &str,
+    ) -> Attempt {
         let content = json!({"text": neutralize_mentions(text)});
         self.send_message(to, reply_to, "text", &content, uuid)
             .await
@@ -329,7 +335,7 @@ impl Api {
 
     /// Send one message of `msg_type`, such as `image` or `file`, as
     /// [`Api::send_text`] does text.
-    pub async fn send_message(
+    pub(crate) async fn send_message(
         &self,
         to: &str,
         reply_to: &str,
@@ -365,7 +371,7 @@ impl Api {
 
     /// A message by ID: the message itself, or for a forwarded bundle
     /// (`merge_forward`) the bundle followed by the messages it holds.
-    pub async fn message(&self, message_id: &str) -> Result<Vec<Value>> {
+    pub(crate) async fn message(&self, message_id: &str) -> Result<Vec<Value>> {
         let path = format!("/open-apis/im/v1/messages/{}", encode_segment(message_id));
         let (_, value) = self
             .call(move |client, open| client.get(format!("{open}{path}")))
@@ -383,7 +389,7 @@ impl Api {
 
     /// Download a file a message carries, failing beyond `max_bytes`.
     /// Returns its bytes and the type Feishu served it as.
-    pub async fn download(
+    pub(crate) async fn download(
         &self,
         resource: &Resource,
         max_bytes: u64,
@@ -452,7 +458,12 @@ impl Api {
 
     /// Upload an image (`image`) or any other file (`file`, with Feishu's
     /// `file_type`) for sending.
-    pub async fn upload(&self, kind: UploadKind<'_>, name: &str, bytes: Vec<u8>) -> Uploaded {
+    pub(crate) async fn upload(
+        &self,
+        kind: UploadKind<'_>,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> Uploaded {
         let (path, fields, part, key): (_, Vec<(&str, String)>, _, _) = match kind {
             UploadKind::Image => (
                 "/open-apis/im/v1/images",
@@ -500,7 +511,7 @@ impl Api {
 
     /// One page of a chat's messages created from `start` to `end`, in
     /// Unix seconds, oldest first.
-    pub async fn history(
+    pub(crate) async fn history(
         &self,
         chat_id: &str,
         start: u64,
@@ -545,7 +556,7 @@ impl Api {
     }
 
     /// The long connection's URL and the server's ping interval.
-    pub async fn socket_endpoint(&self) -> Result<(reqwest::Url, Option<Duration>)> {
+    pub(crate) async fn socket_endpoint(&self) -> Result<(reqwest::Url, Option<Duration>)> {
         let response = self
             .client
             .post(format!("{}/callback/ws/endpoint", self.endpoints.open))
@@ -577,7 +588,7 @@ impl Api {
 /// What an upload is for: a picture, or a file of Feishu's `file_type`
 /// (`pdf`, `doc`, `xls`, `ppt`, or `stream` for anything else).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UploadKind<'a> {
+pub(crate) enum UploadKind<'a> {
     Image,
     File(&'a str),
 }
@@ -646,7 +657,7 @@ fn classify(result: Result<(u16, Value)>) -> Attempt {
 /// Feishu text messages turn `<at user_id="...">` into mentions, including
 /// `@all`. Model output must never notify people, so a zero-width space
 /// breaks every such tag.
-pub fn neutralize_mentions(text: &str) -> String {
+pub(crate) fn neutralize_mentions(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(index) = rest.find('<') {

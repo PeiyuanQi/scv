@@ -116,7 +116,8 @@ impl ToolApprovals {
         }
     }
 
-    pub fn is_enabled(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_enabled(&self) -> bool {
         self.gate.is_some()
     }
 
@@ -219,7 +220,7 @@ pub struct ToolError {
 }
 
 impl ToolError {
-    pub fn new(kind: ToolFailure, message: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: ToolFailure, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),

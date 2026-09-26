@@ -8,7 +8,7 @@
 use crate::media::{MediaKind, MediaSettings};
 use anyhow::{Result, anyhow, bail};
 use scv_client::Layout;
-pub use scv_protocol::{RemoteTools, Senders};
+pub(crate) use scv_protocol::{RemoteTools, Senders};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
@@ -59,38 +59,38 @@ fn is_owner(senders: &Senders) -> bool {
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
-pub struct PendingDelivery {
+pub(crate) struct PendingDelivery {
     #[serde(default)]
-    pub message_id: String,
-    pub to_user_id: String,
+    pub(crate) message_id: String,
+    pub(crate) to_user_id: String,
     /// The transport's handle for answering `message_id`; empty for a
     /// message that answers nothing.
-    pub context_token: String,
-    pub reply: String,
+    pub(crate) context_token: String,
+    pub(crate) reply: String,
     /// Stable client IDs make retries of each chunk idempotent.
     #[serde(default)]
-    pub client_ids: Vec<String>,
+    pub(crate) client_ids: Vec<String>,
     #[serde(default)]
-    pub next_chunk: usize,
+    pub(crate) next_chunk: usize,
     /// Conversation that holds this reply if the transport refuses it. Empty
     /// in older state, meaning the direct chat with `to_user_id`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub key: String,
+    pub(crate) key: String,
     /// Earlier refused replies this delivery carries ahead of `own`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub carried: Vec<HeldReply>,
+    pub(crate) carried: Vec<HeldReply>,
     /// The reply to `message_id` alone, when `reply` also carries `carried`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub own: Option<String>,
+    pub(crate) own: Option<String>,
     /// A notice that is not worth holding when the transport refuses it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub transient: bool,
+    pub(crate) transient: bool,
     /// Files sent after the text, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<PendingFile>,
+    pub(crate) files: Vec<PendingFile>,
     /// The first file not yet sent.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub next_file: usize,
+    pub(crate) next_file: usize,
 }
 
 #[allow(
@@ -104,72 +104,72 @@ fn is_zero(value: &usize) -> bool {
 /// A file waiting to be sent: a private copy in the media outbox, removed
 /// once it is sent or refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingFile {
-    pub path: String,
-    pub name: String,
-    pub mime: String,
-    pub kind: MediaKind,
+pub(crate) struct PendingFile {
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) mime: String,
+    pub(crate) kind: MediaKind,
     /// Stable across retries of this file, including after a restart.
-    pub client_id: String,
+    pub(crate) client_id: String,
 }
 
 /// Written before connecting or submitting a turn. Recovery must never replay it.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct InFlight {
-    pub message_id: String,
-    pub to_user_id: String,
-    pub context_token: String,
+pub(crate) struct InFlight {
+    pub(crate) message_id: String,
+    pub(crate) to_user_id: String,
+    pub(crate) context_token: String,
     /// The sender's conversation; empty in older state (direct chat).
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub key: String,
+    pub(crate) key: String,
 }
 
 /// A reply the transport refused. It is delivered with the conversation's
 /// next reply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeldReply {
-    pub key: String,
-    pub to_user_id: String,
-    pub reply: String,
+pub(crate) struct HeldReply {
+    pub(crate) key: String,
+    pub(crate) to_user_id: String,
+    pub(crate) reply: String,
     /// Unix seconds when the transport refused it.
-    pub held_at: u64,
+    pub(crate) held_at: u64,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
-pub struct BridgeState {
+pub(crate) struct BridgeState {
     #[serde(default)]
-    pub credential_fingerprint: Option<String>,
+    pub(crate) credential_fingerprint: Option<String>,
     /// The transport's checkpoint of what it has received.
-    pub cursor: String,
-    pub seen: Vec<String>,
+    pub(crate) cursor: String,
+    pub(crate) seen: Vec<String>,
     /// Completed replies awaiting delivery, oldest first.
     #[serde(default, with = "one_or_many")]
-    pub pending: Vec<PendingDelivery>,
+    pub(crate) pending: Vec<PendingDelivery>,
     /// Claimed messages whose turns have not completed, oldest first.
     #[serde(default, with = "one_or_many")]
-    pub in_flight: Vec<InFlight>,
+    pub(crate) in_flight: Vec<InFlight>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub held: Vec<HeldReply>,
+    pub(crate) held: Vec<HeldReply>,
     /// Background jobs direct-chat sessions are running, so the next run can
     /// tell each chat which of its jobs a restart stopped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub jobs: Vec<RunningJob>,
+    pub(crate) jobs: Vec<RunningJob>,
 }
 
 /// A background job a direct chat's session started and has not reported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunningJob {
+pub(crate) struct RunningJob {
     /// The chat partner it reports to.
-    pub to_user_id: String,
+    pub(crate) to_user_id: String,
     /// The session's job handle, such as `job-1`.
-    pub job: String,
+    pub(crate) job: String,
     /// The delegating tool, such as `agent_codex`.
-    pub tool: String,
+    pub(crate) tool: String,
     /// The first line of the delegated prompt, shortened.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub task: String,
+    pub(crate) task: String,
     /// Unix seconds when it was first recorded.
-    pub started_at: u64,
+    pub(crate) started_at: u64,
 }
 
 /// Older bridges stored at most one pending reply and one claim as a single
@@ -182,7 +182,7 @@ mod one_or_many {
         clippy::ptr_arg,
         reason = "serde's `serialize_with` passes the field as `&Vec<T>`"
     )]
-    pub fn serialize<T: Serialize, S: Serializer>(
+    pub(crate) fn serialize<T: Serialize, S: Serializer>(
         items: &Vec<T>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -193,7 +193,7 @@ mod one_or_many {
         }
     }
 
-    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<T>, D::Error> {
         #[derive(Deserialize)]
@@ -233,7 +233,7 @@ pub fn validate_name(name: &str) -> Result<()> {
 
 /// Whether an error is lock contention that clears once the holder's short
 /// transaction ends.
-pub fn is_busy(error: &anyhow::Error) -> bool {
+pub(crate) fn is_busy(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<std::io::Error>()
         .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
@@ -256,7 +256,7 @@ fn check_private(path: &Path, kind: &str) -> Result<()> {
 
 /// Create `directory` privately. Every directory between the instance home
 /// and it is made private too, because channel and account names are.
-pub fn private_directory(home: &Path, directory: &Path) -> Result<()> {
+pub(crate) fn private_directory(home: &Path, directory: &Path) -> Result<()> {
     std::fs::create_dir_all(directory)?;
     #[cfg(unix)]
     {
@@ -273,7 +273,7 @@ pub fn private_directory(home: &Path, directory: &Path) -> Result<()> {
 
 /// Replace `path` with `contents` atomically, as a private file in a private
 /// directory.
-pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("state path has no parent"))?;
@@ -344,7 +344,7 @@ fn toml_line(text: &str, span: Option<std::ops::Range<usize>>) -> String {
 /// - delivery state in `state/channels/<channel>/<account>.json`, beside the
 ///   account's `.lock` (held for a whole run) and `.transaction` (held for
 ///   each short filesystem transaction).
-pub struct Store<C> {
+pub(crate) struct Store<C> {
     channel: String,
     home: PathBuf,
     credentials: PathBuf,
@@ -355,7 +355,7 @@ pub struct Store<C> {
 }
 
 impl<C: Credentials> Store<C> {
-    pub fn new(layout: &Layout, channel: &str) -> Self {
+    pub(crate) fn new(layout: &Layout, channel: &str) -> Self {
         Self {
             channel: channel.to_owned(),
             home: layout.home().to_owned(),
@@ -367,26 +367,26 @@ impl<C: Credentials> Store<C> {
         }
     }
 
-    pub fn credentials_path(&self, name: &str) -> Result<PathBuf> {
+    pub(crate) fn credentials_path(&self, name: &str) -> Result<PathBuf> {
         validate_name(name)?;
         Ok(self.credentials.join(format!("{name}.json")))
     }
 
-    pub fn state_path(&self, name: &str) -> Result<PathBuf> {
+    pub(crate) fn state_path(&self, name: &str) -> Result<PathBuf> {
         validate_name(name)?;
         Ok(self.state.join(format!("{name}.json")))
     }
 
     /// Keep the file open for the entire account run. Never unlink lock files:
     /// competing open descriptors must always refer to the same inode.
-    pub fn lock(&self, name: &str) -> Result<std::fs::File> {
+    pub(crate) fn lock(&self, name: &str) -> Result<std::fs::File> {
         validate_name(name)?;
         self.file_lock(&self.state.join(format!("{name}.lock")))
     }
 
     /// Only synchronous, short filesystem transactions hold this lock. Never
     /// hold it across HTTP, protocol I/O, or a lifetime lock acquisition.
-    pub fn transaction(&self, name: &str) -> Result<std::fs::File> {
+    pub(crate) fn transaction(&self, name: &str) -> Result<std::fs::File> {
         validate_name(name)?;
         self.file_lock(&self.state.join(format!("{name}.transaction")))
     }
@@ -425,7 +425,7 @@ impl<C: Credentials> Store<C> {
         atomic_write(path, contents)
     }
 
-    pub fn account(&self, name: &str) -> Result<Option<C>> {
+    pub(crate) fn account(&self, name: &str) -> Result<Option<C>> {
         let _transaction = self.transaction(name)?;
         self.account_unlocked(name)
     }
@@ -439,7 +439,7 @@ impl<C: Credentials> Store<C> {
         Ok(Some(serde_json::from_str(&std::fs::read_to_string(path)?)?))
     }
 
-    pub fn save_account(&self, name: &str, value: &C) -> Result<()> {
+    pub(crate) fn save_account(&self, name: &str, value: &C) -> Result<()> {
         let _transaction = self.transaction(name)?;
         let previous = self.account_unlocked(name)?;
         let mut state = self.load_state_unlocked(name)?;
@@ -467,7 +467,7 @@ impl<C: Credentials> Store<C> {
         )
     }
 
-    pub fn settings(&self, name: &str) -> Result<AccountSettings> {
+    pub(crate) fn settings(&self, name: &str) -> Result<AccountSettings> {
         let _transaction = self.transaction(name)?;
         self.settings_unlocked(name)
     }
@@ -512,7 +512,7 @@ impl<C: Credentials> Store<C> {
             })
     }
 
-    pub fn save_settings(&self, name: &str, value: &AccountSettings) -> Result<()> {
+    pub(crate) fn save_settings(&self, name: &str, value: &AccountSettings) -> Result<()> {
         let _transaction = self.transaction(name)?;
         self.edit_settings(name, Some(value))
     }
@@ -620,7 +620,7 @@ impl<C: Credentials> Store<C> {
 
     /// Discover accounts from saved credentials, failing on entry errors or
     /// more than 128 entries. Credentials are validated separately.
-    pub fn account_names(&self) -> Result<Vec<String>> {
+    pub(crate) fn account_names(&self) -> Result<Vec<String>> {
         const MAX_ENTRIES: usize = 128;
         let mut names = BTreeSet::new();
         let entries = match std::fs::read_dir(&self.credentials) {
@@ -649,7 +649,8 @@ impl<C: Credentials> Store<C> {
         Ok(names.into_iter().collect())
     }
 
-    pub fn load_state(&self, name: &str) -> Result<BridgeState> {
+    #[cfg(test)]
+    pub(crate) fn load_state(&self, name: &str) -> Result<BridgeState> {
         let _transaction = self.transaction(name)?;
         self.load_state_unlocked(name)
     }
@@ -663,7 +664,7 @@ impl<C: Credentials> Store<C> {
         Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
 
-    pub fn save_state(&self, name: &str, value: &BridgeState) -> Result<()> {
+    pub(crate) fn save_state(&self, name: &str, value: &BridgeState) -> Result<()> {
         let _transaction = self.transaction(name)?;
         check_binding(value, self.account_unlocked(name)?.as_ref())?;
         self.save_state_unlocked(name, value)
@@ -676,7 +677,7 @@ impl<C: Credentials> Store<C> {
     /// Load the account's delivery state for a run with the credentials the
     /// runner holds. `running` says whether they are the saved credentials;
     /// unbound state is bound to them before first use.
-    pub fn bind_state(
+    pub(crate) fn bind_state(
         &self,
         name: &str,
         running: impl FnOnce(&C) -> Result<bool>,
@@ -698,7 +699,7 @@ impl<C: Credentials> Store<C> {
     }
 
     /// Read credentials and settings together under the account transaction lock.
-    pub fn account_snapshot(&self, name: &str) -> Result<(Option<C>, AccountSettings)> {
+    pub(crate) fn account_snapshot(&self, name: &str) -> Result<(Option<C>, AccountSettings)> {
         let _transaction = self.transaction(name)?;
         Ok((self.account_unlocked(name)?, self.settings_unlocked(name)?))
     }
@@ -706,12 +707,12 @@ impl<C: Credentials> Store<C> {
     /// A lock-free look at one account for display: its credentials and its
     /// settings, each parsed. It never holds a lock a running bridge needs;
     /// every file is replaced atomically, so each read is whole.
-    pub fn inspect(&self, name: &str) -> (Result<Option<C>>, Result<AccountSettings>) {
+    pub(crate) fn inspect(&self, name: &str) -> (Result<Option<C>>, Result<AccountSettings>) {
         (self.account_unlocked(name), self.settings_unlocked(name))
     }
 
     /// Accounts that have a `[channels.<channel>.<account>]` table.
-    pub fn configured_accounts(&self) -> Result<Vec<String>> {
+    pub(crate) fn configured_accounts(&self) -> Result<Vec<String>> {
         let Some(text) = read_config(&self.config)? else {
             return Ok(Vec::new());
         };
@@ -728,7 +729,7 @@ impl<C: Credentials> Store<C> {
 
     /// Remove the account's credentials, delivery state, and settings. The
     /// caller must stop the account's running component first.
-    pub fn remove(&self, name: &str) -> Result<()> {
+    pub(crate) fn remove(&self, name: &str) -> Result<()> {
         let _lock = self.lock(name)?;
         let _transaction = self.transaction(name)?;
         // Credentials must be durably gone before settings can disappear and

@@ -16,7 +16,7 @@ const MAX_TRANSCRIPT_CHARS: usize = 4000;
 
 /// Refuse attachments that are too many, of an unknown kind, or not an
 /// absolute path to a regular file.
-pub fn validate(attachments: &[Attachment]) -> Result<(), String> {
+pub(crate) fn validate(attachments: &[Attachment]) -> Result<(), String> {
     if attachments.len() > MAX_TURN_ATTACHMENTS {
         return Err(format!(
             "a turn may attach at most {MAX_TURN_ATTACHMENTS} files"
@@ -41,7 +41,7 @@ pub fn validate(attachments: &[Attachment]) -> Result<(), String> {
 /// The model's input for `prompt` with `attachments`: the text, a list of
 /// the files, and the images. A session with tools sees each file's path so
 /// it can open it or hand it to an agent; one without sees names only.
-pub fn turn_input(prompt: &str, attachments: &[Attachment], tools: bool) -> TurnInput {
+pub(crate) fn turn_input(prompt: &str, attachments: &[Attachment], tools: bool) -> TurnInput {
     if attachments.is_empty() {
         return prompt.into();
     }

@@ -23,6 +23,7 @@ resolver = "2"
 [workspace.lints.rust]
 rust_2018_idioms = { level = "deny", priority = -1 }
 unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

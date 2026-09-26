@@ -23,7 +23,7 @@ const INHERITED_SCV_ENV: &[&str] = &[
 /// explicit nor a fallback lookup can reach the developer's real `~/.scv`.
 /// Every test that spawns an SCV binary must use this; the
 /// `every_spawned_scv_binary_is_isolated` guard enforces it.
-pub trait Isolated {
+pub(crate) trait Isolated {
     fn isolated(&mut self, home: &Path) -> &mut Self;
 }
 
@@ -53,7 +53,7 @@ impl Isolated for tokio::process::Command {
 }
 
 /// Write `contents` to `path`, creating its directory, with mode 0600.
-pub fn write_private(path: &Path, contents: &str) {
+pub(crate) fn write_private(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -61,7 +61,7 @@ pub fn write_private(path: &Path, contents: &str) {
 
 /// A Responses event stream in which the model calls tool `name` once, as
 /// call `call_id`.
-pub fn call(call_id: &str, name: &str, arguments: Value) -> String {
+pub(crate) fn call(call_id: &str, name: &str, arguments: Value) -> String {
     let delta = json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":arguments.to_string()});
     let done = json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":call_id,"name":name}});
     format!(
@@ -70,14 +70,14 @@ pub fn call(call_id: &str, name: &str, arguments: Value) -> String {
 }
 
 /// A Responses event stream in which the model answers `content`.
-pub fn text(content: &str) -> String {
+pub(crate) fn text(content: &str) -> String {
     let delta = json!({"type":"response.output_text.delta","delta":content});
     format!("data: {delta}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n")
 }
 
 /// Read one HTTP request from `reader` and return its body, sized by its
 /// `Content-Length`.
-pub fn read_http_request(reader: &mut impl BufRead) -> Vec<u8> {
+pub(crate) fn read_http_request(reader: &mut impl BufRead) -> Vec<u8> {
     let mut length = 0;
     loop {
         let mut line = String::new();
@@ -97,7 +97,7 @@ pub fn read_http_request(reader: &mut impl BufRead) -> Vec<u8> {
 }
 
 /// An HTTP 200 response carrying the event stream `body`.
-pub fn sse_response(body: &str) -> String {
+pub(crate) fn sse_response(body: &str) -> String {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -106,7 +106,7 @@ pub fn sse_response(body: &str) -> String {
 
 /// Processes whose `SCV_PARENT` chain names delegation `handle`. Reads
 /// `/proc`, so it finds nothing where there is none.
-pub fn tagged(handle: &str) -> Vec<u32> {
+pub(crate) fn tagged(handle: &str) -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -129,7 +129,7 @@ pub fn tagged(handle: &str) -> Vec<u32> {
 }
 
 /// Whether process `pid` is running; a zombie has exited and does not count.
-pub fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         // No procfs (macOS): ask the kernel.
         // SAFETY: signal 0 only checks that the process exists.

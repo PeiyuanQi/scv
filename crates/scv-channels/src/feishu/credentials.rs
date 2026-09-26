@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The Feishu channel's account store.
-pub type Store = crate::state::Store<Account>;
+pub(crate) type Store = crate::state::Store<Account>;
 
 /// Which deployment an app lives in: Feishu (China) or Lark (international).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,7 +18,7 @@ pub enum Brand {
 }
 
 impl Brand {
-    pub fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "feishu" => Some(Self::Feishu),
             "lark" => Some(Self::Lark),
@@ -62,7 +62,7 @@ impl std::fmt::Debug for Account {
 
 impl Account {
     /// Check the IDs' shape before they reach a request or a file.
-    pub fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         validate_app_id(&self.app_id)?;
         if self.app_secret.is_empty()
             || self.app_secret.len() > 256
@@ -87,7 +87,7 @@ impl crate::state::Credentials for Account {
     }
 }
 
-pub fn validate_app_id(app_id: &str) -> Result<()> {
+pub(crate) fn validate_app_id(app_id: &str) -> Result<()> {
     let valid = app_id.len() <= 64
         && app_id.strip_prefix("cli_").is_some_and(|rest| {
             !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric())
@@ -98,7 +98,7 @@ pub fn validate_app_id(app_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_open_id(open_id: &str) -> Result<()> {
+pub(crate) fn validate_open_id(open_id: &str) -> Result<()> {
     let valid = open_id.len() <= 128
         && open_id.strip_prefix("ou_").is_some_and(|rest| {
             !rest.is_empty()

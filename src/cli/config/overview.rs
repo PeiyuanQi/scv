@@ -243,8 +243,8 @@ fn channel(
                     .as_deref()
                     .map_or_else(|| "the daemon's workspace".to_owned(), tilde);
                 let tools = match settings.remote_tools {
-                    scv_channels::state::RemoteTools::None => "no remote tools",
-                    scv_channels::state::RemoteTools::Owner => "owner has remote tools",
+                    scv_protocol::RemoteTools::None => "no remote tools",
+                    scv_protocol::RemoteTools::Owner => "owner has remote tools",
                 };
                 let owner_known = credentials
                     .as_ref()
@@ -284,13 +284,13 @@ fn channel(
 
 /// Whose messages an account answers, given whether its sign-in records an
 /// owner (`None` when it is not signed in or unreadable).
-fn answers(senders: scv_channels::state::Senders, owner_known: Option<bool>) -> &'static str {
+fn answers(senders: scv_protocol::Senders, owner_known: Option<bool>) -> &'static str {
     match (senders, owner_known) {
-        (scv_channels::state::Senders::Anyone, _) => "answers anyone",
-        (scv_channels::state::Senders::Owner, Some(false)) => {
+        (scv_protocol::Senders::Anyone, _) => "answers anyone",
+        (scv_protocol::Senders::Owner, Some(false)) => {
             "answers nobody (only its owner, and no owner is recorded)"
         }
-        (scv_channels::state::Senders::Owner, _) => "answers only its owner",
+        (scv_protocol::Senders::Owner, _) => "answers only its owner",
     }
 }
 

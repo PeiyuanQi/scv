@@ -16,7 +16,7 @@ fn known_account() -> Account {
 fn replacement_requires_logout_and_preserves_delivery() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         crate::wechat::CHANNEL,
     );
     let original = known_account();
@@ -76,7 +76,7 @@ fn replacement_requires_logout_and_preserves_delivery() {
 fn binding_rejects_externally_replaced_credentials_without_changing_state() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         crate::wechat::CHANNEL,
     );
     let original = known_account();
@@ -123,7 +123,7 @@ fn binding_rejects_externally_replaced_credentials_without_changing_state() {
 fn known_identity_token_rotation_preserves_pending_while_running() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         crate::wechat::CHANNEL,
     );
     let original = known_account();
@@ -175,7 +175,7 @@ fn known_identity_token_rotation_preserves_pending_while_running() {
 fn legacy_binding_requires_original_credentials_and_refuses_login_upgrade() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         crate::wechat::CHANNEL,
     );
     let legacy = Account {
@@ -249,7 +249,7 @@ fn legacy_binding_requires_original_credentials_and_refuses_login_upgrade() {
 fn replacement_is_rejected_even_without_pending_delivery() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::new(
-        &crate::Layout::new(directory.path()),
+        &scv_client::Layout::new(directory.path()),
         crate::wechat::CHANNEL,
     );
     store.save_account("default", &known_account()).unwrap();

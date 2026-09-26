@@ -67,14 +67,14 @@ const SYSTEM_SECRETS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct ChatAttachConfig {
     /// Largest file accepted.
-    pub max_bytes: u64,
+    pub(crate) max_bytes: u64,
     /// Private directory the checked copies are written to.
-    pub outbox: PathBuf,
+    pub(crate) outbox: PathBuf,
     /// Refused, with everything beneath them.
-    pub denied: Vec<PathBuf>,
+    pub(crate) denied: Vec<PathBuf>,
     /// Allowed even beneath a denied path, such as the media chat users sent,
     /// which lives in the SCV instance.
-    pub allowed: Vec<PathBuf>,
+    pub(crate) allowed: Vec<PathBuf>,
 }
 
 impl ChatAttachConfig {
@@ -104,7 +104,11 @@ impl ChatAttachConfig {
     /// Check `path` and copy it into the outbox, reporting the copy. The
     /// file is opened without following a final symlink and re-checked
     /// through the open handle, so it cannot be swapped after the check.
-    pub fn attach(&self, workspace: &Path, path: &str) -> Result<ReplyAttachment, ToolError> {
+    pub(crate) fn attach(
+        &self,
+        workspace: &Path,
+        path: &str,
+    ) -> Result<ReplyAttachment, ToolError> {
         use std::io::Read as _;
         use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
         let mut attached = self.check(workspace, path)?;
@@ -159,7 +163,7 @@ impl ChatAttachConfig {
 
     /// Check `path` (relative paths resolve from `workspace`) and describe
     /// the file to send.
-    pub fn check(&self, workspace: &Path, path: &str) -> Result<ReplyAttachment, ToolError> {
+    pub(crate) fn check(&self, workspace: &Path, path: &str) -> Result<ReplyAttachment, ToolError> {
         let requested = Path::new(path);
         let joined = if requested.is_absolute() {
             requested.to_path_buf()
@@ -236,8 +240,8 @@ fn has_secret_name(path: &Path) -> bool {
     })
 }
 
-pub struct ChatAttachTool {
-    pub config: ChatAttachConfig,
+pub(crate) struct ChatAttachTool {
+    pub(crate) config: ChatAttachConfig,
 }
 
 #[derive(Deserialize)]

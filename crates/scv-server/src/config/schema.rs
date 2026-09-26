@@ -16,33 +16,33 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub provider: ProviderConfig,
     /// Named provider profiles. When non-empty, `provider.active` selects one.
-    pub providers: HashMap<String, ProviderConfig>,
-    pub provider_active: Option<String>,
-    pub agent: AgentConfig,
-    pub session: SessionConfig,
-    pub context: ContextConfigFile,
-    pub tools: ToolConfig,
-    pub protocol: ProtocolConfig,
-    pub tui: TuiConfig,
+    pub(crate) providers: HashMap<String, ProviderConfig>,
+    pub(crate) provider_active: Option<String>,
+    pub(crate) agent: AgentConfig,
+    pub(crate) session: SessionConfig,
+    pub(crate) context: ContextConfigFile,
+    pub(crate) tools: ToolConfig,
+    pub(crate) protocol: ProtocolConfig,
+    pub(crate) tui: TuiConfig,
     pub update: UpdateConfig,
-    pub notify: NotifyConfig,
-    pub provider_limits: ProviderLimitsFile,
-    pub skills: SkillsConfig,
-    pub agents: AgentsConfig,
-    pub web: WebConfig,
+    pub(crate) notify: NotifyConfig,
+    pub(crate) provider_limits: ProviderLimitsFile,
+    pub(crate) skills: SkillsConfig,
+    pub(crate) agents: AgentsConfig,
+    pub(crate) web: WebConfig,
     /// `[channels.<channel>.<account>]`: each chat account's settings. SCV's
     /// channel store reads and edits them in the instance's `config.toml`;
     /// here they are only validated.
-    pub channels: BTreeMap<String, BTreeMap<String, AccountSettings>>,
+    pub(crate) channels: BTreeMap<String, BTreeMap<String, AccountSettings>>,
     /// The process-owned root: see [`Layout`] for what it holds.
     #[serde(skip)]
-    pub instance_home: PathBuf,
+    pub(crate) instance_home: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderConfig {
-    pub active: Option<String>,
+    pub(crate) active: Option<String>,
     pub kind: String,
     pub wire_api: String,
     pub model: String,
@@ -55,7 +55,7 @@ pub struct ProviderConfig {
     /// Show images users attach to the model as image input. Turn it off
     /// for a model without vision; SCV also stops for the session after the
     /// provider rejects an image.
-    pub image_input: bool,
+    pub(crate) image_input: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -69,11 +69,11 @@ pub struct UpdateConfig {
 /// terminal, a rollback, a restart after a crash, or a disconnected account.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct NotifyConfig {
+pub(crate) struct NotifyConfig {
     /// Accounts as `<channel>:<account>`, such as `feishu:default`. A notice
     /// goes to the owner of the first one that is connected, on that one
     /// account only. Empty: the chat the owner last wrote from.
-    pub owner: Vec<String>,
+    pub(crate) owner: Vec<String>,
 }
 
 impl Default for ProviderConfig {
@@ -95,23 +95,23 @@ impl Default for ProviderConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct AgentConfig {
-    pub max_steps: usize,
-    pub system_prompt: String,
+pub(crate) struct AgentConfig {
+    pub(crate) max_steps: usize,
+    pub(crate) system_prompt: String,
     /// `agent_*` tools are offered only while this SCV's own delegation depth
     /// is below this, so delegation chains stay bounded. 0 disables them.
-    pub max_delegation_depth: u32,
+    pub(crate) max_delegation_depth: u32,
     /// Delegated conversations a session remembers; starting another forgets
     /// the least recently used idle one.
-    pub max_conversations: usize,
+    pub(crate) max_conversations: usize,
     /// A delegated conversation unused this long is forgotten.
-    pub conversation_idle_seconds: u64,
+    pub(crate) conversation_idle_seconds: u64,
     /// Background agent jobs (`background: true`) a session may run at once;
     /// 0 turns background delegation off.
-    pub max_background: usize,
+    pub(crate) max_background: usize,
     /// Agents the user prefers, in order (such as `["codex", "claude"]`);
     /// the system prompt names the installed ones. Empty states no preference.
-    pub prefer: Vec<String>,
+    pub(crate) prefer: Vec<String>,
 }
 
 impl Default for AgentConfig {
@@ -132,9 +132,9 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct SessionConfig {
-    pub max_history_bytes: usize,
-    pub max_messages: usize,
+pub(crate) struct SessionConfig {
+    pub(crate) max_history_bytes: usize,
+    pub(crate) max_messages: usize,
 }
 
 impl Default for SessionConfig {
@@ -148,12 +148,12 @@ impl Default for SessionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ContextConfigFile {
-    pub max_tokens: usize,
-    pub reserve_output_tokens: usize,
-    pub safety_margin_tokens: usize,
-    pub bytes_per_token: usize,
-    pub summary_max_chars: usize,
+pub(crate) struct ContextConfigFile {
+    pub(crate) max_tokens: usize,
+    pub(crate) reserve_output_tokens: usize,
+    pub(crate) safety_margin_tokens: usize,
+    pub(crate) bytes_per_token: usize,
+    pub(crate) summary_max_chars: usize,
 }
 
 impl Default for ContextConfigFile {
@@ -191,17 +191,17 @@ pub enum ApprovalPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ToolConfig {
-    pub approval_policy: ApprovalPolicy,
+pub(crate) struct ToolConfig {
+    pub(crate) approval_policy: ApprovalPolicy,
     /// `bash` timeout when a call does not choose one.
-    pub command_timeout_seconds: u64,
+    pub(crate) command_timeout_seconds: u64,
     /// Native-agent timeout when a call does not choose one.
-    pub agent_timeout_seconds: u64,
+    pub(crate) agent_timeout_seconds: u64,
     /// The longest timeout a single tool call may request.
-    pub max_timeout_seconds: u64,
-    pub output_limit_bytes: usize,
-    pub max_read_bytes: usize,
-    pub max_write_bytes: usize,
+    pub(crate) max_timeout_seconds: u64,
+    pub(crate) output_limit_bytes: usize,
+    pub(crate) max_read_bytes: usize,
+    pub(crate) max_write_bytes: usize,
 }
 
 impl Default for ToolConfig {
@@ -220,9 +220,9 @@ impl Default for ToolConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ProtocolConfig {
-    pub max_client_frame_bytes: usize,
-    pub max_server_frame_bytes: usize,
+pub(crate) struct ProtocolConfig {
+    pub(crate) max_client_frame_bytes: usize,
+    pub(crate) max_server_frame_bytes: usize,
 }
 
 impl Default for ProtocolConfig {
@@ -236,11 +236,11 @@ impl Default for ProtocolConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct TuiConfig {
-    pub max_transcript_bytes: usize,
-    pub max_transcript_items: usize,
-    pub max_prompt_history_bytes: usize,
-    pub max_prompt_history_items: usize,
+pub(crate) struct TuiConfig {
+    pub(crate) max_transcript_bytes: usize,
+    pub(crate) max_transcript_items: usize,
+    pub(crate) max_prompt_history_bytes: usize,
+    pub(crate) max_prompt_history_items: usize,
 }
 
 impl Default for TuiConfig {
@@ -256,13 +256,13 @@ impl Default for TuiConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ProviderLimitsFile {
-    pub max_sse_event_bytes: usize,
-    pub max_response_bytes: usize,
-    pub max_assistant_bytes: usize,
-    pub max_tool_calls: usize,
-    pub max_tool_arguments_bytes: usize,
-    pub max_retries: usize,
+pub(crate) struct ProviderLimitsFile {
+    pub(crate) max_sse_event_bytes: usize,
+    pub(crate) max_response_bytes: usize,
+    pub(crate) max_assistant_bytes: usize,
+    pub(crate) max_tool_calls: usize,
+    pub(crate) max_tool_arguments_bytes: usize,
+    pub(crate) max_retries: usize,
 }
 
 impl Default for ProviderLimitsFile {
@@ -281,14 +281,14 @@ impl Default for ProviderLimitsFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct SkillsConfig {
-    pub user_dir: PathBuf,
-    pub project_dir: PathBuf,
+pub(crate) struct SkillsConfig {
+    pub(crate) user_dir: PathBuf,
+    pub(crate) project_dir: PathBuf,
     /// List the agent skills (`.agents/skills`, `.claude/skills`) of the
     /// workspace and its immediate child projects in tool-enabled sessions.
-    pub scan_projects: bool,
-    pub max_skills: usize,
-    pub max_skill_bytes: usize,
+    pub(crate) scan_projects: bool,
+    pub(crate) max_skills: usize,
+    pub(crate) max_skill_bytes: usize,
 }
 
 impl Default for SkillsConfig {
@@ -306,7 +306,7 @@ impl Default for SkillsConfig {
 /// Where `web_search` results come from.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum WebSearchMode {
+pub(crate) enum WebSearchMode {
     Off,
     /// The provider endpoint's hosted Responses `web_search` tool.
     Provider,
@@ -316,22 +316,22 @@ pub enum WebSearchMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct WebConfig {
+pub(crate) struct WebConfig {
     /// Offer `web_fetch` (and search, when configured) to tool-enabled sessions.
-    pub enabled: bool,
-    pub fetch_max_bytes: usize,
-    pub fetch_timeout_seconds: u64,
-    pub max_redirects: usize,
+    pub(crate) enabled: bool,
+    pub(crate) fetch_max_bytes: usize,
+    pub(crate) fetch_timeout_seconds: u64,
+    pub(crate) max_redirects: usize,
     /// HTTPS hosts `web_fetch` may read without approval.
-    pub auto_approve_domains: Vec<String>,
+    pub(crate) auto_approve_domains: Vec<String>,
     /// Let `web_fetch` reach loopback, private, and link-local addresses.
-    pub allow_private_addresses: bool,
-    pub search: WebSearchMode,
-    pub searxng_url: Option<String>,
-    pub brave_url: String,
-    pub brave_api_key: Option<Secret>,
-    pub brave_api_key_env: Option<String>,
-    pub max_search_results: usize,
+    pub(crate) allow_private_addresses: bool,
+    pub(crate) search: WebSearchMode,
+    pub(crate) searxng_url: Option<String>,
+    pub(crate) brave_url: String,
+    pub(crate) brave_api_key: Option<Secret>,
+    pub(crate) brave_api_key_env: Option<String>,
+    pub(crate) max_search_results: usize,
 }
 
 impl Default for WebConfig {
@@ -364,33 +364,33 @@ impl Default for WebConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct AdapterConfig {
-    pub command: String,
-    pub args: Vec<String>,
+pub(crate) struct AdapterConfig {
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
     /// `full` adds the CLI's own switches for unprompted, unsandboxed work.
-    pub permissions: AgentPermissions,
+    pub(crate) permissions: AgentPermissions,
     /// Placed immediately before the prompt (`grok -p <prompt>`).
-    pub prompt_args: Vec<String>,
+    pub(crate) prompt_args: Vec<String>,
     /// Appended when a call selects a model; `{model}` is substituted.
-    pub model_args: Vec<String>,
+    pub(crate) model_args: Vec<String>,
     /// Appended when a call selects an effort; `{effort}` is substituted.
-    pub effort_args: Vec<String>,
+    pub(crate) effort_args: Vec<String>,
     /// How SCV talks to the agent: its ACP server or one process per turn.
-    pub transport: AgentTransport,
+    pub(crate) transport: AgentTransport,
     /// When to choose this agent, in the user's words; added to its tool
     /// description so the model can pick between agents.
-    pub use_for: Option<String>,
+    pub(crate) use_for: Option<String>,
     /// Model to pass when the work matches `use_for`. Without `use_for`, pass
     /// it whenever this agent is called, unless the user asks for another.
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     /// Effort to pass the same way as `model`.
-    pub effort: Option<String>,
+    pub(crate) effort: Option<String>,
 }
 
 /// How SCV talks to a delegated agent that has an ACP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentTransport {
+pub(crate) enum AgentTransport {
     /// The agent's ACP server when it is installed, else one process per turn.
     #[default]
     Auto,
@@ -403,7 +403,7 @@ pub enum AgentTransport {
 /// How much a delegated CLI may do without its own prompts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentPermissions {
+pub(crate) enum AgentPermissions {
     /// Add nothing: the CLI's own configuration decides.
     #[default]
     Default,
@@ -415,7 +415,7 @@ pub enum AgentPermissions {
 /// `[agents.<name>]` for every adapter in [`scv_tools::adapters::ADAPTERS`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct AgentsConfig(pub BTreeMap<String, AdapterConfig>);
+pub(crate) struct AgentsConfig(pub(crate) BTreeMap<String, AdapterConfig>);
 
 impl Default for AgentsConfig {
     fn default() -> Self {

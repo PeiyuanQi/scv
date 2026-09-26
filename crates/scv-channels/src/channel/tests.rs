@@ -37,16 +37,16 @@ fn lark() -> crate::feishu::Account {
 
 #[test]
 fn credentials_name_their_owner_bot_and_platform() {
+    assert_eq!(crate::wechat::WeChat::title(&wechat()), "WeChat");
     let wechat = ChannelCredentials::from(wechat());
-    assert_eq!(wechat.kind(), ChannelKind::Wechat);
+    assert!(matches!(wechat, ChannelCredentials::Wechat(_)));
     assert_eq!(wechat.owner(), Some("owner@im.wechat"));
     assert_eq!(wechat.bot_id().as_deref(), Some("bot@im.bot"));
-    assert_eq!(wechat.title(), "WeChat");
+    assert_eq!(crate::feishu::Feishu::title(&lark()), "Lark");
     let lark = ChannelCredentials::from(lark());
-    assert_eq!(lark.kind(), ChannelKind::Feishu);
+    assert!(matches!(lark, ChannelCredentials::Feishu(_)));
     assert_eq!(lark.owner(), None);
     assert_eq!(lark.bot_id().as_deref(), Some("cli_a1b2c3d4"));
-    assert_eq!(lark.title(), "Lark");
 }
 
 #[test]

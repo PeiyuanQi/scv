@@ -38,7 +38,7 @@ use crate::config::Instance;
 /// Where configuration and state files live and how they are shaped. Bump it
 /// when a release reads or writes them in a way the previous release cannot:
 /// a rollback between releases with different layouts is refused.
-pub const CONFIG_LAYOUT: u32 = 1;
+pub(crate) const CONFIG_LAYOUT: u32 = 1;
 
 const DEFAULT_MAX_WAIT: u64 = 10 * 60;
 const MAX_WAIT_LIMIT: u64 = 60 * 60;
@@ -59,8 +59,8 @@ const RESTART_CONTEXT_MAX_AGE: u64 = 60 * 60;
 /// What a binary reports about itself for a planned restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildInfo {
-    pub version: String,
-    pub config_layout: u32,
+    pub(crate) version: String,
+    pub(crate) config_layout: u32,
 }
 
 /// This binary's build information, printed by `scv build-info`.
@@ -73,7 +73,7 @@ pub fn build_info() -> BuildInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlanState {
+pub(crate) enum PlanState {
     /// Waiting for the requesting work to end.
     Waiting,
     /// The watchdog is restarting the unit and checking the new release.
@@ -89,51 +89,51 @@ pub enum PlanState {
 
 /// The delegation that asked for a restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Requester {
-    pub handle: String,
-    pub session: String,
+pub(crate) struct Requester {
+    pub(crate) handle: String,
+    pub(crate) session: String,
 }
 
 /// A planned restart, saved in `<home>/state/update.json` (mode 0600) and
 /// shared by the daemon that plans it, the watchdog, and the next daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Plan {
-    pub id: String,
-    pub state: PlanState,
-    pub from_version: String,
-    pub to_version: String,
+pub(crate) struct Plan {
+    pub(crate) id: String,
+    pub(crate) state: PlanState,
+    pub(crate) from_version: String,
+    pub(crate) to_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    pub from_layout: u32,
-    pub to_layout: u32,
-    pub unit: String,
+    pub(crate) commit: Option<String>,
+    pub(crate) from_layout: u32,
+    pub(crate) to_layout: u32,
+    pub(crate) unit: String,
     /// The daemon's executable, where the new release was installed.
-    pub binary: PathBuf,
+    pub(crate) binary: PathBuf,
     /// A copy of the release the daemon ran, for rollback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous: Option<PathBuf>,
+    pub(crate) previous: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requester: Option<Requester>,
+    pub(crate) requester: Option<Requester>,
     /// The chat that asked, which hears the outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<Origin>,
+    pub(crate) origin: Option<Origin>,
     /// Accounts connected when the restart went ahead; the new release
     /// must reconnect them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expected: Vec<String>,
-    pub requested_unix: u64,
-    pub deadline_unix: u64,
+    pub(crate) expected: Vec<String>,
+    pub(crate) requested_unix: u64,
+    pub(crate) deadline_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restart_unix: Option<u64>,
+    pub(crate) restart_unix: Option<u64>,
     /// The restart went ahead at the deadline while work still ran.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub waited_out: bool,
+    pub(crate) waited_out: bool,
     /// Why the new release failed, for the announcement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
+    pub(crate) detail: Option<String>,
     /// How long the watchdog gives the new release.
     #[serde(default = "default_verify_seconds")]
-    pub verify_seconds: u64,
+    pub(crate) verify_seconds: u64,
 }
 
 fn default_verify_seconds() -> u64 {

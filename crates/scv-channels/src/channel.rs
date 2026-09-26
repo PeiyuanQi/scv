@@ -114,16 +114,6 @@ pub enum ChannelCredentials {
 }
 
 impl ChannelCredentials {
-    /// Which channel these credentials sign in to.
-    pub fn kind(&self) -> ChannelKind {
-        match *self {
-            #[cfg(feature = "wechat")]
-            Self::Wechat(_) => ChannelKind::Wechat,
-            #[cfg(feature = "feishu")]
-            Self::Feishu(_) => ChannelKind::Feishu,
-        }
-    }
-
     /// See [`Channel::owner`].
     pub fn owner(&self) -> Option<&str> {
         match *self {
@@ -141,16 +131,6 @@ impl ChannelCredentials {
             Self::Wechat(ref credentials) => crate::wechat::WeChat::bot_id(credentials),
             #[cfg(feature = "feishu")]
             Self::Feishu(ref credentials) => crate::feishu::Feishu::bot_id(credentials),
-        }
-    }
-
-    /// See [`Channel::title`].
-    pub fn title(&self) -> &'static str {
-        match *self {
-            #[cfg(feature = "wechat")]
-            Self::Wechat(ref credentials) => crate::wechat::WeChat::title(credentials),
-            #[cfg(feature = "feishu")]
-            Self::Feishu(ref credentials) => crate::feishu::Feishu::title(credentials),
         }
     }
 }
@@ -171,7 +151,7 @@ impl From<crate::feishu::Account> for ChannelCredentials {
 
 /// One channel's saved accounts: credentials under `credentials/<channel>`,
 /// settings as `[channels.<channel>.<account>]` in `config.toml`, and
-/// delivery state under `state/channels/<channel>` (see [`state::Store`]).
+/// delivery state under `state/channels/<channel>` (see `state::Store`).
 pub struct Accounts {
     kind: ChannelKind,
     store: Box<dyn Stored>,

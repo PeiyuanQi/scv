@@ -10,35 +10,35 @@ use std::time::Duration;
 /// A doubling delay between retries, from [`Backoff::FIRST`] up to
 /// [`Backoff::MAX`]. [`Backoff::reset`] starts over after a success.
 #[derive(Debug, Clone)]
-pub struct Backoff {
+pub(crate) struct Backoff {
     next: Duration,
 }
 
 impl Backoff {
     /// The first delay, and the delay again after [`Backoff::reset`].
-    pub const FIRST: Duration = Duration::from_secs(1);
+    pub(crate) const FIRST: Duration = Duration::from_secs(1);
     /// The longest delay: a platform that stays down is still retried every
     /// minute.
-    pub const MAX: Duration = Duration::from_secs(60);
+    pub(crate) const MAX: Duration = Duration::from_secs(60);
 
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { next: Self::FIRST }
     }
 
     /// The delay to wait now. Each call doubles the next one, up to
     /// [`Backoff::MAX`].
-    pub fn next_delay(&mut self) -> Duration {
+    pub(crate) fn next_delay(&mut self) -> Duration {
         let delay = self.next;
         self.next = (self.next * 2).min(Self::MAX);
         delay
     }
 
     /// Sleep for [`Backoff::next_delay`].
-    pub async fn wait(&mut self) {
+    pub(crate) async fn wait(&mut self) {
         tokio::time::sleep(self.next_delay()).await;
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.next = Self::FIRST;
     }
 }
@@ -50,11 +50,11 @@ impl Default for Backoff {
 }
 
 /// How many times [`retry_send`] tries one request.
-pub const SEND_ATTEMPTS: u32 = 3;
+pub(crate) const SEND_ATTEMPTS: u32 = 3;
 
 /// The result of one try at an outbound request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Attempt<T> {
+pub(crate) enum Attempt<T> {
     /// The platform accepted it.
     Done(T),
     /// The platform refused it; sending the same request again cannot help.
@@ -65,16 +65,16 @@ pub enum Attempt<T> {
 
 /// What [`retry_send`] logs and returns, so each platform keeps its wording.
 #[derive(Debug, Clone, Copy)]
-pub struct SendLabels<'a> {
+pub(crate) struct SendLabels<'a> {
     /// Logged with the reason when the platform refuses, such as
     /// `"Feishu refused a reply"`.
-    pub refused: &'a str,
+    pub(crate) refused: &'a str,
     /// Logged with the reason after each transient failure, such as
     /// `"Feishu reply send failed"`.
-    pub failed: &'a str,
+    pub(crate) failed: &'a str,
     /// The error once every try failed, such as
     /// `"Feishu could not deliver the reply"`.
-    pub gave_up: &'a str,
+    pub(crate) gave_up: &'a str,
 }
 
 /// Try one outbound request up to [`SEND_ATTEMPTS`] times, waiting 1 s and
@@ -85,7 +85,7 @@ pub struct SendLabels<'a> {
 ///
 /// `attempt` must be safe to repeat: callers resend with the same
 /// idempotency key (a client id or `uuid`) so the platform delivers once.
-pub async fn retry_send<T, F, Fut>(
+pub(crate) async fn retry_send<T, F, Fut>(
     labels: SendLabels<'_>,
     report: &(dyn Fn(bool) + Send + Sync),
     mut attempt: F,

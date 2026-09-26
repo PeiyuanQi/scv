@@ -44,7 +44,7 @@ pub struct Origin {
 pub struct LastOwner {
     pub component: String,
     pub peer: String,
-    pub unix_seconds: u64,
+    pub(crate) unix_seconds: u64,
 }
 
 /// A message for one account's outbox, sent like a background report.
@@ -351,7 +351,7 @@ impl Link {
 
     /// Why the daemon last restarted, for the account's first recovery in
     /// this daemon only; later runs of the bridge were not restarted by it.
-    pub fn take_restart(&self) -> Option<Restart> {
+    pub(crate) fn take_restart(&self) -> Option<Restart> {
         let hub = self.hub.as_ref()?;
         let first = hub
             .recovered

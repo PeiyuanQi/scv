@@ -117,10 +117,10 @@ struct Outcome {
 #[derive(Debug, Clone)]
 pub struct JobReport {
     pub job: String,
-    pub tool: String,
-    pub status: JobStatus,
-    pub session: Option<String>,
-    pub reply: String,
+    pub(crate) tool: String,
+    pub(crate) status: JobStatus,
+    pub(crate) session: Option<String>,
+    pub(crate) reply: String,
 }
 
 impl Drop for BackgroundJobs {
@@ -149,7 +149,7 @@ impl BackgroundJobs {
         self
     }
 
-    pub fn limit(&self) -> usize {
+    pub(crate) fn limit(&self) -> usize {
         self.limit
     }
 

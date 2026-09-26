@@ -243,13 +243,22 @@ without the lints that do not pay for themselves here (`missing_errors_doc`,
 `allow_attributes_without_reason` deny, and `unwrap_used` warns outside tests:
 state an invariant with `expect("…")` instead.
 
+Rust's `unreachable_pub` warns as well. An item is `pub` only when another
+workspace package, the root `scv-cli` package, `tests/it`, or a documented
+extension surface (scv-core's traits and the types they take, scv-protocol's
+wire types) uses it; everything else is `pub(crate)` or private, and a helper
+only a crate's own tests use is `#[cfg(test)]`. The lint flags a `pub` item
+that no path from the crate root reaches. It cannot see a reachable `pub`
+item that nothing outside the crate uses, so narrow an item when its last
+outside user goes away.
+
 The next ratchet steps are the pedantic lints still allowed under the "Next
 ratchet" comment in `Cargo.toml`, such as `format_push_string`,
 `items_after_statements`, `needless_pass_by_value`, the `cast_*` lints, and
 `too_many_lines` at the `clippy.toml` threshold. Each still has findings that
 need a hand-written change; remove its line together with that cleanup. Then
-come `unreachable_pub`, and `missing_docs` crate by crate as each crate's
-public items are documented.
+comes `missing_docs`, crate by crate as each crate's public items are
+documented (`scv-protocol` already warns on it).
 
 The suite is a foundation, not a claim of exhaustive terminal or provider
 compatibility. Snapshot coverage for every TUI state, randomized protocol

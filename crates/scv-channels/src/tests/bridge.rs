@@ -3,6 +3,8 @@
 //! HTTP API: claims, ordering, concurrency, busy replies, and redelivery.
 
 use super::*;
+use crate::media::MediaSettings;
+use scv_client::Layout;
 use serde_json::{Value, json};
 use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

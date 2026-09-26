@@ -16,17 +16,17 @@ const MAX_INTERVAL: u64 = 60;
 const DEFAULT_EXPIRY: u64 = 600;
 
 /// A registration waiting for the user's scan.
-pub struct Pending {
-    pub device_code: String,
+pub(crate) struct Pending {
+    pub(crate) device_code: String,
     /// The page to scan or open, on the brand's own host.
-    pub url: String,
-    pub interval: Duration,
-    pub expires_in: Duration,
+    pub(crate) url: String,
+    pub(crate) interval: Duration,
+    pub(crate) expires_in: Duration,
 }
 
 /// What a completed registration returns.
-pub struct Registered {
-    pub account: Account,
+pub(crate) struct Registered {
+    pub(crate) account: Account,
 }
 
 /// Sign in by creating a bot app: show a QR code, wait for the scan, and
@@ -127,7 +127,7 @@ pub(crate) async fn login_existing(
 
 /// Start a registration: check the server supports secret-based apps, then
 /// ask for a device code. `display` is the brand whose page the user opens.
-pub async fn begin(
+pub(crate) async fn begin(
     client: &reqwest::Client,
     registration: &Endpoints,
     display: &Endpoints,
@@ -188,7 +188,7 @@ pub async fn begin(
 
 /// Poll until the user confirms, denies, or the code expires. A Lark user's
 /// scan moves polling to Lark once.
-pub async fn poll(
+pub(crate) async fn poll(
     client: &reqwest::Client,
     registration: &Endpoints,
     pending: &Pending,
@@ -324,7 +324,7 @@ fn safe_code(code: &str) -> String {
 }
 
 /// Where to rename the bot, which registration names after its creator.
-pub fn rename_hint(account: &Account) -> String {
+pub(crate) fn rename_hint(account: &Account) -> String {
     let console = Endpoints::for_brand(account.brand).open;
     format!(
         "The bot is named after you (\"...的飞书 CLI\"). To rename it, open {console}/app/{}, edit the name under 凭证与基础信息 (Credentials & Basic Info), then publish a new version under 版本管理与发布 (Version Management & Release).",
@@ -334,7 +334,7 @@ pub fn rename_hint(account: &Account) -> String {
 
 /// The URL as a terminal QR code, light on dark so phones read it from a
 /// dark terminal.
-pub fn qr_code(url: &str) -> String {
+pub(crate) fn qr_code(url: &str) -> String {
     use qrcode::render::unicode::Dense1x2;
     match qrcode::QrCode::new(url.as_bytes()) {
         Ok(code) => code

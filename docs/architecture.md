@@ -129,7 +129,7 @@ What lives where in the largest crates:
 
 | Crate | Module | Contents |
 | --- | --- | --- |
-| `scv-server` | `lib.rs` | Module list, the public API (`run_socket`, `run_stdio`, `config`, build info, the restart watchdog), and the service unit name |
+| `scv-server` | `lib.rs` | Module list and the public API (`run_socket`, `run_stdio`, `config`, build info, the restart watchdog) |
 | | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs |
 | | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
 | | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, and questions to the owner |

@@ -36,7 +36,7 @@ fn media_limits_show_where_each_was_set() {
 
 #[test]
 fn an_owner_only_account_without_an_owner_answers_nobody() {
-    use scv_channels::state::Senders;
+    use scv_protocol::Senders;
     assert_eq!(
         answers(Senders::Owner, Some(true)),
         "answers only its owner"
