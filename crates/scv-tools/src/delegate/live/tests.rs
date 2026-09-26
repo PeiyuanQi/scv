@@ -77,3 +77,32 @@ async fn close_stops_a_running_child_and_its_record() {
     assert!(registry.list(true).is_empty());
     assert!(!zombie(child.pid));
 }
+
+#[tokio::test]
+async fn a_child_is_recorded_idle_between_turns_and_at_work_during_one() {
+    let home = tempfile::tempdir().unwrap();
+    let (registry, child) = spawn(home.path(), "exec sleep 30");
+    let entry = || {
+        let mut entries = registry.list(true);
+        assert_eq!(entries.len(), 1);
+        entries.remove(0)
+    };
+    // A child starts inside its first turn.
+    assert!(entry().working());
+    let turn = child.begin_turn(2);
+    assert_eq!(entry().record.turn, Some(2));
+    assert!(entry().working());
+    drop(turn);
+    // Between turns its process lives on, but it is not at work.
+    let idle = entry();
+    assert!(idle.record.idle_since_unix.is_some());
+    assert!(idle.processes > 0);
+    assert!(!idle.working());
+    let turn = child.begin_turn(3);
+    assert_eq!(entry().record.idle_since_unix, None);
+    assert!(entry().working());
+    // A turn that outlives its child leaves no record behind.
+    child.close().await;
+    drop(turn);
+    assert!(registry.list(true).is_empty());
+}

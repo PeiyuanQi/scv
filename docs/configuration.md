@@ -714,8 +714,10 @@ does not change when the executable is replaced.
 `scv restart --when-idle [--version V] [--commit C] [--max-wait SECONDS]` asks
 a daemon running as its systemd user unit to restart into the binary now
 installed at its own path once the delegated agent running the command (if
-any) has finished and its report is stored, and no owner message is being
-answered; after `--max-wait` (default 600 seconds) it restarts anyway. A
+any) has finished (a nested SCV or ACP agent, which lives for its whole
+conversation, once its turn has ended) and its report is stored, and no owner
+message is being answered; after `--max-wait` (default 600 seconds) it
+restarts anyway. A
 watchdog outside the daemon checks the new release and rolls back to the
 previous binary (kept as `<binary>.prev`) when it fails to start or reconnect
 its accounts, unless the releases differ in config layout. It is the one daemon

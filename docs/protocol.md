@@ -94,8 +94,9 @@ when it does not run as its systemd user unit, when the installed binary does
 not answer `scv build-info`, or when that reports a version other than
 `version`. Otherwise it saves a plan and replies at once with
 `daemon.status`, whose `restart` shows what it waits for: the delegation that
-`parent` (the caller's `SCV_PARENT` chain) names until it has finished and its
-report is stored, then any owner message a chat bridge has claimed but not
+`parent` (the caller's `SCV_PARENT` chain) names until it has finished (a
+nested SCV or ACP agent, which lives for its whole conversation, until its
+turn has ended) and its report is stored, then any owner message a chat bridge has claimed but not
 answered. At `max_wait_seconds` (default 600, at most 3600) it restarts
 anyway. A second request for the same version returns the scheduled restart.
 The restart itself runs in a watchdog unit outside the daemon; see
@@ -284,7 +285,10 @@ than 0.1.26 has no `delegations` and parses as zero.
 `reaped` the orphans this daemon has stopped since it started; `entries` and
 `killed` appear only in `delegations` and `delegation_kill` responses. An
 entry that is a turn of a delegated conversation also carries `conversation`
-(the handle, such as `codex-2`) and `turn`; both are omitted otherwise. Each
+(the handle, such as `codex-2`) and `turn`; both are omitted otherwise. A
+live agent (a nested SCV or an ACP agent) with no turn running also carries
+`idle_since_unix_seconds`, when its last turn ended; it is omitted while the
+agent works, for per-turn runs, and by older daemons. Each
 component contains `id` (`<channel>:<account>`), `channel`, `account`,
 `bot_id`, `user_id`, `enabled`, `state`, `last_success_unix_seconds`, `error`,
 and `restarts`; a daemon older than 0.1.35 omits `channel`, which parses as

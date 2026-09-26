@@ -172,6 +172,11 @@ Daemon and component changes require focused coverage for:
   `scv server --stdio` reaped by the next reconcile, the depth limit and
   nested daemon-command refusal, and agent status never printing an email or
   key;
+- live agents (nested SCV and ACP): the record at work during a turn and
+  idle between turns however the call ends, never written back once the
+  child is gone, and readable by the previous release; `scv agents ps`
+  listing such an agent `idle`; and a planned restart waiting for the live
+  agent that asked only while its turn runs;
 - background jobs: each call's `tool.completed.jobs` naming the jobs it
   started and those whose results it first showed the model (a job settles
   once seen or stopped, never merely finished, and never twice), report turns

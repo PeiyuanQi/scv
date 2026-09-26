@@ -673,7 +673,8 @@ impl Tool for ScvAgentTool {
             ));
             child
         };
-        child.live.set_turn(turn.turn);
+        // Recorded at work until this call returns, however it ends.
+        let _serving = child.live.begin_turn(turn.turn);
         let handle = turn.handle.clone();
         let number = turn.turn;
         let end = self

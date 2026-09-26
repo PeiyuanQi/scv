@@ -206,6 +206,11 @@ pub struct DelegationInfo {
     /// Which turn of that conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<u32>,
+    /// A live agent (a nested SCV or an ACP agent) with no turn running:
+    /// when its last turn ended. Absent while it works, for a per-turn run,
+    /// and from older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since_unix_seconds: Option<u64>,
 }
 
 /// What a `daemon.control` message asks the daemon to do.

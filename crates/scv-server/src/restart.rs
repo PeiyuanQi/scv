@@ -4,14 +4,15 @@
 //! `scv restart --when-idle` (run by the feature-flow deploy script after
 //! `cargo install`) asks the daemon to restart into the binary now at its own
 //! path. The daemon checks that binary runs, then waits until the delegation
-//! that asked has finished and its report is stored, and no owner message is
-//! being answered, or until the request's deadline. It then records a plan,
-//! keeps a copy of its own binary for rollback, and starts a watchdog outside
-//! its own cgroup (`systemd-run`). The watchdog restarts the unit, checks that
-//! the new release comes up with the channels that were connected before,
-//! and otherwise puts the previous binary back when both releases share a
-//! config layout. The daemon that starts next announces the outcome in the
-//! chat that asked, or through the notify list.
+//! that asked has finished (for a live child that serves a whole
+//! conversation, until its turn has ended) and its report is stored, and no
+//! owner message is being answered, or until the request's deadline. It then
+//! records a plan, keeps a copy of its own binary for rollback, and starts a
+//! watchdog outside its own cgroup (`systemd-run`). The watchdog restarts the
+//! unit, checks that the new release comes up with the channels that were
+//! connected before, and otherwise puts the previous binary back when both
+//! releases share a config layout. The daemon that starts next announces the
+//! outcome in the chat that asked, or through the notify list.
 //!
 //! The same notifier tells the owner about restarts after a crash and about
 //! accounts that stay disconnected.
@@ -750,12 +751,15 @@ impl Restarter {
     /// What the restart still waits for, or `None` when it may go ahead.
     fn waiting_for(&self, plan: &Plan) -> Option<String> {
         if let Some(requester) = &plan.requester {
-            let running = self
+            // A per-turn run works while its processes live; a live child
+            // (nested SCV, ACP agent) keeps its process for the whole
+            // conversation, so it works only while a turn runs.
+            let working = self
                 .registry
                 .list(true)
                 .into_iter()
-                .any(|entry| entry.record.handle == requester.handle && entry.processes > 0);
-            if running {
+                .any(|entry| entry.record.handle == requester.handle && entry.working());
+            if working {
                 return Some(format!("{} to finish", requester.handle));
             }
             if session_busy(&requester.session) || self.hub.session_work(&requester.session) > 0 {
