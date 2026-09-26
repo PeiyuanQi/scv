@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.2.2`. All crates share that version, and
-dependencies between workspace packages use exact `=0.2.2` pins.
+The current workspace release is `0.3.0`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.0` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,52 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.0
+
+`0.3.0` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.2.1` checks the new release and can roll it back,
+and existing credentials, delivery state, and settings are read unchanged. A
+running TUI still needs a restart after the update.
+
+What changes for a person running SCV:
+
+- **Chat channels answer only the account owner by default.** An account
+  table without `senders` answers only its owner; messages from anyone else
+  are checkpointed with no reply and no model turn. Set
+  `senders = "anyone"` in `[channels.<channel>.<account>]` (or run
+  `scv channels run <channel> --senders anyone`) to answer every sender
+  again. An account whose sign-in recorded no owner answers nobody;
+  `scv channels status` shows a `Note:` line for it. A release before `0.3.0`
+  refuses an account table that sets `senders`, so remove the key before
+  rolling back.
+- **Voice messages without a platform transcript** (every Feishu voice
+  message, and a WeChat one whose transcript is missing) get the fixed reply
+  "SCV cannot listen to voice messages yet. Please type your message
+  instead." instead of a model turn.
+- **`scv confirm`** asks the owner a yes-or-no question in chat, and the
+  feature flow's `publish.sh` uses it when an agent SCV delegated to
+  publishes. The daemon and CLI that ask must both be `0.3.0` or newer, so
+  `0.3.0` itself is published from a terminal.
+- **`[agents.<name>]`** accepts `model` and `effort` defaults for the work
+  its `use_for` matches.
+- **Log targets** of the WeChat and Feishu transports are now
+  `scv_channels::wechat` and `scv_channels::feishu`; update any `RUST_LOG`
+  filter that names `scv_clawbot` or `scv_feishu`.
+
+What changes for code that embeds SCV's crates:
+
+- `scv-clawbot` and `scv-feishu` are the `wechat` and `feishu` modules of
+  `scv-channels`, behind Cargo features of the same names (both on by
+  default), with one `Channel` trait and `scv_channels::run` for every
+  account. The old crates' final `0.3.0` releases contain no code.
+- `scv-server` no longer exports the CLI's administration helpers, and every
+  crate takes the instance `Layout` explicitly instead of reading `SCV_HOME`.
+- Errors are typed: `scv_protocol::ErrorCode` and `ToolErrorKind`,
+  `scv_core::ToolError { kind, message }` and `ToolOutput::failure`, and
+  `scv_client::ControlError`. Background jobs report typed `JobStatus` and
+  `JobChange` values on `tool.completed.jobs`.
+- Items no other crate uses are no longer `pub`.
 
 ## Upgrading to 0.2.0
 
