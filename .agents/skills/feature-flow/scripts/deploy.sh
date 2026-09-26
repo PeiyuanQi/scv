@@ -20,7 +20,6 @@ version=${1:?usage: deploy.sh <version>}
 unit=${SCV_UNIT:-scv.service}
 restart_delay=${SCV_RESTART_DELAY:-60}
 max_wait=${SCV_RESTART_MAX_WAIT:-600}
-commit=$(git -C "$here" rev-parse --short HEAD 2>/dev/null || true)
 inside=false
 if grep -q "/$unit" /proc/self/cgroup; then
   inside=true
@@ -50,6 +49,16 @@ if [ "$installed" != "$version" ]; then
   exit 1
 fi
 echo "Installed scv $installed."
+
+# The commit the release was packaged from, for the announcement. The
+# checkout running this script can be at another commit, so read what Cargo
+# recorded in the published crate; without it, announce no commit.
+commit=
+for info in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/"scv-cli-$version"/.cargo_vcs_info.json; do
+  [ -f "$info" ] || continue
+  commit=$(sed -n 's/.*"sha1": *"\([0-9a-f]\{7\}\)[0-9a-f]*".*/\1/p' "$info")
+  [ -n "$commit" ] && break
+done
 
 started=$(date +%s)
 set +e
