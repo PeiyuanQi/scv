@@ -108,6 +108,9 @@ const SESSION_IDLE: Duration = Duration::from_secs(1800);
 const STATE_BUSY_RETRY: Duration = Duration::from_secs(5);
 pub const BUSY_REPLY: &str =
     "SCV is still working on your earlier messages. Please send this one again later.";
+/// The reply to a voice message that has no transcript and nothing else.
+pub const VOICE_REPLY: &str =
+    "SCV cannot listen to voice messages yet. Please type your message instead.";
 pub const HELD_HEADER: &str = "[Earlier reply that could not be delivered at the time]\n";
 pub const LATEST_HEADER: &str = "[Reply to your latest message]\n";
 /// Refused replies are delivered with the conversation's next reply for a week.
@@ -636,35 +639,46 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 return self.save(&state).await;
             }
             Verdict::Claimed => return Ok(()),
-            Verdict::Busy(sender) => (sender, None),
+            Verdict::Busy(sender) => {
+                tracing::warn!("at the work limit; asking a sender to retry later");
+                (sender, Err(BUSY_REPLY))
+            }
+            Verdict::Unheard(sender) => {
+                tracing::info!("asking a sender to type instead of sending a voice message");
+                (sender, Err(VOICE_REPLY))
+            }
             Verdict::Turn {
                 sender,
                 owner,
                 limit,
                 evict,
-            } => (sender, Some((owner, limit, evict))),
+            } => (sender, Ok((owner, limit, evict))),
         };
         let message = sender.message;
         if sender.owner_chat {
             self.registration.owner_wrote(&message.sender);
         }
         let key = sender.key;
-        let Some((owner, limit, evict)) = turn else {
-            tracing::warn!("at the work limit; asking a sender to retry later");
-            let mut busy = new_pending(
-                id,
-                &message.sender,
-                &message.reply_to,
-                BUSY_REPLY,
-                MAX_REPLY_BYTES,
-            );
-            busy.key = key;
-            busy.transient = true;
-            state.pending.push(busy);
-            self.save(&state).await?;
-            drop(state);
-            self.replies.notify_one();
-            return Ok(());
+        let (owner, limit, evict) = match turn {
+            Ok(turn) => turn,
+            // A fixed notice instead of a turn: sent like any reply, but
+            // never held if the platform refuses it.
+            Err(notice) => {
+                let mut pending = new_pending(
+                    id,
+                    &message.sender,
+                    &message.reply_to,
+                    notice,
+                    MAX_REPLY_BYTES,
+                );
+                pending.key = key;
+                pending.transient = true;
+                state.pending.push(pending);
+                self.save(&state).await?;
+                drop(state);
+                self.replies.notify_one();
+                return Ok(());
+            }
         };
         state.in_flight.push(state::InFlight {
             message_id: id.to_owned(),

@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 
 use crate::state::Senders;
 use crate::{
-    Inbound, Job, MAX_CLAIMS, MAX_QUEUED_PER_CONVERSATION, MAX_SESSIONS, Message, TURN_TIMEOUT,
-    ToolOwner, conversation_key, state,
+    Inbound, Job, MAX_CLAIMS, MAX_QUEUED_PER_CONVERSATION, MAX_SESSIONS, MediaKind, Message,
+    TURN_TIMEOUT, ToolOwner, conversation_key, state,
 };
 
 /// A live conversation's job queue as seen by the poller.
@@ -64,6 +64,10 @@ pub(crate) enum Verdict<'m> {
     /// A message to answer while the bridge is at its work limits: answer
     /// with the busy notice instead of a turn.
     Busy(Sender<'m>),
+    /// A voice message with no transcript and nothing else, which the model
+    /// cannot hear: answer with the voice notice instead of a turn, without
+    /// downloading it.
+    Unheard(Sender<'m>),
     /// Claim the message and run a turn on its conversation.
     Turn {
         sender: Sender<'m>,
@@ -120,6 +124,10 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         key,
         owner_chat: direct && owner == Some(sender),
     };
+    // Nothing a turn could use, and nothing that waits for a turn slot.
+    if unheard(message) {
+        return Verdict::Unheard(from);
+    }
     let waiting = |key: &str| {
         state
             .in_flight
@@ -147,6 +155,20 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         limit,
         evict,
     }
+}
+
+/// Whether `message` is only voice that no transcript turned into text: no
+/// text of its own, and every file audio with an empty or missing transcript.
+fn unheard(message: &Message) -> bool {
+    message.text.trim().is_empty()
+        && !message.media.is_empty()
+        && message.media.iter().all(|media| {
+            media.kind == MediaKind::Audio
+                && media
+                    .transcript
+                    .as_deref()
+                    .is_none_or(|transcript| transcript.trim().is_empty())
+        })
 }
 
 /// The conversation a full session table closes to make room: the least

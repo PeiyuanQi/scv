@@ -190,7 +190,10 @@ Both channels take pictures, voice messages, videos, files, quoted messages,
 and (on Feishu) forwarded bundles. SCV downloads them privately under
 `$SCV_HOME/state/media`, shows images to the model when it accepts image input,
 and hands the owner's agent the file paths; on an account that answers anyone,
-other senders' files are limited to pictures. In the owner's chat the agent can send files and pictures back
+other senders' files are limited to pictures. The model cannot listen to
+audio, so it gets a voice message's transcript when WeChat supplies one;
+without one (always on Feishu) the sender is asked to type instead. In the
+owner's chat the agent can send files and pictures back
 with its `chat_attach` tool. See [channel media](docs/channels.md#media).
 
 
