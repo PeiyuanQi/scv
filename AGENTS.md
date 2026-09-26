@@ -54,11 +54,12 @@
   and the delegated agents' credential-file formats in `scv-tools`, policy and
   session authority in `scv-server`, terminal presentation in `scv-tui`, and
   administration only the command line does (agent sign-ins and imports,
-  `scv config show`, the systemd unit) in the root package's `src/cli/`. Keep the shared chat-channel bridge in
-  `scv-channels` and each platform's transport in its own crate (WeChat in
-  `scv-clawbot`, Feishu/Lark in `scv-feishu`). Preserve
-  `server -> clawbot|feishu -> channels -> client -> protocol`;
-  TUI and channel crates must not depend on server. A change to an internal
+  `scv config show`, the systemd unit) in the root package's `src/cli/`. Keep
+  the chat channels in `scv-channels`: the bridge they share, and each
+  platform's transport in its own module behind a Cargo feature (WeChat in
+  `wechat`, Feishu/Lark in `feishu`). Preserve
+  `server -> channels -> client -> protocol`;
+  TUI and channels must not depend on server. A change to an internal
   dependency updates the diagram in `docs/architecture.md` in the same commit.
 - Put unit tests in the module's own test file (`src/foo.rs` declares
   `#[cfg(test)] mod tests;` and its tests live in `src/foo/tests.rs`), never
@@ -73,7 +74,7 @@
   through shutdown.
 - Keep all crate versions aligned and internal workspace dependency versions
   exactly pinned. Publish in dependency order: core, protocol, client,
-  provider-openai, tools, channels, clawbot, feishu, server, tui, cli.
+  provider-openai, tools, channels, server, tui, cli.
 - Treat `SCV_HOME` or `--scv-home` as the instance ownership boundary. Separate
   profiles must not share sockets, service units, credentials, adapter state,
   or provider/model configuration. SCV-created native-agent subprocesses must

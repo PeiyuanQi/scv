@@ -1,7 +1,22 @@
-//! The bridge every chat channel shares: it claims inbound messages durably,
-//! runs each conversation's turns in order on its own SCV daemon session,
-//! and delivers replies with stable retry identities. A channel supplies
-//! only its [`Transport`]: receiving messages and sending them.
+//! SCV's chat channels: WeChat ([`wechat`], feature `wechat`) and Feishu or
+//! Lark ([`feishu`], feature `feishu`), on the bridge they share.
+//!
+//! The bridge claims inbound messages durably, runs each conversation's
+//! turns in order on its own SCV daemon session, and delivers replies with
+//! stable retry identities. A channel supplies only its `Transport`:
+//! receiving messages and sending them. The daemon runs an account with
+//! [`run`] and manages saved accounts through [`ChannelKind::accounts`].
+
+// Without a channel the bridge has no transport to run, and the channel
+// dispatch has no arms that use their inputs.
+#![cfg_attr(
+    not(any(feature = "wechat", feature = "feishu")),
+    allow(
+        dead_code,
+        unused_variables,
+        reason = "a build without channels only checks the shared code"
+    )
+)]
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
@@ -19,13 +34,22 @@ use std::{
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 use uuid::Uuid;
 
+use intake::{Conversation, Verdict};
+
 pub use scv_client::Layout;
+mod channel;
+#[cfg(feature = "feishu")]
+pub mod feishu;
 pub mod hub;
+mod intake;
 pub mod media;
 pub mod retry;
 pub mod session;
 pub mod state;
+#[cfg(feature = "wechat")]
+pub mod wechat;
 
+pub use channel::{AccountRun, Accounts, Channel, ChannelCredentials, ChannelKind, run};
 pub use media::{MediaKind, MediaOptions, MediaSettings};
 
 /// Bytes in one outbound message; longer replies go out in parts.
@@ -145,6 +169,7 @@ impl Inbound {
 }
 
 /// A message to answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub id: String,
     pub sender: String,
@@ -252,7 +277,7 @@ pub enum SendOutcome {
 
 /// A chat platform's connection for one account.
 #[async_trait]
-pub trait Transport: Send + Sync {
+pub(crate) trait Transport: Send + Sync {
     /// Names the channel in logs and errors, such as `ClawBot`.
     fn label(&self) -> &'static str;
 
@@ -305,68 +330,51 @@ pub trait Transport: Send + Sync {
     }
 }
 
-/// Run one account until the returned future is dropped or fails. It holds
-/// the account's lifetime lock, binds delivery state to the credentials the
-/// transport uses (`running` says whether they are the saved ones), recovers
-/// interrupted work, and delivers recovered replies before receiving.
-///
-/// `tool_owner` is the authenticated owner when the account grants its owner
-/// remote tools; every other sender stays tool-free. `media` says where
-/// received and outgoing files live and how large they may be.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
-)]
-pub async fn run<C: state::Credentials, T: Transport>(
-    transport: &T,
-    account: &str,
-    workspace: &Path,
-    socket: &Path,
-    tool_owner: Option<&ToolOwner>,
-    media: &MediaOptions,
-    store: &state::Store<C>,
-    running: impl FnOnce(&C) -> Result<bool>,
-    report: &(dyn Fn(bool) + Send + Sync),
-) -> Result<()> {
-    run_linked(
-        transport,
-        account,
-        workspace,
-        socket,
-        tool_owner,
-        media,
-        store,
-        running,
-        report,
-        &hub::Link::detached(),
-    )
-    .await
+/// What the bridge needs to run one account; a channel's `run` builds it
+/// with [`AccountRun::bridge`].
+pub(crate) struct BridgeRun<'a> {
+    pub(crate) account: &'a str,
+    pub(crate) workspace: &'a Path,
+    pub(crate) socket: &'a Path,
+    /// The account owner, whether or not it holds remote tools.
+    pub(crate) owner: Option<&'a str>,
+    /// The owner, when the account grants it remote tools; every other
+    /// sender stays tool-free.
+    pub(crate) tool_owner: Option<ToolOwner>,
+    /// Where received and outgoing files live and how large they may be.
+    pub(crate) media: MediaOptions,
+    /// The account's connection to the daemon's hub, which then sees its
+    /// owner work and chats and can queue notices.
+    pub(crate) link: &'a hub::Link,
+    pub(crate) report: &'a (dyn Fn(bool) + Send + Sync),
 }
 
-/// [`run`] for an account the daemon runs, linked to its [`hub::Hub`]: the
-/// daemon then sees the account's owner work and chats and can queue
-/// notices, and recovery describes work a planned restart interrupted.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one account's run context, passed field by field until the channel crates fold into scv-channels"
-)]
+/// Run one account over `transport` until the returned future is dropped or
+/// fails. It holds the account's lifetime lock, binds delivery state to the
+/// credentials the transport uses (`running` says whether they are the saved
+/// ones), recovers interrupted work (describing work a planned restart
+/// interrupted as such), and delivers recovered replies before receiving.
 #[tracing::instrument(
     name = "channel",
     skip_all,
-    fields(channel = transport.channel(), account = account)
+    fields(channel = transport.channel(), account = run.account)
 )]
-pub async fn run_linked<C: state::Credentials, T: Transport>(
+pub(crate) async fn serve<C: state::Credentials, T: Transport>(
     transport: &T,
-    account: &str,
-    workspace: &Path,
-    socket: &Path,
-    tool_owner: Option<&ToolOwner>,
-    media: &MediaOptions,
+    run: BridgeRun<'_>,
     store: &state::Store<C>,
     running: impl FnOnce(&C) -> Result<bool>,
-    report: &(dyn Fn(bool) + Send + Sync),
-    link: &hub::Link,
 ) -> Result<()> {
+    let BridgeRun {
+        account,
+        workspace,
+        socket,
+        owner,
+        tool_owner,
+        media,
+        link,
+        report,
+    } = run;
     let _lock = store.lock(account)?;
     let mut state = store.bind_state(account, running)?;
     recover_interrupted_after(store, account, &mut state, link.take_restart().as_ref())?;
@@ -378,10 +386,10 @@ pub async fn run_linked<C: state::Credentials, T: Transport>(
         socket,
         store,
         report,
-        link,
-        tool_owner: tool_owner.map(|owner| owner.user_id.as_str()),
+        owner,
+        tool_owner: tool_owner.as_ref().map(|owner| owner.user_id.as_str()),
         registration,
-        media,
+        media: &media,
         state: Mutex::new(state),
         turns: Semaphore::new(MAX_CONCURRENT_TURNS),
         replies: Notify::new(),
@@ -393,7 +401,7 @@ pub async fn run_linked<C: state::Credentials, T: Transport>(
     // so cancellation drops every session and request with it.
     let (start, mut started) = mpsc::unbounded_channel();
     let mut conversations = FuturesUnordered::new();
-    let poll = bridge.poll(tool_owner, &start);
+    let poll = bridge.poll(tool_owner.as_ref(), &start);
     let deliver = bridge.deliver();
     tokio::pin!(poll, deliver);
     loop {
@@ -447,31 +455,6 @@ fn conversation_dir(key: &str) -> String {
         .collect()
 }
 
-/// A live conversation's job queue as seen by the poller.
-struct Conversation {
-    jobs: mpsc::UnboundedSender<Job>,
-    last_used: Instant,
-    /// Set by the conversation while its session has background jobs
-    /// running or reports to send: closing it then would cancel them.
-    watching: Arc<AtomicBool>,
-}
-
-/// The conversation a full session table closes to make room: the least
-/// recently used one with no claimed messages waiting and no background
-/// work in flight, or none.
-fn evictable(
-    conversations: &HashMap<String, Conversation>,
-    waiting: impl Fn(&str) -> usize,
-) -> Option<String> {
-    conversations
-        .iter()
-        .filter(|(key, conversation)| {
-            waiting(key) == 0 && !conversation.watching.load(Ordering::Acquire)
-        })
-        .min_by_key(|(_, conversation)| conversation.last_used)
-        .map(|(key, _)| key.clone())
-}
-
 enum Step {
     Idle,
     Progress,
@@ -494,7 +477,8 @@ struct Bridge<'a, C, T> {
     socket: &'a Path,
     store: &'a state::Store<C>,
     report: &'a (dyn Fn(bool) + Send + Sync),
-    link: &'a hub::Link,
+    /// The account owner, whether or not it holds remote tools.
+    owner: Option<&'a str>,
     /// The owner granted remote tools, whose claimed messages count as owner
     /// work in the hub.
     tool_owner: Option<&'a str>,
@@ -624,61 +608,43 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     ) -> Result<()> {
         let id = inbound.id();
         let mut state = self.state.lock().await;
-        if state.seen.iter().any(|seen| seen == id) {
-            // Keep all IDs encountered in this bounded batch until its cursor
-            // commits, including IDs recovered from the preceding run.
-            mark_seen(&mut state, id);
-            return self.save(&state).await;
-        }
-        // Claimed or answered but not yet delivered: never a second turn.
-        if state.in_flight.iter().any(|claim| claim.message_id == id)
-            || state.pending.iter().any(|pending| pending.message_id == id)
-        {
-            return Ok(());
-        }
-        let Inbound::Text(message) = inbound else {
-            mark_seen(&mut state, id);
-            return self.save(&state).await;
-        };
-        let (sender, ctx, group) = (
-            message.sender.as_str(),
-            message.reply_to.as_str(),
-            &message.group,
+        let verdict = intake::classify(
+            inbound,
+            &intake::Intake {
+                state: &state,
+                conversations,
+                owner: self.owner,
+                tool_owner,
+            },
         );
-        let key = group
-            .as_ref()
-            .map_or_else(|| sender.to_owned(), |group| format!("{group}\0{sender}"));
-        let owner =
-            group.is_none() && tool_owner.is_some_and(|tool_owner| tool_owner.user_id == sender);
-        if group.is_none() && self.link.owner() == Some(sender) {
-            self.registration.owner_wrote(sender);
+        let (sender, turn) = match verdict {
+            Verdict::Ignore => {
+                mark_seen(&mut state, id);
+                return self.save(&state).await;
+            }
+            Verdict::Claimed => return Ok(()),
+            Verdict::Busy(sender) => (sender, None),
+            Verdict::Turn {
+                sender,
+                owner,
+                limit,
+                evict,
+            } => (sender, Some((owner, limit, evict))),
+        };
+        let message = sender.message;
+        if sender.owner_chat {
+            self.registration.owner_wrote(&message.sender);
         }
-        let limit = match tool_owner {
-            Some(tool_owner) if owner => tool_owner.turn_timeout,
-            _ => TURN_TIMEOUT,
-        };
-        let waiting = |key: &str| {
-            state
-                .in_flight
-                .iter()
-                .filter(|claim| conversation_key(&claim.key, &claim.to_user_id) == key)
-                .count()
-        };
-        // A full session table makes room by closing the least recently used
-        // conversation that has nothing waiting and no background work.
-        let evict = if conversations.contains_key(&key) || conversations.len() < MAX_SESSIONS {
-            None
-        } else {
-            evictable(conversations, waiting)
-        };
-        let room = state.in_flight.len() < MAX_CLAIMS
-            && waiting(&key) < MAX_QUEUED_PER_CONVERSATION
-            && (conversations.contains_key(&key)
-                || conversations.len() < MAX_SESSIONS
-                || evict.is_some());
-        if !room {
+        let key = sender.key;
+        let Some((owner, limit, evict)) = turn else {
             tracing::warn!("at the work limit; asking a sender to retry later");
-            let mut busy = new_pending(id, sender, ctx, BUSY_REPLY, MAX_REPLY_BYTES);
+            let mut busy = new_pending(
+                id,
+                &message.sender,
+                &message.reply_to,
+                BUSY_REPLY,
+                MAX_REPLY_BYTES,
+            );
             busy.key = key;
             busy.transient = true;
             state.pending.push(busy);
@@ -686,11 +652,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             drop(state);
             self.replies.notify_one();
             return Ok(());
-        }
+        };
         state.in_flight.push(state::InFlight {
             message_id: id.to_owned(),
-            to_user_id: sender.into(),
-            context_token: ctx.into(),
+            to_user_id: message.sender.clone(),
+            context_token: message.reply_to.clone(),
             key: key.clone(),
         });
         self.save(&state).await?;
@@ -723,7 +689,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             } else {
                 let (jobs, queue) = mpsc::unbounded_channel();
                 // Only a direct chat can receive unprompted background reports.
-                let recipient = group.is_none().then(|| sender.to_owned());
+                let recipient = message.group.is_none().then(|| message.sender.clone());
                 let watching = Arc::new(AtomicBool::new(false));
                 start
                     .send((owner, recipient, queue, Arc::clone(&watching)))

@@ -1803,35 +1803,16 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "scv-channels"
 version = "0.2.2"
 dependencies = [
- "anyhow",
- "async-trait",
- "futures-util",
- "libc",
- "scv-client",
- "scv-protocol",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "toml_edit",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "scv-clawbot"
-version = "0.2.2"
-dependencies = [
  "aes",
  "anyhow",
  "async-trait",
  "base64",
- "dirs",
+ "futures-util",
+ "libc",
  "md-5",
+ "prost",
+ "qrcode",
  "reqwest",
- "scv-channels",
  "scv-client",
  "scv-protocol",
  "serde",
@@ -1839,7 +1820,10 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
+ "toml",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -1857,10 +1841,8 @@ dependencies = [
  "libc",
  "reqwest",
  "scv-channels",
- "scv-clawbot",
  "scv-client",
  "scv-core",
- "scv-feishu",
  "scv-protocol",
  "scv-server",
  "scv-tools",
@@ -1901,30 +1883,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scv-feishu"
-version = "0.2.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "dirs",
- "futures-util",
- "prost",
- "qrcode",
- "reqwest",
- "scv-channels",
- "scv-client",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "scv-protocol"
 version = "0.2.2"
 dependencies = [
@@ -1958,10 +1916,8 @@ dependencies = [
  "dirs",
  "libc",
  "scv-channels",
- "scv-clawbot",
  "scv-client",
  "scv-core",
- "scv-feishu",
  "scv-protocol",
  "scv-provider-openai",
  "scv-tools",

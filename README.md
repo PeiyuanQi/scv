@@ -74,8 +74,6 @@ cargo publish --locked -p scv-client
 cargo publish --locked -p scv-provider-openai
 cargo publish --locked -p scv-tools
 cargo publish --locked -p scv-channels
-cargo publish --locked -p scv-clawbot
-cargo publish --locked -p scv-feishu
 cargo publish --locked -p scv-server
 cargo publish --locked -p scv-tui
 cargo publish --locked -p scv-cli
@@ -350,19 +348,18 @@ SCV is a Cargo workspace with deliberately narrow packages:
 - `scv-provider-openai`: streaming provider transport;
 - `scv-tools`: filesystem, process, skill, and nested-agent tools, and the
   credential files of the agent CLIs SCV delegates to;
-- `scv-channels`: the chat-channel bridge every channel shares: durable
-  claims, delivery state, and remote sessions;
-- `scv-clawbot`: the WeChat channel's iLink login, polling, and sending;
-- `scv-feishu`: the Feishu/Lark channel's QR app registration, event long
-  connection with catch-up, and sending;
+- `scv-channels`: the chat channels: the bridge they share (durable claims,
+  delivery state, and remote sessions), WeChat's iLink login, polling, and
+  sending (feature `wechat`), and Feishu/Lark's QR app registration, event long
+  connection with catch-up, and sending (feature `feishu`);
 - `scv-server`: configuration, sessions, permissions, component supervision,
   and protocol dispatch;
 - `scv-tui`: terminal client and headless protocol client.
 
 The TUI connects to the local Unix-socket daemon; `scv-server --stdio` exposes
 the same server library to one-shot local clients. Dependencies flow from
-server to the channel crates (WeChat's `scv-clawbot`, Feishu's `scv-feishu`)
-to the channel core (`scv-channels`) to client to protocol; the TUI depends on client, not server.
+server to the channels (`scv-channels`) to client to protocol; the TUI
+depends on client, not server.
 All long-running components must be supervised by the server. Start with the
 [`architecture`](docs/architecture.md), then see the
 [`protocol`](docs/protocol.md), [`context`](docs/context-management.md),

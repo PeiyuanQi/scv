@@ -129,7 +129,7 @@ fn timeouts_default_below_a_ceiling_that_projects_may_only_lower() {
     assert_eq!(tools.max_timeout, Duration::from_secs(14400));
     // A ClawBot owner turn outlasts the ceiling by five minutes: 4h05m.
     assert_eq!(
-        scv_clawbot::owner_turn_timeout(tools.max_timeout),
+        scv_channels::owner_turn_timeout(tools.max_timeout),
         Duration::from_secs(4 * 3600 + 5 * 60)
     );
 

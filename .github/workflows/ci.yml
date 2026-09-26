@@ -33,6 +33,11 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The workspace builds scv-channels with both channels; check each
+      # channel alone, and neither, as other users of the crate may build it.
+      - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features -- -D warnings
+      - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features --features wechat -- -D warnings
+      - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features --features feishu -- -D warnings
       - run: git diff --check
 
   dependencies:

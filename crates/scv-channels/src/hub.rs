@@ -288,10 +288,6 @@ impl Link {
         if first { hub.restart() } else { None }
     }
 
-    pub(crate) fn owner(&self) -> Option<&str> {
-        self.owner.as_deref()
-    }
-
     /// Announce a running bridge, which then stores each [`Notice`] it
     /// receives. Dropping the registration withdraws it.
     pub fn register(&self) -> (Registration, mpsc::UnboundedReceiver<Notice>) {

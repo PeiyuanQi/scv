@@ -214,8 +214,8 @@ pub(crate) enum ChannelArg {
 impl ChannelArg {
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::Wechat => scv_clawbot::CHANNEL,
-            Self::Feishu | Self::Lark => scv_feishu::CHANNEL,
+            Self::Wechat => scv_channels::wechat::CHANNEL,
+            Self::Feishu | Self::Lark => scv_channels::feishu::CHANNEL,
         }
     }
 

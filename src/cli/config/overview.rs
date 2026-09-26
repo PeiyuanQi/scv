@@ -135,10 +135,9 @@ pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -
         raw: raw.as_ref(),
         all,
     };
-    let wechat = scv_clawbot::state::Store::new(&layout, scv_clawbot::CHANNEL);
-    any |= channel(&mut out, &listing, &wechat, scv_clawbot::CHANNEL)?;
-    let feishu = scv_feishu::state::Store::new(&layout, scv_feishu::CHANNEL);
-    any |= channel(&mut out, &listing, &feishu, scv_feishu::CHANNEL)?;
+    for kind in scv_channels::ChannelKind::ALL {
+        any |= channel(&mut out, &listing, &kind.accounts(&layout))?;
+    }
     if !any {
         writeln!(out, "  none signed in; see `scv channels login`")?;
     }
@@ -206,14 +205,14 @@ struct Listing<'a> {
 }
 
 /// The accounts of one channel; whether there were any.
-fn channel<C: scv_channels::state::Credentials>(
+fn channel(
     out: &mut String,
     listing: &Listing<'_>,
-    store: &scv_channels::state::Store<C>,
-    name: &str,
+    store: &scv_channels::Accounts,
 ) -> Result<bool> {
-    let mut accounts = store.account_names().unwrap_or_default();
-    match store.configured_accounts() {
+    let name = store.kind().name();
+    let mut accounts = store.names().unwrap_or_default();
+    match store.configured() {
         Ok(configured) => accounts.extend(configured),
         Err(error) => writeln!(out, "  {name}: settings unreadable: {}", safe_error(&error))?,
     }

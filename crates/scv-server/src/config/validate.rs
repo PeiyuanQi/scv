@@ -176,7 +176,10 @@ impl Config {
             );
         }
         for (channel, accounts) in &self.channels {
-            let known = [scv_clawbot::CHANNEL, scv_feishu::CHANNEL];
+            let known: Vec<&str> = scv_channels::ChannelKind::ALL
+                .iter()
+                .map(|kind| kind.name())
+                .collect();
             if !known.contains(&channel.as_str()) {
                 bail!(
                     "unknown channel [channels.{channel}]; known channels are {}",
