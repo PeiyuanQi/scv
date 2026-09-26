@@ -25,6 +25,11 @@ pub(crate) use credentials::Store;
 /// The channel name: `scv channels <command> wechat`.
 pub const CHANNEL: &str = "wechat";
 
+/// What every message SCV writes itself starts with. WeChat shows all of a
+/// bot's messages alike, so without it the owner could not tell SCV's
+/// notices and fixed replies from the model's answers.
+pub(crate) const SYSTEM_PREFIX: &str = "system msg: ";
+
 /// iLink's `bot_type` for a ClawBot login QR code.
 const CLAWBOT_BOT_TYPE: u8 = 3;
 /// One ordinary iLink request: a QR code, a reply, an upload address.
@@ -225,6 +230,10 @@ impl Transport for Ilink<'_> {
 
     fn channel(&self) -> &'static str {
         "WeChat"
+    }
+
+    fn system_prefix(&self) -> &'static str {
+        SYSTEM_PREFIX
     }
 
     /// Long-poll `getupdates` after the opaque cursor.

@@ -356,7 +356,10 @@ to an account owner's direct chat: the chat that asked, the `[notify]`
 accounts' owners, or the chat the owner last wrote from. Their text is
 composed by SCV, not the model, and names versions, commits, job handles, and
 the first line of each stopped job's delegated prompt; the restart plan and
-the owner's last chat are private files under `$SCV_HOME/state`.
+the owner's last chat are private files under `$SCV_HOME/state`. On WeChat
+they, like every message SCV writes itself, start with `system msg: `. That
+is a label for the owner, not proof of where a message came from: the
+model's answer is sent as written and can begin with the same words.
 
 A question to the owner (`scv confirm`, asked by the feature flow before it
 publishes to crates.io) likewise goes only to an account owner's direct chat:
