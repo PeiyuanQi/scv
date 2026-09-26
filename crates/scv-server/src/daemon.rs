@@ -5,6 +5,7 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
+use scv_client::Layout;
 use scv_tools::delegation::{self as delegations, DelegationRegistry};
 use tokio::{
     net::{UnixListener, UnixStream},
@@ -14,23 +15,27 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     components,
-    config::{self, ConfigOverrides},
+    config::{ConfigOverrides, Instance},
     connection::run_managed,
     restart,
 };
 
-pub async fn run_stdio(overrides: ConfigOverrides) -> Result<()> {
+/// Serve one session over stdin and stdout for the instance at `layout`.
+pub async fn run_stdio(layout: &Layout, overrides: ConfigOverrides) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let tasks = TaskTracker::new();
-    let registry = instance_delegations()?;
+    let registry = instance_delegations(layout);
     // Without a daemon, a later `scv exec` is what cleans up after an earlier
     // one that was killed; this runs alongside the session.
     tokio::spawn(reconcile_delegations(Arc::clone(&registry)));
     let result = run_managed(
         stdin,
         stdout,
-        overrides,
+        Instance {
+            layout: layout.clone(),
+            overrides,
+        },
         None,
         registry,
         CancellationToken::new(),
@@ -42,8 +47,14 @@ pub async fn run_stdio(overrides: ConfigOverrides) -> Result<()> {
     result
 }
 
-/// Run the authoritative server on the local Unix socket.
-pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
+/// Run the authoritative server on the instance's Unix socket.
+pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<()> {
+    let socket = layout.socket();
+    let path = socket.as_path();
+    let instance = Instance {
+        layout: layout.clone(),
+        overrides,
+    };
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -58,7 +69,7 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
     let _lock = SocketLock::acquire(path)?;
     // Nothing reads an older release's files; say so once rather than let
     // them look like live configuration.
-    if let Ok(strays) = scv_client::Layout::from_env().and_then(|layout| layout.strays()) {
+    if let Ok(strays) = layout.strays() {
         for stray in strays.into_iter().filter(|stray| stray.legacy) {
             tracing::warn!(
                 "{} is from an older SCV layout and is not used; see `scv config show`",
@@ -91,25 +102,23 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .context("secure SCV socket")?;
     }
-    let home =
-        config::user_home_path().ok_or_else(|| anyhow!("cannot determine SCV instance home"))?;
-    let hub = scv_channels::hub::Hub::new(Some(restart::last_owner_path(&home)));
+    let hub = scv_channels::hub::Hub::new(Some(layout.last_owner()));
     // Before any account starts: its recovery needs to know whether this
     // start is a planned restart.
-    let startup = restart::startup(&home, &hub);
+    let startup = restart::startup(layout, &hub);
     let components = Arc::new(Mutex::new(components::Components::with_hub(
-        path.to_owned(),
+        instance.clone(),
         std::env::current_dir()?,
         Arc::clone(&hub),
     )));
-    let registry = instance_delegations()?;
+    let registry = instance_delegations(layout);
     // Descendants a delegated agent leaves behind reparent to the daemon, not init.
     if !delegations::become_child_subreaper() {
         tracing::debug!("SCV daemon is not a child subreaper on this platform");
     }
     let cancellation = CancellationToken::new();
     let restarter = restart::Restarter::new(
-        home.clone(),
+        instance.clone(),
         hub,
         Arc::clone(&registry),
         &components,
@@ -120,7 +129,7 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         .await
         .set_restarter(Arc::clone(&restarter));
     let notices = tokio::spawn(restart::announce(
-        home.clone(),
+        layout.clone(),
         startup,
         restarter.notifier().clone(),
         cancellation.clone(),
@@ -179,14 +188,14 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = match accepted { Ok(value) => value, Err(error) => break Err(error.into()) };
-                let child_overrides = overrides.clone();
+                let instance = instance.clone();
                 let components = components.clone();
                 let registry = Arc::clone(&registry);
                 let cancellation = cancellation.clone();
                 let tasks = tasks.clone();
                 clients.spawn(async move {
                     let (reader, writer) = stream.into_split();
-                    if let Err(error) = run_managed(reader, writer, child_overrides, Some(components), registry, cancellation, tasks).await {
+                    if let Err(error) = run_managed(reader, writer, instance, Some(components), registry, cancellation, tasks).await {
                         tracing::warn!(error = format!("{error:#}"), "SCV socket client stopped");
                     }
                 });
@@ -213,17 +222,15 @@ pub async fn run_socket(path: &Path, overrides: ConfigOverrides) -> Result<()> {
     tasks.close();
     tasks.wait().await;
     let _ = tokio::fs::remove_file(path).await;
-    restart::clean_shutdown(&home);
+    restart::clean_shutdown(layout);
     result
 }
 
 pub(crate) const DELEGATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The delegation registry for this process's SCV instance.
-pub(crate) fn instance_delegations() -> Result<Arc<DelegationRegistry>> {
-    let home =
-        config::user_home_path().ok_or_else(|| anyhow!("cannot determine SCV instance home"))?;
-    Ok(Arc::new(DelegationRegistry::new(&home)))
+pub(crate) fn instance_delegations(layout: &Layout) -> Arc<DelegationRegistry> {
+    Arc::new(DelegationRegistry::new(layout))
 }
 
 /// Stop orphaned delegations of this instance and log what was stopped.

@@ -215,7 +215,9 @@ impl Config {
             .collect()
     }
 
-    /// Where this instance keeps everything.
+    /// The paths under this instance's home. It does not know whether the
+    /// instance is the default one, so take the service unit name from the
+    /// `Layout` the process resolved instead.
     pub fn layout(&self) -> Layout {
         Layout::new(&self.instance_home)
     }

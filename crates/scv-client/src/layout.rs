@@ -12,8 +12,13 @@
 //!   state and locks, and chat media.
 //!
 //! Anything else in the home is not read by SCV; [`Layout::strays`] lists it.
+//!
+//! A process selects its instance once, with [`Layout::from_env`], and hands
+//! the `Layout` to everything that needs a path; the environment only carries
+//! the selection on to child processes.
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Top-level entries of an instance home, in display order.
@@ -34,6 +39,8 @@ const LEGACY: [&str; 7] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     home: PathBuf,
+    /// Selected by default (`~/.scv`) rather than by `SCV_HOME`.
+    default: bool,
 }
 
 /// Something in an instance home that SCV does not read.
@@ -45,21 +52,52 @@ pub struct Stray {
 }
 
 impl Layout {
+    /// The instance at `home`, selected explicitly as `SCV_HOME` selects one.
     pub fn new(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
+        Self {
+            home: home.into(),
+            default: false,
+        }
     }
 
-    /// The instance selected by `SCV_HOME`, or `~/.scv`.
+    /// The instance selected by `SCV_HOME`, or `~/.scv`, with its home
+    /// resolved: canonical when it exists, otherwise made absolute. Service
+    /// unit names and delegation records hash this path, so every process of
+    /// an instance must resolve it the same way.
     pub fn from_env() -> Result<Self> {
-        std::env::var_os("SCV_HOME")
-            .map(PathBuf::from)
+        let selected = std::env::var_os("SCV_HOME").map(PathBuf::from);
+        let default = selected.is_none();
+        let home = selected
             .or_else(|| dirs::home_dir().map(|path| path.join(".scv")))
-            .map(Self::new)
-            .context("cannot determine SCV_HOME")
+            .context("cannot determine SCV_HOME")?;
+        Ok(Self {
+            home: resolve(home)?,
+            default,
+        })
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Whether this is the default instance, which `SCV_HOME` did not select.
+    pub fn is_default(&self) -> bool {
+        self.default
+    }
+
+    /// The instance's systemd user unit: `scv.service` for the default
+    /// instance, otherwise `scv-<hash of the home>.service`, so instances
+    /// never share a unit and a release finds the unit an earlier one wrote.
+    pub fn service_name(&self) -> String {
+        if self.default {
+            return "scv.service".into();
+        }
+        let digest = Sha256::digest(self.home.to_string_lossy().as_bytes());
+        let suffix = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("scv-{suffix}.service")
     }
 
     /// The settings file a person edits.
@@ -125,6 +163,27 @@ impl Layout {
         self.state().join("media")
     }
 
+    /// Copies of files the model attached, waiting to be sent to a chat.
+    pub fn outbox(&self) -> PathBuf {
+        self.media().join("outbox")
+    }
+
+    /// A planned restart in progress.
+    pub fn update_plan(&self) -> PathBuf {
+        self.state().join("update.json")
+    }
+
+    /// The chat the account owner last wrote from.
+    pub fn last_owner(&self) -> PathBuf {
+        self.state().join("last-owner.json")
+    }
+
+    /// Present while a daemon runs; one left behind means it did not shut
+    /// down cleanly.
+    pub fn daemon_marker(&self) -> PathBuf {
+        self.state().join("daemon.json")
+    }
+
     /// Serializes SCV's own edits of `config.toml`.
     pub fn config_lock(&self) -> PathBuf {
         self.state().join("config.lock")
@@ -159,6 +218,20 @@ impl Layout {
         }
         strays.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(strays)
+    }
+}
+
+/// `path` resolved as an instance home: canonical when it exists, otherwise
+/// made absolute against the working directory.
+fn resolve(path: PathBuf) -> Result<PathBuf> {
+    if path.exists() {
+        Ok(std::fs::canonicalize(&path).unwrap_or(path))
+    } else if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()
+            .context("cannot determine SCV instance home")?
+            .join(path))
     }
 }
 

@@ -25,7 +25,15 @@ third-party agent. The correctness contract covers:
   hashes, process timeout, process-group cancellation, bounded process output,
   and native-agent argument/cwd and model/effort mapping behavior;
 - configuration trust boundaries, stricter project limits, and cross-field
-  bounds;
+  bounds; loading from a temporary `Layout` with an explicit config file and
+  no environment, including each setting's origin and the server's own reads
+  ignoring command-line flags;
+- instance identity pinned to golden values: the service unit name hashed
+  from the home (`scv-8973cbc5732311b1.service` for `/srv/scv`, `scv.service`
+  for the default instance) and the delegation registry's instance ID
+  (`8973cbc5`), the home resolved through a symlink before hashing (checked
+  end to end through `scv config show`), and the restart and media files'
+  paths under `state/`;
 - bounded client/server frame reading, CRLF boundaries, server handshake,
   session startup, and a complete streamed turn through a fake provider; and
 - TUI prompt history, Unicode editing, primary-region rendering, bounded frame

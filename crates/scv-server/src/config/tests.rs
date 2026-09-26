@@ -8,6 +8,7 @@ use std::{
 };
 
 use scv_channels::state::AccountSettings;
+use scv_client::Layout;
 use scv_tools::web::SearchBackend;
 
 use super::{
@@ -727,4 +728,74 @@ command = \"zcode\"
     let unknown: Config = value.try_into().unwrap();
     let error = unknown.validate().unwrap_err().to_string();
     assert!(error.contains("unknown agent [agents.zcode]"), "{error}");
+}
+
+#[test]
+fn configuration_loads_from_the_layout_it_is_given() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path());
+    let write = |path: &std::path::Path, text: &str| {
+        std::fs::write(path, text).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    write(
+        &layout.config(),
+        "[tools]\ncommand_timeout_seconds = 900\nagent_timeout_seconds = 900\n",
+    );
+    let explicit = home.path().join("explicit.toml");
+    write(&explicit, "[tools]\ncommand_timeout_seconds = 300\n");
+
+    let config = Config::load(&layout, workspace.path(), ConfigOverrides::default()).unwrap();
+    assert_eq!(config.tools.command_timeout_seconds, 900);
+    assert_eq!(config.instance_home, home.path());
+    assert_eq!(config.layout(), layout);
+    // The default skills directory is the instance's own.
+    assert_eq!(config.skills.user_dir, layout.skills());
+
+    let overrides = ConfigOverrides {
+        config_file: Some(explicit.clone()),
+        ..ConfigOverrides::default()
+    };
+    let config = Config::load(&layout, workspace.path(), overrides.clone()).unwrap();
+    assert_eq!(config.tools.command_timeout_seconds, 300);
+    assert_eq!(config.tools.agent_timeout_seconds, 900);
+    let settings =
+        Config::settings_with_origins(&layout, Some(workspace.path()), &overrides).unwrap();
+    let origin = |key: &str| {
+        settings
+            .iter()
+            .find(|setting| setting.key == key)
+            .map(|setting| setting.origin.clone())
+    };
+    assert_eq!(
+        origin("tools.command_timeout_seconds").as_deref(),
+        Some("SCV_CONFIG")
+    );
+    assert_eq!(
+        origin("tools.agent_timeout_seconds").as_deref(),
+        Some("config.toml")
+    );
+
+    // A server's own reads keep the explicit file but not its flags.
+    let instance = Instance {
+        layout: layout.clone(),
+        overrides: ConfigOverrides {
+            approval_policy: Some(ApprovalPolicy::Never),
+            ..overrides
+        },
+    };
+    let default_policy = ToolConfig::default().approval_policy;
+    let config = instance.load_user().unwrap();
+    assert_eq!(config.tools.command_timeout_seconds, 300);
+    assert_eq!(config.tools.approval_policy, default_policy);
+    assert_eq!(
+        instance
+            .load(workspace.path())
+            .unwrap()
+            .tools
+            .approval_policy,
+        default_policy
+    );
 }

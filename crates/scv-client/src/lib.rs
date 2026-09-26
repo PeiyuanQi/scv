@@ -1,6 +1,6 @@
 //! What every local client of the SCV daemon needs, without depending on the
-//! server: the instance [`Layout`] (every path under `SCV_HOME`), the
-//! [`default_socket_path`], the delegation-depth variable a delegated SCV
+//! server: the instance [`Layout`] (every path under `SCV_HOME`, and the
+//! instance's service unit name), the delegation-depth variable a delegated SCV
 //! inherits, framed reading and writing ([`Connection`], [`read_frame`]),
 //! private instance files ([`fs::replace_private`]), [`Secret`] values
 //! that never print, byte-bounded text
@@ -23,11 +23,7 @@ use scv_protocol::{
     ClientMessage, DaemonCommand, DaemonStatus, ErrorCode, Frame, FrameDecoder, Overflow,
     PROTOCOL_VERSION, ServerEvent,
 };
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{fmt, path::Path, time::Duration};
 use tokio::{io::BufReader, net::UnixStream};
 
 /// Largest management reply, counting its line ending.
@@ -48,11 +44,6 @@ fn parse_delegation_depth(value: Option<&str>) -> Option<u32> {
     value
         .and_then(|value| value.trim().parse().ok())
         .filter(|depth| *depth > 0)
-}
-
-/// The daemon socket of the instance selected by `SCV_HOME`.
-pub fn default_socket_path() -> Result<PathBuf> {
-    Ok(Layout::from_env()?.socket())
 }
 
 /// Why a [`control`] request failed.

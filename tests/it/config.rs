@@ -456,3 +456,28 @@ fn config_show_names_each_setting_origin_and_hides_secrets() {
             .to_string()
     );
 }
+
+/// The systemd unit of an instance started with `--scv-home` is named by a
+/// hash of its resolved home, so `scv restart` and the planned-restart
+/// watchdog find the unit an earlier release wrote. The home here is reached
+/// through a symlink, which must not change the name.
+#[test]
+fn the_service_unit_is_named_by_a_hash_of_the_resolved_home() {
+    use sha2::{Digest as _, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("instance");
+    std::fs::create_dir(&real).unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let resolved = std::fs::canonicalize(&real).unwrap();
+    let digest = Sha256::digest(resolved.to_string_lossy().as_bytes());
+    let suffix: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let shown = success(&scv(&link, &["config", "show"], ""));
+    assert!(
+        shown.contains(&format!("scv-{suffix}.service")),
+        "missing scv-{suffix}.service in:\n{shown}"
+    );
+}

@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use scv_channels::Channel as _;
 use scv_channels::feishu::{self, Feishu};
 use scv_channels::wechat::{self, WeChat};
+use scv_client::Layout;
 use scv_protocol::{DaemonCommand, RemoteTools};
 use std::path::Path;
 
@@ -13,7 +14,7 @@ use super::control;
 use super::prompt::read_secret;
 use super::status::show_status;
 
-pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
+pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Result<()> {
     match command {
         ChannelsCommand::Login {
             channel,
@@ -22,7 +23,6 @@ pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
             app_id,
             owner_open_id,
         } => {
-            let layout = scv_client::Layout::from_env()?;
             match channel {
                 ChannelArg::Wechat => {
                     if app_id.is_some() {
@@ -30,7 +30,7 @@ pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
                     }
                     let base_url =
                         login_url.unwrap_or_else(|| "https://ilinkai.weixin.qq.com".into());
-                    WeChat::login(&layout, &account, wechat::Login { base_url }).await?;
+                    WeChat::login(layout, &account, wechat::Login { base_url }).await?;
                 }
                 ChannelArg::Feishu | ChannelArg::Lark => {
                     if login_url.is_some() {
@@ -55,37 +55,52 @@ pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
                         }
                         None => feishu::Login::Scan { brand },
                     };
-                    Feishu::login(&layout, &account, login).await?;
+                    Feishu::login(layout, &account, login).await?;
                 }
             }
-            reload_after_login().await
+            reload_after_login(layout).await
         }
         ChannelsCommand::Run {
             channel,
             account,
             workspace,
             remote_tools,
-        } => channel_run(channel, &account, &workspace, remote_tools.map(Into::into)).await,
+        } => {
+            channel_run(
+                layout,
+                channel,
+                &account,
+                &workspace,
+                remote_tools.map(Into::into),
+            )
+            .await
+        }
         ChannelsCommand::Stop { channel, account } => {
-            control(DaemonCommand::ChannelSet {
-                channel: channel.name().into(),
-                account,
-                enabled: false,
-                workspace: None,
-                remote_tools: None,
-            })
+            control(
+                layout,
+                DaemonCommand::ChannelSet {
+                    channel: channel.name().into(),
+                    account,
+                    enabled: false,
+                    workspace: None,
+                    remote_tools: None,
+                },
+            )
             .await?;
             println!("{} account disabled and stopped.", channel.title());
             Ok(())
         }
         ChannelsCommand::Status { channel, account } => {
-            show_status(channel.map(ChannelArg::name), account.as_deref()).await
+            show_status(layout, channel.map(ChannelArg::name), account.as_deref()).await
         }
         ChannelsCommand::Logout { channel, account } => {
-            control(DaemonCommand::ChannelLogout {
-                channel: channel.name().into(),
-                account,
-            })
+            control(
+                layout,
+                DaemonCommand::ChannelLogout {
+                    channel: channel.name().into(),
+                    account,
+                },
+            )
             .await?;
             println!(
                 "{} account stopped; local credentials and delivery state removed.",
@@ -97,19 +112,23 @@ pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
 }
 
 async fn channel_run(
+    layout: &Layout,
     channel: ChannelArg,
     account: &str,
     workspace: &Path,
     remote_tools: Option<RemoteTools>,
 ) -> Result<()> {
     let workspace = std::fs::canonicalize(workspace).context("resolve channel workspace")?;
-    let status = control(DaemonCommand::ChannelSet {
-        channel: channel.name().into(),
-        account: account.into(),
-        enabled: true,
-        workspace: Some(workspace.display().to_string()),
-        remote_tools,
-    })
+    let status = control(
+        layout,
+        DaemonCommand::ChannelSet {
+            channel: channel.name().into(),
+            account: account.into(),
+            enabled: true,
+            workspace: Some(workspace.display().to_string()),
+            remote_tools,
+        },
+    )
     .await?;
     println!(
         "{} account enabled under the SCV daemon; use `scv channels status {}` for live connection state.",
@@ -138,8 +157,8 @@ async fn channel_run(
     Ok(())
 }
 
-async fn reload_after_login() -> Result<()> {
-    match control(DaemonCommand::Reload).await {
+async fn reload_after_login(layout: &Layout) -> Result<()> {
+    match control(layout, DaemonCommand::Reload).await {
         Ok(_) => println!("Daemon refreshed; enabled accounts start automatically."),
         Err(_) => println!(
             "Credentials saved. The daemon will load enabled accounts at startup or its next refresh."

@@ -337,7 +337,7 @@ impl<'a> AccountRun<'a> {
                     turn_timeout,
                 }),
             media: MediaOptions::new(
-                &self.layout.media(),
+                self.layout,
                 kind.name(),
                 self.account,
                 self.settings.media.clone(),

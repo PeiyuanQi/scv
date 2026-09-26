@@ -2,7 +2,7 @@
 //! a delegated release, and the rule that delegated runs never manage it.
 
 use anyhow::{Context, Result, bail};
-use scv_client::ControlError;
+use scv_client::{ControlError, Layout};
 use scv_protocol::{DaemonCommand, ErrorCode};
 use scv_server::config::ConfigOverrides;
 use std::io::{self, IsTerminal};
@@ -47,6 +47,7 @@ pub(crate) fn refuse_nested_daemon_control(command: &Command) -> Result<()> {
 const RESTART_UNSUPPORTED: i32 = 3;
 
 pub(crate) async fn restart_when_idle(
+    layout: &Layout,
     version: Option<String>,
     commit: Option<String>,
     max_wait: Option<u64>,
@@ -54,12 +55,15 @@ pub(crate) async fn restart_when_idle(
     let parent = std::env::var(scv_tools::delegation::PARENT_VARIABLE)
         .ok()
         .filter(|chain| !chain.trim().is_empty());
-    let status = match control(DaemonCommand::RestartWhenIdle {
-        version,
-        commit,
-        parent,
-        max_wait_seconds: max_wait,
-    })
+    let status = match control(
+        layout,
+        DaemonCommand::RestartWhenIdle {
+            version,
+            commit,
+            parent,
+            max_wait_seconds: max_wait,
+        },
+    )
     .await
     {
         Ok(status) => status,
@@ -116,11 +120,14 @@ pub(crate) fn describe_restart(info: &scv_protocol::RestartInfo) -> String {
     )
 }
 
-pub(crate) async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> {
-    let socket = scv_client::default_socket_path()?;
+pub(crate) async fn run_daemon(
+    layout: &Layout,
+    workspace: &Path,
+    overrides: ConfigOverrides,
+) -> Result<()> {
     std::env::set_current_dir(workspace)
         .with_context(|| format!("change to daemon workspace {}", workspace.display()))?;
-    scv_server::run_socket(&socket, overrides).await
+    scv_server::run_socket(layout, overrides).await
 }
 
 pub(crate) fn init_tracing() {

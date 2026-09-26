@@ -26,14 +26,14 @@ async fn nonreading_management_client_does_not_hold_component_lock() {
     let (server_output, _blocked_output) = tokio::io::duplex(1);
     let tasks = TaskTracker::new();
     let components = Arc::new(Mutex::new(components::Components::new(
-        PathBuf::from("/unused.sock"),
+        crate::test_support::test_instance("/unused"),
         PathBuf::from("/"),
     )));
     let cancel = CancellationToken::new();
     let handler = tokio::spawn(run_managed(
         server_input,
         server_output,
-        ConfigOverrides::default(),
+        crate::test_support::test_instance("/unused"),
         Some(components.clone()),
         test_registry(),
         cancel.clone(),
@@ -75,7 +75,7 @@ async fn forced_connection_abort_drops_and_joins_writer_descendants() {
     let handler = tokio::spawn(run_managed(
         server_input,
         server_output,
-        ConfigOverrides::default(),
+        crate::test_support::test_instance("/unused"),
         None,
         test_registry(),
         CancellationToken::new(),

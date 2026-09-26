@@ -1866,6 +1866,7 @@ dependencies = [
  "scv-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]
@@ -1923,7 +1924,6 @@ dependencies = [
  "scv-tools",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "tokio",
  "tokio-util",

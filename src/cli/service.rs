@@ -3,29 +3,41 @@
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum as _;
+use scv_client::Layout;
+use scv_server::config::ConfigOverrides;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use super::common::ApprovalArg;
 
+/// The command-line settings `scv start` and `scv restart` write into the
+/// unit's `scv run` command.
+pub(crate) struct Flags<'a> {
+    pub(crate) approval_policy: Option<ApprovalArg>,
+    pub(crate) provider: Option<&'a str>,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) base_url: Option<&'a str>,
+}
+
+/// Start, stop, or restart the instance's systemd user unit, writing the
+/// unit first when a `workspace` is given.
 pub(crate) fn daemon_control(
+    layout: &Layout,
+    overrides: &ConfigOverrides,
     action: &str,
     workspace: Option<&Path>,
-    approval_policy: Option<ApprovalArg>,
-    provider: Option<&str>,
-    model: Option<&str>,
-    base_url: Option<&str>,
+    flags: &Flags<'_>,
     allow_sudo: bool,
 ) -> Result<()> {
     if action == "start" || action == "restart" {
         ensure_sudo_expectation(allow_sudo)?;
     }
+    let service = layout.service_name();
     if let Some(workspace) = workspace {
         let workspace = std::fs::canonicalize(workspace).context("resolve daemon workspace")?;
-        let service = scv_server::service_name()?;
-        stop_legacy_instance(&service)?;
-        let path = service_unit_path()?;
+        stop_legacy_instance(layout, &service)?;
+        let path = service_unit_path(layout)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -37,26 +49,39 @@ pub(crate) fn daemon_control(
             systemd_quote(workspace.as_os_str()),
         ];
         for (flag, value) in [
-            ("--provider", provider),
-            ("--model", model),
-            ("--base-url", base_url),
+            ("--provider", flags.provider),
+            ("--model", flags.model),
+            ("--base-url", flags.base_url),
         ] {
             if let Some(value) = value {
                 command.push(flag.into());
                 command.push(systemd_quote(std::ffi::OsStr::new(value)));
             }
         }
-        if let Some(policy) = approval_policy {
+        if let Some(policy) = flags.approval_policy {
             command.push("--approval-policy".into());
             command.push(systemd_quote(std::ffi::OsStr::new(
                 policy.to_possible_value().expect("value enum").get_name(),
             )));
         }
-        let instance_environment = std::env::var_os("SCV_HOME")
-            .map(|home| format!("Environment=SCV_HOME={}\n", systemd_quote(&home)))
-            .unwrap_or_default();
-        let config_environment = std::env::var_os("SCV_CONFIG")
-            .map(|config| format!("Environment=SCV_CONFIG={}\n", systemd_quote(&config)))
+        // The unit selects the same instance and configuration file.
+        let instance_environment = if layout.is_default() {
+            String::new()
+        } else {
+            format!(
+                "Environment=SCV_HOME={}\n",
+                systemd_quote(layout.home().as_os_str())
+            )
+        };
+        let config_environment = overrides
+            .config_file
+            .as_ref()
+            .map(|config| {
+                format!(
+                    "Environment=SCV_CONFIG={}\n",
+                    systemd_quote(config.as_os_str())
+                )
+            })
             .unwrap_or_default();
         let unit = format!(
             "[Unit]\nDescription=SCV agent daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={}\nRestart=on-failure\nRestartSec=3\nEnvironment=RUST_LOG=info\n{}{}\n[Install]\nWantedBy=default.target\n",
@@ -82,20 +107,18 @@ pub(crate) fn daemon_control(
     let mut command = ProcessCommand::new("systemctl");
     command.args(["--user", verb]);
     command.args(extra);
-    command.arg(scv_server::service_name()?);
+    command.arg(&service);
     let status = command.status().context("run systemctl")?;
     if !status.success() {
-        bail!("systemctl {action} {} failed", scv_server::service_name()?);
+        bail!("systemctl {action} {service} failed");
     }
     Ok(())
 }
 
 /// Where `scv start` writes this instance's systemd user unit.
-pub(crate) fn service_unit_path() -> Result<PathBuf> {
+pub(crate) fn service_unit_path(layout: &Layout) -> Result<PathBuf> {
     let config = dirs::config_dir().context("cannot determine XDG config directory")?;
-    Ok(config
-        .join("systemd/user")
-        .join(scv_server::service_name()?))
+    Ok(config.join("systemd/user").join(layout.service_name()))
 }
 
 fn sudo_available() -> bool {
@@ -181,14 +204,11 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     scv_client::fs::replace_private(path, contents).context("install systemd unit")
 }
 
-fn stop_legacy_instance(service: &str) -> Result<()> {
-    if service == "scv.service" {
+fn stop_legacy_instance(layout: &Layout, service: &str) -> Result<()> {
+    if service == "scv.service" || layout.is_default() {
         return Ok(());
     }
-    let Some(home) = std::env::var_os("SCV_HOME") else {
-        return Ok(());
-    };
-    let expected_home = format!("SCV_HOME={}", PathBuf::from(home).display());
+    let expected_home = format!("SCV_HOME={}", layout.home().display());
     let output = ProcessCommand::new("systemctl")
         .args([
             "--user",

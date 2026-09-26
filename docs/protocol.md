@@ -4,9 +4,10 @@ Status: protocol version 3
 
 The SCV client protocol is bidirectional newline-delimited JSON over the local
 Unix socket or stdin/stdout. Each line is one UTF-8 JSON object. The server
-writes diagnostics only to stderr. `scv-client` owns the default socket path
-(`$SCV_HOME/state/server.sock`, normally `~/.scv/state/server.sock`) and the daemon control
-helper; it depends on wire types in `scv-protocol`, not server implementation.
+writes diagnostics only to stderr. `scv-client` owns the instance layout,
+which places the socket at `$SCV_HOME/state/server.sock` (normally
+`~/.scv/state/server.sock`), and the daemon control helper; it depends on wire
+types in `scv-protocol`, not server implementation.
 
 ## Version and envelopes
 

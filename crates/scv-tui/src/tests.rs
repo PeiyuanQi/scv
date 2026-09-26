@@ -113,7 +113,7 @@ async fn connected(
 ) -> (Client, App, BufReader<UnixStream>) {
     let options = LaunchOptions::default();
     let (connection, peer) = tokio::join!(
-        Client::connect_at(&path.0, Path::new("/tmp"), &options),
+        Client::connect(&path.0, Path::new("/tmp"), &options),
         accept_session(listener, "old-session"),
     );
     let (client, session) = connection.unwrap();

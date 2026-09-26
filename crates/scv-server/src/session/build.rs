@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use scv_client::Layout;
 use scv_core::{AgentRuntime, ApprovalGate, BudgetContextPolicy, ToolRegistry};
 use scv_provider_openai::OpenAiProvider;
 use scv_tools::{
@@ -20,7 +21,7 @@ use uuid::Uuid;
 use super::{Session, SessionClient};
 use crate::{
     approval::UnattendedGate,
-    config::{self, Config, ConfigOverrides},
+    config::{Config, ConfigOverrides},
     prompt::{PromptContext, SkillListings, build_system_prompt, skills::discover_skills},
 };
 
@@ -68,6 +69,7 @@ pub(crate) fn agent_tool_names(tools: &ToolRegistry) -> Vec<String> {
 /// A chat client (one naming its `channel`) sends files the model attaches,
 /// so a session with tools then offers `chat_attach`.
 pub(crate) async fn build_session(
+    layout: &Layout,
     cwd: &str,
     overrides: ConfigOverrides,
     delegation_depth: u32,
@@ -80,7 +82,7 @@ pub(crate) async fn build_session(
         return Err(anyhow!("cwd is not a directory"));
     }
     let no_tools = overrides.no_tools;
-    let config = Config::load(&workspace, overrides)?;
+    let config = Config::load(layout, &workspace, overrides)?;
     if !no_tools {
         config.prepare_adapter_homes()?;
     }
@@ -137,7 +139,7 @@ pub(crate) async fn build_session(
         });
         tools.background = background.clone();
         if client.channel.is_some() {
-            tools.chat_attach = chat_attach_config();
+            tools.chat_attach = Some(chat_attach_config(layout));
         }
         let mut registry = builtin_registry(
             tools,
@@ -190,16 +192,14 @@ pub(crate) async fn build_session(
 /// `chat_attach` for a chat session: it copies checked files into the
 /// channels' media outbox, and refuses the SCV instance itself except its
 /// media, secret locations in the user's home, and host secrets.
-pub(crate) fn chat_attach_config() -> Option<scv_tools::chat_attach::ChatAttachConfig> {
-    let scv_home = config::user_home_path()?;
-    let media = scv_client::Layout::new(&scv_home).media();
-    Some(scv_tools::chat_attach::ChatAttachConfig::standard(
+pub(crate) fn chat_attach_config(layout: &Layout) -> scv_tools::chat_attach::ChatAttachConfig {
+    scv_tools::chat_attach::ChatAttachConfig::standard(
         dirs::home_dir().as_deref(),
-        &scv_home,
-        scv_channels::media::outbox(&media),
-        vec![media],
+        layout.home(),
+        layout.outbox(),
+        vec![layout.media()],
         scv_channels::media::MAX_REPLY_FILE_BYTES,
-    ))
+    )
 }
 
 #[cfg(test)]

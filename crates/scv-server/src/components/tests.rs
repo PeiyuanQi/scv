@@ -93,7 +93,10 @@ fn credentials_are_not_connection_evidence() {
 async fn busy_account_snapshot_preserves_live_work_but_invalid_settings_stop_it() {
     let starts = Arc::new(AtomicUsize::new(0));
     let stops = Arc::new(AtomicUsize::new(0));
-    let mut components = Components::new(PathBuf::from("/unused.sock"), PathBuf::from("/"));
+    let mut components = Components::new(
+        crate::test_support::test_instance("/unused"),
+        PathBuf::from("/"),
+    );
     components.supervisor.start(
         Arc::new(Fake {
             starts: starts.clone(),
@@ -261,7 +264,7 @@ async fn a_cancelled_channel_account_stops_before_touching_anything() {
         }),
         settings: AccountSettings::default(),
         workspace: "/".into(),
-        socket: "/missing".into(),
+        instance: crate::test_support::test_instance("/missing"),
         tools: false,
         link: scv_channels::hub::Link::detached(),
     };

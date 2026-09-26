@@ -87,7 +87,7 @@ fn inbound() -> Value {
 /// Media directories inside a test's temporary directory.
 fn media(root: &Path) -> crate::MediaOptions {
     crate::MediaOptions::new(
-        &root.join("media"),
+        &crate::Layout::new(root),
         "wechat",
         "default",
         crate::MediaSettings::default(),
@@ -1973,7 +1973,7 @@ async fn an_owners_files_are_decrypted_saved_privately_and_attached_to_the_turn(
         assert_eq!(image["mime"], "image/png");
         assert_eq!(image["size"], png.len());
         let path = Path::new(image["path"].as_str().unwrap());
-        assert!(path.starts_with(directory.path().join("media/wechat/default")));
+        assert!(path.starts_with(directory.path().join("state/media/wechat/default")));
         assert_eq!(std::fs::read(path).unwrap(), png);
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(path), 0o600);

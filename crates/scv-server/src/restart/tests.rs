@@ -117,6 +117,7 @@ fn notifier(
     (
         Notifier {
             hub: Arc::clone(hub),
+            instance: crate::test_support::test_instance("/unused"),
             states: States::Fixed(Arc::clone(&states)),
             grace: Duration::from_millis(200),
             give_up: Duration::from_secs(5),
@@ -334,19 +335,19 @@ fn only_a_recent_restart_explains_interrupted_work() {
     let hub = Hub::new(None);
     let mut recent = plan(PlanState::Verified);
     recent.restart_unix = Some(unix_now() - 30);
-    save_plan(&plan_path(directory.path()), &recent).unwrap();
-    startup(directory.path(), &hub);
+    save_plan(&Layout::new(directory.path()).update_plan(), &recent).unwrap();
+    startup(&Layout::new(directory.path()), &hub);
     assert_eq!(hub.restart().unwrap().to_version, "0.1.37");
 
     let mut old = recent.clone();
     old.restart_unix = Some(unix_now() - 2 * RESTART_CONTEXT_MAX_AGE);
-    save_plan(&plan_path(directory.path()), &old).unwrap();
-    startup(directory.path(), &hub);
+    save_plan(&Layout::new(directory.path()).update_plan(), &old).unwrap();
+    startup(&Layout::new(directory.path()), &hub);
     assert!(hub.restart().is_none());
 
     let waiting = plan(PlanState::Waiting);
-    save_plan(&plan_path(directory.path()), &waiting).unwrap();
-    startup(directory.path(), &hub);
+    save_plan(&Layout::new(directory.path()).update_plan(), &waiting).unwrap();
+    startup(&Layout::new(directory.path()), &hub);
     assert!(hub.restart().is_none(), "a plan that never restarted");
 }
 
@@ -354,7 +355,7 @@ fn only_a_recent_restart_explains_interrupted_work() {
 fn an_unclean_stop_is_detected_once() {
     let directory = tempfile::tempdir().unwrap();
     let hub = Hub::new(None);
-    let first = startup(directory.path(), &hub);
+    let first = startup(&Layout::new(directory.path()), &hub);
     assert!(first.unclean.is_none());
     // Pretend the marker was left by another daemon that died.
     let marker = Marker {
@@ -363,24 +364,24 @@ fn an_unclean_stop_is_detected_once() {
         started_unix: 5,
     };
     std::fs::write(
-        marker_path(directory.path()),
+        Layout::new(directory.path()).daemon_marker(),
         serde_json::to_vec(&marker).unwrap(),
     )
     .unwrap();
-    let second = startup(directory.path(), &hub);
+    let second = startup(&Layout::new(directory.path()), &hub);
     assert_eq!(
         second.unclean.map(|(version, _)| version).as_deref(),
         Some("0.1.30")
     );
-    clean_shutdown(directory.path());
-    let third = startup(directory.path(), &hub);
+    clean_shutdown(&Layout::new(directory.path()));
+    let third = startup(&Layout::new(directory.path()), &hub);
     assert!(third.unclean.is_none());
 }
 
 #[test]
 fn plans_are_private_files() {
     let directory = tempfile::tempdir().unwrap();
-    let path = plan_path(directory.path());
+    let path = Layout::new(directory.path()).update_plan();
     save_plan(&path, &plan(PlanState::Waiting)).unwrap();
     assert_eq!(load_plan(&path).unwrap(), Some(plan(PlanState::Waiting)));
     #[cfg(unix)]
@@ -414,14 +415,18 @@ fn recording(
     registry: &Arc<DelegationRegistry>,
 ) -> (Arc<Restarter>, Launched, Arc<Mutex<Components>>) {
     let components = Arc::new(Mutex::new(Components::new(
-        PathBuf::from("/unused.sock"),
+        crate::test_support::test_instance("/unused"),
         PathBuf::from("/"),
     )));
     let launched = Arc::new(SyncMutex::new(Vec::new()));
     let restarter = Arc::new(Restarter {
         launcher: Launcher::Record(Arc::clone(&launched)),
-        notifier: Notifier::new(Arc::clone(hub), Arc::downgrade(&components)),
-        home: home.to_owned(),
+        notifier: Notifier::new(
+            crate::test_support::test_instance(home),
+            Arc::clone(hub),
+            Arc::downgrade(&components),
+        ),
+        instance: crate::test_support::test_instance(home),
         hub: Arc::clone(hub),
         registry: Arc::clone(registry),
         components: Arc::downgrade(&components),
@@ -446,7 +451,9 @@ async fn a_restart_waits_for_the_requesting_job_its_report_and_owner_messages() 
     use scv_tools::delegation::{DelegationRecord, ProcessIdentity};
     use std::os::unix::process::CommandExt as _;
     let home = tempfile::tempdir().unwrap();
-    let registry = Arc::new(DelegationRegistry::new(home.path()));
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
     let hub = Hub::new(None);
     let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
     // The delegation running the deploy, started by this daemon.
@@ -533,7 +540,10 @@ async fn a_restart_waits_for_the_requesting_job_its_report_and_owner_messages() 
         })
     );
     assert_eq!(
-        load_plan(&plan_path(home.path())).unwrap().unwrap().state,
+        load_plan(&Layout::new(home.path()).update_plan())
+            .unwrap()
+            .unwrap()
+            .state,
         PlanState::Restarting
     );
 }
@@ -541,7 +551,9 @@ async fn a_restart_waits_for_the_requesting_job_its_report_and_owner_messages() 
 #[tokio::test]
 async fn a_restart_goes_ahead_at_its_deadline_and_says_so() {
     let home = tempfile::tempdir().unwrap();
-    let registry = Arc::new(DelegationRegistry::new(home.path()));
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
     let hub = Hub::new(None);
     let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
     let link = Link::new(Arc::clone(&hub), "feishu:default", Some("owner".into()));

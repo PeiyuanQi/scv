@@ -63,15 +63,8 @@ pub(crate) enum ClientInput {
 }
 
 impl Client {
+    /// Connect to the daemon listening on `path` and start a session.
     pub(crate) async fn connect(
-        cwd: &Path,
-        options: &LaunchOptions,
-    ) -> Result<(Self, SessionInfo)> {
-        let path = scv_client::default_socket_path()?;
-        Self::connect_at(&path, cwd, options).await
-    }
-
-    pub(crate) async fn connect_at(
         path: &Path,
         cwd: &Path,
         options: &LaunchOptions,
@@ -251,7 +244,7 @@ pub(crate) async fn reconnect_client(
     options: &LaunchOptions,
 ) -> (Client, SessionInfo) {
     loop {
-        if let Ok(connection) = Client::connect_at(path, cwd, options).await {
+        if let Ok(connection) = Client::connect(path, cwd, options).await {
             return connection;
         }
         tokio::time::sleep(RECONNECT_DELAY).await;

@@ -41,22 +41,31 @@ fn main() -> Result<()> {
     unsafe {
         common::apply_process_config(cli.scv_home.as_deref(), cli.config_path.as_deref(), &cwd)?;
     }
-    tokio::runtime::Runtime::new()?.block_on(serve(cli))
+    let layout = scv_client::Layout::from_env()?;
+    let config_file = cli
+        .config_path
+        .as_deref()
+        .map(|path| common::absolute_path(path, &cwd));
+    tokio::runtime::Runtime::new()?.block_on(serve(cli, layout, config_file))
 }
 
-async fn serve(cli: Cli) -> Result<()> {
+async fn serve(cli: Cli, layout: scv_client::Layout, config_file: Option<PathBuf>) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
-    scv_server::run_stdio(ConfigOverrides {
-        provider: cli.provider,
-        model: cli.model,
-        base_url: cli.base_url,
-        approval_policy: cli.approval_policy.map(Into::into),
-        no_tools: false,
-    })
+    scv_server::run_stdio(
+        &layout,
+        ConfigOverrides {
+            provider: cli.provider,
+            model: cli.model,
+            base_url: cli.base_url,
+            approval_policy: cli.approval_policy.map(Into::into),
+            no_tools: false,
+            config_file,
+        },
+    )
     .await
 }

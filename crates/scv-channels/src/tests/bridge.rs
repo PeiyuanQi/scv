@@ -106,7 +106,7 @@ impl Bench {
     /// daemon, until `peer` returns; fails the test after 15 seconds.
     async fn run<T>(&self, peer: impl std::future::Future<Output = T>) -> T {
         let media = MediaOptions::new(
-            &self.directory.path().join("media"),
+            &Layout::new(self.directory.path()),
             "test",
             "default",
             MediaSettings::default(),

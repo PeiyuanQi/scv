@@ -647,7 +647,7 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
     let reports = StdMutex::new(Vec::new());
     let report = |healthy| reports.lock().unwrap().push(healthy);
     let media = crate::MediaOptions::new(
-        &directory.path().join("media"),
+        &crate::Layout::new(directory.path()),
         "feishu",
         "default",
         crate::MediaSettings::default(),
