@@ -24,8 +24,9 @@ SCV merges configuration in this order, from lowest to highest precedence:
 1. built-in defaults;
 2. `$SCV_HOME/config.toml` or `~/.scv/config.toml`;
 3. `<workspace>/.scv/config.toml`;
-4. documented environment variables;
-5. command-line flags.
+4. the explicit file from `--config` or `SCV_CONFIG`;
+5. documented environment variables;
+6. command-line flags.
 
 Unknown keys and invalid values are startup errors, reported with the file
 and line but never the line's text, which may hold a key. Project configuration is
@@ -616,6 +617,31 @@ Secrets are never included in diagnostics, protocol events, approval summaries,
 or tool results.
 
 ## Daemon and component settings
+
+One daemon serves an instance. Run it attached to a terminal, or let the
+systemd user service supervise the same process:
+
+```bash
+scv run --workspace /path/to/workspace      # in the foreground
+scv start --workspace /path/to/workspace    # as the systemd user service
+scv status
+scv reload
+scv restart --workspace /path/to/workspace
+scv restart --when-idle   # into a newly installed release, once owner work is done
+scv confirm "Publish the release?"   # ask the owner yes or no in chat; 0 only on yes
+scv stop
+```
+
+With no subcommand, `scv` opens the TUI on the daemon's socket, for a session
+in the current directory. It never starts a server itself: when no daemon
+listens, it names the socket and suggests `scv start` or `scv run`. Model and
+provider overrides travel with the TUI's `session.start`, so one running
+daemon serves sessions on different models or providers without a restart:
+
+```bash
+scv --model gpt-4.1-mini
+scv --provider local --model llama3.1 --base-url http://localhost:11434/v1
+```
 
 The daemon listens on the instance's socket, `$SCV_HOME/state/server.sock`
 (normally `~/.scv/state/server.sock`), which `scv_client::Layout` places;
