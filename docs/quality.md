@@ -14,7 +14,7 @@ third-party agent. The correctness contract covers:
 - protocol round trips and forward-compatible additive fields; every error
   code and tool error kind keeping its wire name, and unknown event types,
   codes, and kinds parsing as `unknown`;
-- a frozen copy of every event 0.2.2 sent decoding with today's types and
+- a frozen copy of every event 0.2 sent decoding with today's types and
   encoding back to the same bytes, and a failed call adding only its `error`
   kind, so the previous release (the planned-restart watchdog) reads what the
   new server sends;

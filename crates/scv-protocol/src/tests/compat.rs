@@ -1,9 +1,10 @@
-//! Compatibility with SCV 0.2.2, the release before the typed error codes:
+//! Compatibility with SCV 0.2, the series before the typed error codes (its
+//! last tree was labelled 0.2.2; 0.2.1 was the last 0.2 release published):
 //! frames it sent, frozen, must decode with today's types and encode back to
-//! the same bytes, so a 0.2.2 client (such as the planned-restart watchdog,
+//! the same bytes, so a 0.2 client (such as the planned-restart watchdog,
 //! which is always the previous release) reads what this server sends.
 //!
-//! The JSON below was produced by 0.2.2's own types. Never edit it: a change
+//! The JSON below was produced by the 0.2.2 tree's own types. Never edit it: a change
 //! that needs it edited breaks protocol version 3.
 
 use super::*;
