@@ -10,6 +10,7 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
         layout.channel_credentials("wechat"),
         layout.agent_home("codex"),
         layout.skills(),
+        layout.history(),
         layout.socket(),
         layout.delegations(),
         layout.conversations(),

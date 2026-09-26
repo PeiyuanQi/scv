@@ -41,6 +41,7 @@ fn session_model(home: &std::path::Path, workspace: &std::path::Path) -> String 
             delegation_depth: None,
             channel: None,
             auto_approve: None,
+            chat: None,
         },
     ] {
         writeln!(input, "{}", serde_json::to_string(&message).unwrap()).unwrap();

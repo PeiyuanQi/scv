@@ -45,7 +45,23 @@ impl Config {
             max_background: self.agent.max_background,
             background: None,
             chat_attach: None,
+            chat_history: None,
         }
+    }
+
+    /// How long a chat may be quiet before its next message starts a new
+    /// episode of its log.
+    pub(crate) fn episode_gap(&self) -> Duration {
+        Duration::from_secs(self.history.episode_gap_minutes.saturating_mul(60))
+    }
+
+    /// Where files the owner keeps from chat go: `history.archive_dir`, or
+    /// the history directory.
+    pub(crate) fn archive_dir(&self) -> std::path::PathBuf {
+        self.history
+            .archive_dir
+            .clone()
+            .unwrap_or_else(|| self.layout().history())
     }
 
     /// Web tool settings for a tool-enabled session, or `None` when disabled.

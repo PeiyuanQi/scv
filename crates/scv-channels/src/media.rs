@@ -90,7 +90,7 @@ impl Default for MediaSettings {
         Self {
             owner_max_mib: 50,
             others_image_max_mib: 5,
-            keep_days: 7,
+            keep_days: 365,
         }
     }
 }

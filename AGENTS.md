@@ -52,8 +52,8 @@
   root package, `tests/it`, or a documented extension surface uses it
   (`unreachable_pub` warns; `docs/quality.md`, "Lints and formatting").
 - Keep protocol types and framing in `scv-protocol`, the instance layout
-  (every path, the socket, the service unit name) and daemon control helpers
-  in `scv-client`, loop and extension traits
+  (every path, the socket, the service unit name), the chat log format, and
+  daemon control helpers in `scv-client`, loop and extension traits
   in `scv-core`, provider transport in provider crates, tool implementations
   and the delegated agents' credential-file formats in `scv-tools`, policy and
   session authority in `scv-server`, terminal presentation in `scv-tui`, and

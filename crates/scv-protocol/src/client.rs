@@ -6,6 +6,19 @@ use crate::{Attachment, DaemonCommand, PeerInfo};
 #[cfg(doc)]
 use crate::{CHAT_ATTACH_TOOL, MAX_CHANNEL_NAME_BYTES, MAX_TURN_ATTACHMENTS};
 
+/// A conversation's chat log under the server's history directory,
+/// `<channel>/<account>/<conversation>`. Each part is at most 64 bytes of
+/// ASCII letters, digits, `-`, and `_`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatLog {
+    /// The channel, as SCV names it in paths (`wechat`, `feishu`).
+    pub channel: String,
+    /// The channel account.
+    pub account: String,
+    /// A digest of the conversation, so sender IDs never become paths.
+    pub conversation: String,
+}
+
 /// A message from client to server. Serialized as one JSON object per line,
 /// tagged by `type` (such as `turn.start`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,6 +81,12 @@ pub enum ClientMessage {
         /// otherwise they get only what the approval policy grants unasked.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_approve: Option<bool>,
+        /// The chat log of the conversation this session answers: the server
+        /// starts the session with the log's open episode and, with tools,
+        /// lets the model search the rest. A chat client sends it for its
+        /// account owner's direct chat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat: Option<ChatLog>,
     },
     /// Attach to an existing session. Not supported: sessions belong to the
     /// connection that started them.

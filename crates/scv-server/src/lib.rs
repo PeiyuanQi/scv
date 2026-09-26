@@ -18,6 +18,7 @@ mod confirm;
 mod connection;
 mod control;
 mod daemon;
+mod disk;
 mod events;
 mod outbound;
 mod prompt;

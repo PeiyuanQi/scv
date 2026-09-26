@@ -96,6 +96,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
             agents: &agents,
             background: true,
             channel: None,
+            chat_history: false,
         },
     )
     .unwrap();
@@ -114,6 +115,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
             agents: &[],
             background: false,
             channel: None,
+            chat_history: false,
         },
     )
     .unwrap();

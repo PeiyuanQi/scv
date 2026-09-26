@@ -272,6 +272,7 @@ impl Parent {
                 delegation_depth: None,
                 channel: None,
                 auto_approve: None,
+                chat: None,
             })
             .await;
         parent.session_id = loop {

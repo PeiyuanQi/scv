@@ -33,7 +33,9 @@ jobs, and messages you when they are done.
 Scan a QR code to pair WeChat or Feishu/Lark. SCV answers only you by default,
 reads the photos, files, and videos you send, and sends files back. Long work
 runs in the background while you keep chatting; results and yes/no questions
-arrive as messages.
+arrive as messages. SCV keeps a log of your chat, so a conversation carries on
+across restarts and it can look back when you mention something older; `/new`
+starts a fresh one.
 
 ### One agent, many agents
 

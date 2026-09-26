@@ -175,6 +175,7 @@ impl Bench {
                 tool_owner: None,
                 senders: self.senders,
                 media,
+                log: crate::chatlog::LogOptions::test(self.directory.path(), "test"),
                 link,
                 report: &|_| {},
             },
@@ -786,4 +787,215 @@ async fn a_notice_its_sender_gave_up_on_is_never_sent() {
             assert!(peer.sent.try_recv().is_err(), "nothing else was sent");
         })
         .await;
+}
+
+/// The owner's direct chat log in `bench`'s instance.
+fn owner_log(bench: &Bench, owner: &str) -> std::path::PathBuf {
+    bench
+        .directory
+        .path()
+        .join("history/test/default")
+        .join(conversation_dir(owner))
+}
+
+/// Accept a session like [`accept_session`], returning its `session.start`.
+async fn accept_session_start(daemon: &UnixListener) -> (BufReader<UnixStream>, Value) {
+    let (stream, _) = daemon.accept().await.unwrap();
+    let mut side = BufReader::new(stream);
+    assert_eq!(next_frame(&mut side).await["type"], "initialize");
+    send_frame(&mut side, json!({"type":"initialized","request_id":"channel-init","protocol_version":scv_protocol::PROTOCOL_VERSION,"server":{"name":"test","version":"0"}})).await;
+    let start = next_frame(&mut side).await;
+    assert_eq!(start["type"], "session.start");
+    send_frame(&mut side, json!({"type":"session.started","request_id":"channel-session","session_id":"s","cwd":"/","model":"test","context_max_tokens":1024,"max_server_frame_bytes":1024,"max_transcript_bytes":1024,"max_transcript_items":10,"max_prompt_history_bytes":1024,"max_prompt_history_items":10})).await;
+    (side, start)
+}
+
+fn logged(dir: &std::path::Path) -> Vec<Vec<(history::Role, String)>> {
+    let (episodes, _) = history::episodes(dir, None, None, 100).unwrap();
+    episodes
+        .iter()
+        .rev()
+        .map(|episode| {
+            history::read_episode(dir, &episode.id, 0, 100)
+                .unwrap()
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|entry| (entry.role, entry.text))
+                .collect()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_owners_direct_chat_is_logged_and_new_starts_a_fresh_episode() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "hello")]);
+    let dir = owner_log(&bench, "owner");
+    bench
+        .run(async {
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            // The session names the log, so the server reloads its open episode.
+            assert_eq!(
+                start["chat"],
+                json!({"channel":"test","account":"default","conversation":conversation_dir("owner")})
+            );
+            assert_eq!(next_turn(&mut side).await, "hello");
+            // The owner's message is in the log before the turn ends.
+            assert_eq!(logged(&dir), [vec![(history::Role::Owner, "hello".to_owned())]]);
+            finish_turn(&mut side, "hi owner").await;
+            assert_eq!(peer.sent().await.text, "hi owner");
+            // `/new` clears the session and ends the episode, without a turn.
+            peer.push(vec![message("m2", "owner", " /NEW ")]);
+            let clear = next_frame(&mut side).await;
+            assert_eq!(clear["type"], "session.clear");
+            send_frame(&mut side, json!({"type":"session.cleared","request_id":clear["request_id"],"session_id":"s","seq":4})).await;
+            assert_eq!(peer.sent().await.text, NEW_LOGGED_REPLY);
+            peer.push(vec![message("m3", "owner", "again")]);
+            assert_eq!(next_turn(&mut side).await, "again");
+            finish_turn(&mut side, "fresh").await;
+            assert_eq!(peer.sent().await.text, "fresh");
+        })
+        .await;
+    let owner = |text: &str| (history::Role::Owner, text.to_owned());
+    let scv = |text: &str| (history::Role::Scv, text.to_owned());
+    assert_eq!(
+        logged(&dir),
+        [
+            vec![owner("hello"), scv("hi owner")],
+            vec![owner("again"), scv("fresh")],
+        ]
+    );
+    let (episodes, _) = history::episodes(&dir, None, None, 10).unwrap();
+    assert!(episodes[1].ended && !episodes[0].ended);
+}
+
+#[tokio::test]
+async fn other_senders_are_not_logged_and_their_sessions_name_no_log() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let bench = Bench {
+        senders: state::Senders::Anyone,
+        ..bench
+    };
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            assert!(start.get("chat").is_none(), "{start}");
+            assert_eq!(next_turn(&mut side).await, "hello");
+            finish_turn(&mut side, "hi alice").await;
+            peer.sent().await;
+        })
+        .await;
+    assert!(!bench.directory.path().join("history").exists());
+}
+
+#[tokio::test]
+async fn a_nearly_full_disk_saves_no_files_from_chat_but_logs_the_text() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let hub = hub::Hub::new(None);
+    hub.set_low_disk(true);
+    let link = hub::Link::new(Arc::clone(&hub), "test:default", Some("owner".into()));
+    let with_photo = |id: &str, text: &str| {
+        let mut message = Message::text(id, "owner", text, &format!("re-{id}"), None);
+        message.media.push(Media {
+            kind: MediaKind::Image,
+            name: "cat.jpg".into(),
+            size: Some(10),
+            mime: None,
+            transcript: None,
+            source: "cat".into(),
+        });
+        Inbound::Text(message)
+    };
+    peer.push(vec![with_photo("m1", "look")]);
+    bench
+        .run_linked(&link, async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(
+                next_turn(&mut side).await,
+                "look\n[image cat.jpg: not saved, the disk is nearly full]"
+            );
+            finish_turn(&mut side, "I cannot see it").await;
+            peer.sent().await;
+            // A photo alone gets the fixed reply instead of a turn.
+            peer.push(vec![with_photo("m2", "")]);
+            assert_eq!(peer.sent().await.text, LOW_DISK_REPLY);
+        })
+        .await;
+    assert_eq!(*bench.transport.downloads.lock().unwrap(), 0);
+    let entries = logged(&owner_log(&bench, "owner"));
+    assert_eq!(
+        entries[0].iter().map(|(role, _)| *role).collect::<Vec<_>>(),
+        [
+            history::Role::Owner,
+            history::Role::Scv,
+            history::Role::Owner,
+            history::Role::System
+        ]
+    );
+}
+
+#[tokio::test]
+async fn new_lets_a_running_background_report_finish_and_sends_it_first() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "hello")]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            finish_turn(&mut side, "hi").await;
+            assert_eq!(peer.sent().await.text, "hi");
+            // The server starts reporting a finished job just as `/new` comes.
+            let origin = json!({"kind":"background","jobs":["job-1"]});
+            send_frame(&mut side, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+            peer.push(vec![message("m2", "owner", "/new")]);
+            let clear = next_frame(&mut side).await;
+            assert_eq!(clear["type"], "session.clear");
+            send_frame(&mut side, json!({"type":"error","request_id":clear["request_id"],"code":"invalid_request","message":"the session is busy","fatal":false})).await;
+            send_frame(&mut side, json!({"type":"assistant.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":11,"content":"job-1 is done"})).await;
+            send_frame(&mut side, json!({"type":"turn.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":12,"steps":1,"usage":{},"origin":origin})).await;
+            let clear = next_frame(&mut side).await;
+            assert_eq!(clear["type"], "session.clear");
+            send_frame(&mut side, json!({"type":"session.cleared","request_id":clear["request_id"],"session_id":"s","seq":13})).await;
+            // The report reaches the owner before the fresh start does.
+            assert_eq!(peer.sent().await.text, "job-1 is done");
+            assert_eq!(peer.sent().await.text, NEW_LOGGED_REPLY);
+        })
+        .await;
+    let entries = logged(&owner_log(&bench, "owner"));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].last().unwrap(),
+        &(history::Role::Scv, "job-1 is done".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn replies_written_while_recovering_from_a_crash_are_logged() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    bench
+        .store
+        .save_state(
+            "default",
+            &state::BridgeState {
+                in_flight: vec![state::InFlight {
+                    message_id: "lost".into(),
+                    to_user_id: "owner".into(),
+                    context_token: "re-lost".into(),
+                    key: String::new(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    bench
+        .run(async {
+            assert_eq!(peer.sent().await.text, FAILURE_REPLY);
+        })
+        .await;
+    assert_eq!(
+        logged(&owner_log(&bench, "owner")),
+        [vec![(history::Role::System, FAILURE_REPLY.to_owned())]]
+    );
 }

@@ -4,7 +4,7 @@
 use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 
 use crate::{
-    builtin::chat_attach,
+    builtin::{chat_attach, chat_history},
     delegate::{
         adapters::{OutputFormat, Resume, Transport},
         background,
@@ -43,6 +43,9 @@ pub struct ToolsConfig {
     pub background: Option<Arc<background::BackgroundJobs>>,
     /// Offers `chat_attach` when the session answers on a chat channel.
     pub chat_attach: Option<chat_attach::ChatAttachConfig>,
+    /// Offers `chat_history` and `chat_keep` when the session answers a
+    /// conversation that has a chat log.
+    pub chat_history: Option<chat_history::ChatHistoryConfig>,
 }
 
 impl Default for ToolsConfig {
@@ -64,6 +67,7 @@ impl Default for ToolsConfig {
             max_background: 2,
             background: None,
             chat_attach: None,
+            chat_history: None,
         }
     }
 }

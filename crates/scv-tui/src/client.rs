@@ -149,6 +149,7 @@ impl Client {
             delegation_depth: scv_client::inherited_delegation_depth(),
             channel: None,
             auto_approve: None,
+            chat: None,
         })
         .await?;
         let session = match self.read_event().await? {

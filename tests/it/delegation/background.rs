@@ -136,6 +136,7 @@ impl Server {
                 delegation_depth: None,
                 channel: channel.map(str::to_owned),
                 auto_approve: channel.map(|_| true),
+                chat: None,
             })
             .await;
         loop {

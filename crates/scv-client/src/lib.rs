@@ -1,7 +1,8 @@
 //! What every local client of the SCV daemon needs, without depending on the
 //! server: the instance [`Layout`] (every path under `SCV_HOME`, and the
 //! instance's service unit name), the delegation-depth variable a delegated SCV
-//! inherits, framed reading and writing ([`Connection`], [`read_frame`]),
+//! inherits, the chat log ([`history`]), framed reading and writing
+//! ([`Connection`], [`read_frame`]),
 //! private instance files ([`fs::replace_private`]), [`Secret`] values
 //! that never print, byte-bounded text
 //! ([`text::utf8_prefix`]), and [`control`] for daemon management requests,
@@ -11,6 +12,7 @@
 
 mod connection;
 pub mod fs;
+pub mod history;
 mod layout;
 mod secret;
 pub mod text;

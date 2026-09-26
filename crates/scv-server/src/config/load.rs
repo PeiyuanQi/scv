@@ -186,6 +186,9 @@ impl Config {
             config.skills.user_dir = layout.skills();
         }
         config.skills.user_dir = expand_home(&config.skills.user_dir);
+        if let Some(archive) = &config.history.archive_dir {
+            config.history.archive_dir = Some(expand_home(archive));
+        }
         config.instance_home = instance_home;
         config.validate()?;
         Ok(config)

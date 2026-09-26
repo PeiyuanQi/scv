@@ -75,7 +75,8 @@ resolving symlinks:
 
 - anything that is not a regular, non-empty file of at most 25 MiB;
 - the SCV instance directory (`SCV_HOME`: its settings, credentials, agent
-  homes, and state), except the media directory holding what chat users sent;
+  homes, and state), except the media directory holding what chat users sent
+  and this chat's own kept files (see `chat_keep`);
 - credential and key locations under the user's home: `.ssh`, `.gnupg`,
   `.aws`, `.azure`, `.kube`, `.docker`, `.netrc`, `.git-credentials`,
   `.npmrc`, `.pypirc`, `.cargo/credentials(.toml)`, `.config/gh`,
@@ -95,6 +96,60 @@ The chat bridge sends only regular files inside the outbox, from a durable
 delivery record, and deletes each copy once it is sent or refused. This keeps
 a prompt from mailing out keys by path; it is not a sandbox, and a model with
 `bash` can still copy data elsewhere.
+
+## Chat history (`chat_history`)
+
+```json
+{"action":"search","query":"blue door"}
+{"action":"episodes","before":"2026-09-01","limit":20}
+{"action":"read","episode":"2026/2026-09-21_2026-09-27/2026-09-26T14-04-05","offset":0}
+```
+
+Offered, with `chat_keep`, only in a tool-enabled session whose client named
+its chat log in `session.start`: an account owner's direct chat on WeChat or
+Feishu (see [Chat history](channels.md#chat-history)). It reads that one
+conversation's log and nothing else, so it is read-only and never asks for
+approval.
+
+- `search` finds messages containing every word of `query`, ignoring case, in
+  their text, what they quoted, their files' names, or a voice message's
+  transcript, newest first: at most
+  `limit` (default 10, at most 100), each with its episode, its `index` in
+  the episode, its local time, who wrote it (`owner`, `scv`, or `system`),
+  and an excerpt. It reads at most 64 MiB of the log per call; `more` says
+  it stopped before the end.
+- `episodes` lists episodes newest first (default 20): ID, local times of
+  the first and last message, message count, the start of the owner's first
+  message, and whether `/new` ended it. `before` keeps those started before a
+  date and `after` those started on or after one, both as `YYYY-MM-DD`.
+- `read` shows an episode's messages from `offset` (default 30 at a time),
+  each up to 8,000 characters, with `total`. A file shows its path while it
+  is in the chat media, its new path with `kept` once kept, `gone` after its
+  retention, `not_saved` for one the user sent that was never saved, or
+  `sent` for a file SCV sent, and a voice message's `transcript`.
+
+An episode ID is `<year>/<week>/<start>` as the log names it; any other shape
+is refused. Results are JSON bounded by `tools.output_limit_bytes`, dropping
+list entries (with `more` set) until they fit.
+
+## Keeping chat files (`chat_keep`)
+
+```json
+{"path":"/home/u/.scv/state/media/wechat/default/3fa9c2d17e5b8a04/a1b2c3-cat.jpg"}
+```
+
+Keeps a file the user sent in this chat for good: it moves from the chat
+media directory, whose files expire after `keep_days`, to the conversation's
+kept files, `<archive>/<channel>/<account>/<conversation>/files/`, which
+nothing removes. `path` is the absolute path shown with the file in the turn
+or in `chat_history`. Only a regular file directly in this conversation's
+media directory is accepted, not a symlink or a file of another chat, and a
+kept file never replaces another of the same name; keeping a kept file again
+reports where it is. The file is linked under its kept name, which never
+replaces an existing file, before the original goes; across disks it is first
+copied to a private temporary file beside the kept files, so a failed copy
+leaves nothing under the kept name. The call has filesystem risk, which a chat
+owner's session approves.
 
 ## `web_fetch`
 

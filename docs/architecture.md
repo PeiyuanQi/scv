@@ -46,7 +46,8 @@ SCV provides:
   provider configuration allows it;
 - configurable, deterministic context budgeting and compaction;
 - built-in `read`, `read_skill`, `write`, `bash`, `web_fetch`, and
-  `web_search` tools, plus the provider's hosted web search when configured;
+  `web_search` tools, plus the provider's hosted web search when configured,
+  and in chat sessions `chat_attach`, `chat_history`, and `chat_keep`;
 - delegation through one `agent` tool, whose `agent` argument names another
   agent CLI (`claude`, `codex`, `grok`, `dsh`, `pi`) or a nested SCV (`scv`),
   in the foreground or as background jobs (`agent_wait`, `agent_status`,
@@ -56,6 +57,9 @@ SCV provides:
 - a TUI and chat channel bridges (WeChat, Feishu/Lark) that attach to the
   daemon through the same protocol, including media in both directions
   (`chat_attach`);
+- a chat log of each account owner's direct chat, from which a new session
+  carries on the open episode and which the model can search, with the files
+  the owner keeps and a free-disk-space floor;
 - interactive approval for tools with filesystem, shell, subprocess, or
   network side effects;
 - planned restarts into a newly installed release, with a binary rollback;
@@ -64,7 +68,7 @@ SCV provides:
 - Linux and macOS source builds and release archives.
 
 The current release does not include dynamic library loading, OS-level
-sandboxing, session resume, provider login, syntax-highlighted diffs, or
+sandboxing, session resume (beyond a chat's open episode), provider login, syntax-highlighted diffs, or
 feature parity with mature coding agents. Those features may be added without
 moving policy or model-provider code into the TUI.
 
@@ -75,7 +79,7 @@ The repository is one Cargo workspace with these packages:
 | Package | Responsibility |
 | --- | --- |
 | `scv-protocol` | Wire messages, the protocol version, and the bounded line framing (`FrameDecoder`) every connection uses. It contains no runtime policy and does no I/O. |
-| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket among them, and the instance's service unit name), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
+| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket among them, and the instance's service unit name), the chat log (`history`: its episode files, writer, and readers), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
@@ -90,7 +94,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.1` and exact workspace dependency pins.
+`0.3.2` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -134,7 +138,7 @@ What lives where in the largest crates:
 | | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
 | | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, and questions to the owner |
 | | `outbound.rs` | The byte- and frame-bounded outbound queue and event encoding |
-| | `session/` | A session (`mod.rs`), building one (`build.rs`), its turn queue (`queue.rs`), and running a turn (`turn.rs`) |
+| | `session/` | A session (`mod.rs`), building one (`build.rs`), starting a chat session with its log's open episode (`reload.rs`), its turn queue (`queue.rs`), and running a turn (`turn.rs`) |
 | | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`) |
 | | `approval.rs`, `events.rs` | Approval gates, and `CoreEvent` to `ServerEvent` |
 | | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
@@ -142,8 +146,9 @@ What lives where in the largest crates:
 | | `restart.rs` | [Planned restarts](#planned-restarts), the watchdog, and the notifier that finds the owner's chat |
 | | `confirm.rs` | [Questions to the owner](#questions-to-the-owner) (`scv confirm`) |
 | | `attachments.rs` | Files attached to a turn, such as chat media |
+| | `disk.rs` | The free-space floor for the chat log, chat media, and kept files |
 | `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, the tools' settings, and the argument helpers every tool shares |
-| | `builtin/` | Tools that run inside SCV: `fs.rs` (`read`, `write`), `skill.rs` (`read_skill`), `shell.rs` (`bash`), `web.rs` (`web_fetch`, `web_search`), `chat_attach.rs` |
+| | `builtin/` | Tools that run inside SCV: `fs.rs` (`read`, `write`), `skill.rs` (`read_skill`), `shell.rs` (`bash`), `web.rs` (`web_fetch`, `web_search`), `chat_attach.rs`, `chat_history.rs` (`chat_history`, `chat_keep`) |
 | | `process.rs` | Spawning a child in its own process group, draining its output, and `ProcessGroup`, the only way SCV signals a group |
 | | `delegate/agent.rs`, `delegate/request.rs` | The `agent` tool, which chooses the agent, checks the call against what it takes, and hands it to that agent's backend, and the arguments every call takes |
 | | `delegate/native.rs` | The per-turn CLI backend |
@@ -154,7 +159,7 @@ What lives where in the largest crates:
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
 | | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
-| | `state.rs`, `hub.rs`, `media.rs` | Durable account state, what the daemon shares with running bridges, and chat media |
+| | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state, what the daemon shares with running bridges, chat media, and logging the owner's direct chat |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
 | | `wechat/` | WeChat login, polling `getupdates`, and sending (`mod.rs`); iLink requests (`ilink.rs`); credentials (`credentials.rs`); CDN files, AES-encrypted both ways (`cdn.rs`) |
 | | `feishu/` | The Feishu transport (`mod.rs`) and its Open Platform client (`api.rs`); the event long connection, its protobuf frames, and parsing events and catch-up history (`socket.rs`, `frame.rs`, `inbound.rs`); signing in by QR scan or with an existing app (`login.rs`); credentials (`credentials.rs`) |

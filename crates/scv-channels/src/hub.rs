@@ -126,6 +126,9 @@ pub struct Hub {
     recovered: Mutex<std::collections::HashSet<String>>,
     /// Where the last-owner record persists across restarts.
     last_owner_path: Option<PathBuf>,
+    /// A disk holding chat files is below its free-space floor, so bridges
+    /// save no new files from chat.
+    low_disk: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -181,7 +184,20 @@ impl Hub {
             restart: Mutex::new(None),
             recovered: Mutex::default(),
             last_owner_path,
+            low_disk: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Record whether a disk holding the chat log, chat media, or kept files
+    /// is below its free-space floor; while it is, bridges save no new files
+    /// from chat.
+    pub fn set_low_disk(&self, low: bool) {
+        self.low_disk
+            .store(low, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn low_disk(&self) -> bool {
+        self.low_disk.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -456,6 +472,11 @@ pub struct Registration {
 }
 
 impl Registration {
+    /// Whether the daemon found a disk holding chat files nearly full.
+    pub(crate) fn low_disk(&self) -> bool {
+        self.hub.as_ref().is_some_and(|hub| hub.low_disk())
+    }
+
     /// Owner messages this bridge claimed and has not answered durably.
     pub fn set_owner_claims(&self, claims: usize) {
         if let Some(hub) = &self.hub

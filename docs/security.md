@@ -411,6 +411,26 @@ deduplicated like any batch. A reply the platform refuses is held in the private
 state file, bounded and for at most 7 days, and delivered only with the next
 reply to the same conversation; its content never enters logs.
 
+The account owner's direct chat is kept in the chat log under
+`$SCV_HOME/history/<channel>/<account>/<conversation>/` (files `0600`,
+directories `0700`), for up to 120 years: the owner's messages, what they
+quoted, the paths of files they sent, the model's answers, and SCV's own
+messages in that chat. Tool calls and their output, other senders, and group
+chats are not logged; the conversation directory is a digest, so no sender ID
+becomes a path. Anyone who can read the instance home can read the log, like
+the rest of it, so back it up and delete it as the personal data it is.
+`session.start` names a log only by plain path parts (`chat`), which the
+server resolves under its own history directory, never a path a client
+chooses. `chat_history` reads only that one conversation's log and refuses
+any other episode ID shape, and `chat_keep` moves only a regular,
+non-symlink file directly inside that conversation's media directory, into
+its kept files, never replacing a file there; neither can reach another
+chat. A chat's own kept files, which nothing removes, are the only part of
+the instance besides chat media that `chat_attach` in that chat may send;
+the logs themselves never are. When a disk holding chat files has less free space
+than `[history] min_free_percent`, the bridges stop saving new files from
+chat, so a flood of media cannot fill the disk, while the text log goes on.
+
 Poll batches above 4096 messages fail before execution or cursor advancement.
 Response bodies are capped at 4 MiB and durable string message IDs at 256 bytes.
 The 4096-ID deduplication window refreshes IDs encountered again so the

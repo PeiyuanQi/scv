@@ -20,7 +20,7 @@ fn media_limits_show_where_each_was_set() {
     let defaults = scv_channels::media::MediaSettings::default();
     assert_eq!(
         media_line(&defaults, &|_| false),
-        "media owner_max_mib = 50 [default], others_image_max_mib = 5 [default], keep_days = 7 \
+        "media owner_max_mib = 50 [default], others_image_max_mib = 5 [default], keep_days = 365 \
          [default]"
     );
     let raised = scv_channels::media::MediaSettings {
@@ -30,7 +30,7 @@ fn media_limits_show_where_each_was_set() {
     assert_eq!(
         media_line(&raised, &|key| key == "owner_max_mib"),
         "media owner_max_mib = 100 [config.toml], others_image_max_mib = 5 [default], \
-         keep_days = 7 [default]"
+         keep_days = 365 [default]"
     );
 }
 

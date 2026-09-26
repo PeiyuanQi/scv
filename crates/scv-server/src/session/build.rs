@@ -18,7 +18,7 @@ use scv_tools::{
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
-use super::{Session, SessionClient};
+use super::{Session, SessionClient, reload};
 use crate::{
     approval::UnattendedGate,
     config::{Config, ConfigOverrides},
@@ -50,7 +50,9 @@ pub(crate) fn offered_adapters(config: &Config) -> HashMap<String, scv_tools::Ag
 /// (0 for a direct client); the session's delegated runs count from it.
 ///
 /// A chat client (one naming its `channel`) sends files the model attaches,
-/// so a session with tools then offers `chat_attach`.
+/// so a session with tools then offers `chat_attach`. One that names its
+/// chat log starts with the log's open episode and, with tools, offers
+/// `chat_history` and `chat_keep`.
 pub(crate) async fn build_session(
     layout: &Layout,
     cwd: &str,
@@ -122,7 +124,20 @@ pub(crate) async fn build_session(
         });
         tools.background = background.clone();
         if client.channel.is_some() {
-            tools.chat_attach = Some(chat_attach_config(layout));
+            // Of the kept files, only this chat's own may be sent back.
+            let kept = client.chat.as_ref().map(|conversation| {
+                scv_client::history::kept_dir(&config.archive_dir(), conversation)
+            });
+            tools.chat_attach = Some(chat_attach_config(layout, kept));
+        }
+        if let Some(conversation) = &client.chat {
+            tools.chat_history = Some(scv_tools::chat_history::ChatHistoryConfig::new(
+                &layout.history(),
+                &layout.media(),
+                &config.archive_dir(),
+                conversation,
+                config.tools.output_limit_bytes,
+            ));
         }
         let mut registry = builtin_registry(
             tools,
@@ -145,8 +160,18 @@ pub(crate) async fn build_session(
             agents: &agents,
             background: tools.get("agent_status").is_some(),
             channel: client.channel.as_deref(),
+            chat_history: tools.get("chat_history").is_some(),
         },
     )?;
+    // A chat with a log carries on with its open episode.
+    let history = client.chat.as_ref().map_or_else(Vec::new, |conversation| {
+        reload::reload(
+            &layout.history().join(conversation),
+            config.episode_gap(),
+            unix_ms(),
+            tools.get("chat_history").is_some(),
+        )
+    });
     let context = Arc::new(BudgetContextPolicy::new((&config.context).into())?);
     let runtime = Arc::new(AgentRuntime::new(
         provider,
@@ -161,7 +186,7 @@ pub(crate) async fn build_session(
             workspace,
             config,
             runtime,
-            history: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(history)),
             seq: Arc::new(AtomicU64::new(0)),
             queue: Arc::new(Mutex::new(VecDeque::new())),
             paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -174,15 +199,29 @@ pub(crate) async fn build_session(
 
 /// `chat_attach` for a chat session: it copies checked files into the
 /// channels' media outbox, and refuses the SCV instance itself except its
-/// media, secret locations in the user's home, and host secrets.
-pub(crate) fn chat_attach_config(layout: &Layout) -> scv_tools::chat_attach::ChatAttachConfig {
+/// media and the files this chat kept (`kept`), secret locations in the
+/// user's home, and host secrets.
+pub(crate) fn chat_attach_config(
+    layout: &Layout,
+    kept: Option<std::path::PathBuf>,
+) -> scv_tools::chat_attach::ChatAttachConfig {
+    let mut allowed = vec![layout.media()];
+    allowed.extend(kept);
     scv_tools::chat_attach::ChatAttachConfig::standard(
         dirs::home_dir().as_deref(),
         layout.home(),
         layout.outbox(),
-        vec![layout.media()],
+        allowed,
         scv_channels::media::MAX_REPLY_FILE_BYTES,
     )
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 #[cfg(test)]

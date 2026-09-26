@@ -293,6 +293,9 @@ pub struct AccountRun<'a> {
     pub workspace: &'a Path,
     /// The daemon socket the account's sessions connect to.
     pub socket: &'a Path,
+    /// How long the owner's direct chat may be quiet before its next
+    /// message starts a new episode of its log.
+    pub episode_gap: Duration,
     /// The account's connection to the daemon's hub.
     pub link: &'a hub::Link,
     /// Called with `true` after each authenticated contact with the platform,
@@ -324,6 +327,12 @@ impl<'a> AccountRun<'a> {
                 self.account,
                 self.settings.media.clone(),
             ),
+            log: crate::chatlog::LogOptions {
+                root: self.layout.history().join(kind.name()).join(self.account),
+                channel: kind.name(),
+                account: self.account.to_owned(),
+                gap: self.episode_gap,
+            },
             link: self.link,
             report: self.health,
         })

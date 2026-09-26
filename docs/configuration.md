@@ -40,7 +40,7 @@ configuration cannot set `[agents]`.
 ## Instance layout
 
 An instance keeps everything under its home, `SCV_HOME` (default `~/.scv`), in
-five places:
+six places:
 
 ```text
 ~/.scv/
@@ -53,6 +53,11 @@ five places:
 ├── agents/<name>/     private homes of the delegated agents (claude, codex,
 │                      grok, dsh, pi, scv), with their own sign-ins
 ├── skills/            your SCV skills
+├── history/           the chat log of each account owner's direct chat (0700)
+│   └── <channel>/<account>/<conversation>/
+│       ├── <year>/<Monday>_<Sunday>/<start>.jsonl   one file per episode
+│       └── files/     files the owner kept, unless [history] archive_dir
+│                      moves them
 └── state/             runtime data SCV writes and reads back (0700)
     ├── server.sock, server.lock
     ├── config.lock
@@ -86,7 +91,10 @@ The rules behind it:
   `scv config show` reports each file without reading it.
 - **State is not configuration.** `state/` holds only what SCV writes and
   reads back: the daemon socket, delegated-run records, channel delivery
-  checkpoints, and locks. Nothing there is meant to be edited.
+  checkpoints, chat media, and locks. Nothing there is meant to be edited.
+- **History is kept.** `history/` holds the owners' conversations and the
+  files they kept, meant to last (see [chat history](channels.md#chat-history));
+  back it up like any other personal data.
 
 Outside the home are the systemd user unit
 (`~/.config/systemd/user/scv.service`, or a hashed name for a custom home) and,
@@ -220,6 +228,11 @@ brave_url = "https://api.search.brave.com/res/v1/web/search"
 brave_api_key_env = "BRAVE_SEARCH_API_KEY"
 max_search_results = 8
 
+[history]
+episode_gap_minutes = 120
+min_free_percent = 20
+# archive_dir = "/mnt/archive/scv"
+
 [agents.claude]
 command = "claude"
 args = ["-p"]
@@ -286,8 +299,8 @@ the adapter offers no such selection; a non-empty one must contain its
 placeholder. Overriding only `command` or `args` keeps the built-in templates. The built-in adapters are enabled when their executable is
 available; attempting to call a missing adapter returns a clear tool error.
 
-`provider`, `agents.*`, and `skills.user_dir` are accepted only from built-in,
-user, explicit `SCV_CONFIG`, environment, and CLI layers. `[channels]` is
+`provider`, `agents.*`, `skills.user_dir`, and `[history]` are accepted only
+from built-in, user, explicit `SCV_CONFIG`, environment, and CLI layers. `[channels]` is
 accepted only in the instance's own `config.toml`, where SCV's channel store
 reads it. Project configuration
 cannot change a model endpoint, credential-variable name, user skill root,
@@ -544,8 +557,8 @@ authentication and downloads.
 
 The daemon sends some notices nobody asked for: an update started from a
 terminal or the TUI, a rollback of a failed update, a restart after the daemon
-stopped unexpectedly, and an enabled chat account disconnected for ten
-minutes. `[notify].owner` lists the accounts that may carry them, as
+stopped unexpectedly, an enabled chat account disconnected for ten
+minutes, and a disk holding chat files running low (see `[history]` below). `[notify].owner` lists the accounts that may carry them, as
 `<channel>:<account>`:
 
 ```toml
@@ -563,6 +576,28 @@ to the owner (`scv confirm`) asked by work that did not start in a chat goes
 to the same owner chat, on the first listed account connected right then (see
 [channels](channels.md#questions-to-the-owner)). Project configuration cannot
 set `[notify]`.
+
+The [chat history](channels.md#chat-history) of each account owner's direct
+chat has its own table, which only the user configuration may set:
+
+```toml
+[history]
+episode_gap_minutes = 120
+min_free_percent = 20
+# archive_dir = "/mnt/archive/scv"
+```
+
+`episode_gap_minutes` (1 to 525600) is how long a chat may be quiet before its
+next message starts a new episode, which a new session no longer reloads.
+`min_free_percent` (at most 90; 0 turns the check off) is the share of each
+disk holding the chat log, chat media, or kept files that must stay free: the
+daemon checks at startup and every ten minutes, and while a disk is below it
+the owner has been told once (like the notices above) and SCV saves no new
+files from chat, while the text of the chat is still logged; a second notice
+says when every such disk is two points above the floor again. `archive_dir`, an absolute path (or one
+starting with `~/`), is where files the owner keeps go, as
+`<archive_dir>/<channel>/<account>/<conversation>/files/`; unset, they stay
+beside the log in `$SCV_HOME/history`.
 
 Project configuration may make policy stricter but not weaker than user
 configuration. A command-line flag may weaken policy because it is an explicit
@@ -676,7 +711,7 @@ Account tables may also limit the files senders send:
 [channels.wechat.default.media]
 owner_max_mib = 50
 others_image_max_mib = 5
-keep_days = 7
+keep_days = 365
 ```
 
 `owner_max_mib` is the largest file downloaded from the account owner (0 turns
@@ -684,7 +719,8 @@ downloads off for everyone), `others_image_max_mib` the largest image from any
 other sender, on an account that answers anyone, whose other files are never
 downloaded (0 turns their images off too), and `keep_days` how long received
 files and copies of sent files stay in
-`$SCV_HOME/state/media`. SCV leaves the defaults above out of the file. See
+`$SCV_HOME/state/media` (a year; files the owner keeps leave it for good).
+SCV leaves the defaults above out of the file. See
 [channel media](channels.md#media).
 
 A missing table or key defaults to `enabled = true`, `remote_tools =

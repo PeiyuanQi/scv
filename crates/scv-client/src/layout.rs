@@ -7,6 +7,9 @@
 //! - `agents/<name>/`: the private homes of delegated agent CLIs, which keep
 //!   their own sign-ins and configuration there;
 //! - `skills/`: the user's SCV skills;
+//! - `history/`: the chat log of the owner's conversations, by channel,
+//!   account, and conversation, and files the owner asked to keep (see
+//!   [`crate::history`]);
 //! - `state/`: runtime data SCV writes: the daemon socket and lock, delegated
 //!   run records, conversation markers, import records, channel delivery
 //!   state and locks, and chat media.
@@ -22,7 +25,14 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Top-level entries of an instance home, in display order.
-pub(crate) const ENTRIES: [&str; 5] = ["config.toml", "credentials", "agents", "skills", "state"];
+pub(crate) const ENTRIES: [&str; 6] = [
+    "config.toml",
+    "credentials",
+    "agents",
+    "skills",
+    "history",
+    "state",
+];
 
 /// Paths earlier releases used, which SCV no longer reads.
 const LEGACY: [&str; 7] = [
@@ -126,6 +136,12 @@ impl Layout {
 
     pub fn skills(&self) -> PathBuf {
         self.home.join("skills")
+    }
+
+    /// The chat log, `<channel>/<account>/<conversation>/` (see
+    /// [`crate::history`]), and by default the files the owner kept.
+    pub fn history(&self) -> PathBuf {
+        self.home.join("history")
     }
 
     /// Runtime data SCV writes and reads back; never edited by hand.

@@ -164,6 +164,7 @@ struct SessionStartRequest {
     delegation_depth: Option<u32>,
     channel: Option<String>,
     auto_approve: Option<bool>,
+    chat: Option<scv_protocol::ChatLog>,
 }
 
 /// One connection's state: its session, the turn it runs, and where its
@@ -320,6 +321,7 @@ impl Connection {
                 delegation_depth,
                 channel,
                 auto_approve,
+                chat,
             } => {
                 let request = SessionStartRequest {
                     cwd,
@@ -330,6 +332,7 @@ impl Connection {
                     delegation_depth,
                     channel,
                     auto_approve,
+                    chat,
                 };
                 self.session_start(request_id, request).await?;
             }
@@ -522,9 +525,30 @@ impl Connection {
             .await?;
             return Ok(());
         }
+        let chat = match &request.chat {
+            None => None,
+            Some(log) => {
+                let path = scv_client::history::conversation_path(
+                    &log.channel,
+                    &log.account,
+                    &log.conversation,
+                );
+                if path.is_none() {
+                    self.reject(
+                        &request_id,
+                        ErrorCode::InvalidRequest,
+                        "chat must name a channel, account, and conversation of letters, digits, - and _",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                path
+            }
+        };
         let client = SessionClient {
             channel: request.channel,
             auto_approve: request.auto_approve.unwrap_or(false),
+            chat,
         };
         let defaults = &self.instance.overrides;
         let overrides = ConfigOverrides {
