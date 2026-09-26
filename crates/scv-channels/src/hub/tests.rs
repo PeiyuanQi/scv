@@ -116,3 +116,51 @@ fn a_detached_link_shares_nothing() {
     assert!(link.take_restart().is_none());
     assert!(notices.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn one_question_waits_per_chat_until_answered_or_withdrawn() {
+    let hub = Hub::new(None);
+    let link = Link::new(Arc::clone(&hub), "wechat:default", Some("owner".into()));
+    let (registration, _notices) = link.register();
+    let answered = hub.ask("q1", "wechat:default", "owner").unwrap();
+    // Nothing answers a question before it is on its way to the owner.
+    assert!(!registration.asking("owner"));
+    assert!(registration.take_question("owner").is_none());
+    hub.open("q1");
+    assert!(registration.asking("owner"));
+    assert!(!registration.asking("other"));
+    // A second question in the same chat is refused; another chat may ask.
+    assert!(hub.ask("q2", "wechat:default", "owner").is_none());
+    let elsewhere = hub.ask("q3", "feishu:default", "owner").unwrap();
+    hub.open("q3");
+    assert!(
+        !Link::new(Arc::clone(&hub), "wechat:other", None)
+            .register()
+            .0
+            .asking("owner")
+    );
+
+    let answer = registration.take_question("owner").unwrap();
+    assert!(!registration.asking("owner"), "taken once");
+    assert!(registration.take_question("owner").is_none());
+    assert!(!hub.withdraw("q1"), "an answer on its way is not withdrawn");
+    answer.give(true);
+    assert_eq!(answered.await, Ok(true));
+
+    // Withdrawing frees the chat; a dropped answer tells the asker.
+    assert!(hub.withdraw("q3"));
+    assert!(!hub.withdraw("q3"));
+    assert!(elsewhere.await.is_err());
+    let lost = hub.ask("q4", "wechat:default", "owner").unwrap();
+    hub.open("q4");
+    drop(registration.take_question("owner"));
+    assert!(lost.await.is_err());
+}
+
+#[test]
+fn a_detached_link_holds_no_question() {
+    let link = Link::detached();
+    let (registration, _notices) = link.register();
+    assert!(!registration.asking("peer"));
+    assert!(registration.take_question("peer").is_none());
+}

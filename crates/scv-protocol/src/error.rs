@@ -46,6 +46,9 @@ pub enum ErrorCode {
     DelegationError,
     /// The daemon refused to schedule a restart.
     RestartError,
+    /// The daemon could not ask the owner a question (no owner chat to ask
+    /// in, or one already waiting there), or does not know the one named.
+    ConfirmError,
     /// The model provider failed the turn.
     ProviderError,
     /// The turn's history does not fit the model's context window.
@@ -84,6 +87,7 @@ impl ErrorCode {
             Self::ComponentError => "component_error",
             Self::DelegationError => "delegation_error",
             Self::RestartError => "restart_error",
+            Self::ConfirmError => "confirm_error",
             Self::ProviderError => "provider_error",
             Self::ContextLimit => "context_limit",
             Self::StepLimit => "step_limit",

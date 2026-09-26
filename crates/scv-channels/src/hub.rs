@@ -4,9 +4,10 @@
 //! [`Link`]. Through the hub the daemon learns which chat a daemon session
 //! answers, whether owner work is still in flight (a planned restart waits
 //! for it), and which chat the owner last wrote from, and it can queue a
-//! notice into an account's durable outbox. Bridges learn why the daemon last
-//! restarted, so they describe work that a planned restart interrupted
-//! accurately.
+//! notice into an account's durable outbox and hold a yes/no question for an
+//! owner's direct chat, which the owner's next explicit answer there resolves
+//! (`scv confirm`). Bridges learn why the daemon last restarted, so they
+//! describe work that a planned restart interrupted accurately.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -80,6 +81,17 @@ impl std::fmt::Display for NotifyError {
 
 impl std::error::Error for NotifyError {}
 
+/// A question taken from the hub to be answered. Dropping it unanswered
+/// tells the asker the answer was lost.
+pub struct Answer(oneshot::Sender<bool>);
+
+impl Answer {
+    /// Hand the owner's answer to the asker.
+    pub fn give(self, yes: bool) {
+        let _ = self.0.send(yes);
+    }
+}
+
 #[derive(Default)]
 pub struct Hub {
     inner: Mutex<Inner>,
@@ -97,6 +109,17 @@ struct Inner {
     bridges: HashMap<String, Bridge>,
     conversations: HashMap<u64, Conversation>,
     last_owner: Option<LastOwner>,
+    /// Questions waiting for an answer, by account and direct chat; at most
+    /// one per chat. They live only as long as this daemon.
+    questions: HashMap<(String, String), Question>,
+}
+
+/// A yes/no question to the owner, waiting in their direct chat.
+struct Question {
+    id: String,
+    answer: oneshot::Sender<bool>,
+    /// The question is in the chat's outbox, so the owner may answer it.
+    open: bool,
 }
 
 struct Bridge {
@@ -218,6 +241,47 @@ impl Hub {
             Ok(Ok(())) => Ok(()),
             _ => Err(NotifyError::NotStored),
         }
+    }
+
+    /// Hold question `id` for the direct chat with `peer` on `component`.
+    /// `None` when a question already waits in that chat. The caller sends
+    /// the question itself, such as with [`Hub::notify`], then calls
+    /// [`Hub::open`], after which the owner's next explicit yes or no there
+    /// answers it.
+    pub fn ask(&self, id: &str, component: &str, peer: &str) -> Option<oneshot::Receiver<bool>> {
+        let mut inner = self.inner();
+        let key = (component.to_owned(), peer.to_owned());
+        if inner.questions.contains_key(&key) {
+            return None;
+        }
+        let (answer, answered) = oneshot::channel();
+        inner.questions.insert(
+            key,
+            Question {
+                id: id.to_owned(),
+                answer,
+                open: false,
+            },
+        );
+        Some(answered)
+    }
+
+    /// Question `id` is on its way to the owner: let their answer count.
+    pub fn open(&self, id: &str) {
+        for question in self.inner().questions.values_mut() {
+            if question.id == id {
+                question.open = true;
+            }
+        }
+    }
+
+    /// Drop question `id` unless it was answered first; whether it was still
+    /// waiting.
+    pub fn withdraw(&self, id: &str) -> bool {
+        let mut inner = self.inner();
+        let before = inner.questions.len();
+        inner.questions.retain(|_, question| question.id != id);
+        inner.questions.len() < before
     }
 
     fn record_owner(&self, component: &str, peer: &str) {
@@ -355,6 +419,32 @@ impl Registration {
         if let Some(hub) = &self.hub {
             hub.record_owner(&self.component, peer);
         }
+    }
+
+    /// Whether a question the owner can answer waits in the direct chat with
+    /// `peer`.
+    pub fn asking(&self, peer: &str) -> bool {
+        self.hub.as_ref().is_some_and(|hub| {
+            hub.inner()
+                .questions
+                .get(&(self.component.clone(), peer.to_owned()))
+                .is_some_and(|question| question.open)
+        })
+    }
+
+    /// Take the question the owner can answer in the direct chat with
+    /// `peer`, to answer it; no question can be taken twice.
+    pub fn take_question(&self, peer: &str) -> Option<Answer> {
+        let hub = self.hub.as_ref()?;
+        let key = (self.component.clone(), peer.to_owned());
+        let mut inner = hub.inner();
+        if !inner.questions.get(&key)?.open {
+            return None;
+        }
+        inner
+            .questions
+            .remove(&key)
+            .map(|question| Answer(question.answer))
     }
 
     /// Track the direct chat with `peer` while the tracker lives.

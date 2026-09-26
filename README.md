@@ -100,6 +100,7 @@ scv status
 scv reload
 scv restart --workspace /path/to/workspace
 scv restart --when-idle   # into a newly installed release, once owner work is done
+scv confirm "Publish the release?"   # ask the owner yes or no in chat; 0 only on yes
 scv stop
 ```
 
@@ -107,6 +108,10 @@ scv stop
 the daemon restarts, checks the new release, and rolls back to the previous
 binary if it does not come up; the new daemon announces the outcome in chat
 (see [configuration](docs/configuration.md#daemon-and-component-settings)).
+`scv confirm [--timeout SECS] QUESTION` asks the owner in the chat that started
+the work (or the `[notify]` owner chat) and waits; it exits 0 on yes, 1 on no
+or no answer in time (30 minutes by default), and 2 when it could not ask (see
+[channels](docs/channels.md#questions-to-the-owner)).
 
 Each SCV instance owns an explicit profile root. Use `--scv-home PATH` (or
 `SCV_HOME`) to run independent daemons with separate provider/model settings,

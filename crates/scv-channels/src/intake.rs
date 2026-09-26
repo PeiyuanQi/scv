@@ -36,6 +36,8 @@ pub(crate) struct Intake<'a> {
     pub(crate) tool_owner: Option<&'a ToolOwner>,
     /// Whose messages the account answers.
     pub(crate) senders: Senders,
+    /// A yes/no question waits for the owner's answer in their direct chat.
+    pub(crate) question: bool,
 }
 
 /// A message to answer, who it comes from, and where it belongs.
@@ -68,6 +70,9 @@ pub(crate) enum Verdict<'m> {
     /// cannot hear: answer with the voice notice instead of a turn, without
     /// downloading it.
     Unheard(Sender<'m>),
+    /// The owner's explicit answer to the question waiting in their direct
+    /// chat: resolve it and acknowledge, without a turn.
+    Answer { sender: Sender<'m>, yes: bool },
     /// Claim the message and run a turn on its conversation.
     Turn {
         sender: Sender<'m>,
@@ -89,6 +94,7 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         owner,
         tool_owner,
         senders,
+        question,
     } = *intake;
     let id = inbound.id();
     if state.seen.iter().any(|seen| seen == id) {
@@ -124,6 +130,15 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         key,
         owner_chat: direct && owner == Some(sender),
     };
+    // Only the owner answers, in their direct chat and in plain words; any
+    // other message runs as usual and the question keeps waiting.
+    if question
+        && from.owner_chat
+        && message.media.is_empty()
+        && let Some(yes) = answer(&message.text)
+    {
+        return Verdict::Answer { sender: from, yes };
+    }
     // Nothing a turn could use, and nothing that waits for a turn slot.
     if unheard(message) {
         return Verdict::Unheard(from);
@@ -169,6 +184,25 @@ fn unheard(message: &Message) -> bool {
                     .as_deref()
                     .is_none_or(|transcript| transcript.trim().is_empty())
         })
+}
+
+/// Whether `text` explicitly answers a yes/no question: trimmed,
+/// lowercased, and without trailing `.`, `!`, `。`, or `！`, it is one of the
+/// accepted words for yes or for no.
+pub(crate) fn answer(text: &str) -> Option<bool> {
+    const YES: &[&str] = &[
+        "yes", "y", "ok", "okay", "是", "是的", "好", "好的", "确认", "可以", "同意",
+    ];
+    const NO: &[&str] = &["no", "n", "否", "不", "不要", "取消", "算了", "stop"];
+    let lowered = text.trim().to_lowercase();
+    let word = lowered.trim_end_matches(['.', '!', '。', '！']).trim_end();
+    if YES.contains(&word) {
+        Some(true)
+    } else if NO.contains(&word) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// The conversation a full session table closes to make room: the least

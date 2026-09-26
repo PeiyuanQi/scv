@@ -264,6 +264,8 @@ pub(crate) struct Components {
     hub: Arc<scv_channels::hub::Hub>,
     /// Plans the daemon's own restarts; set only in the socket daemon.
     restarter: Option<Arc<crate::restart::Restarter>>,
+    /// Asks the owner yes/no questions; set only in the socket daemon.
+    confirmer: Option<Arc<crate::confirm::Confirmer>>,
 }
 
 impl Components {
@@ -285,6 +287,7 @@ impl Components {
             workspace,
             hub,
             restarter: None,
+            confirmer: None,
         }
     }
 
@@ -301,6 +304,14 @@ impl Components {
         self.restarter.clone()
     }
 
+    pub(crate) fn set_confirmer(&mut self, confirmer: Arc<crate::confirm::Confirmer>) {
+        self.confirmer = Some(confirmer);
+    }
+
+    pub(crate) fn confirmer(&self) -> Option<Arc<crate::confirm::Confirmer>> {
+        self.confirmer.clone()
+    }
+
     pub fn status(&self) -> DaemonStatus {
         let mut components = self.supervisor.health();
         components.extend(self.inactive.values().cloned());
@@ -311,6 +322,7 @@ impl Components {
             components,
             delegations: scv_protocol::DelegationSummary::default(),
             restart: None,
+            confirm: None,
         }
     }
 
@@ -451,11 +463,14 @@ impl Components {
 
     pub async fn control(&mut self, command: DaemonCommand) -> Result<DaemonStatus> {
         match command {
-            // Delegations belong to the connection handler, which adds them.
+            // Delegations, restarts, and questions belong to the connection
+            // handler, which adds them.
             DaemonCommand::Status
             | DaemonCommand::Delegations { .. }
             | DaemonCommand::DelegationKill { .. }
-            | DaemonCommand::RestartWhenIdle { .. } => return Ok(self.status()),
+            | DaemonCommand::RestartWhenIdle { .. }
+            | DaemonCommand::ConfirmAsk { .. }
+            | DaemonCommand::ConfirmStatus { .. } => return Ok(self.status()),
             DaemonCommand::Reload => {}
             DaemonCommand::ChannelSet {
                 channel,

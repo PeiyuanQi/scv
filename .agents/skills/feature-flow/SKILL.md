@@ -23,13 +23,15 @@ stage 0.
   keys, `gh` login, rustup toolchain, crates.io token, or daemon socket. Run
   your own `git`, `gh`, `cargo`, `scv`, and `systemctl` commands as
   `scripts/host.sh <command...>`, which restores the real home. Outside SCV it
-  passes straight through.
+  passes straight through. SCV also sets `SCV_PARENT`, which is how
+  `publish.sh` knows to ask the owner in chat before publishing (stage 6).
 - **SCV delegating this flow:** call `agent_codex` or `agent_claude` with `cwd`
   set to this repository (`scv` in a `~/projects` workspace) so the agent loads
   this skill and `AGENTS.md`. The agent default of `tools.agent_timeout_seconds`
   (3600) covers a normal landing (gates, CI, and publishing take 20-50
   minutes); pass a larger `timeout_seconds`, up to `tools.max_timeout_seconds`
-  (14400), when CI reruns are likely. The agent needs `permissions = "full"`
+  (14400), when CI reruns are likely, and remember that publishing waits up
+  to 30 minutes for the owner's yes. The agent needs `permissions = "full"`
   in its `[agents.<name>]` user config to run commands and edit files unprompted.
 - **Secrets:** never print `~/.scv/config.toml`, `~/.scv/credentials/`,
   the sign-in files under `~/.scv/agents/` (such as `codex/auth.json`), or
@@ -160,6 +162,21 @@ shared version. It publishes `scv-core`, `scv-protocol`, `scv-client`,
 `scv-provider-openai`, `scv-tools`, `scv-channels`, `scv-server`, `scv-tui`,
 and `scv-cli` in that order, and skips any crate already on
 crates.io, so a partial run can be resumed. It needs the `cargo login` token in the real home.
+
+**Delegated by SCV** (`SCV_PARENT` is set): publishing cannot be undone, so
+before its first `cargo publish` the script asks the owner with
+`scripts/host.sh scv confirm`, naming the version, the crates it will
+publish, and the `origin/main` commit. The question goes to the chat that
+started the work (or, for work started elsewhere, the `[notify]` owner chat),
+and the script publishes only when the owner answers yes; no, no answer
+within 30 minutes (`SCV_CONFIRM_TIMEOUT` seconds), or a question that could
+not be asked stops it with nothing published. Run it with a tool timeout
+longer than that wait (in the background if your shell tool caps foreground
+commands, as Claude Code's does at 10 minutes); if the command is killed, the
+daemon withdraws the question after a minute and tells the chat. Report a no
+or an unasked question to the owner instead of retrying on your own, and never
+run `cargo publish` directly to get around it. `--check` never asks, and a
+run from a terminal without `SCV_PARENT` does not ask either.
 
 ## 7. Install and restart
 

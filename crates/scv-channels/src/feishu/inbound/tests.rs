@@ -347,6 +347,7 @@ fn a_voice_message_gets_the_voice_reply_because_feishu_sends_no_transcript() {
         owner: Some("ou_user"),
         tool_owner: None,
         senders: crate::state::Senders::Owner,
+        question: false,
     };
     let Verdict::Unheard(sender) = classify(&received.inbound, &intake) else {
         panic!("a Feishu voice message gets the voice reply");

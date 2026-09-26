@@ -16,6 +16,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     components,
     config::{ConfigOverrides, Instance},
+    confirm,
     connection::run_managed,
     restart,
 };
@@ -119,15 +120,22 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
     let cancellation = CancellationToken::new();
     let restarter = restart::Restarter::new(
         instance.clone(),
-        hub,
+        Arc::clone(&hub),
         Arc::clone(&registry),
         &components,
         cancellation.clone(),
     );
-    components
-        .lock()
-        .await
-        .set_restarter(Arc::clone(&restarter));
+    let confirmer = confirm::Confirmer::new(
+        hub,
+        Arc::clone(&registry),
+        restarter.notifier().clone(),
+        cancellation.clone(),
+    );
+    {
+        let mut components = components.lock().await;
+        components.set_restarter(Arc::clone(&restarter));
+        components.set_confirmer(confirmer);
+    }
     let notices = tokio::spawn(restart::announce(
         layout.clone(),
         startup,

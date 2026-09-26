@@ -502,8 +502,10 @@ chat whose jobs were recorded gets one message listing the jobs that stopped.
 ## Restarts and notices
 
 An owner can ask SCV from a chat to change, publish, and deploy SCV itself:
-the delegated agent runs the feature flow, whose `deploy.sh` ends with `scv
-restart --when-idle`. The daemon then restarts only once that agent has
+the delegated agent runs the feature flow, whose `publish.sh` first asks the
+owner in that chat whether to publish (see
+[Questions to the owner](#questions-to-the-owner)) and whose `deploy.sh` ends
+with `scv restart --when-idle`. The daemon then restarts only once that agent has
 finished, its report is stored in the chat's outbox, and no owner message is
 being answered, or after ten minutes at the latest (see
 [architecture](architecture.md#planned-restarts)). Across the restart:
@@ -526,6 +528,50 @@ connected account in `[notify].owner`, or else to the chat the owner last
 wrote from, and never through the account the notice is about. Each is queued
 in that account's outbox like a background report. See
 [configuration](configuration.md#daemon-and-component-settings).
+
+## Questions to the owner
+
+Before a step that cannot be undone, a delegated agent (or anything else on
+the host) can ask the owner yes or no with `scv confirm [--timeout SECS]
+QUESTION`; the feature flow's `publish.sh` asks this way before publishing SCV
+to crates.io. The question goes to the chat that started the work, found as
+for a planned restart: the caller's `SCV_PARENT` chain names the delegation,
+the delegation its daemon session, and the hub the direct chat that session
+answers. Work that did not start in a chat, such as a TUI session, asks where
+unprompted notices go: the owner of the first connected `[notify].owner`
+account, or else the chat the owner last wrote from. Only an account owner's
+direct chat can be asked; with none reachable, nothing is asked.
+
+The daemon queues the question in that account's outbox like a notice, as one
+unprompted message:
+
+```text
+<question>
+
+Reply yes or no. No answer in <N> minutes counts as no.
+```
+
+Once the question is in the outbox, the owner's next direct message in that
+chat that is an explicit answer decides it. After trimming, lowercasing, and dropping trailing `.`, `!`, `。`,
+and `！`, the words `yes`, `y`, `ok`, `okay`, `是`, `是的`, `好`, `好的`,
+`确认`, `可以`, and `同意` mean yes, and `no`, `n`, `否`, `不`, `不要`, `取消`,
+`算了`, and `stop` mean no; a message with files is not an answer. An answer
+starts no turn: the bridge replies to it "OK, going ahead." or "OK, stopped."
+once that reply is durable, and only then hands the answer to the asker. Any
+other message runs as a normal turn while the question keeps waiting. Other
+senders and group messages, the owner's own in a group included, never answer.
+With no answer in time (default 30 minutes, at most 4 hours) the chat is told
+"No answer, so stopped."; an asker that stops following the question for a
+minute (it was killed) has it withdrawn, and the chat is told "The question
+was withdrawn, so stopped."
+
+A chat holds at most one question; asking again while one waits is refused.
+Questions live only in the daemon's memory, in the channel hub next to the
+notices, and a daemon restart drops them. `scv confirm` exits 0 for yes; 1 for
+no or no answer in time; and 2 when nothing could be asked or the answer was
+not learned: no daemon, a daemon too old for the command, no owner chat to
+ask in, a question already waiting there, or the daemon restarting while it
+waited. A delegated agent may run it; it manages nothing.
 
 ## Sessions and safety
 

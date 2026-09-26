@@ -130,13 +130,21 @@ impl Bench {
     /// Run the bridge next to `peer`, which plays the platform and the
     /// daemon, until `peer` returns; fails the test after 15 seconds.
     async fn run<T>(&self, peer: impl std::future::Future<Output = T>) -> T {
+        self.run_linked(&hub::Link::detached(), peer).await
+    }
+
+    /// [`Bench::run`], linked to a daemon's hub through `link`.
+    async fn run_linked<T>(
+        &self,
+        link: &hub::Link,
+        peer: impl std::future::Future<Output = T>,
+    ) -> T {
         let media = MediaOptions::new(
             &Layout::new(self.directory.path()),
             "test",
             "default",
             MediaSettings::default(),
         );
-        let detached = hub::Link::detached();
         let bridge = serve(
             &self.transport,
             BridgeRun {
@@ -147,7 +155,7 @@ impl Bench {
                 tool_owner: None,
                 senders: self.senders,
                 media,
-                link: &detached,
+                link,
                 report: &|_| {},
             },
             &self.store,
@@ -428,4 +436,103 @@ async fn a_voice_message_without_a_transcript_gets_the_voice_reply_and_nothing_e
         })
         .await;
     assert_eq!(*bench.transport.downloads.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_question_reaches_the_owners_chat_and_a_plain_answer_resolves_it_without_a_turn() {
+    // An account that answers anyone, so others' messages reach the check.
+    let (bench, mut peer) = Bench::new();
+    let bench = Bench {
+        owner: Some("owner"),
+        ..bench
+    };
+    let hub = hub::Hub::new(None);
+    let link = hub::Link::new(Arc::clone(&hub), "fake:default", Some("owner".into()));
+    let question = "Publish SCV 0.3.0?\n\nReply yes or no. No answer in 30 minutes counts as no.";
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.owner("fake:default").is_some()).await;
+            let mut answered = hub.ask("q1", "fake:default", "owner").unwrap();
+            hub.notify("fake:default", "owner", question).await.unwrap();
+            hub.open("q1");
+            // The question goes to the owner's direct chat, answering nothing.
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: String::new(),
+                    text: question.into(),
+                }
+            );
+            // Other words from the owner run a turn; the question keeps waiting.
+            peer.push(vec![message("m1", "owner", "what is this about?")]);
+            let mut owner = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut owner).await, "what is this about?");
+            finish_turn(&mut owner, "A release.").await;
+            assert_eq!(peer.sent().await.text, "A release.");
+            // Another sender, and the owner in a group, cannot answer.
+            peer.push(vec![message("b1", "bob", "yes")]);
+            let mut bob = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut bob).await, "yes");
+            finish_turn(&mut bob, "to bob").await;
+            assert_eq!(peer.sent().await.to, "bob");
+            peer.push(vec![Inbound::Text(Message::text(
+                "g1",
+                "owner",
+                "yes",
+                "re-g1",
+                Some("group"),
+            ))]);
+            let mut group = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut group).await, "yes");
+            finish_turn(&mut group, "in the group").await;
+            assert_eq!(peer.sent().await.reply_to, "re-g1");
+            assert!(answered.try_recv().is_err(), "still waiting");
+
+            // The owner's plain yes answers it and is acknowledged, no turn.
+            peer.push(vec![message("m2", "owner", "Yes!")]);
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: "re-m2".into(),
+                    text: ANSWERED_YES.into(),
+                }
+            );
+            assert_eq!(answered.await, Ok(true));
+            peer.push(vec![message("m3", "owner", "thanks")]);
+            assert_eq!(next_turn(&mut owner).await, "thanks", "m2 ran no turn");
+            finish_turn(&mut owner, "welcome").await;
+            assert_eq!(peer.sent().await.text, "welcome");
+
+            // A later question, answered no.
+            let answered = hub.ask("q2", "fake:default", "owner").unwrap();
+            hub.notify("fake:default", "owner", "Deploy?")
+                .await
+                .unwrap();
+            hub.open("q2");
+            assert_eq!(peer.sent().await.text, "Deploy?");
+            peer.push(vec![message("m4", "owner", "不")]);
+            let sent = peer.sent().await;
+            assert_eq!(
+                (sent.reply_to.as_str(), sent.text.as_str()),
+                ("re-m4", ANSWERED_NO)
+            );
+            assert_eq!(answered.await, Ok(false));
+            // A yes with no question waiting is an ordinary message again.
+            peer.push(vec![message("m5", "owner", "yes")]);
+            assert_eq!(next_turn(&mut owner).await, "yes");
+            finish_turn(&mut owner, "yes to what?").await;
+            assert_eq!(peer.sent().await.text, "yes to what?");
+            eventually(|| {
+                let saved = bench.state();
+                saved.in_flight.is_empty()
+                    && saved.pending.is_empty()
+                    && ["m2", "m4"]
+                        .iter()
+                        .all(|id| saved.seen.iter().any(|seen| seen == id))
+            })
+            .await;
+        })
+        .await;
 }

@@ -125,6 +125,7 @@ fn a_voice_message_is_answered_by_a_turn_only_with_its_transcript() {
         owner: Some("u"),
         tool_owner: None,
         senders: crate::state::Senders::Owner,
+        question: false,
     };
     let heard = voice(serde_json::json!("call me"));
     assert!(matches!(classify(&heard, &intake), Verdict::Turn { .. }));

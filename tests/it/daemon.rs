@@ -11,7 +11,7 @@ use tokio::{
     process::{Child, Command},
 };
 
-fn start(home: &Path, workspace: &Path) -> Child {
+pub(crate) fn start(home: &Path, workspace: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_scv"))
         .isolated(home)
         .args(["run", "--workspace"])
@@ -25,7 +25,7 @@ fn start(home: &Path, workspace: &Path) -> Child {
         .unwrap()
 }
 
-async fn status(home: &Path) -> DaemonStatus {
+pub(crate) async fn status(home: &Path) -> DaemonStatus {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(status) =
@@ -40,7 +40,7 @@ async fn status(home: &Path) -> DaemonStatus {
     .unwrap()
 }
 
-async fn terminate(child: &mut Child) {
+pub(crate) async fn terminate(child: &mut Child) {
     let result = Command::new("kill")
         .args(["-TERM", &child.id().unwrap().to_string()])
         .status()
