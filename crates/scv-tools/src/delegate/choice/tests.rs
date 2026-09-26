@@ -1,33 +1,25 @@
 //! Unit tests for `src/delegate/choice.rs`.
 
-use super::*;
-use crate::delegate::output;
-use serde_json::json;
-use std::sync::Mutex;
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
 
-/// An agent whose next call returns `result`.
-struct Scripted {
-    name: &'static str,
-    result: Mutex<Option<Result<ToolOutput, ToolError>>>,
-}
+use async_trait::async_trait;
+use scv_core::{ToolContext, ToolRisk};
+use serde_json::json;
+
+use super::*;
+use crate::delegate::{agent::Backend, output};
+
+/// A backend the entries below never call.
+struct Idle;
 
 #[async_trait]
-impl Tool for Scripted {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.name.into(),
-            description: "Runs as a nested coding agent.".into(),
-            parameters: json!({"type":"object"}),
-        }
-    }
-
+impl Backend for Idle {
     fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
         Ok(ToolRisk::Delegate)
     }
 
     fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
-        Ok("run".into())
+        Ok(String::new())
     }
 
     async fn execute(
@@ -35,90 +27,107 @@ impl Tool for Scripted {
         _arguments: Value,
         _context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        self.result.lock().unwrap().take().unwrap()
+        Ok(ToolOutput::success(""))
     }
 }
 
-fn chosen(
-    name: &'static str,
-    result: Result<ToolOutput, ToolError>,
-    alternatives: &[&str],
-) -> ChosenAgent {
-    ChosenAgent {
-        inner: Arc::new(Scripted {
-            name,
-            result: Mutex::new(Some(result)),
-        }),
+fn offered(name: &str, accepts: Accepts) -> Offered {
+    Offered {
+        name: name.into(),
+        backend: Arc::new(Idle),
+        accepts,
+        model_hint: adapters::adapter(name)
+            .map_or("", |adapter| adapter.model_hint)
+            .into(),
         use_for: Some("current events and posts on X".into()),
         model: None,
         effort: None,
-        alternatives: alternatives.iter().map(|name| (*name).to_owned()).collect(),
     }
 }
 
-async fn run(agent: &ChosenAgent) -> Result<ToolOutput, ToolError> {
-    agent
-        .execute(
-            json!({}),
-            ToolContext::new(std::env::temp_dir(), CancellationToken::new()),
-        )
-        .await
-}
+const ALL: Accepts = Accepts {
+    model: true,
+    effort: true,
+    session: true,
+};
 
 #[test]
-fn descriptions_name_the_product_what_it_offers_and_the_users_note() {
-    let grok = chosen("agent_grok", Ok(ToolOutput::success("")), &[]);
-    let description = grok.spec().description;
+fn entries_name_the_product_what_it_offers_and_the_users_note() {
+    let grok = entry(&offered(
+        "grok",
+        Accepts {
+            session: false,
+            ..ALL
+        },
+    ));
     assert!(
-        description.starts_with("Grok Build: xAI's coding agent;"),
-        "{description}"
+        grok.starts_with("grok (Grok Build): xAI's coding agent;"),
+        "{grok}"
     );
+    assert!(grok.contains("live web and X search"), "{grok}");
     assert!(
-        description.contains("live web and X search"),
-        "{description}"
-    );
-    assert!(
-        description.contains(
-            "Call it when another agent declined or refused a request, including a safety \
-                 or guardrail refusal"
+        grok.contains(
+            "Call it when another agent declined or refused a request, including a safety or \
+             guardrail refusal."
         ),
-        "{description}"
+        "{grok}"
     );
     assert!(
-        description.ends_with("The user's note on when to use it: current events and posts on X"),
-        "{description}"
+        grok.ends_with(
+            "Takes model (xAI Grok model ID, such as grok-4.7) and effort. The user's note on \
+             when to use it: current events and posts on X"
+        ),
+        "{grok}"
     );
-    // An unknown tool keeps its own description.
-    let other = chosen("agent_fake", Ok(ToolOutput::success("")), &[]);
-    assert!(other.spec().description.starts_with("Runs as"));
-    assert_eq!(product("agent_codex"), "Codex");
-    assert_eq!(product("agent_fake"), "agent_fake");
+    // An unknown agent is named alone.
+    let mut other = offered("fake", Accepts::default());
+    other.use_for = None;
+    assert_eq!(entry(&other), "fake. Takes no model, effort, or session.");
+    assert_eq!(product("codex"), "Codex");
+    assert_eq!(product("fake"), "fake");
 }
 
 #[test]
-fn descriptions_name_task_defaults_for_matching_work() {
-    let mut grok = chosen("agent_grok", Ok(ToolOutput::success("")), &[]);
+fn entries_name_each_agent_s_model_family() {
+    let model = |name: &str| {
+        let mut agent = offered(name, ALL);
+        agent.use_for = None;
+        entry(&agent)
+    };
+    let (claude, codex, pi) = (model("claude"), model("codex"), model("pi"));
+    assert!(claude.contains("model (Claude model alias or ID, such as sonnet or opus)"));
+    assert!(codex.contains("not a Claude alias"), "{codex}");
+    assert!(!codex.contains("sonnet"), "{codex}");
+    assert!(
+        pi.contains("the SCV-configured endpoint is provider scv)"),
+        "{pi}"
+    );
+}
+
+#[test]
+fn entries_name_task_defaults_for_matching_work() {
+    let mut grok = offered("grok", ALL);
     grok.model = Some("grok-4.7".into());
     grok.effort = Some("high".into());
-    let description = grok.spec().description;
     assert!(
-        description.contains(
+        entry(&grok).ends_with(
             "The user's note on when to use it: current events and posts on X. For that work, \
              pass model grok-4.7 and effort high; omit model and effort for other work so the \
              agent uses its own default."
         ),
-        "{description}"
+        "{}",
+        entry(&grok)
     );
-    let mut claude = chosen("agent_claude", Ok(ToolOutput::success("")), &[]);
+    let mut claude = offered("claude", ALL);
     claude.use_for = None;
     claude.model = Some("sonnet".into());
-    let description = claude.spec().description;
     assert!(
-        description.contains(
+        entry(&claude).ends_with(
             "Pass model sonnet unless the user asks for another; omit them to use the agent's \
              own default."
         ),
-        "{description}"
+        "{}",
+        entry(&claude)
     );
 }
 
@@ -129,54 +138,50 @@ fn failed(error: &str) -> ToolOutput {
     )
 }
 
-#[tokio::test]
-async fn availability_failures_name_the_other_agents() {
+#[test]
+fn availability_failures_name_the_other_agents() {
     for error in [
         "HTTP 404: model grok-4.7 not found",
         "Not logged in · Please run /login",
         "API Error: 429 rate limited",
         "the agent exited",
     ] {
-        let agent = chosen(
-            "agent_grok",
-            Ok(failed(error)),
-            &["agent_claude", "agent_codex"],
-        );
-        let output = run(&agent).await.unwrap();
+        let output = settle(Ok(failed(error)), &["claude", "codex"]).unwrap();
         assert_eq!(output.failure, Some(ToolFailure::Unavailable), "{error}");
         let content: Value = serde_json::from_str(&output.content).unwrap();
         assert_eq!(
             content["fallback"],
             "This agent could not run: it is missing, signed out, or its provider returned \
-                 an error. Other agents are available: agent_claude, agent_codex.",
+             an error. Other agents are available: claude, codex. Call agent again with one \
+             of them.",
             "{error}"
         );
     }
     // A launch error carries it too.
-    let missing = chosen(
-        "agent_grok",
+    let error = settle(
         Err(ToolError::unavailable(
             "launch \"grok\": No such file or directory",
         )),
-        &["agent_codex"],
-    );
-    let error = run(&missing).await.unwrap_err();
+        &["codex"],
+    )
+    .unwrap_err();
     assert_eq!(error.kind, ToolFailure::Unavailable);
     assert!(
-        error.message.ends_with("available: agent_codex."),
+        error
+            .message
+            .ends_with("available: codex. Call agent again with one of them."),
         "{error}"
     );
 }
 
-#[tokio::test]
-async fn scv_errors_name_other_agents_only_when_scv_found_the_agent_unavailable() {
+#[test]
+fn scv_errors_name_other_agents_only_when_scv_found_the_agent_unavailable() {
     // A bad `cwd` is the caller's mistake, however its error reads.
     for error in [
         ToolError::invalid_arguments("cwd \"docs\": No such file or directory (os error 2)"),
         ToolError::failed("write to child: 403 forbidden"),
     ] {
-        let agent = chosen("agent_codex", Err(error.clone()), &["agent_claude"]);
-        assert_eq!(run(&agent).await.unwrap_err(), error);
+        assert_eq!(settle(Err(error.clone()), &["claude"]).unwrap_err(), error);
     }
 }
 
@@ -193,66 +198,79 @@ fn declined_output(agent: &str, note: &str) -> ToolOutput {
     )
 }
 
-#[tokio::test]
-async fn a_declined_request_names_grok_when_it_is_offered() {
+#[test]
+fn a_declined_request_names_grok_when_it_is_offered() {
     // The reply is the agent's own words and may mention anything.
-    let agent = chosen(
-        "agent_claude",
+    let output = settle(
         Ok(declined_output(
             "claude",
             "The agent declined this request.",
         )),
-        &["agent_grok"],
-    );
-    let content: Value = serde_json::from_str(&run(&agent).await.unwrap().content).unwrap();
+        &["grok"],
+    )
+    .unwrap();
+    let content: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(content["status"], "declined");
     assert_eq!(content["note"], output::DECLINED_NOTE_TRY_GROK);
     assert!(content.get("fallback").is_none(), "{content}");
 }
 
-#[tokio::test]
-async fn a_declined_request_without_grok_does_not_name_another_agent() {
+#[test]
+fn a_declined_request_without_grok_does_not_name_another_agent() {
     let declined = declined_output("claude", output::DECLINED_NOTE);
-    let agent = chosen("agent_claude", Ok(declined.clone()), &["agent_codex"]);
-    assert_eq!(run(&agent).await.unwrap().content, declined.content);
-    let grok = chosen(
-        "agent_grok",
-        Ok(declined_output("grok", output::DECLINED_NOTE)),
-        &["agent_claude", "agent_codex"],
+    assert_eq!(
+        settle(Ok(declined.clone()), &["codex"]).unwrap().content,
+        declined.content
     );
-    let content: Value = serde_json::from_str(&run(&grok).await.unwrap().content).unwrap();
+    // Grok itself declined: it is not among the others.
+    let output = settle(
+        Ok(declined_output("grok", output::DECLINED_NOTE)),
+        &["claude", "codex"],
+    )
+    .unwrap();
+    let content: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(content["note"], output::DECLINED_NOTE);
     assert!(content.get("fallback").is_none(), "{content}");
 }
 
-#[tokio::test]
-async fn only_the_reported_error_decides_a_fallback() {
+#[test]
+fn only_the_reported_error_decides_a_fallback() {
+    let unchanged = |output: ToolOutput, others: &[&str]| {
+        assert_eq!(
+            settle(Ok(output.clone()), others).unwrap().content,
+            output.content
+        );
+    };
     // An unavailable-sounding reply with no reported error, as when a
     // task genuinely failed while discussing a 403.
-    let reply_only = ToolOutput::failed(
-        ToolFailure::Failed,
-        json!({"status":"failed","reply":"authentication returns 403; 3 tests failed"}).to_string(),
+    unchanged(
+        ToolOutput::failed(
+            ToolFailure::Failed,
+            json!({"status":"failed","reply":"authentication returns 403; 3 tests failed"})
+                .to_string(),
+        ),
+        &["claude"],
     );
-    let agent = chosen("agent_codex", Ok(reply_only.clone()), &["agent_claude"]);
-    assert_eq!(run(&agent).await.unwrap().content, reply_only.content);
-    let tests_failed = failed("cargo test: 3 tests failed");
-    let agent = chosen("agent_codex", Ok(tests_failed.clone()), &["agent_claude"]);
-    assert_eq!(run(&agent).await.unwrap().content, tests_failed.content);
+    unchanged(failed("cargo test: 3 tests failed"), &["claude"]);
     // Unstructured output is never judged.
-    let plain = ToolOutput::failed(ToolFailure::Failed, "not signed in");
-    let agent = chosen("agent_codex", Ok(plain.clone()), &["agent_claude"]);
-    assert_eq!(run(&agent).await.unwrap().content, plain.content);
-    // A timeout is not an availability failure.
-    let timeout = ToolOutput::failed(
-        ToolFailure::Limit,
-        json!({"status":"timeout","reply":"","error":"503 upstream"}).to_string(),
+    unchanged(
+        ToolOutput::failed(ToolFailure::Failed, "not signed in"),
+        &["claude"],
     );
-    let agent = chosen("agent_codex", Ok(timeout.clone()), &["agent_claude"]);
-    assert_eq!(run(&agent).await.unwrap().content, timeout.content);
+    // A timeout is not an availability failure.
+    unchanged(
+        ToolOutput::failed(
+            ToolFailure::Limit,
+            json!({"status":"timeout","reply":"","error":"503 upstream"}).to_string(),
+        ),
+        &["claude"],
+    );
     // A lone agent has nobody to name, and successes are left alone.
-    let alone = chosen("agent_codex", Ok(failed("not signed in")), &[]);
-    assert!(!run(&alone).await.unwrap().content.contains("fallback"));
-    let fine = ToolOutput::success("404 pages fixed");
-    let agent = chosen("agent_codex", Ok(fine.clone()), &["agent_claude"]);
-    assert_eq!(run(&agent).await.unwrap().content, fine.content);
+    assert!(
+        !settle(Ok(failed("not signed in")), &[])
+            .unwrap()
+            .content
+            .contains("fallback")
+    );
+    unchanged(ToolOutput::success("404 pages fixed"), &["claude"]);
 }

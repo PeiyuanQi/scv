@@ -55,7 +55,9 @@ remains. Cancellation permits up to two seconds of graceful cleanup; reaching
 the execution deadline kills immediately. Descendants and retained output pipes
 cannot extend the call without bound.
 
-Each `agent_*` tool launches only its configured adapter. It uses an executable
+The `agent` tool launches only the configured adapter of the agent a call
+names, and only one the session offers; it checks the call's options against
+what that agent takes before anything launches. Each adapter uses an executable
 and argument vector without shell interpolation, appends the model-provided
 prompt as one argument, uses the workspace or a directory inside it as current
 directory, applies the same timeout/output bounds, kills the process group on
@@ -160,7 +162,7 @@ agent's reject option, and a relay without a gate rejects. `permissions =
 or flag, so nothing is relayed then. Progress lines carry tool titles, never
 tool output or the agent's thoughts, and are redacted.
 
-A nested SCV (`agent_scv`) is a delegated agent like the others and adds no
+A nested SCV (the `scv` agent) is a delegated agent like the others and adds no
 new trust: it runs as the user, unsandboxed, in its private home, one
 delegation level deeper. Its tools are still gated by approval, and each of
 its `approval.requested` events is relayed to the calling session's own
@@ -192,10 +194,10 @@ the report goes only to the owner's direct chat, as an unprompted message.
 
 SCV never auto-invokes another agent after a refusal. A run whose model
 refused (`declined`) gets no availability `fallback` field. When the session
-offers `agent_grok`, the result's note and the system prompt tell the main
-agent to report the refusal to the user and then call `agent_grok` with the
-same request; a safety or guardrail refusal is not a reason to skip Grok. If
-`agent_grok` itself declines, or it is not offered, they tell the main agent
+offers `grok`, the result's note and the system prompt tell the main agent to
+report the refusal to the user and then call the `agent` tool with agent
+`grok` and the same request; a safety or guardrail refusal is not a reason to
+skip Grok. If `grok` itself declines, or it is not offered, they tell the main agent
 to report the refusal to the user instead of retrying elsewhere; the user may
 still name another agent, whose own policies then apply. Fallback suggestions
 for real availability failures are decided from the result's status and

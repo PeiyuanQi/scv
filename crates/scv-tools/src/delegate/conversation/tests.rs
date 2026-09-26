@@ -26,7 +26,11 @@ fn handles_are_issued_per_agent_and_vendor_ids_are_not_handles() {
         "../codex-1",
     ] {
         assert!(!is_handle(not_handle), "{not_handle}");
+        assert_eq!(handle_agent(not_handle), None, "{not_handle}");
     }
+    // A handle names its agent.
+    assert_eq!(handle_agent("codex-2"), Some("codex"));
+    assert_eq!(handle_agent("pi-10"), Some("pi"));
     let store = store(8, DAY, None);
     let cwd = Path::new("/w");
     let first = store.begin("codex", None, cwd, false).unwrap();
@@ -67,7 +71,7 @@ fn continuing_pins_agent_and_cwd_and_counts_turns() {
         .begin("claude", Some("codex-1"), cwd, false)
         .unwrap_err();
     assert!(
-        other_agent.message.contains("belongs to agent_codex"),
+        other_agent.message.contains("belongs to codex, not claude"),
         "{}",
         other_agent.message
     );

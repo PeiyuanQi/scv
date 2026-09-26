@@ -193,7 +193,7 @@ pub enum KeyStore {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterDescriptor {
-    /// Short name: the tool is `agent_<name>` and the home `agents/<name>`.
+    /// Short name: the `agent` tool's value for it and the home `agents/<name>`.
     pub name: &'static str,
     /// Product name for messages and the tool description.
     pub product: &'static str,

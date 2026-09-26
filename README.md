@@ -308,11 +308,14 @@ Web search comes from the provider's hosted Responses tool (`web.search =
 "provider"`) or a SearXNG or Brave Search backend; see
 [configuration](docs/configuration.md#web-tools).
 
-The built-in `agent_claude`, `agent_codex`, `agent_grok`, `agent_dsh`, and
-`agent_pi` tools launch Claude Code, Codex, Grok Build, DeepSeek Harness, and pi
-directly, without shell interpolation; a session offers only those installed. They are optional,
-approval-gated, cancellable subprocess adapters and share the same output and
-timeout limits as other process tools. A call may set `cwd` to a project
+The built-in `agent` tool hands work to Claude Code, Codex, Grok Build,
+DeepSeek Harness, or pi, named by its `agent` argument (`claude`, `codex`,
+`grok`, `dsh`, `pi`, or `scv` for a nested SCV), and launches them directly,
+without shell interpolation; a session offers only those installed. The model
+names the agent, or the user's first `agent.prefer` runs a call that names
+none, and an option the chosen agent does not take fails before anything
+launches. The agents are optional, approval-gated, cancellable subprocess
+adapters and share the same output and timeout limits as other process tools. A call may set `cwd` to a project
 directory inside the workspace, where the agent loads that project's
 `AGENTS.md`/`CLAUDE.md` and skills, and may raise `timeout_seconds` up to
 `tools.max_timeout_seconds` (default 14400) for long work such as landing a
@@ -326,7 +329,7 @@ reuses or modifies the user's normal `~/.claude`, `~/.codex`, `~/.grok`,
 `scv agents import codex`, point pi at SCV's own provider with
 `scv agents import pi --from-scv-provider` (or any OpenAI-compatible endpoint
 with `scv agents login pi --openai-compatible`), and check with
-`scv agents status`. `agent_scv` delegates to a nested SCV in its own private
+`scv agents status`. The `scv` agent is a nested SCV in its own private
 home, kept running for the conversation and driven over the SCV protocol; its
 tool approvals come back to the calling session. Give it SCV's own provider
 with `scv agents import scv`. A delegated run returns only its final reply, usage, and
@@ -343,7 +346,7 @@ main agent is told to work this way by default: it answers quick questions
 itself and hands real work to background agents, so it stays available to
 chat. A session runs at most `agent.max_background` (default 4) jobs, and
 closing it cancels them. `agent.prefer` and `[agents.<name>] use_for`, `model`,
-and `effort` steer which agent it picks and which model and effort to pass. Claude Code, Codex, Grok Build, and DeepSeek Harness run over the
+and `effort` steer which agent it names and which model and effort to pass. Claude Code, Codex, Grok Build, and DeepSeek Harness run over the
 Agent Client Protocol when its server is installed (`claude-agent-acp` and
 `codex-acp` from npm `@agentclientprotocol/*`, or the built-in `grok agent
 stdio` and `dsh --profile acp`): one server per conversation whose permission
@@ -360,8 +363,9 @@ SCV is a Cargo workspace with deliberately narrow packages:
 - `scv-client`: the instance layout (every path under the SCV home, the
   daemon socket, and the service unit name) and the daemon control helper;
 - `scv-provider-openai`: streaming provider transport;
-- `scv-tools`: filesystem, process, skill, and nested-agent tools, and the
-  credential files of the agent CLIs SCV delegates to;
+- `scv-tools`: filesystem, process, and skill tools, the `agent` tool that
+  delegates to other agents, and the credential files of the agent CLIs SCV
+  delegates to;
 - `scv-channels`: the chat channels: the bridge they share (durable claims,
   delivery state, and remote sessions), WeChat's iLink login, polling, and
   sending (feature `wechat`), and Feishu/Lark's QR app registration, event long

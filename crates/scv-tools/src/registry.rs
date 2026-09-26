@@ -1,8 +1,8 @@
 //! [`builtin_registry`]: the tools one session offers its model.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
-use scv_core::{Tool, ToolError, ToolRegistry};
+use scv_core::{ToolError, ToolRegistry};
 
 use crate::{
     AgentAdapterConfig, DelegationContext, SkillMap, ToolsConfig,
@@ -16,7 +16,8 @@ use crate::{
     delegate::{
         acp::AcpAgentTool,
         adapters::{self, Transport},
-        background, choice,
+        agent::{AgentTool, Backend, Offered},
+        background,
         conversation::ConversationStore,
         native::NativeAgentTool,
         records,
@@ -24,16 +25,16 @@ use crate::{
     },
 };
 
-/// The tools a session offers: the built-in ones, then an `agent_*` tool for
-/// each installed agent below the delegation depth limit, wrapped so it can
-/// run in the background and name the other agents, and the job tools
-/// (`agent_wait`, `agent_status`, `agent_cancel`) when there are agents.
+/// The tools a session offers: the built-in ones, then, when an installed
+/// agent is offered below the delegation depth limit, the `agent` tool,
+/// able to run in the background, and the job tools (`agent_wait`,
+/// `agent_status`, `agent_cancel`).
 pub fn builtin_registry(
     config: ToolsConfig,
     skills: SkillMap,
     skill_roots: Vec<PathBuf>,
     max_skill_bytes: usize,
-    adapters: HashMap<String, AgentAdapterConfig>,
+    adapters: impl IntoIterator<Item = (String, AgentAdapterConfig)>,
 ) -> Result<ToolRegistry, ToolError> {
     let mut registry = ToolRegistry::default();
     registry.register(Arc::new(ReadTool {
@@ -60,22 +61,10 @@ pub fn builtin_registry(
         .delegation
         .as_ref()
         .map_or_else(records::current_depth, DelegationContext::owner_depth);
-    let adapters = if depth < config.max_delegation_depth {
-        adapters
-    } else {
-        HashMap::new()
-    };
-    // One job store per session, shared by its agent tools and dropped with
-    // it, which cancels the jobs still running.
-    let jobs = (config.max_background > 0).then(|| {
-        config.background.clone().unwrap_or_else(|| {
-            Arc::new(background::BackgroundJobs::new(config.max_background, None))
-        })
-    });
-    // Agents are registered together once all are known, so each can name
-    // the others as fallbacks.
-    let mut found: Vec<FoundAgent> = Vec::new();
-    // One store per session, shared by its agent tools and dropped with it.
+    if depth >= config.max_delegation_depth {
+        return Ok(registry);
+    }
+    // One store per session, shared by its agents and dropped with it.
     let conversations = Arc::new(ConversationStore::new(
         config.conversations,
         config
@@ -83,136 +72,112 @@ pub fn builtin_registry(
             .as_ref()
             .map(|context| context.registry.conversation_dir().to_owned()),
     ));
-    for (name, adapter) in adapters {
-        let (tool_name, use_for, model, effort) = (
-            name.clone(),
-            adapter.use_for.clone(),
-            adapter.model.clone(),
-            adapter.effort.clone(),
-        );
-        let mut register_agent = |_: &mut ToolRegistry, tool: Arc<dyn Tool>| {
-            found.push(FoundAgent {
-                name: tool_name.clone(),
-                tool,
-                use_for: use_for.clone(),
-                model: model.clone(),
-                effort: effort.clone(),
-            });
-            Ok::<(), ToolError>(())
-        };
-        if adapter.transport == Transport::ScvProtocol {
-            let resolved =
-                adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs);
-            // An agent that is not installed is not offered to the model.
-            if resolved.is_some() {
-                register_agent(
-                    &mut registry,
-                    Arc::new(ScvAgentTool {
-                        name,
-                        command: adapter.command,
-                        resolved,
-                        args: adapter.args,
-                        environment: adapter.environment,
-                        timeouts: Timeouts {
-                            default: config.agent_timeout,
-                            max: config.max_timeout,
-                        },
-                        output_limit: config.output_limit_bytes,
-                        delegation: config.delegation.clone(),
-                        conversations: Arc::clone(&conversations),
-                    }),
-                )?;
-            }
-            continue;
-        }
-        if let Some(launch) = adapter.acp.clone() {
-            let resolved =
-                adapters::resolve_agent_executable(&launch.command, &adapter.search_dirs);
-            if resolved.is_some() {
-                register_agent(
-                    &mut registry,
-                    Arc::new(AcpAgentTool::new(
-                        name,
-                        &adapter,
-                        launch,
-                        resolved,
-                        Timeouts {
-                            default: config.agent_timeout,
-                            max: config.max_timeout,
-                        },
-                        config.output_limit_bytes,
-                        config.delegation.clone(),
-                        Arc::clone(&conversations),
-                    )),
-                )?;
-                continue;
-            }
-            if launch.required {
-                // `transport = "acp"` without its server: not offered.
-                continue;
-            }
-        }
-        let tool = NativeAgentTool::new(
-            name,
-            adapter,
-            Timeouts {
-                default: config.agent_timeout,
-                max: config.max_timeout,
-            },
-            config.output_limit_bytes,
-            config.delegation.clone(),
-            Arc::clone(&conversations),
-        );
-        // An agent that is not installed is not offered to the model.
-        if tool.resolved.is_some() {
-            register_agent(&mut registry, Arc::new(tool))?;
-        }
+    let offered: Vec<Offered> = adapters
+        .into_iter()
+        .filter_map(|(name, adapter)| offer(name, adapter, &config, &conversations))
+        .collect();
+    if offered.is_empty() {
+        return Ok(registry);
     }
-    found.sort_by(|a, b| a.name.cmp(&b.name));
-    let names: Vec<String> = found.iter().map(|agent| agent.name.clone()).collect();
-    let agents = found.len();
-    for agent in found {
-        let tool: Arc<dyn Tool> = Arc::new(choice::ChosenAgent {
-            inner: agent.tool,
-            use_for: agent.use_for,
-            model: agent.model,
-            effort: agent.effort,
-            alternatives: names
-                .iter()
-                .filter(|other| **other != agent.name)
-                .cloned()
-                .collect(),
-        });
-        match &jobs {
-            Some(jobs) => registry.register(Arc::new(background::BackgroundCapable {
-                inner: tool,
-                jobs: Arc::clone(jobs),
-            }))?,
-            None => registry.register(tool)?,
-        }
+    let timeouts = Timeouts {
+        default: config.agent_timeout,
+        max: config.max_timeout,
+    };
+    let agent = Arc::new(AgentTool::new(offered, &config.prefer, timeouts));
+    if config.max_background == 0 {
+        registry.register(agent)?;
+        return Ok(registry);
     }
-    if let Some(jobs) = jobs.filter(|_| agents > 0) {
-        registry.register(Arc::new(background::WaitTool {
-            jobs: Arc::clone(&jobs),
-            timeouts: Timeouts {
-                default: config.agent_timeout,
-                max: config.max_timeout,
-            },
-        }))?;
-        registry.register(Arc::new(background::StatusTool {
-            jobs: Arc::clone(&jobs),
-        }))?;
-        registry.register(Arc::new(background::CancelTool { jobs }))?;
-    }
+    // One job store per session, dropped with it, which cancels the jobs
+    // still running.
+    let jobs = config
+        .background
+        .clone()
+        .unwrap_or_else(|| Arc::new(background::BackgroundJobs::new(config.max_background, None)));
+    registry.register(Arc::new(background::BackgroundCapable {
+        inner: agent,
+        jobs: Arc::clone(&jobs),
+    }))?;
+    registry.register(Arc::new(background::WaitTool {
+        jobs: Arc::clone(&jobs),
+        timeouts,
+    }))?;
+    registry.register(Arc::new(background::StatusTool {
+        jobs: Arc::clone(&jobs),
+    }))?;
+    registry.register(Arc::new(background::CancelTool { jobs }))?;
     Ok(registry)
 }
 
-struct FoundAgent {
+/// The agent `name` as the `agent` tool offers it, on the backend its
+/// adapter and transport call for; `None` when it is not installed.
+fn offer(
     name: String,
-    tool: Arc<dyn Tool>,
-    use_for: Option<String>,
-    model: Option<String>,
-    effort: Option<String>,
+    adapter: AgentAdapterConfig,
+    config: &ToolsConfig,
+    conversations: &Arc<ConversationStore>,
+) -> Option<Offered> {
+    let timeouts = Timeouts {
+        default: config.agent_timeout,
+        max: config.max_timeout,
+    };
+    let (backend, accepts): (Arc<dyn Backend>, _) = if adapter.transport == Transport::ScvProtocol {
+        let resolved = adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs)?;
+        (
+            Arc::new(ScvAgentTool {
+                name: name.clone(),
+                command: adapter.command.clone(),
+                resolved: Some(resolved),
+                args: adapter.args.clone(),
+                environment: adapter.environment.clone(),
+                timeouts,
+                output_limit: config.output_limit_bytes,
+                delegation: config.delegation.clone(),
+                conversations: Arc::clone(conversations),
+            }),
+            ScvAgentTool::ACCEPTS,
+        )
+    } else if let Some(launch) = adapter.acp.clone()
+        && let Some(resolved) =
+            adapters::resolve_agent_executable(&launch.command, &adapter.search_dirs)
+    {
+        let tool = AcpAgentTool::new(
+            name.clone(),
+            &adapter,
+            launch,
+            Some(resolved),
+            timeouts,
+            config.output_limit_bytes,
+            config.delegation.clone(),
+            Arc::clone(conversations),
+        );
+        let accepts = tool.accepts();
+        (Arc::new(tool), accepts)
+    } else if adapter.acp.as_ref().is_some_and(|launch| launch.required) {
+        // `transport = "acp"` without its server: not offered.
+        return None;
+    } else {
+        let tool = NativeAgentTool::new(
+            name.clone(),
+            adapter.clone(),
+            timeouts,
+            config.output_limit_bytes,
+            config.delegation.clone(),
+            Arc::clone(conversations),
+        );
+        tool.resolved.as_ref()?;
+        let accepts = tool.accepts();
+        (Arc::new(tool), accepts)
+    };
+    Some(Offered {
+        name,
+        backend,
+        accepts,
+        model_hint: adapter.model_hint,
+        use_for: adapter.use_for,
+        model: adapter.model,
+        effort: adapter.effort,
+    })
 }
 
 #[cfg(test)]

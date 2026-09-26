@@ -139,6 +139,65 @@ fn a_question_tag_is_written_only_when_set_and_older_readers_ignore_it() {
 }
 
 #[test]
+fn a_running_job_names_its_agent_and_0_3_0_state_still_reads() {
+    // 0.3.0 had one tool per agent and saved only the tool's name.
+    let saved =
+        r#"{"to_user_id":"u","job":"job-1","tool":"agent_codex","task":"Fix it","started_at":1}"#;
+    let state: BridgeState =
+        serde_json::from_str(&format!(r#"{{"cursor":"c","seen":[],"jobs":[{saved}]}}"#)).unwrap();
+    let [old] = state.jobs.as_slice() else {
+        panic!("one saved job")
+    };
+    assert!(old.agent.is_empty());
+    assert_eq!(old.agent_name(), "codex");
+    // Written back unchanged.
+    assert_eq!(serde_json::to_string(old).unwrap(), saved);
+
+    let job = RunningJob {
+        to_user_id: "u".into(),
+        job: "job-2".into(),
+        tool: "agent".into(),
+        agent: "claude".into(),
+        task: "Publish".into(),
+        started_at: 2,
+    };
+    assert_eq!(job.agent_name(), "claude");
+    let json = serde_json::to_string(&BridgeState {
+        jobs: vec![job.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    let restored: BridgeState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.jobs, [job]);
+    // 0.3.0, which a rollback runs, reads jobs without
+    // `deny_unknown_fields`, so it ignores `agent` and reads the rest.
+    #[derive(serde::Deserialize)]
+    struct Release030Job {
+        to_user_id: String,
+        job: String,
+        tool: String,
+        #[serde(default)]
+        task: String,
+        started_at: u64,
+    }
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let older: Vec<Release030Job> = serde_json::from_value(value["jobs"].clone()).unwrap();
+    let [older] = older.as_slice() else {
+        panic!("one job for 0.3.0")
+    };
+    assert_eq!(
+        (
+            older.to_user_id.as_str(),
+            older.job.as_str(),
+            older.tool.as_str(),
+            older.task.as_str(),
+            older.started_at
+        ),
+        ("u", "job-2", "agent", "Publish", 2)
+    );
+}
+
+#[test]
 fn single_entries_keep_the_legacy_shape_and_many_become_lists() {
     let claim = |id: &str| InFlight {
         message_id: id.into(),

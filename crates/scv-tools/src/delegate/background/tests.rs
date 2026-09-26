@@ -1,6 +1,7 @@
 //! Unit tests for `src/delegate/background.rs`.
 
 use super::*;
+use crate::delegate::agent::{Accepts, Backend};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;
 
@@ -12,20 +13,7 @@ struct FakeAgent {
 }
 
 #[async_trait]
-impl Tool for FakeAgent {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "agent_fake".into(),
-            description: "Fake agent.".into(),
-            parameters: json!({
-                "type":"object",
-                "properties":{"prompt":{"type":"string"}},
-                "required":["prompt"],
-                "additionalProperties":false
-            }),
-        }
-    }
-
+impl Backend for FakeAgent {
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
         if arguments.get("prompt").and_then(Value::as_str).is_none() {
             return Err(ToolError::failed("prompt is required"));
@@ -70,7 +58,7 @@ fn fixture(limit: usize) -> Fixture {
     let release = Arc::new(Notify::new());
     let cancelled = Arc::new(AtomicBool::new(false));
     let tool = BackgroundCapable {
-        inner: Arc::new(FakeAgent {
+        inner: offering(FakeAgent {
             release: Arc::clone(&release),
             cancelled: Arc::clone(&cancelled),
         }),
@@ -83,6 +71,17 @@ fn fixture(limit: usize) -> Fixture {
         cancelled,
         finished,
     }
+}
+
+/// The `agent` tool offering `backend` as `fake`, its default, beside
+/// `codex`.
+fn offering(backend: impl Backend + 'static) -> Arc<AgentTool> {
+    Arc::new(AgentTool::beside(
+        "fake",
+        Arc::new(backend),
+        Accepts::default(),
+        &["codex"],
+    ))
 }
 
 fn context() -> ToolContext {
@@ -117,7 +116,8 @@ async fn start_as(tool: &BackgroundCapable, call_id: &str) -> Value {
 fn job_1(status: JobStatus) -> JobChange {
     JobChange {
         job: "job-1".into(),
-        tool: "agent_fake".into(),
+        tool: "agent".into(),
+        agent: "fake".into(),
         status,
         task: "work".into(),
     }
@@ -130,7 +130,7 @@ async fn background_calls_return_a_job_that_wait_and_status_observe() {
     assert_eq!(
         started,
         json!({
-            "job":"job-1","tool":"agent_fake","status":"running","background":true,
+            "job":"job-1","agent":"fake","status":"running","background":true,
             "note":started["note"]
         })
     );
@@ -234,23 +234,17 @@ async fn a_finished_job_nobody_looked_at_is_reported_once() {
     assert_eq!(
         (
             report.job.as_str(),
-            report.tool.as_str(),
+            report.agent.as_str(),
             report.status.as_str(),
             report.session.as_deref(),
             report.reply.as_str()
         ),
-        (
-            "job-1",
-            "agent_fake",
-            "completed",
-            Some("fake-1"),
-            "all done"
-        )
+        ("job-1", "fake", "completed", Some("fake-1"), "all done")
     );
     let prompt = report_prompt(&reports);
     assert!(prompt.starts_with("[SCV background report]"), "{prompt}");
     assert!(
-        prompt.contains("job-1 (agent_fake, conversation fake-1): completed\nall done"),
+        prompt.contains("job-1 (fake, conversation fake-1): completed\nall done"),
         "{prompt}"
     );
     assert!(fixture.jobs.take_unreported().is_empty(), "reported twice");
@@ -294,7 +288,7 @@ async fn dropping_the_session_store_cancels_running_jobs() {
 async fn foreground_calls_pass_through_and_the_schema_offers_background() {
     let fixture = fixture(2);
     let spec = fixture.tool.spec();
-    assert_eq!(spec.name, "agent_fake");
+    assert_eq!(spec.name, "agent");
     assert_eq!(
         spec.parameters["properties"]["background"]["type"],
         "boolean"
@@ -308,6 +302,7 @@ async fn foreground_calls_pass_through_and_the_schema_offers_background() {
         .tool
         .approval_summary(&json!({"prompt":"work","background":true}))
         .unwrap();
+    assert!(summary.starts_with("agent fake: "), "{summary}");
     assert!(summary.contains("Runs in the background"), "{summary}");
     assert!(
         !fixture
@@ -390,15 +385,7 @@ async fn agent_cancel_stops_a_running_job_without_a_report() {
 struct AskingAgent;
 
 #[async_trait]
-impl Tool for AskingAgent {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "agent_asking".into(),
-            description: "Asking agent.".into(),
-            parameters: json!({"type":"object","properties":{}}),
-        }
-    }
-
+impl Backend for AskingAgent {
     fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
         Ok(ToolRisk::Delegate)
     }
@@ -458,10 +445,10 @@ async fn nested_answer(gate: Option<Arc<dyn ApprovalGate>>) -> String {
     }
     let jobs = Arc::new(jobs);
     let tool = BackgroundCapable {
-        inner: Arc::new(AskingAgent),
+        inner: offering(AskingAgent),
         jobs: Arc::clone(&jobs),
     };
-    tool.execute(json!({"background":true}), context())
+    tool.execute(json!({"prompt":"ask","background":true}), context())
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), finished.recv())
@@ -525,6 +512,52 @@ async fn wait_and_status_tools_validate_and_are_read_only() {
     assert_eq!(status.risk(&json!({})).unwrap(), ToolRisk::ReadOnly);
     let empty = status.execute(json!({}), context()).await.unwrap();
     assert_eq!(empty.content, json!({"jobs":[]}).to_string());
+}
+
+#[tokio::test]
+async fn a_background_call_runs_the_agent_it_names_and_a_refused_one_starts_no_job() {
+    let mut fixture = fixture(2);
+    // The dispatcher refuses an agent the session does not offer, or an
+    // option the agent does not take, before any job starts.
+    for refused in [
+        json!({"agent":"zcode","prompt":"work","background":true}),
+        json!({"agent":"fake","prompt":"work","model":"m","background":true}),
+    ] {
+        let error = fixture
+            .tool
+            .execute(refused, call("call-0"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            scv_core::ToolFailure::InvalidArguments,
+            "{error}"
+        );
+    }
+    assert_eq!(fixture.jobs.running(), 0);
+    assert!(fixture.jobs.take_changes("call-0").is_empty());
+    // The job belongs to the agent the call named, however it is named.
+    let started = fixture
+        .tool
+        .execute(
+            json!({"agent":"fake","prompt":"work","background":true}),
+            call("call-1"),
+        )
+        .await
+        .unwrap();
+    let started: Value = serde_json::from_str(&started.content).unwrap();
+    assert_eq!(started["agent"], "fake");
+    let [change] = fixture.jobs.take_changes("call-1").try_into().unwrap();
+    assert_eq!(
+        (change.tool.as_str(), change.agent_name()),
+        ("agent", "fake")
+    );
+    let listed = fixture.jobs.describe(None, "call-2").unwrap();
+    assert_eq!(listed["jobs"][0]["agent"], "fake");
+    assert!(listed["jobs"][0].get("tool").is_none(), "{listed}");
+    fixture.release.notify_one();
+    fixture.finished.recv().await.unwrap();
+    assert_eq!(fixture.jobs.take_unreported()[0].agent, "fake");
 }
 
 #[test]

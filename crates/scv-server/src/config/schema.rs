@@ -98,8 +98,8 @@ impl Default for ProviderConfig {
 pub(crate) struct AgentConfig {
     pub(crate) max_steps: usize,
     pub(crate) system_prompt: String,
-    /// `agent_*` tools are offered only while this SCV's own delegation depth
-    /// is below this, so delegation chains stay bounded. 0 disables them.
+    /// The `agent` tool is offered only while this SCV's own delegation depth
+    /// is below this, so delegation chains stay bounded. 0 disables it.
     pub(crate) max_delegation_depth: u32,
     /// Delegated conversations a session remembers; starting another forgets
     /// the least recently used idle one.
@@ -110,7 +110,8 @@ pub(crate) struct AgentConfig {
     /// 0 turns background delegation off.
     pub(crate) max_background: usize,
     /// Agents the user prefers, in order (such as `["codex", "claude"]`);
-    /// the system prompt names the installed ones. Empty states no preference.
+    /// the system prompt names the offered ones, and the first of them runs
+    /// an `agent` call that names none. Empty states no preference.
     pub(crate) prefer: Vec<String>,
 }
 

@@ -30,10 +30,8 @@ use crate::{
 /// and fail with a sign-in hint if they turn out to be signed out.
 pub(crate) fn offered_adapters(config: &Config) -> HashMap<String, scv_tools::AgentAdapterConfig> {
     let mut adapters = config.adapters();
-    adapters.retain(|tool, adapter| {
-        let descriptor = tool
-            .strip_prefix("agent_")
-            .and_then(scv_tools::adapters::adapter);
+    adapters.retain(|name, adapter| {
+        let descriptor = scv_tools::adapters::adapter(name);
         match (
             descriptor.map(|descriptor| descriptor.status),
             &adapter.home,
@@ -46,21 +44,6 @@ pub(crate) fn offered_adapters(config: &Config) -> HashMap<String, scv_tools::Ag
         }
     });
     adapters
-}
-
-/// Agent tools that delegate work, as opposed to observing or stopping jobs.
-pub(crate) fn agent_tool_names(tools: &ToolRegistry) -> Vec<String> {
-    let mut names: Vec<String> = tools
-        .specs()
-        .into_iter()
-        .map(|spec| spec.name)
-        .filter(|name| {
-            name.starts_with("agent_")
-                && !["agent_wait", "agent_status", "agent_cancel"].contains(&name.as_str())
-        })
-        .collect();
-    names.sort();
-    names
 }
 
 /// `delegation_depth` is the depth the client declared in `session.start`
@@ -153,7 +136,7 @@ pub(crate) async fn build_session(
         }
         Arc::new(registry)
     };
-    let agents = agent_tool_names(&tools);
+    let agents = scv_tools::offered_agents(&tools);
     let system_prompt = build_system_prompt(
         &workspace,
         &config,

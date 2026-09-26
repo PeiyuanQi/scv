@@ -17,13 +17,13 @@ use scv_tools::stores::{self, Endpoint, StoredStatus, WireApi};
 use super::imports;
 
 /// Build a command for a native agent's CLI with the same private home and
-/// cleaned environment the daemon's `agent_<name>` tool uses, so the agent's
-/// own sign-in stores credentials where delegated runs will find them.
+/// cleaned environment the daemon's delegated runs of that agent use, so
+/// the agent's own sign-in stores credentials where they will find them.
 pub(crate) fn agent_command(config: &Config, agent: &str) -> Result<std::process::Command> {
     config.prepare_adapter_homes()?;
     let adapter = config
         .adapters()
-        .remove(&format!("agent_{agent}"))
+        .remove(agent)
         .ok_or_else(|| anyhow!("unknown agent {agent}"))?;
     let executable = adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs)
         .ok_or_else(|| {
@@ -42,7 +42,7 @@ pub(crate) fn agent_command(config: &Config, agent: &str) -> Result<std::process
 pub(crate) fn agent_executable(config: &Config, agent: &str) -> Result<Option<PathBuf>> {
     let adapter = config
         .adapters()
-        .remove(&format!("agent_{agent}"))
+        .remove(agent)
         .ok_or_else(|| anyhow!("unknown agent {agent}"))?;
     Ok(adapters::resolve_agent_executable(
         &adapter.command,
@@ -209,7 +209,7 @@ pub(crate) fn agent_import_status(config: &Config, agent: &str) -> Result<Option
     Ok(status.map(|status| status.describe(agent, imports::now())))
 }
 
-/// Give the nested SCV (`agent_scv`) its own copy of SCV's active provider,
+/// Give the nested SCV (the `scv` agent) its own copy of SCV's active provider,
 /// in `$SCV_HOME/agents/scv/config.toml` (mode 0600).
 pub(crate) fn import_scv_from_scv_provider(config: &Config) -> Result<Vec<String>> {
     config.prepare_adapter_homes()?;

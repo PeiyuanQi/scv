@@ -47,8 +47,8 @@ SCV provides:
 - configurable, deterministic context budgeting and compaction;
 - built-in `read`, `read_skill`, `write`, `bash`, `web_fetch`, and
   `web_search` tools, plus the provider's hosted web search when configured;
-- delegation to other agent CLIs (`agent_claude`, `agent_codex`,
-  `agent_grok`, `agent_dsh`, `agent_pi`) and to a nested SCV (`agent_scv`),
+- delegation through one `agent` tool, whose `agent` argument names another
+  agent CLI (`claude`, `codex`, `grok`, `dsh`, `pi`) or a nested SCV (`scv`),
   in the foreground or as background jobs (`agent_wait`, `agent_status`,
   `agent_cancel`);
 - a versioned newline-delimited JSON protocol;
@@ -87,8 +87,8 @@ The repository is one Cargo workspace with these packages:
 The integration dependency chain is
 `server -> channels -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
-on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
-nested SCV; core contains no concrete transport, provider, tool, server, or TUI
+on core, and tools also on protocol, whose wire types the `scv` agent speaks
+to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
 `0.3.0` and exact workspace dependency pins.
 
@@ -145,9 +145,10 @@ What lives where in the largest crates:
 | `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, the tools' settings, and the argument helpers every tool shares |
 | | `builtin/` | Tools that run inside SCV: `fs.rs` (`read`, `write`), `skill.rs` (`read_skill`), `shell.rs` (`bash`), `web.rs` (`web_fetch`, `web_search`), `chat_attach.rs` |
 | | `process.rs` | Spawning a child in its own process group, draining its output, and `ProcessGroup`, the only way SCV signals a group |
-| | `delegate/native.rs`, `delegate/request.rs` | The per-turn CLI agent tool and the arguments every `agent_*` call takes |
+| | `delegate/agent.rs`, `delegate/request.rs` | The `agent` tool, which chooses the agent, checks the call against what it takes, and hands it to that agent's backend, and the arguments every call takes |
+| | `delegate/native.rs` | The per-turn CLI backend |
 | | `delegate/acp/`, `delegate/scv.rs`, `delegate/live.rs` | Long-running delegations over ACP (`rpc`, `session`, `permission`, `progress`, `tool`) and the SCV protocol, on one live-child runtime |
-| | `delegate/adapters.rs`, `delegate/choice.rs` | One descriptor per delegated agent CLI, and how agent tools are described and chosen |
+| | `delegate/adapters.rs`, `delegate/choice.rs` | One descriptor per delegated agent CLI, and how the `agent` tool describes each agent and names the others after a failure |
 | | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
@@ -376,7 +377,7 @@ nonreading management client cannot prevent reconciliation or shutdown.
 
 Delegated agent runs are tracked by `scv_tools::delegation`. Each SCV process
 (the daemon or a `scv server --stdio`) holds one `DelegationRegistry` for its
-instance, and every session's agent tools record their runs in it through
+instance, and every session's agent backends record their runs in it through
 `ToolsConfig.delegation`, which carries the registry and the session ID.
 Records live in `$SCV_HOME/state/delegations`, so the daemon also sees runs that
 `scv exec` servers started. A separate daemon task reconciles them at startup
@@ -398,7 +399,7 @@ planned restart does not wait for it then, unless a nested SCV's own
 background jobs still count (below). The conversation store
 keeps the child as the conversation's attachment, so forgetting, expiring, or
 ending the conversation's session is what shuts it down. `delegate/scv.rs`
-runs the SCV protocol client on top of it for `agent_scv`. A nested SCV's
+runs the SCV protocol client on top of it for the `scv` agent. A nested SCV's
 session can run background jobs that outlive the call that started them and
 are reported in turns the nested SCV starts itself, so between calls a
 watcher task keeps reading its events. The nested SCV never stalls on a full
@@ -413,16 +414,18 @@ in its protocol, and nothing reads from it between turns. `delegate/acp/`
 runs an Agent Client Protocol (JSON-RPC 2.0) client on the same runtime for
 the agents whose adapter-table entry names an ACP server
 (`AcpLaunch`). The server resolves `[agents.<name>] transport` into an
-`AcpAgentLaunch`, and the registry registers the ACP tool when that server is
-installed, otherwise the per-turn CLI tool. Tools reach the session's approval
+`AcpAgentLaunch`, and the registry offers the agent on its ACP backend when
+that server is installed, otherwise on the per-turn CLI backend. Tools reach
+the session's approval
 gate through `ToolContext.approvals`, which carries the running call's ID, so a
 nested agent's approval requests are decided like the session's own.
 
 Background delegations live in `scv_tools::background`. Each session owns one
 `BackgroundJobs` store, shared by its tools and dropped with the session,
 which cancels the jobs still running. When `agent.max_background` is positive
-the registry wraps every agent tool in `BackgroundCapable`: a call with
-`background: true` starts the wrapped tool's `execute` in a detached task with
+the registry wraps the `agent` tool in `BackgroundCapable`: a call with
+`background: true` has the tool choose and check its agent, then starts the
+tool's `execute` in a detached task with
 its own cancellation token, a buffered progress sink, and the session's
 unattended approval gate (the policy's own decision, else the client's
 declared `auto_approve`, else a denial), and returns a job handle;
@@ -433,9 +436,14 @@ the model a job's result or stops it; `ProtocolSink` takes them
 (`take_changes`) into that call's `tool.completed.jobs`, so clients learn
 which jobs run from typed events rather than from prompts or tool output.
 Agent results are read back through one typed `AgentReply`
-(`delegate/output.rs`). Beneath it, `ChosenAgent` (`delegate/choice.rs`) prefixes each
-agent tool's description with its product and what it offers, appends the
-user's `use_for` and any default `model`/`effort` for that work, and names the
+(`delegate/output.rs`). Beneath it, `AgentTool` (`delegate/agent.rs`) is the
+one tool the model sees for delegation: its `agent` argument is an enum of the
+offered agents, and it routes each call to that agent's `Backend` (native,
+ACP, or nested SCV), taking the agent from a `session` handle, the argument,
+or the first offered `agent.prefer`, and refusing an option the agent does not
+take before anything launches. `delegate/choice.rs` writes each agent's line
+in the argument's description (product, what it offers, what it takes, the
+user's `use_for` and any default `model`/`effort` for that work) and names the
 other offered agents on availability failures. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
@@ -445,7 +453,7 @@ session's jobs from `tool.completed.jobs` and report turns' `origin.jobs`;
 the bridge routes report turns by `request_id`, keeps a session with running
 jobs open (and exempt from eviction), and sends their answers as unprompted
 messages. The system prompt's delegation and chat-channel sections
-are built after the registry, from the agent tools it actually offers and the
+are built after the registry, from the agents its `agent` tool actually offers and the
 `channel` the client declared.
 
 A live child (`LiveChild` in `delegate/live.rs`, behind the ACP and nested-SCV
@@ -510,8 +518,8 @@ Rust traits are the stable internal extension seam:
 changes to the loop. `AgentRuntime` is constructed from trait objects so another
 binary can embed SCV with different providers, policies, and tools.
 
-Process extensions use the same internal adapter behind `agent_claude`,
-`agent_codex`, `agent_grok`, `agent_dsh`, and `agent_pi`. Adapters are
+Process extensions use the same internal adapter behind the `claude`,
+`codex`, `grok`, `dsh`, and `pi` agents of the `agent` tool. Adapters are
 declarative: one `scv_tools::adapters` descriptor per CLI holds its
 executable-plus-argument templates, its state location inside the private
 home, the variables it must not inherit, and how `scv agents` signs it in. SCV does not load third-party dynamic
@@ -529,7 +537,7 @@ Repositories carry their own agent skills in `.agents/skills` (Codex) and
 `.claude/skills` (Claude Code). SCV does not execute or translate them: in
 tool-enabled sessions it lists those of the workspace and its immediate child
 projects as `<project>:<name>` so the model knows they exist, and delegates the
-work with an `agent_*` call whose `cwd` is that project. The nested CLI then
+work with an `agent` call whose `cwd` is that project. The nested CLI then
 discovers the project's instructions and skills natively, so new repositories
 and skills need no SCV registration.
 

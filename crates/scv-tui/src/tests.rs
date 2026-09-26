@@ -542,9 +542,15 @@ fn running_tools_show_their_latest_progress_line() {
         turn_id,
         seq,
         call_id: "c1".into(),
-        name: "agent_codex".into(),
-        arguments: serde_json::json!({"prompt":"work"}),
+        name: "agent".into(),
+        arguments: serde_json::json!({"agent":"codex","prompt":"work"}),
     });
+    // Every delegation is the one tool, so the agent is named beside it.
+    assert!(
+        screen(&app).contains("○ agent codex  {"),
+        "{}",
+        screen(&app)
+    );
     let (request_id, session_id, turn_id, seq) = meta(2);
     app.handle_server_event(ServerEvent::ToolStarted {
         request_id,
@@ -552,7 +558,7 @@ fn running_tools_show_their_latest_progress_line() {
         turn_id,
         seq,
         call_id: "c1".into(),
-        name: "agent_codex".into(),
+        name: "agent".into(),
     });
     let (request_id, session_id, turn_id, seq) = meta(3);
     app.handle_server_event(ServerEvent::ToolProgress {
@@ -574,7 +580,7 @@ fn running_tools_show_their_latest_progress_line() {
         turn_id,
         seq,
         call_id: "c1".into(),
-        name: "agent_codex".into(),
+        name: "agent".into(),
         success: true,
         output: "{}".into(),
         truncated: false,
@@ -791,4 +797,32 @@ fn server_clear_is_authoritative_for_display_and_prompt_history() {
     assert!(app.items.is_empty());
     assert!(app.prompt_history.is_empty());
     assert_eq!(app.last_seq, 1);
+}
+
+#[test]
+fn agent_calls_are_labelled_with_the_agent_they_run_on() {
+    let label = |name: &str, arguments: serde_json::Value| crate::app::call_label(name, &arguments);
+    assert_eq!(
+        label("agent", serde_json::json!({"agent":"codex","prompt":"x"})),
+        "agent codex"
+    );
+    // A continuation names its conversation, whose handle names the agent.
+    assert_eq!(
+        label(
+            "agent",
+            serde_json::json!({"session":"claude-2","prompt":"x"})
+        ),
+        "agent claude-2"
+    );
+    // The preferred agent runs a call that names none; only the server knows it.
+    assert_eq!(label("agent", serde_json::json!({"prompt":"x"})), "agent");
+    // Anything but a plain name stays in the arguments shown beside it.
+    assert_eq!(
+        label("agent", serde_json::json!({"agent":"co\ndex","prompt":"x"})),
+        "agent"
+    );
+    assert_eq!(
+        label("bash", serde_json::json!({"agent":"codex","command":"ls"})),
+        "bash"
+    );
 }

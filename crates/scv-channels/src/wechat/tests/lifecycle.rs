@@ -1032,7 +1032,7 @@ async fn only_the_owner_gets_tools_and_auto_approval() {
             assert_eq!(start["channel"], "WeChat");
             assert_eq!(start["auto_approve"], tools);
             assert_eq!(next_turn(&mut side).await, "hello");
-            send_frame(&mut side, json!({"type":"approval.requested","request_id":"r","session_id":"s","turn_id":"t","seq":1,"approval_id":"a1","call_id":"c1","name":"agent_claude","risk":"delegate","cwd":"/","summary":"Launch claude"})).await;
+            send_frame(&mut side, json!({"type":"approval.requested","request_id":"r","session_id":"s","turn_id":"t","seq":1,"approval_id":"a1","call_id":"c1","name":"agent","risk":"delegate","cwd":"/","summary":"agent claude: Launch claude"})).await;
             let resolved = next_frame(&mut side).await;
             assert_eq!(resolved["approval_id"], "a1");
             assert_eq!(resolved["approved"], tools);
@@ -1405,11 +1405,11 @@ async fn tool_progress_never_reaches_wechat() {
         // A direct client declares no delegation depth.
         assert!(start.get("delegation_depth").is_none(), "{start}");
         assert_eq!(next_turn(&mut side).await, "hello");
-        send_frame(&mut side, json!({"type":"tool.started","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent_codex"})).await;
+        send_frame(&mut side, json!({"type":"tool.started","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent"})).await;
         for seq in 2..5 {
             send_frame(&mut side, json!({"type":"tool.progress","request_id":"r","session_id":"s","turn_id":"t","seq":seq,"call_id":"c","text":format!("$ step {seq} PROGRESS")})).await;
         }
-        send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":5,"call_id":"c","name":"agent_codex","success":true,"output":"{}","truncated":false})).await;
+        send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":5,"call_id":"c","name":"agent","success":true,"output":"{}","truncated":false})).await;
         send_frame(&mut side, json!({"type":"assistant.completed","request_id":"r","session_id":"s","turn_id":"t","seq":6,"content":"final answer"})).await;
         send_frame(&mut side, json!({"type":"turn.completed","request_id":"r","session_id":"s","turn_id":"t","seq":7,"steps":2,"usage":{}})).await;
         let body = ilink.sent().await;
@@ -1482,9 +1482,9 @@ async fn start_job_with_task(
     reply: &str,
 ) {
     let output =
-        json!({"job":job,"tool":"agent_codex","status":"running","background":true}).to_string();
-    let started = json!({"job":job,"tool":"agent_codex","status":"running","task":task});
-    send_frame(side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent_codex","success":true,"output":output,"truncated":false,"jobs":[started]})).await;
+        json!({"job":job,"agent":"codex","status":"running","background":true}).to_string();
+    let started = json!({"job":job,"tool":"agent","agent":"codex","status":"running","task":task});
+    send_frame(side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent","success":true,"output":output,"truncated":false,"jobs":[started]})).await;
     finish_turn(side, reply).await;
 }
 
@@ -1732,15 +1732,15 @@ async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background
     bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }
 
-/// Frames of an owner turn whose `agent_codex` call starts background job
-/// `job` for `prompt`.
+/// Frames of an owner turn whose `agent` call starts background job `job`
+/// on codex for `prompt`.
 async fn start_described_job(
     side: &mut BufReader<tokio::net::UnixStream>,
     job: &str,
     prompt: &str,
     reply: &str,
 ) {
-    send_frame(side, json!({"type":"tool.proposed","request_id":"r","session_id":"s","turn_id":"t","seq":0,"call_id":"c","name":"agent_codex","arguments":{"prompt":prompt,"background":true}})).await;
+    send_frame(side, json!({"type":"tool.proposed","request_id":"r","session_id":"s","turn_id":"t","seq":0,"call_id":"c","name":"agent","arguments":{"agent":"codex","prompt":prompt,"background":true}})).await;
     // The daemon names the job by its prompt's first line.
     let task = prompt.lines().next().unwrap_or_default();
     start_job_with_task(side, job, task, reply).await;
@@ -1793,9 +1793,10 @@ async fn the_hub_sees_owner_work_until_its_report_is_stored_and_can_queue_notice
             (
                 jobs[0].job.as_str(),
                 jobs[0].tool.as_str(),
+                jobs[0].agent.as_str(),
                 jobs[0].task.as_str()
             ),
-            ("job-1", "agent_codex", "Land the fix")
+            ("job-1", "agent", "codex", "Land the fix")
         );
         report_turn(&mut side, "background:1", &["job-1"], "job-1 landed.").await;
         assert_eq!(sent_text(&ilink.sent().await), "job-1 landed.");
@@ -1843,8 +1844,7 @@ async fn a_job_whose_result_a_later_call_showed_the_model_stops_holding_the_sess
         // result: no report turn will follow.
         ilink.push(vec![text_message("m2", "sender", "done yet?")]);
         assert_eq!(next_turn(&mut side).await, "done yet?");
-        let settled =
-            json!({"job":"job-1","tool":"agent_codex","status":"completed","task":"Land the fix"});
+        let settled = json!({"job":"job-1","tool":"agent","agent":"codex","status":"completed","task":"Land the fix"});
         send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c2","name":"agent_wait","success":true,"output":"{}","truncated":false,"jobs":[settled]})).await;
         finish_turn(&mut side, "job-1 landed.").await;
         assert_eq!(sent_text(&ilink.sent().await), "job-1 landed.");
@@ -1904,10 +1904,12 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
                     context_token: "ctx-m1".into(),
                     key: "sender".into(),
                 }],
+                // As 0.3.0 saved it, with the agent in the tool's name.
                 jobs: vec![crate::state::RunningJob {
                     to_user_id: "sender".into(),
                     job: "job-2".into(),
                     tool: "agent_claude".into(),
+                    agent: String::new(),
                     task: "Review the PR".into(),
                     started_at: 1,
                 }],

@@ -249,6 +249,7 @@ impl Session {
                             change.job.clone(),
                             JobInfo {
                                 tool: change.tool.clone(),
+                                agent: change.agent_name().to_owned(),
                                 task: change.task.clone(),
                             },
                         );
@@ -461,8 +462,10 @@ impl Session {
 /// A background job this session started, as a restart describes it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct JobInfo {
-    /// The delegating tool, such as `agent_codex`.
+    /// The delegating tool: `agent`, or `agent_codex` from SCV 0.3.0.
     pub(crate) tool: String,
+    /// The agent that runs it, such as `codex`, in either case.
+    pub(crate) agent: String,
     /// The first line of the delegated prompt, shortened.
     pub(crate) task: String,
 }

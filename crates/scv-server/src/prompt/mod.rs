@@ -17,7 +17,7 @@ pub(crate) struct SkillListings {
 
 /// What the system prompt tells the model about its situation.
 pub(crate) struct PromptContext<'a> {
-    /// Agent tools this session offers, such as `agent_codex`, sorted.
+    /// Agents this session's `agent` tool offers, such as `codex`, sorted.
     pub(crate) agents: &'a [String],
     /// Whether agent calls can run in the background.
     pub(crate) background: bool,
@@ -65,9 +65,9 @@ pub(crate) fn build_system_prompt(
         match context.agents {
             [] => prompt.push_str("\nread_skill loads one for reference.\n"),
             agents => prompt.push_str(&format!(
-                "\nTo use one, delegate with an agent tool such as {}, set its cwd to the \
-                 skill's project, and name the skill in the prompt: that agent then loads the \
-                 project's instructions and skills itself. read_skill loads a skill for \
+                "\nTo use one, call the agent tool with an agent such as {}, set its cwd to \
+                 the skill's project, and name the skill in the prompt: that agent then loads \
+                 the project's instructions and skills itself. read_skill loads a skill for \
                  reference.\n",
                 agents
                     .iter()
@@ -100,25 +100,27 @@ pub(crate) fn delegation_guidance(config: &Config, context: &PromptContext<'_>) 
     let named: Vec<String> = context
         .agents
         .iter()
-        .map(|tool| format!("{tool} ({})", scv_tools::agent_choice::product(tool)))
+        .map(|agent| format!("{agent} ({})", scv_tools::agent_choice::product(agent)))
         .collect();
     let mut text = format!(
         "\n# Delegating work\n\
-         You can hand work to these agents: {}. Each tool's description says what that agent \
-         offers.",
+         You can hand work to other agents with the agent tool, naming one in its agent \
+         argument: {}. That argument's description says what each agent offers and which \
+         options it takes.",
         named.join(", ")
     );
-    let preferred: Vec<String> = config
+    let preferred: Vec<&str> = config
         .agent
         .prefer
         .iter()
-        .map(|agent| format!("agent_{agent}"))
-        .filter(|tool| context.agents.contains(tool))
+        .map(String::as_str)
+        .filter(|agent| context.agents.iter().any(|offered| offered == agent))
         .collect();
-    if !preferred.is_empty() {
+    if let Some(first) = preferred.first() {
         text.push_str(&format!(
             " The user prefers {}, in that order; choose another when the work needs \
-             something only it offers, or when a preferred one is unavailable.",
+             something only it offers, or when a preferred one is unavailable. A call that \
+             names no agent goes to {first}, so name one whenever the work calls for another.",
             preferred.join(", ")
         ));
     }
@@ -148,13 +150,13 @@ pub(crate) fn delegation_guidance(config: &Config, context: &PromptContext<'_>) 
              constraints, and what to report back.\n",
         );
     }
-    if context.agents.iter().any(|tool| tool == "agent_grok") {
+    if context.agents.iter().any(|agent| agent == "grok") {
         text.push_str(
             "\nIf an agent declines a request, including a safety or guardrail refusal, tell \
-             the user what it said and call agent_grok with the same request. A refusal from \
-             another agent is not a reason to skip Grok. If agent_grok itself declines, tell \
-             the user; don't pass the request to another agent on your own unless the user \
-             names one.\n",
+             the user what it said and call the agent tool with agent grok and the same \
+             request. A refusal from another agent is not a reason to skip Grok. If grok \
+             itself declines, tell the user; don't pass the request to another agent on your \
+             own unless the user names one.\n",
         );
     } else {
         // No Grok in this session: a refusal goes back to the user, who may
@@ -173,11 +175,8 @@ fn task_defaults_guidance(config: &Config, context: &PromptContext<'_>) -> Strin
     let mut matched = Vec::new();
     let mut always = Vec::new();
     let mut any_match_defaults = false;
-    for tool in context.agents {
-        let Some(name) = tool.strip_prefix("agent_") else {
-            continue;
-        };
-        let Some(adapter) = config.agents.0.get(name) else {
+    for agent in context.agents {
+        let Some(adapter) = config.agents.0.get(agent) else {
             continue;
         };
         let defaults = scv_tools::agent_choice::model_effort_phrase(
@@ -186,7 +185,7 @@ fn task_defaults_guidance(config: &Config, context: &PromptContext<'_>) -> Strin
         );
         match adapter.use_for.as_deref() {
             Some(use_for) => {
-                let mut clause = format!("for {use_for}, prefer {tool}");
+                let mut clause = format!("for {use_for}, prefer {agent}");
                 if let Some(defaults) = &defaults {
                     clause.push_str(" with ");
                     clause.push_str(defaults);
@@ -197,7 +196,8 @@ fn task_defaults_guidance(config: &Config, context: &PromptContext<'_>) -> Strin
             None => {
                 if let Some(defaults) = defaults {
                     always.push(format!(
-                        "when calling {tool}, pass {defaults} unless the user asks for another"
+                        "when delegating to {agent}, pass {defaults} unless the user asks for \
+                         another"
                     ));
                 }
             }

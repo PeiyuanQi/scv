@@ -164,45 +164,75 @@ targets; search tests use fake SearXNG and Brave responses; a stdio test
 covers approval with and without the allowlist and the hosted tool in the
 request.
 
-## Native agent adapters
+## Delegated agents (`agent`)
 
-SCV knows five agent CLIs: Claude Code (`agent_claude`), Codex
-(`agent_codex`), Grok Build (`agent_grok`), DeepSeek Harness (`agent_dsh`),
-and pi (`agent_pi`), plus a nested SCV (`agent_scv`, see
-[Nested SCV](#nested-scv-agent_scv)). Claude Code, Codex, Grok Build, and DeepSeek Harness
-run over the [Agent Client Protocol](#agent-client-protocol-transport) when its
-server is installed. Each is one descriptor in `scv_tools::adapters` holding
-its default command line, where its state lives inside the private home, the
-variables it must not inherit, and how it signs in; adding an agent is one
-more entry. A session offers only the agents whose executable resolves when
-the session starts, so an agent installed later appears in new sessions. An
-agent whose sign-in SCV checks by reading a local file (Grok, DeepSeek
-Harness, pi, and the nested SCV; see [Signing in](#signing-in-delegated-agents))
-is also left out while that check says it is signed out. Claude Code and Codex
-report sign-in only through their own CLI, which is too slow to run at every
-session start, so they stay offered and a signed-out call fails with the
-sign-in hint.
+One tool, `agent`, hands work to another agent, and its `agent` argument names
+which one. SCV knows five agent CLIs: Claude Code (`claude`), Codex (`codex`),
+Grok Build (`grok`), DeepSeek Harness (`dsh`), and pi (`pi`), plus a nested
+SCV (`scv`, see [Nested SCV](#nested-scv-scv)). Claude Code, Codex, Grok
+Build, and DeepSeek Harness run over the
+[Agent Client Protocol](#agent-client-protocol-transport) when its server is
+installed. Each is one descriptor in `scv_tools::adapters` holding its default
+command line, where its state lives inside the private home, the variables it
+must not inherit, and how it signs in; adding an agent is one more entry. A
+session offers only the agents whose executable resolves when the session
+starts, so an agent installed later appears in new sessions. An agent whose
+sign-in SCV checks by reading a local file (Grok, DeepSeek Harness, pi, and
+the nested SCV; see [Signing in](#signing-in-delegated-agents)) is also left
+out while that check says it is signed out. Claude Code and Codex report
+sign-in only through their own CLI, which is too slow to run at every session
+start, so they stay offered and a signed-out call fails with the sign-in hint.
+A session that offers no agent has no `agent` tool.
+
+Behind the tool, each agent runs on one of three backends: its CLI once per
+turn, its ACP server for a whole conversation, or a nested
+`scv server --stdio` for a whole conversation. The `agent` tool chooses the
+agent, checks the call against what that agent takes, and hands the call to
+its backend, so the model sees one schema whichever way the agent runs.
 
 ### Choosing an agent
 
-Each tool description starts with the product name and one factual line on
-what that harness offers, so the model can choose between them:
+SCV hard-codes no agent: which one runs comes from the user, through what they
+ask for in chat, their `[agent] prefer`, and their `use_for` notes, which the
+model reads. A call runs on, in order:
 
-| Tool | Description starts with |
+1. the agent whose conversation its `session` handle names (`codex-2` is a
+   Codex conversation). An explicit `agent` that disagrees fails with
+   `conversation codex-2 belongs to codex, not claude; omit agent to continue
+   it, or omit session to start a new conversation with claude`;
+2. the `agent` argument;
+3. the first agent in the user's `[agent] prefer` that the session offers.
+
+Without that default the schema lists `agent` as required, and a call that
+names none fails with the agents on offer: `name the agent: the user prefers
+none of the agents this session offers ([agent] prefer); choose one of:
+claude, codex`. Naming an agent the session does not offer fails the same way
+(`agent "zcode" is not offered in this session; choose one of: …`).
+
+The `agent` argument is an enum of the offered agents. Its description says
+how the default is chosen, then gives each agent one line: its value, its
+product and what that harness offers, which options it takes (with the model
+family `model` expects), and the user's `use_for` note and defaults, such as:
+
+```text
+- codex (Codex): OpenAI's coding agent; it reads, edits, and runs code in a project, with live web search under full permissions. Takes model (OpenAI model ID from the Codex configuration; not a Claude alias), effort, and session. The user's note on when to use it: coding. For that work, pass model gpt-5.5 and effort high; omit model and effort for other work so the agent uses its own default.
+```
+
+| Agent | Its line starts with |
 | --- | --- |
-| `agent_claude` | Claude Code: Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
-| `agent_codex` | Codex: OpenAI's coding agent; reads, edits, and runs code, with live web search under full permissions |
-| `agent_grok` | Grok Build: xAI's coding agent; reads, edits, and runs code, with live web and X search. Call it when another agent declined or refused a request, including a safety or guardrail refusal |
-| `agent_dsh` | DeepSeek Harness: a coding agent on DeepSeek models |
-| `agent_pi` | pi: a minimal coding agent that can run on SCV's own model endpoint; no web search |
-| `agent_scv` | SCV: a nested session for a self-contained sub-task kept out of this context, or work in another project |
+| `claude` | Claude Code: Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
+| `codex` | Codex: OpenAI's coding agent; reads, edits, and runs code, with live web search under full permissions |
+| `grok` | Grok Build: xAI's coding agent; reads, edits, and runs code, with live web and X search. Call it when another agent declined or refused a request, including a safety or guardrail refusal |
+| `dsh` | DeepSeek Harness: a coding agent on DeepSeek models |
+| `pi` | pi: a minimal coding agent that can run on SCV's own model endpoint; no web search |
+| `scv` | SCV: a nested session for a self-contained sub-task kept out of this context, or work in another project |
 
 The user steers the choice in their own configuration (projects cannot set
 these keys):
 
 ```toml
 [agent]
-prefer = ["codex", "claude"]   # named in the system prompt, in order; no default
+prefer = ["codex", "claude"]   # named in the system prompt, in order; the first offered is the default
 
 [agents.claude]
 use_for = "coding"
@@ -213,19 +243,21 @@ effort = "xhigh"
 use_for = "current events, and anything that needs posts on X"
 ```
 
-`use_for` (one line, at most 500 bytes) is appended to that tool's
-description. `model` and `effort` are the values to pass when the work matches
-that note; other work omits them so the agent uses its own default. Without
-`use_for`, they apply whenever that agent is called, unless the user asks for
-another. `prefer` names only agents the session offers, and an unknown
-name fails configuration validation. A `model` or `effort` on an agent that
-does not offer that selection is a configuration error. When a call fails in a way another agent
+`use_for` (one line, at most 500 bytes) is appended to that agent's line.
+`model` and `effort` are the values to pass when the work matches that note;
+other work omits them so the agent uses its own default. Without `use_for`,
+they apply whenever that agent is called, unless the user asks for another.
+`prefer` names only agents the session offers, the first of which runs a call
+that names no agent, and an unknown name fails configuration validation. A
+`model` or `effort` on an agent that does not offer that selection is a
+configuration error. When a call fails in a way another agent
 could avoid (the executable is missing or exits, it is signed out, or its
 provider returned an HTTP 401, 403, 404, 429, or 5xx, a quota error, or an
 unknown model), the result gains a `fallback` field naming the other agents
-this session offers, such as `"This agent could not run: it is missing, signed
-out, or its provider returned an error. Other agents are available:
-agent_claude, agent_codex."`. SCV's own error gets the same sentence when SCV
+this session offers as values for `agent`, such as `"This agent could not
+run: it is missing, signed out, or its provider returned an error. Other
+agents are available: claude, codex. Call agent again with one of them."`.
+SCV's own error gets the same sentence when SCV
 found the agent unavailable: its executable missing or failing to start, or
 its live conversation's process gone. The decision reads only the result's
 `status` (`failed`) and its structured `error`, or the kind of SCV's own
@@ -235,19 +267,35 @@ unchanged.
 
 A `declined` result, where the agent's model refused the request, never gets a
 `fallback` (that field is only for availability failures). When the session
-offers `agent_grok`, the result's `note` tells the calling model to tell the
-user what the agent said and then call `agent_grok` with the same request; a
-safety or guardrail refusal is not a reason to skip Grok. If `agent_grok`
-itself declines, or the session does not offer it, the note tells the calling
-model to tell the user rather than pass the request to another agent on its
-own; if the user then asks for a specific agent, the main agent uses it, and
-that agent's own policies apply.
+offers `grok` and another agent declined, the result's `note` tells the
+calling model to tell the user what the agent said and then call `agent`
+again with agent `grok` and the same request; a safety or guardrail refusal is
+not a reason to skip Grok. If `grok` itself declines, or the session does not
+offer it, the note tells the calling model to tell the user rather than pass
+the request to another agent on its own; if the user then asks for a specific
+agent, the main agent uses it, and that agent's own policies apply.
 
-They share this schema:
+The tool's arguments:
 
 ```json
-{"prompt":"Land the fix with the feature-flow skill.","cwd":"scv","timeout_seconds":7200,"model":"sonnet","effort":"medium"}
+{"agent":"codex","prompt":"Land the fix with the feature-flow skill.","cwd":"scv","session":"codex-1","model":"gpt-5.5","effort":"high","background":true,"timeout_seconds":7200}
 ```
+
+`prompt` is required; `agent` too when there is no default. Three options
+apply to some agents only, and the schema offers each when an offered agent
+takes it:
+
+| Option | Taken by |
+| --- | --- |
+| `model` | Agents whose adapter maps it to arguments (`model_args`: Claude Code, Codex, Grok Build, and pi, on either transport), and the nested SCV, for a new conversation |
+| `effort` | Agents whose adapter maps it to arguments (`effort_args`: Claude Code, Codex, Grok Build, and pi); not the nested SCV |
+| `session` | Agents that can continue a conversation: Claude Code, Codex, and pi in one process per turn, every agent over ACP, and the nested SCV |
+
+A call that passes one of them to an agent that does not take it fails before
+anything launches, naming the agents that do: `dsh does not take model; these
+agents do: claude, grok, scv. Omit model, or call one of them`. SCV runs these
+checks when it assesses the call's risk, before any approval, so a refused call
+is never put to the user.
 
 `cwd` is optional: a directory inside the workspace, relative (such as a
 project directory) or absolute. It resolves, following symlinks, when the call
@@ -260,20 +308,20 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 (default 3600) and may be raised up to `tools.max_timeout_seconds` (default
 14400) for long work such as builds, releases, or landing a change.
 
-`model` and `effort` are optional and offered only when the adapter configures
-`model_args` or `effort_args`. Their schema descriptions name the adapter's
-model family (Claude aliases such as `sonnet` for `agent_claude`, OpenAI model
-IDs for `agent_codex`, Grok model IDs for `agent_grok`, pi model patterns or
-`provider/id` for `agent_pi`) and tell the model to set them when the user asks
-or when the work matches a configured `use_for` default; an omitted value leaves
-the agent's own configured default in place. A
-blank `cwd`, `model`, or `effort` counts as omitted, since models often send
-`""` for an optional field they mean to leave unset. A model is 1-128 ASCII letters, digits, or
-`._:/@[]-` and cannot start with `-` or `@`; an effort is `low`, `medium`, `high`,
-`xhigh`, or `max`. Each selected value becomes one substituted argument, never
-shell text, so the CLI itself reports values it does not support.
+Each agent's line names the model family its `model` takes (Claude aliases
+such as `sonnet` for `claude`, OpenAI model IDs for `codex`, Grok model IDs
+for `grok`, pi model patterns or `provider/id` for `pi`), and the `model` and
+`effort` descriptions tell the model to set them when the user asks or when
+the work matches a configured `use_for` default; an omitted value leaves the
+agent's own configured default in place. A blank `agent`, `cwd`, `session`,
+`model`, or `effort` counts as omitted, since models often send `""` for an
+optional field they mean to leave unset. A model is 1-128 ASCII letters,
+digits, or `._:/@[]-` and cannot start with `-` or `@`; an effort is `low`,
+`medium`, `high`, `xhigh`, or `max`. Each selected value becomes one
+substituted argument, never shell text, so the CLI itself reports values it
+does not support.
 
-Each tool resolves only its configured executable and fixed argument vector,
+Each agent resolves only its configured executable and fixed argument vector,
 adds any selected model/effort arguments, then any `prompt_args` (for CLIs
 whose prompt is a flag value, such as `grok -p`), appends the prompt as one
 argument, and starts it directly in the workspace or the selected `cwd`. A
@@ -302,16 +350,16 @@ credentials, or ask its own model provider.
 
 The default invocation contracts are:
 
-| Tool | Invocation |
+| Agent | Invocation |
 | --- | --- |
-| `agent_claude` | `claude -p --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
-| `agent_codex` | `codex exec --json -o <file> [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
-| `agent_grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
-| `agent_dsh` | `dsh --profile headless <prompt>` |
-| `agent_pi` | `pi -p --mode json [--model <model>] [--thinking <effort>] <prompt>` |
+| `claude` | `claude -p --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
+| `codex` | `codex exec --json -o <file> [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
+| `grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
+| `dsh` | `dsh --profile headless <prompt>` |
+| `pi` | `pi -p --mode json [--model <model>] [--thinking <effort>] <prompt>` |
 
 Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness takes its
-model from its profile, so `agent_dsh` offers no `model` or `effort`.
+model from its profile, so `dsh` takes no `model` or `effort`.
 `permissions = "full"` switches follow the fixed arguments, before the output
 format arguments.
 
@@ -380,17 +428,18 @@ second per call and never adds them to the model's history or the tool result.
 An agent whose CLI can resume a session takes an optional `session` argument.
 Omitting it starts a conversation; the result's `session` is an SCV-issued
 handle such as `codex-2`, and passing it back continues that conversation with
-the agent's own context:
+the agent's own context. The handle names its agent, so a call that continues
+a conversation needs no `agent`:
 
-| Tool | Starts with | Continues with |
+| Agent | Starts with | Continues with |
 | --- | --- | --- |
-| `agent_claude` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
-| `agent_codex` | nothing; the thread ID comes from `thread.started` | `codex exec resume … <thread-id> <prompt>` |
-| `agent_pi` | `--session-id <uuid>` (chosen by SCV) | `--session-id <uuid>` |
+| `claude` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
+| `codex` | nothing; the thread ID comes from `thread.started` | `codex exec resume … <thread-id> <prompt>` |
+| `pi` | `--session-id <uuid>` (chosen by SCV) | `--session-id <uuid>` |
 
 Grok and DeepSeek Harness start a fresh conversation on every call: their
-resume options could not be verified headless here, so their tools offer no
-`session` argument and refuse one.
+resume options could not be verified headless here, so in one process per
+turn they take no `session`, and a call that passes one fails before launch.
 
 The model only ever sees handles. The CLI's own session IDs stay inside SCV,
 and a value that is not one of this session's handles, such as a raw vendor
@@ -425,20 +474,22 @@ kept, and symlinks are never followed.
 
 ### Background jobs
 
-Any `agent_*` call may set `"background": true`. The call then returns at once
-with a job handle, `{"job":"job-1","tool":"agent_codex","status":"running",
+Any `agent` call may set `"background": true`. The call then returns at once
+with a job handle, `{"job":"job-1","agent":"codex","status":"running",
 "background":true}`, while the agent keeps working, so the turn ends and the
 user can keep talking to the main agent. The system prompt makes this the
 default way to work (see [Delegate first](#delegate-first)). The job runs
-exactly as a foreground call would, in its conversation (`session`, `cwd`,
-model, and timeout apply as usual) and tracked like any delegation, and its
-final result is the structured result above. Three tools manage a session's
+exactly as a foreground call would, on the agent the call chose and in its
+conversation (`session`, `cwd`, model, and timeout apply as usual), tracked
+like any delegation, and its final result is the structured result above. A
+call the `agent` tool refuses starts no job. Three tools manage a session's
 jobs:
 
 - `agent_wait {job, timeout_seconds?}` blocks until the job finishes or the
   timeout passes (default `tools.agent_timeout_seconds`, at most
-  `tools.max_timeout_seconds`) and returns `{"job","status","elapsed_seconds",
-  "result"}`, or `"status":"running"` with its latest progress line;
+  `tools.max_timeout_seconds`) and returns `{"job","agent","status",
+  "elapsed_seconds","result"}`, or `"status":"running"` with its latest
+  progress line;
 - `agent_status {job?}` describes one job, or `{"jobs":[...]}` for every job
   the session remembers: running ones with their latest progress, finished
   ones with their result;
@@ -489,12 +540,14 @@ never closes it to make room.
 
 ### Delegate first
 
-When a session offers agent tools, the system prompt adds a *Delegating work*
-section, generated from the tools actually offered (so it applies even when
-`agent.system_prompt` is replaced). It names each offered agent with its
-product, adds `agent.prefer` and any `[agents.<name>] use_for` / `model` /
-`effort` defaults, and, when background jobs are on, asks the main
-agent to stay available: answer quick things (short reads, lookups, status
+When a session offers the `agent` tool, the system prompt adds a *Delegating
+work* section, generated from the agents actually offered (so it applies even
+when `agent.system_prompt` is replaced). It names each offered agent by its
+`agent` value with its product (`codex (Codex)`), adds `agent.prefer` in order
+and that a call naming no agent goes to the first of them, so the main agent
+names one whenever the work calls for another, and any `[agents.<name>]
+use_for` / `model` / `effort` defaults, and, when background jobs are on, asks
+the main agent to stay available: answer quick things (short reads, lookups, status
 checks) itself, and hand real work (changes, multi-step investigation, builds,
 tests, releases, anything likely to take more than about a minute) to a
 background job with a self-contained brief, then reply at once with what it
@@ -502,12 +555,12 @@ started and the job handle. It relays each `[SCV background report]`, uses
 `agent_status` and `agent_cancel` when the user asks, and keeps `agent_wait`,
 foreground agent calls, and long `bash` commands for quick results it needs
 within the turn, since those hold the turn open and the user cannot reach it
-meanwhile. If an agent declines a request and the session offers `agent_grok`,
-it tells the user what the agent said and calls `agent_grok` with the same
-request; a safety or guardrail refusal is not a reason to skip Grok. If
-`agent_grok` itself declines, or it is not offered, it tells the user rather
-than passing the request to another agent on its own, and uses a specific
-agent if the user then asks for one. The wording explains why rather than
+meanwhile. If an agent declines a request and the session offers `grok`, it
+tells the user what the agent said and calls the `agent` tool with agent
+`grok` and the same request; a safety or guardrail refusal is not a reason to
+skip Grok. If `grok` itself declines, or it is not offered, it tells the user
+rather than passing the request to another agent on its own, and uses a
+specific agent if the user then asks for one. The wording explains why rather than
 issuing capitalised rules.
 Without background jobs the section only asks for self-contained briefs.
 A session started for a chat channel also gets a *Chat channel* section (see
@@ -551,7 +604,7 @@ scv agents kill --orphans
 `scv status` counts the runs at work as `running` (a nested SCV whose own
 background jobs still count among them) and the live agents waiting between
 turns as `idle`, as `scv agents ps` lists them, and shows how many
-orphans the daemon has stopped. Agent tools are offered only while the
+orphans the daemon has stopped. The `agent` tool is offered only while the
 session's own depth is below `agent.max_delegation_depth` (default 2), and a
 delegated run may not start, stop, restart, update, or run a daemon, or manage
 channels. This is cooperative: see [Delegated runs](security.md#delegated-runs).
@@ -572,18 +625,20 @@ then states `FULL PERMISSIONS`. See
 Before approval, SCV resolves the executable through the server environment
 and displays its absolute path, full argument vector, bounded prompt, requested
 directory, timeout, and delegate-risk warning; the approval request also
-carries the session workspace. Project configuration cannot replace the
+carries the session workspace. The summary starts with the agent that runs the
+call, as in `agent codex: Launch /home/u/.local/bin/codex with args […]`, and
+the risk is always `delegate`. Project configuration cannot replace the
 executable or arguments.
 
 Adapter processes use instance-private state directories under
-`$SCV_HOME/agents/<name>`. In particular, `agent_codex` receives
+`$SCV_HOME/agents/<name>`. In particular, `codex` receives
 `CODEX_HOME=$SCV_HOME/agents/codex` and does not read the user's normal
-`~/.codex` state, `agent_claude` does not read `~/.claude`, and Grok, DeepSeek
+`~/.codex` state, `claude` does not read `~/.claude`, and Grok, DeepSeek
 Harness, and pi never read `~/.grok`, `~/.dsh`, or `~/.pi`.
 
-### Nested SCV (`agent_scv`)
+### Nested SCV (`scv`)
 
-`agent_scv` delegates to another SCV: a separate session in SCV's private
+The `scv` agent is another SCV: a separate session in SCV's private
 home `$SCV_HOME/agents/scv`, with its own context, instructions, and tools.
 Unlike the CLI adapters, which start one process per turn, it keeps one
 `scv server --stdio` running for a whole conversation and speaks the
@@ -593,9 +648,9 @@ Unlike the CLI adapters, which start one process per turn, it keeps one
 initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.start per call
 ```
 
-- Its schema has `prompt`, `cwd`, `session`, `timeout_seconds`, and `model`
-  (a new conversation only, sent as the session's model override); there is no
-  `effort`.
+- It takes `session` and `model` (a new conversation only, sent as the
+  session's model override), but no `effort`, which the `agent` tool refuses
+  for it before anything starts.
 - The first call starts the nested SCV and returns a handle such as `scv-1`;
   passing it as `session` sends the next prompt to the same nested session,
   which keeps its history. A conversation keeps its `cwd`, runs one turn at a
@@ -623,7 +678,9 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   and counts the jobs that still run or wait to be reported, from the call
   that started each (`tool.completed.jobs`) until the nested model has seen
   its result, through a later call or a report turn, which counts until it
-  ends. A planned restart waits for them as for a running turn (see
+  ends. Only job handles and statuses count, so a nested SCV 0.3.0, whose job
+  changes name one tool per agent (`agent_codex`), is followed the same way.
+  A planned restart waits for them as for a running turn (see
   [architecture](architecture.md#planned-restarts)).
 - The nested SCV is recorded like any delegation, so `scv agents ps` lists it
   with its current turn (`running` during a turn, `idle` between turns, or
@@ -641,7 +698,7 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   default of 2 lets it delegate once more, and it cannot start, restart, or
   update a daemon or manage channels. It has no parent daemon socket.
 
-`agent_scv` needs the `scv` executable (searched on `PATH` and in
+The `scv` agent needs the `scv` executable (searched on `PATH` and in
 `~/.cargo/bin`, where `cargo install` puts it) and a provider in its private
 home: `scv agents import scv` (or `scv agents login scv`) copies SCV's own
 active provider there, as below. Its own delegated agents live under
@@ -659,13 +716,13 @@ permission requests and reports progress as it happens:
 
 | Agent | ACP server | Source |
 | --- | --- | --- |
-| `agent_claude` | `claude-agent-acp` | npm `@agentclientprotocol/claude-agent-acp` (ACP organisation; Zed's `claude-code-acp` is deprecated in its favour) |
-| `agent_codex` | `codex-acp` | npm `@agentclientprotocol/codex-acp` (ACP organisation) |
-| `agent_grok` | `grok agent stdio` | built in |
-| `agent_dsh` | `dsh --profile acp` | built in (0.1.7-rc.1) |
+| `claude` | `claude-agent-acp` | npm `@agentclientprotocol/claude-agent-acp` (ACP organisation; Zed's `claude-code-acp` is deprecated in its favour) |
+| `codex` | `codex-acp` | npm `@agentclientprotocol/codex-acp` (ACP organisation) |
+| `grok` | `grok agent stdio` | built in |
+| `dsh` | `dsh --profile acp` | built in (0.1.7-rc.1) |
 
-pi has only a community adapter and stays on one process per turn, as does
-`agent_scv`, which speaks SCV's own protocol. `[agents.<name>] transport`
+pi has only a community adapter and stays on one process per turn, and the
+`scv` agent speaks SCV's own protocol. `[agents.<name>] transport`
 chooses: `auto` (the default) uses the ACP server when it resolves (on `PATH`
 or in `~/.local/bin`) and the agent's `command` is the built-in one, and
 otherwise one CLI process per turn; `acp` requires the server and offers the
@@ -679,12 +736,13 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   → [session/set_config_option for model/effort] → session/prompt per call
 ```
 
-- The schema is the CLI adapters' and always includes `session`: the first
-  call returns a handle such as `claude-1`, and passing it sends the next
-  prompt to the same ACP session on the same server. A conversation keeps its
-  `cwd`, runs one turn at a time, and follows `agent.max_conversations` and
+- An agent over ACP always takes `session`: the first call returns a handle
+  such as `claude-1`, and passing it sends the next prompt to the same ACP
+  session on the same server. A conversation keeps its `cwd`, runs one turn at
+  a time, and follows `agent.max_conversations` and
   `agent.conversation_idle_seconds`.
-- `model` and `effort` become `session/set_config_option` on the session's
+- `model` and `effort`, for an agent whose adapter offers them (so not
+  DeepSeek Harness), become `session/set_config_option` on the session's
   `model` and `effort`/`reasoning_effort` options, at any turn. A value the
   agent does not offer fails the call with the offered list and keeps the
   conversation.
@@ -693,8 +751,8 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   failed tool call, and the current plan step. Thoughts and tool output never
   become progress, and titles are redacted like the other adapters' lines.
 - The agent's `session/request_permission` goes through the calling session's
-  approval gate as `agent_<name>` with the summary `[claude-1 acp] <title>
-  (<kind>)`. The risk follows SCV's own tools: `read`, `search`, and `think`
+  approval gate as `agent` with the summary `[claude-1 acp] <title>
+  (<kind>)`, whose handle names the agent. The risk follows SCV's own tools: `read`, `search`, and `think`
   are read-only unless a location looks secret-like, edits, deletes, and moves
   are file-system work, `execute` is a process, `fetch` is network, and
   anything else is delegation. An approval selects the agent's allow-once
@@ -753,7 +811,7 @@ scv agents logout claude
 
 They work from any directory. For Claude Code, Codex, and Grok, `login` and
 `logout` run the agent's own command with exactly the private home and cleaned
-environment that the daemon's `agent_*` tool uses, with the terminal attached
+environment that the daemon's delegated runs of it use, with the terminal attached
 for browser or device-code flows, and the agent CLI itself writes those
 credentials under `$SCV_HOME/agents/<name>` (mode `0700`). For Claude Code
 and Codex, `status` runs the CLI's own status command but prints only a
@@ -790,7 +848,7 @@ is never accepted as an argument. DeepSeek Harness 0.1.7-rc.1 is the tested
 version; 0.1.5-rc.2 fails at startup with "cannot create effect on inactive
 context" because its sandbox plugin requires a different Cordis framework
 version than the one it installs. Signed out, it fails with `MISSING_CREDENTIAL`,
-and the `agent_dsh` result names `scv agents login dsh`.
+and a `dsh` result names `scv agents login dsh`.
 
 pi's own `/login` covers its built-in providers. For any OpenAI-compatible
 endpoint, `scv agents login pi --openai-compatible` asks for the base URL, the
@@ -804,13 +862,13 @@ files in `.pi/agent`, each atomically with mode `0600`: provider `scv` in
 `compat.sessionAffinityFormat = "openai-nosession"`, because pi's default
 `session_id` header is rejected by proxies that refuse underscores in header
 names), its key in `auth.json`, and `defaultProvider`/`defaultModel` in
-`settings.json`, so a bare `agent_pi` call uses it and `model` can name
+`settings.json`, so a call to `pi` without `model` uses it and `model` can name
 `scv/<id>`. Other providers and settings in those files are preserved.
 `status` shows the default provider, API, endpoint host, and model, and which
 providers have stored sign-ins; `logout` removes `auth.json`, the `scv`
 provider, and a default that points at it.
 
-`scv agents import scv` gives the nested SCV behind `agent_scv` a copy of
+`scv agents import scv` gives the nested SCV behind the `scv` agent a copy of
 SCV's own active provider: `$SCV_HOME/agents/scv/config.toml` (mode `0600`,
 written atomically) gets `[provider] active = "scv"` and a `[providers.scv]`
 profile with the same kind, wire API, model, base URL, timeout, and headers,
@@ -847,6 +905,13 @@ missing sign-in, its tool result gains a `hint` naming
 `scv agents login <name>`, since the agent's own advice (`/login`) cannot be
 followed from a remote chat.
 
+Scripted backends behind the `agent` tool cover its choice of agent (an
+explicit `agent`, the `prefer` default, the agent a `session` handle names,
+and a handle that disagrees with `agent`), refusals before anything launches
+(an option the agent does not take, an agent the session does not offer, a
+call that names none without a default), the schema's enum, options, and
+`required`, each agent's line, the `fallback` and Grok notes, a background job
+started through it, and approval summaries that name the agent.
 A fake agent script, run through `bash` so tests never execute a freshly
 written file, verifies native-agent argument boundaries, model/effort argument
 mapping and validation, workspace and `cwd` selection including symlink
@@ -858,7 +923,7 @@ kill, a timed-out run's `setsid` descendant, and an orphan left by a
 SIGKILLed `scv server --stdio`. Fake SCV homes cover the DeepSeek Harness key file, pi's endpoint
 files and import, and that no sign-in output contains a key. Shared process-runner tests cover
 output limits, timeout, cancellation, and background-descendant cleanup. A
-bash stand-in for `scv server --stdio` covers `agent_scv` conversations on one
+bash stand-in for `scv server --stdio` covers `scv` conversations on one
 child, progress, approval relay (approved, denied, and without a gate), cancel
 and timeout relay including a child that ignores `turn.cancel`, a child dying
 mid-turn, idle and session-end teardown, and the depth limit; an end-to-end
@@ -877,7 +942,9 @@ falls back to one process per turn, and hides a required one that is missing.
 A `Tool` supplies a unique name, description, JSON Schema, declared `ToolRisk`,
 approval summary, and asynchronous executor. Stable risk values are
 `read_only`, `filesystem`, `process`, `delegate`, and `network`. Registration rejects
-duplicate names. The loop and TUI do not contain name-specific execution code.
+duplicate names. The loop and TUI do not contain name-specific execution code;
+the TUI only labels an `agent` call with the agent it names, such as
+`agent codex`.
 
 ## `read_skill`
 
@@ -893,6 +960,6 @@ not accept a path and cannot be used as a general out-of-workspace read.
 Tool-enabled sessions also map workspace project skills (`.agents/skills` and
 `.claude/skills` of the workspace and its child projects) under
 `<project>:<name>`, listed separately with the instruction to delegate to that
-project with `agent_*` and `cwd`; see
+project with the `agent` tool and `cwd`; see
 [Project skills](configuration.md#project-skills). Skill
 metadata and content remain untrusted instructions.

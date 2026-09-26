@@ -36,6 +36,7 @@ impl Config {
             max_read_bytes: self.tools.max_read_bytes,
             max_write_bytes: self.tools.max_write_bytes,
             max_delegation_depth: self.agent.max_delegation_depth,
+            prefer: self.agent.prefer.clone(),
             conversations: ConversationLimits {
                 max: self.agent.max_conversations,
                 idle: Duration::from_secs(self.agent.conversation_idle_seconds),
@@ -159,7 +160,7 @@ impl Config {
                         .map(|(variable, value)| (OsString::from(variable), OsString::from(value))),
                 );
                 Some((
-                    format!("agent_{name}"),
+                    name.clone(),
                     AgentAdapterConfig {
                         command: config.command.clone(),
                         args: config.args.clone(),

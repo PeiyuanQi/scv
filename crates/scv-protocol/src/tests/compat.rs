@@ -6,6 +6,10 @@
 //!
 //! The JSON below was produced by the 0.2.2 tree's own types. Never edit it: a change
 //! that needs it edited breaks protocol version 3.
+//!
+//! SCV 0.3.0 offered one delegation tool per agent (`agent_codex`), so its
+//! job changes name the agent only in `tool`; the last tests check that
+//! those still read, and that 0.3.0 reads what this version sends.
 
 use super::*;
 
@@ -150,7 +154,8 @@ fn a_call_that_starts_a_job_adds_only_its_jobs_to_the_0_2_2_frame() {
     assert!(jobs.is_empty(), "0.2.2 sent no jobs");
     jobs.push(JobChange {
         job: "job-1".into(),
-        tool: "agent_codex".into(),
+        tool: "agent".into(),
+        agent: "codex".into(),
         status: JobStatus::Running,
         task: "Fix it".into(),
     });
@@ -190,4 +195,60 @@ fn what_a_0_2_2_client_sends_still_parses() {
         serde_json::from_str::<ClientMessage>(frame)
             .unwrap_or_else(|error| panic!("0.2.2 message no longer parses ({error}): {frame}"));
     }
+}
+
+/// A job change as SCV 0.3.0 sent it, one tool per agent and no `agent`.
+const JOB_CHANGE_0_3_0: &str =
+    r#"{"job":"job-1","tool":"agent_codex","status":"running","task":"Fix it"}"#;
+
+/// `JobChange` as SCV 0.3.0 declared it, to read what this version sends.
+#[derive(Debug, serde::Deserialize)]
+struct JobChange030 {
+    job: String,
+    tool: String,
+    status: JobStatus,
+    #[serde(default)]
+    task: String,
+}
+
+#[test]
+fn a_0_3_0_job_change_reads_its_agent_from_the_tool_and_encodes_unchanged() {
+    let change: JobChange = serde_json::from_str(JOB_CHANGE_0_3_0).unwrap();
+    assert!(change.agent.is_empty());
+    assert_eq!(change.agent_name(), "codex");
+    assert!(change.started());
+    // Nothing is added to a 0.3.0 frame, such as one a nested SCV sends.
+    assert_eq!(serde_json::to_string(&change).unwrap(), JOB_CHANGE_0_3_0);
+    // A tool name without the prefix stands for itself.
+    assert_eq!(job_agent("", "custom"), "custom");
+    assert_eq!(job_agent("pi", "agent"), "pi");
+}
+
+#[test]
+fn a_0_3_0_client_reads_the_job_change_this_version_sends() {
+    let change = JobChange {
+        job: "job-1".into(),
+        tool: "agent".into(),
+        agent: "codex".into(),
+        status: JobStatus::Completed,
+        task: "Fix it".into(),
+    };
+    let sent = serde_json::to_string(&change).unwrap();
+    assert_eq!(
+        sent,
+        r#"{"job":"job-1","tool":"agent","agent":"codex","status":"completed","task":"Fix it"}"#
+    );
+    // 0.3.0 ignores `agent` and reads the rest; its name for the agent
+    // falls back to the tool, `agent`.
+    let old: JobChange030 = serde_json::from_str(&sent).unwrap();
+    assert_eq!(
+        (
+            old.job.as_str(),
+            old.tool.as_str(),
+            old.status,
+            old.task.as_str()
+        ),
+        ("job-1", "agent", JobStatus::Completed, "Fix it")
+    );
+    assert_eq!(serde_json::from_str::<JobChange>(&sent).unwrap(), change);
 }

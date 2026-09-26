@@ -1,4 +1,4 @@
-//! The arguments every `agent_*` call takes, and their validation.
+//! The arguments an `agent` call takes, and their validation.
 
 use std::path::{Path, PathBuf};
 
@@ -8,6 +8,10 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentArgs {
+    /// Which agent runs the call. The `agent` tool resolves it before a
+    /// backend sees the call, so backends ignore it.
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub(crate) agent: Option<String>,
     pub(crate) prompt: String,
     pub(crate) timeout_seconds: Option<u64>,
     #[serde(default, deserialize_with = "blank_as_none")]

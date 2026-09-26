@@ -4,6 +4,7 @@ use std::{os::unix::fs::PermissionsExt as _, sync::Mutex as StdMutex, time::Dura
 
 use async_trait::async_trait;
 use scv_core::{AgentError, ApprovalGate, ApprovalRequest, ToolApprovals};
+use serde_json::json;
 
 use super::*;
 use crate::delegate::{
@@ -68,7 +69,7 @@ fn tool(
     delegation: Option<DelegationContext>,
 ) -> ScvAgentTool {
     ScvAgentTool {
-        name: "agent_scv".into(),
+        name: "scv".into(),
         command: script.display().to_string(),
         resolved: Some(script.to_owned()),
         args: Vec::new(),
@@ -307,7 +308,7 @@ fn background_work_follows_jobs_until_their_report_turn_ends() {
     let tool_completed = |jobs: Value| {
         event(
             json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,
-            "call_id":"c","name":"agent_codex","success":true,"output":"{}","truncated":false,"jobs":jobs}),
+            "call_id":"c","name":"agent","success":true,"output":"{}","truncated":false,"jobs":jobs}),
         )
     };
     let turn = |kind: &str, request: &str, origin: Value| {
@@ -319,10 +320,12 @@ fn background_work_follows_jobs_until_their_report_turn_ends() {
         event(value)
     };
     let mut work = BackgroundWork::default();
-    // Two jobs start; one is seen through agent_wait.
+    // Two jobs start; one is seen through agent_wait. Only handles and
+    // statuses count, so a 0.3.0 nested SCV's one-tool-per-agent names
+    // (`agent_codex`) count the same.
     assert_eq!(
         work.observe(&tool_completed(json!([
-            {"job":"job-1","tool":"agent_codex","status":"running"},
+            {"job":"job-1","tool":"agent","agent":"codex","status":"running"},
             {"job":"job-2","tool":"agent_codex","status":"running"}
         ]))),
         Some(2)
@@ -562,7 +565,7 @@ fn arguments_are_checked_before_approval() {
 }
 
 #[test]
-fn the_registry_offers_agent_scv_only_below_the_depth_limit() {
+fn the_registry_offers_scv_only_below_the_depth_limit() {
     let dir = tempfile::tempdir().unwrap();
     let script = fake_scv(dir.path(), "echo");
     let adapter = crate::AgentAdapterConfig {
@@ -601,17 +604,18 @@ fn the_registry_offers_agent_scv_only_below_the_depth_limit() {
             crate::SkillMap::new(),
             Vec::new(),
             1024,
-            std::collections::HashMap::from([("agent_scv".to_owned(), adapter.clone())]),
+            std::collections::HashMap::from([("scv".to_owned(), adapter.clone())]),
         )
         .unwrap();
         assert_eq!(
-            registry.get("agent_scv").is_some(),
+            crate::offered_agents(&registry) == ["scv"],
             offered,
             "depth {depth}"
         );
-        if let Some(tool) = registry.get("agent_scv") {
+        if let Some(tool) = registry.get("agent") {
             let spec = tool.spec();
             assert!(spec.parameters["properties"]["session"].is_object());
+            assert!(spec.parameters["properties"]["model"].is_object());
             assert!(spec.parameters["properties"].get("effort").is_none());
         }
     }

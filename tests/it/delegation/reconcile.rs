@@ -20,13 +20,13 @@ use tokio::{
 /// Processes whose environment tags them with `handle`.
 #[tokio::test]
 async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
-    // A provider that asks for one agent_claude call.
+    // A provider that asks for one agent call to claude.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     thread::spawn(move || {
         let body = concat!(
-            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"prompt\\\":\\\"work\\\"}\"}\n\n",
-            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"agent_claude\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"agent\\\":\\\"claude\\\",\\\"prompt\\\":\\\"work\\\"}\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"agent\"}}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
         );
         let (stream, _) = listener.accept().unwrap();

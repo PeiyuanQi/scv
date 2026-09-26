@@ -1,5 +1,5 @@
-//! `agent_scv` end to end: a real `scv server --stdio` delegates to a real
-//! nested SCV over the SCV protocol. The nested SCV's `bash` approval comes
+//! The `scv` agent end to end: a real `scv server --stdio` delegates to a
+//! real nested SCV over the SCV protocol. The nested SCV's `bash` approval comes
 //! back to the parent's client, its events arrive as progress, a second turn
 //! continues the same nested session, its record shows it at work during a
 //! turn and idle between turns (unless a background job of its own still
@@ -59,12 +59,13 @@ fn serve_provider(listener: TcpListener) {
                 match parent_step {
                     1 => call(
                         "call_1",
-                        "agent_scv",
-                        json!({"prompt":"CHILD-ONE remember the word heron"}),
+                        "agent",
+                        json!({"agent":"scv","prompt":"CHILD-ONE remember the word heron"}),
                     ),
+                    // The handle alone names the agent it continues.
                     3 => call(
                         "call_1",
-                        "agent_scv",
+                        "agent",
                         json!({"prompt":"CHILD-TWO which word?","session":"scv-1"}),
                     ),
                     _ => text("parent done"),
@@ -144,7 +145,7 @@ async fn delegate(approve_nested: bool) {
                         assert!(run.working(), "{run:?}");
                         assert_eq!(run.record.turn, Some(1));
                     }
-                    let approved = name == "agent_scv" || approve_nested;
+                    let approved = name == "agent" || approve_nested;
                     turn.approvals.push((name, summary));
                     parent.resolve(approval_id, approved).await;
                 }
@@ -174,7 +175,12 @@ async fn delegate(approve_nested: bool) {
 
     // Turn one: the nested bash approval came back here, labelled.
     let first = &turns[0];
-    assert_eq!(first.approvals[0].0, "agent_scv");
+    assert_eq!(first.approvals[0].0, "agent");
+    assert!(
+        first.approvals[0].1.starts_with("agent scv: Send prompt"),
+        "{}",
+        first.approvals[0].1
+    );
     let nested = &first.approvals[1];
     assert_eq!(nested.0, "bash");
     assert!(nested.1.starts_with("[scv-1 depth 1] "), "{}", nested.1);
@@ -214,7 +220,7 @@ struct Parent {
 }
 
 impl Parent {
-    /// Start the parent in `home`, whose `agent_scv` runs this build's `scv`.
+    /// Start the parent in `home`, whose `scv` agent runs this build's `scv`.
     async fn start(home: &Path, address: SocketAddr, workspace: &Path) -> Self {
         write_private(
             &home.join("config.toml"),
@@ -363,8 +369,8 @@ fn serve_background_provider(listener: TcpListener) {
                 } else {
                     call(
                         "call_1",
-                        "agent_codex",
-                        json!({"prompt":"land it","background":true}),
+                        "agent",
+                        json!({"agent":"codex","prompt":"land it","background":true}),
                     )
                 }
             } else {
@@ -372,8 +378,8 @@ fn serve_background_provider(listener: TcpListener) {
                 if parent_step == 1 {
                     call(
                         "call_1",
-                        "agent_scv",
-                        json!({"prompt":"land it in the background"}),
+                        "agent",
+                        json!({"agent":"scv","prompt":"land it in the background"}),
                     )
                 } else {
                     text("parent done")
@@ -428,7 +434,7 @@ async fn a_nested_scvs_own_background_job_keeps_it_at_work_between_turns() {
     let mut output = None;
     loop {
         match parent.event().await {
-            // The parent's agent_scv call and the nested agent_codex call.
+            // The parent's call to scv and the nested call to codex.
             ServerEvent::ApprovalRequested { approval_id, .. } => {
                 parent.resolve(approval_id, true).await;
             }

@@ -25,10 +25,10 @@ stage 0.
   `scripts/host.sh <command...>`, which restores the real home. Outside SCV it
   passes straight through. SCV also sets `SCV_PARENT`, which is how
   `publish.sh` knows to ask the owner in chat before publishing (stage 6).
-- **SCV delegating this flow:** call `agent_codex` or `agent_claude` with `cwd`
-  set to this repository (`scv` in a `~/projects` workspace) so the agent loads
-  this skill and `AGENTS.md`. The agent default of `tools.agent_timeout_seconds`
-  (3600) covers a normal landing (gates, CI, and publishing take 20-50
+- **SCV delegating this flow:** call the `agent` tool with agent `codex` or
+  `claude` and `cwd` set to this repository (`scv` in a `~/projects`
+  workspace) so the agent loads this skill and `AGENTS.md`. The agent default
+  of `tools.agent_timeout_seconds` (3600) covers a normal landing (gates, CI, and publishing take 20-50
   minutes); pass a larger `timeout_seconds`, up to `tools.max_timeout_seconds`
   (14400), when CI reruns are likely, and remember that publishing waits up
   to 30 minutes for the owner's yes. The agent needs `permissions = "full"`

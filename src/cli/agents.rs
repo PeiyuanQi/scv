@@ -69,7 +69,7 @@ pub(crate) async fn agents(
                 return Ok(());
             }
             println!(
-                "Signing {name} in for SCV's agent_{name} tool (separate from your own {} login).",
+                "Signing {name} in for SCV's delegated {name} agent (separate from your own {} login).",
                 adapter.product
             );
             match adapter.login {
@@ -292,9 +292,9 @@ pub(crate) async fn agents(
     }
 }
 
-/// Give the nested SCV behind `agent_scv` a copy of SCV's own provider.
+/// Give the nested SCV (the `scv` agent) a copy of SCV's own provider.
 fn import_scv_child(user_config: impl Fn() -> Result<Config>) -> Result<()> {
-    println!("Giving SCV's nested SCV (agent_scv) a copy of SCV's own provider");
+    println!("Giving SCV's nested SCV (the scv agent) a copy of SCV's own provider");
     for line in setup::import_scv_from_scv_provider(&user_config()?)? {
         println!("  {line}");
     }

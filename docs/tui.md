@@ -45,7 +45,9 @@ lines. Rendering never interprets terminal escape sequences from model or tool
 content; control characters are replaced with visible, inert text.
 
 Each tool call is one compact row with state, tool name, a bounded summary, and
-locally measured elapsed time. Running rows visibly animate without changing
+locally measured elapsed time. A delegation's row names its agent beside the
+tool, as `agent codex`, or the conversation it continues (`agent codex-1`),
+when the call's argument is a plain name. Running rows visibly animate without changing
 layout width. While a tool runs, the newest line of its `tool.progress` (such
 as a delegated agent's current command) appears under its row and disappears
 when the tool completes. Headless `scv exec` prints progress lines to stderr. Completed output is collapsed by default. `Ctrl+O` opens a tool

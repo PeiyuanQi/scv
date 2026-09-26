@@ -216,13 +216,16 @@ fn agent_choice_settings_are_validated_and_user_only() {
     assert!(config.validate().is_ok());
     let adapters = config.adapters();
     assert_eq!(
-        adapters["agent_grok"].use_for.as_deref(),
+        adapters["grok"].use_for.as_deref(),
         Some("current events and X posts")
     );
-    assert_eq!(adapters["agent_claude"].model.as_deref(), Some("opus-5.5"));
-    assert_eq!(adapters["agent_claude"].effort.as_deref(), Some("xhigh"));
-    assert_eq!(adapters["agent_codex"].use_for, None);
-    assert_eq!(adapters["agent_codex"].model, None);
+    assert_eq!(adapters["claude"].model.as_deref(), Some("opus-5.5"));
+    assert_eq!(adapters["claude"].effort.as_deref(), Some("xhigh"));
+    assert_eq!(adapters["codex"].use_for, None);
+    assert_eq!(adapters["codex"].model, None);
+    // The preference reaches the tools, where the first offered agent runs
+    // an `agent` call that names none.
+    assert_eq!(config.tools().prefer, ["codex", "claude"]);
     let mut unknown = Config::default();
     unknown.agent.prefer = vec!["zcode".into()];
     assert!(unknown.validate().is_err());
@@ -472,7 +475,7 @@ fn adapters_are_bound_to_the_instance_home() {
         ..Config::default()
     };
     let adapters = config.adapters();
-    let codex = &adapters["agent_codex"];
+    let codex = &adapters["codex"];
     assert!(codex.environment.contains(&(
         OsString::from("CODEX_HOME"),
         OsString::from("/tmp/scv-instance/agents/codex")
@@ -490,7 +493,7 @@ fn adapters_are_bound_to_the_instance_home() {
             "/tmp/scv-instance/agents/pi/.pi/agent",
         ),
     ] {
-        let adapter = &adapters[&format!("agent_{agent}")];
+        let adapter = &adapters[agent];
         assert!(
             adapter
                 .environment
@@ -502,12 +505,12 @@ fn adapters_are_bound_to_the_instance_home() {
             OsString::from(format!("/tmp/scv-instance/agents/{agent}"))
         )));
     }
-    assert!(adapters["agent_grok"].environment.contains(&(
+    assert!(adapters["grok"].environment.contains(&(
         OsString::from("GROK_DISABLE_AUTOUPDATER"),
         OsString::from("1")
     )));
-    assert_eq!(adapters["agent_grok"].prompt_args, ["-p"]);
-    assert!(adapters["agent_pi"].model_hint.contains("provider scv"));
+    assert_eq!(adapters["grok"].prompt_args, ["-p"]);
+    assert!(adapters["pi"].model_hint.contains("provider scv"));
 }
 
 #[test]
@@ -524,7 +527,7 @@ fn full_codex_over_acp_keeps_live_web_search() {
         );
         let config: Config = value.try_into().unwrap();
         config.validate().unwrap();
-        config.adapters()["agent_codex"].acp.clone().unwrap()
+        config.adapters()["codex"].acp.clone().unwrap()
     };
     let full = codex_acp("full");
     assert_eq!(full.full_mode.as_deref(), Some("agent-full-access"));
@@ -548,7 +551,7 @@ fn full_codex_over_acp_keeps_live_web_search() {
 fn agents_prefer_their_acp_server_unless_configured_otherwise() {
     let defaults = Config::default().adapters();
     let launch = |adapters: &HashMap<String, scv_tools::AgentAdapterConfig>, agent: &str| {
-        adapters[&format!("agent_{agent}")].acp.clone()
+        adapters[agent].acp.clone()
     };
     for agent in ["claude", "codex", "grok", "dsh"] {
         let acp = launch(&defaults, agent).unwrap();
@@ -647,12 +650,7 @@ fn full_permissions_are_opt_in_per_agent_and_combine_with_args() {
     let config: Config = value.try_into().unwrap();
     config.validate().unwrap();
     let adapters = config.adapters();
-    let full = |agent: &str| {
-        adapters[&format!("agent_{agent}")]
-            .full_permission_args
-            .clone()
-            .unwrap()
-    };
+    let full = |agent: &str| adapters[agent].full_permission_args.clone().unwrap();
     assert_eq!(full("claude"), ["--permission-mode", "bypassPermissions"]);
     assert_eq!(
         full("codex"),
@@ -662,18 +660,15 @@ fn full_permissions_are_opt_in_per_agent_and_combine_with_args() {
             "web_search=\"live\""
         ]
     );
-    assert_eq!(
-        adapters["agent_codex"].args,
-        ["exec", "--skip-git-repo-check"]
-    );
+    assert_eq!(adapters["codex"].args, ["exec", "--skip-git-repo-check"]);
     assert_eq!(full("grok"), ["--always-approve"]);
     assert!(full("dsh").is_empty());
-    assert!(adapters["agent_dsh"].environment.contains(&(
+    assert!(adapters["dsh"].environment.contains(&(
         OsString::from("DSH_PERMISSION_MODE"),
         OsString::from("danger-full-access")
     )));
     assert!(
-        !defaults["agent_dsh"]
+        !defaults["dsh"]
             .environment
             .iter()
             .any(|(variable, _)| variable == "DSH_PERMISSION_MODE")

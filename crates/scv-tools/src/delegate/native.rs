@@ -10,27 +10,29 @@ use std::{
 };
 
 use async_trait::async_trait;
-use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
-use serde_json::{Value, json};
+use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
+use serde_json::Value;
 use tokio::{sync::Mutex, time::Instant};
 
 use crate::{
     AgentAdapterConfig, DelegationContext,
-    args::{Timeouts, bounded, parse_args, timeout_schema, validate_process_args},
+    args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
         adapters::{self, OutputFormat, Resume},
+        agent::{Accepts, Backend},
         conversation::{self, ConversationStore},
         output::{self, AgentStream, RunExit, STDERR_TAIL_BYTES, TailBuffer, add_sign_in_hint},
         records::{self, DelegationGuard, DelegationRegistry},
         request::{
-            AGENT_EFFORTS, AgentArgs, resolve_agent_cwd, valid_effort, valid_model_name,
-            validate_agent_cwd,
+            AgentArgs, resolve_agent_cwd, valid_effort, valid_model_name, validate_agent_cwd,
         },
     },
     process::{ProcessSpec, child_pid, drain_output, spawn_process, supervise},
 };
 
+/// An agent run as one CLI process per turn.
 pub(crate) struct NativeAgentTool {
+    /// The adapter name, such as `codex`.
     name: String,
     command: String,
     /// The executable found on `PATH` or in the install directories; an
@@ -41,7 +43,6 @@ pub(crate) struct NativeAgentTool {
     full_permission_args: Option<Vec<String>>,
     model_args: Vec<String>,
     effort_args: Vec<String>,
-    model_hint: String,
     environment: Vec<(OsString, OsString)>,
     timeouts: Timeouts,
     output_limit: usize,
@@ -53,6 +54,16 @@ pub(crate) struct NativeAgentTool {
 }
 
 impl NativeAgentTool {
+    /// What this agent takes: `model` and `effort` when its adapter maps
+    /// them to arguments, and `session` when its CLI can resume.
+    pub(crate) fn accepts(&self) -> Accepts {
+        Accepts {
+            model: !self.model_args.is_empty(),
+            effort: !self.effort_args.is_empty(),
+            session: self.resume.is_supported(),
+        }
+    }
+
     /// The fixed arguments, validated model and effort selections, and the
     /// prompt arguments; the prompt is appended separately as the final argument.
     fn command_args(&self, args: &AgentArgs) -> Result<Vec<String>, ToolError> {
@@ -133,7 +144,6 @@ impl NativeAgentTool {
             full_permission_args: config.full_permission_args,
             model_args: config.model_args,
             effort_args: config.effort_args,
-            model_hint: config.model_hint,
             environment: config.environment,
             timeouts,
             output_limit,
@@ -194,69 +204,7 @@ fn take_file(path: &Path, limit: usize) -> Option<String> {
 }
 
 #[async_trait]
-impl Tool for NativeAgentTool {
-    fn spec(&self) -> ToolSpec {
-        let mut properties = json!({
-            "prompt":{"type":"string"},
-            "cwd":{
-                "type":"string",
-                "description":"Directory inside the workspace to run in, such as a project directory (\"scv\"). \
-                    The agent loads that directory's AGENTS.md or CLAUDE.md and its project skills. \
-                    Defaults to the workspace root."
-            },
-            "timeout_seconds":timeout_schema(self.timeouts)
-        });
-        if self.resume.is_supported() {
-            properties["session"] = json!({
-                "type":"string",
-                "description":"The `session` handle an earlier call to this tool returned, such as \"codex-1\". \
-                    Pass it to continue that conversation: the agent keeps its context, in the same cwd. \
-                    Omit it to start a new conversation for unrelated work."
-            });
-        }
-        if !self.model_args.is_empty() {
-            properties["model"] = json!({
-                "type":"string",
-                "description":format!(
-                    "{} Set when the user asks, or when the work matches a configured \
-                     use_for default; omit to use the agent's configured default.",
-                    self.model_hint
-                )
-            });
-        }
-        if !self.effort_args.is_empty() {
-            properties["effort"] = json!({
-                "type":"string",
-                "enum":AGENT_EFFORTS,
-                "description":"Reasoning effort. Set when the user asks, or when the work \
-                    matches a configured use_for default; omit to use the agent's configured default."
-            });
-        }
-        ToolSpec {
-            name: self.name.clone(),
-            description: format!(
-                "Runs its CLI as a nested coding agent (not sandboxed). Delegate substantial \
-                 work here rather than doing it step by step with bash: research and web \
-                 lookups, multi-file coding, and running tools, builds, and tests. Give it a \
-                 self-contained brief, since it does not see this conversation, and set cwd \
-                 to the project the work is in so it follows that project's instructions \
-                 and skills.{}",
-                if self.resume.is_supported() {
-                    " Each result carries a `session` handle: pass it back to follow up on the \
-                     same work (answers, fixes, next steps) instead of repeating the context."
-                } else {
-                    " Each call starts a fresh conversation."
-                }
-            ),
-            parameters: json!({
-                "type":"object",
-                "properties":properties,
-                "required":["prompt"],
-                "additionalProperties":false
-            }),
-        }
-    }
-
+impl Backend for NativeAgentTool {
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
         let args: AgentArgs = parse_args(arguments)?;
         self.command_args(&args)?;
@@ -307,7 +255,7 @@ impl Tool for NativeAgentTool {
                 self.name, self.command
             ))
         })?;
-        let agent = self.name.trim_start_matches("agent_");
+        let agent = self.name.as_str();
         let turn = if self.resume.is_supported() {
             Some(self.conversations.begin(
                 agent,

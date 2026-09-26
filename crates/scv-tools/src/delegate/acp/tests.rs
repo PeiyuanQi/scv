@@ -8,6 +8,7 @@ use scv_core::{AgentError, ApprovalGate, ApprovalRequest, ToolApprovals};
 use super::*;
 use crate::delegate::{
     adapters::{OutputFormat, Resume, Transport},
+    agent::{AgentTool, Backend as _},
     conversation::ConversationLimits,
     records::{DelegationRegistry, ProcessIdentity},
 };
@@ -85,7 +86,7 @@ fn acp_tool(
     full_mode: Option<&str>,
 ) -> AcpAgentTool {
     AcpAgentTool::new(
-        "agent_claude".into(),
+        "claude".into(),
         &adapter(full_mode.is_some()),
         AcpAgentLaunch {
             command: script.display().to_string(),
@@ -273,7 +274,7 @@ async fn permission_requests_go_through_the_callers_gate() {
         assert!(value["reply"].as_str().unwrap().contains(chosen), "{value}");
         let requests = gate.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].name, "agent_claude");
+        assert_eq!(requests[0].name, "agent");
         assert_eq!(requests[0].risk, ToolRisk::Filesystem);
         assert!(
             requests[0]
@@ -462,13 +463,8 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
     assert!(value.get("error").is_none(), "{value}");
     assert!(value.get("hint").is_none(), "{value}");
     // Chosen among several agents, Grok is named in the note, not as fallback.
-    let chosen = crate::delegate::choice::ChosenAgent {
-        inner: Arc::new(tool),
-        use_for: None,
-        model: None,
-        effort: None,
-        alternatives: vec!["agent_codex".into(), "agent_grok".into()],
-    };
+    let accepts = tool.accepts();
+    let chosen = AgentTool::beside("claude", Arc::new(tool), accepts, &["codex", "grok"]);
     let refused = chosen
         .execute(json!({"prompt":"refuse"}), context(dir.path(), None))
         .await
@@ -498,13 +494,8 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
     );
     assert!(value["hint"].is_string(), "{value}");
     // A signed-out agent is a real availability failure: the others are named.
-    let chosen = crate::delegate::choice::ChosenAgent {
-        inner: Arc::new(tool),
-        use_for: None,
-        model: None,
-        effort: None,
-        alternatives: vec!["agent_codex".into()],
-    };
+    let accepts = tool.accepts();
+    let chosen = AgentTool::beside("claude", Arc::new(tool), accepts, &["codex"]);
     let output = chosen
         .execute(json!({"prompt":"hello"}), context(auth_dir.path(), None))
         .await
@@ -513,7 +504,7 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
         json(&output)["fallback"]
             .as_str()
             .unwrap()
-            .ends_with("available: agent_codex."),
+            .ends_with("available: codex. Call agent again with one of them."),
         "{}",
         output.content
     );
@@ -587,7 +578,7 @@ async fn the_launch_environment_reaches_the_acp_server() {
     let script = fake_agent(dir.path(), "normal");
     let tool = |environment: Vec<(OsString, OsString)>| {
         AcpAgentTool::new(
-            "agent_codex".into(),
+            "codex".into(),
             &adapter(true),
             AcpAgentLaunch {
                 command: script.display().to_string(),
@@ -688,28 +679,33 @@ fn the_registry_prefers_an_installed_acp_server() {
         });
         adapter
     };
-    let description = |adapter: AgentAdapterConfig| {
+    // What the user approves shows which transport runs the agent.
+    let summary = |adapter: AgentAdapterConfig| {
         let registry = crate::builtin_registry(
             crate::ToolsConfig::default(),
             crate::SkillMap::new(),
             Vec::new(),
             1024,
-            HashMap::from([("agent_claude".to_owned(), adapter)]),
+            HashMap::from([("claude".to_owned(), adapter)]),
         )
         .unwrap();
-        registry
-            .get("agent_claude")
-            .map(|tool| tool.spec().description)
+        registry.get("agent").map(|tool| {
+            tool.approval_summary(&json!({"agent":"claude","prompt":"hi"}))
+                .unwrap()
+        })
     };
-    let installed = description(with_acp(&script.display().to_string(), false)).unwrap();
-    assert!(installed.contains("Agent Client Protocol"), "{installed}");
-    let missing = dir.path().join("no-such-acp-server").display().to_string();
-    let fallback = description(with_acp(&missing, false)).unwrap();
+    let installed = summary(with_acp(&script.display().to_string(), false)).unwrap();
     assert!(
-        fallback.starts_with("Claude Code: ") && fallback.contains("Runs its CLI"),
+        installed.starts_with("agent claude: Send prompt \"hi\" to a new ACP session of"),
+        "{installed}"
+    );
+    let missing = dir.path().join("no-such-acp-server").display().to_string();
+    let fallback = summary(with_acp(&missing, false)).unwrap();
+    assert!(
+        fallback.starts_with("agent claude: Launch /bin/echo with args"),
         "{fallback}"
     );
-    assert!(description(with_acp(&missing, true)).is_none());
+    assert!(summary(with_acp(&missing, true)).is_none());
 }
 
 /// Whether `pid` is an uncollected zombie.
@@ -789,13 +785,15 @@ async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() 
         1,
         Some(finished_tx),
     ));
+    let backend = acp_tool(
+        &script,
+        store(Duration::from_secs(3600)),
+        Some(delegation(&registry)),
+        None,
+    );
+    let accepts = backend.accepts();
     let tool = crate::delegate::background::BackgroundCapable {
-        inner: Arc::new(acp_tool(
-            &script,
-            store(Duration::from_secs(3600)),
-            Some(delegation(&registry)),
-            None,
-        )),
+        inner: Arc::new(AgentTool::beside("claude", Arc::new(backend), accepts, &[])),
         jobs: Arc::clone(&jobs),
     };
     tool.execute(
@@ -816,6 +814,7 @@ async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() 
         .unwrap();
     let reports = jobs.take_unreported();
     assert_eq!(reports.len(), 1, "a report turn follows");
+    assert_eq!(reports[0].agent, "claude");
     assert_eq!(reports[0].status, scv_protocol::JobStatus::Failed);
     assert!(reports[0].reply.contains("exited"), "{}", reports[0].reply);
     until(|| registry.list(true).is_empty()).await;

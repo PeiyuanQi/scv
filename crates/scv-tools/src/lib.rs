@@ -3,7 +3,7 @@
 //! [`builtin_registry`] builds a session's tools: files (`read`,
 //! `read_skill`, `write`), the shell (`bash`), the web (`web_fetch`,
 //! `web_search`), delegation to other agent CLIs and to a nested SCV
-//! (`agent_*`, with background jobs), and `chat_attach` for chat sessions.
+//! (`agent`, with background jobs), and `chat_attach` for chat sessions.
 //! [`delegation`] records every delegated process so SCV can list, stop, and
 //! clean them up.
 //!
@@ -11,9 +11,10 @@
 //!
 //! - `builtin/`: tools that run inside SCV (`fs`, `skill`, `shell`, [`web`],
 //!   [`chat_attach`]).
-//! - `delegate/`: the `agent_*` tools that hand a turn to another agent: one
-//!   CLI process per turn (`native`), a long-lived Agent Client Protocol
-//!   server (`acp`), or a nested SCV (`scv`); the [`adapters`] table,
+//! - `delegate/`: the `agent` tool that hands a turn to another agent, named
+//!   as its argument, on one of three backends: one CLI process per turn
+//!   (`native`), a long-lived Agent Client Protocol server (`acp`), or a
+//!   nested SCV (`scv`); the [`adapters`] table,
 //!   [`background`] jobs, [`conversation`] handles, run records
 //!   ([`delegation`]), the agents' own credential files ([`stores`]), and
 //!   how a run's output and progress are read.
@@ -33,7 +34,9 @@ mod sync;
 pub use builtin::{chat_attach, web};
 pub use config::{AcpAgentLaunch, AgentAdapterConfig, DelegationContext, SkillMap, ToolsConfig};
 pub use delegate::{
-    adapters, background, choice as agent_choice, conversation, records as delegation,
+    adapters,
+    agent::offered_agents,
+    background, choice as agent_choice, conversation, records as delegation,
     request::{AGENT_EFFORTS, valid_effort, valid_model_name},
     stores,
 };
