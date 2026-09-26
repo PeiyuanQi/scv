@@ -184,9 +184,13 @@ Daemon and component changes require focused coverage for:
 - live agents (nested SCV and ACP): the record at work during a turn and
   idle between turns however the call ends, never written back once the
   child is gone, and readable by the previous release; `scv agents ps`
-  listing such an agent `idle`, and `scv status` counting it idle rather than
-  running (with no idle count from an older daemon); and a planned restart
-  waiting for the live agent that asked only while its turn runs;
+  listing such an agent `idle`, or `background`, and `scv status` counting
+  it idle rather than running (with no idle count from an older daemon); a
+  nested SCV's own background jobs counted from its events until reported
+  (its report turn ended), read between calls so its report turns never
+  stall, and their approval requests denied; and a planned restart waiting
+  for the live agent that asked only while its turn runs or its own
+  background jobs count, and never past its deadline;
 - background jobs: each call's `tool.completed.jobs` naming the jobs it
   started and those whose results it first showed the model (a job settles
   once seen or stopped, never merely finished, and never twice), report turns

@@ -96,11 +96,12 @@ not answer `scv build-info`, or when that reports a version other than
 `daemon.status`, whose `restart` shows what it waits for: the delegation that
 `parent` (the caller's `SCV_PARENT` chain) names until it has finished (a
 nested SCV or ACP agent, which lives for its whole conversation, until its
-turn has ended) and its report is stored, then any owner message a chat bridge has claimed but not
-answered. At `max_wait_seconds` (default 600, at most 3600) it restarts
-anyway. A second request for the same version returns the scheduled restart.
-The restart itself runs in a watchdog unit outside the daemon; see
-[architecture.md](architecture.md#planned-restarts).
+turn has ended and, for a nested SCV, the background jobs of its own session
+have been reported to it) and its report is stored, then any owner message a
+chat bridge has claimed but not answered. At `max_wait_seconds` (default 600,
+at most 3600) it restarts anyway. A second request for the same version
+returns the scheduled restart. The restart itself runs in a watchdog unit
+outside the daemon; see [architecture.md](architecture.md#planned-restarts).
 
 `confirm_ask` asks the owner a yes/no `question` (at most 4 KiB) in chat, as
 `scv confirm` does: in the chat that started the delegation `parent` names,
@@ -283,14 +284,18 @@ and `deadline_unix_seconds`. A status from a daemon older
 than 0.1.26 has no `delegations` and parses as zero.
 `delegations.active` counts running delegated runs of the instance, live
 agents waiting between turns included; `idle` says how many of them are such
-agents (omitted by older daemons), and `reaped` counts the orphans this daemon
+agents, apart from a nested SCV whose own background jobs still count
+(omitted by older daemons), and `reaped` counts the orphans this daemon
 has stopped since it started. `entries` and
 `killed` appear only in `delegations` and `delegation_kill` responses. An
 entry that is a turn of a delegated conversation also carries `conversation`
 (the handle, such as `codex-2`) and `turn`; both are omitted otherwise. A
 live agent (a nested SCV or an ACP agent) with no turn running also carries
 `idle_since_unix_seconds`, when its last turn ended; it is omitted while the
-agent works, for per-turn runs, and by older daemons. Each
+agent works, for per-turn runs, and by older daemons. A nested SCV whose own
+background jobs still run or wait to be reported to it carries
+`background_jobs`, their number; it is omitted when there are none and by
+older daemons. Each
 component contains `id` (`<channel>:<account>`), `channel`, `account`,
 `bot_id`, `user_id`, `enabled`, `state`, `last_success_unix_seconds`, `error`,
 and `restarts`; a daemon older than 0.1.35 omits `channel`, which parses as

@@ -2,14 +2,16 @@
 //! nested SCV over the SCV protocol. The nested SCV's `bash` approval comes
 //! back to the parent's client, its events arrive as progress, a second turn
 //! continues the same nested session, its record shows it at work during a
-//! turn and idle between turns, and nothing outlives the parent.
+//! turn and idle between turns (unless a background job of its own still
+//! runs or awaits its report), and nothing outlives the parent.
 
 use crate::support::{
     Isolated, alive, call, read_http_request, sse_response, tagged, text, write_private,
 };
 use std::{
     io::{BufReader as StdBufReader, Write as _},
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
+    os::unix::fs::PermissionsExt as _,
     path::Path,
     process::Stdio,
     thread,
@@ -20,8 +22,8 @@ use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
 use scv_tools::delegation::{DelegationEntry, DelegationRegistry};
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    process::{Child, ChildStdin, ChildStdout, Command},
     time::timeout,
 };
 
@@ -113,10 +115,6 @@ async fn delegate(approve_nested: bool) {
     let home = tempfile::tempdir().unwrap();
     let home_path = std::fs::canonicalize(home.path()).unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    write_private(
-        &home_path.join("config.toml"),
-        &format!("[agents.scv]\ncommand = {:?}\n", env!("CARGO_BIN_EXE_scv")),
-    );
     // What `scv agents import scv` would write: the nested SCV's own provider.
     write_private(
         &home_path.join("agents/scv/config.toml"),
@@ -125,85 +123,14 @@ async fn delegate(approve_nested: bool) {
         ),
     );
     let registry = DelegationRegistry::new(&scv_client::Layout::new(&home_path));
-
-    let mut server = Command::new(env!("CARGO_BIN_EXE_scv"))
-        .isolated(&home_path)
-        .arg("--scv-home")
-        .arg(&home_path)
-        .args([
-            "--model",
-            "parent-model",
-            "--base-url",
-            &format!("http://{address}/v1"),
-            "server",
-            "--stdio",
-        ])
-        .env("OPENAI_API_KEY", "test-only")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut input = server.stdin.take().unwrap();
-    let mut lines = BufReader::new(server.stdout.take().unwrap()).lines();
-    let mut send = async |message: ClientMessage| {
-        input
-            .write_all(format!("{}\n", serde_json::to_string(&message).unwrap()).as_bytes())
-            .await
-            .unwrap();
-        input.flush().await.unwrap();
-    };
-    send(ClientMessage::Initialize {
-        request_id: "init".into(),
-        protocol_version: PROTOCOL_VERSION,
-        client: PeerInfo {
-            name: "agent-scv-test".into(),
-            version: "0".into(),
-        },
-    })
-    .await;
-    send(ClientMessage::SessionStart {
-        request_id: "session".into(),
-        cwd: workspace.path().display().to_string(),
-        provider: None,
-        model: None,
-        base_url: None,
-        no_tools: None,
-        delegation_depth: None,
-        channel: None,
-        auto_approve: None,
-    })
-    .await;
-    let session_id = loop {
-        let line = timeout(Duration::from_secs(30), lines.next_line())
-            .await
-            .expect("server went quiet")
-            .unwrap()
-            .expect("server exited");
-        if let ServerEvent::SessionStarted { session_id, .. } = serde_json::from_str(&line).unwrap()
-        {
-            break session_id;
-        }
-    };
+    let mut parent = Parent::start(&home_path, address, workspace.path()).await;
 
     let mut turns = Vec::new();
     for (index, prompt) in ["first", "second"].into_iter().enumerate() {
-        send(ClientMessage::TurnStart {
-            request_id: format!("turn-{index}"),
-            session_id: session_id.clone(),
-            prompt: prompt.into(),
-            attachments: Vec::new(),
-        })
-        .await;
+        parent.turn_start(&format!("turn-{index}"), prompt).await;
         let mut turn = Turn::default();
         loop {
-            let line = timeout(Duration::from_secs(60), lines.next_line())
-                .await
-                .expect("server went quiet")
-                .unwrap()
-                .expect("server exited");
-            match serde_json::from_str(&line).unwrap() {
+            match parent.event().await {
                 ServerEvent::ApprovalRequested {
                     approval_id,
                     name,
@@ -219,13 +146,7 @@ async fn delegate(approve_nested: bool) {
                     }
                     let approved = name == "agent_scv" || approve_nested;
                     turn.approvals.push((name, summary));
-                    send(ClientMessage::ApprovalResolve {
-                        request_id: "approve".into(),
-                        session_id: session_id.clone(),
-                        approval_id,
-                        approved,
-                    })
-                    .await;
+                    parent.resolve(approval_id, approved).await;
                 }
                 ServerEvent::ToolProgress { call_id, text, .. } => {
                     assert_eq!(call_id, "call_1");
@@ -280,22 +201,137 @@ async fn delegate(approve_nested: bool) {
     assert_eq!(output["reply"], "the word was heron");
     assert_eq!(output["turn"], 2);
 
-    // The parent ends: its nested SCV and everything tagged with it go too.
-    drop(input);
-    timeout(Duration::from_secs(20), server.wait())
-        .await
-        .expect("the parent did not exit")
-        .unwrap();
-    for _ in 0..100 {
-        if !alive(child) && live_tagged(&handle).is_empty() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    parent.stop(child, &handle).await;
+}
+
+/// The parent: a real `scv server --stdio` with one session, as a client
+/// drives it.
+struct Parent {
+    server: Child,
+    input: ChildStdin,
+    lines: Lines<BufReader<ChildStdout>>,
+    session_id: String,
+}
+
+impl Parent {
+    /// Start the parent in `home`, whose `agent_scv` runs this build's `scv`.
+    async fn start(home: &Path, address: SocketAddr, workspace: &Path) -> Self {
+        write_private(
+            &home.join("config.toml"),
+            &format!("[agents.scv]\ncommand = {:?}\n", env!("CARGO_BIN_EXE_scv")),
+        );
+        let mut server = Command::new(env!("CARGO_BIN_EXE_scv"))
+            .isolated(home)
+            .arg("--scv-home")
+            .arg(home)
+            .args([
+                "--model",
+                "parent-model",
+                "--base-url",
+                &format!("http://{address}/v1"),
+                "server",
+                "--stdio",
+            ])
+            .env("OPENAI_API_KEY", "test-only")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut parent = Self {
+            input: server.stdin.take().unwrap(),
+            lines: BufReader::new(server.stdout.take().unwrap()).lines(),
+            server,
+            session_id: String::new(),
+        };
+        parent
+            .send(ClientMessage::Initialize {
+                request_id: "init".into(),
+                protocol_version: PROTOCOL_VERSION,
+                client: PeerInfo {
+                    name: "agent-scv-test".into(),
+                    version: "0".into(),
+                },
+            })
+            .await;
+        parent
+            .send(ClientMessage::SessionStart {
+                request_id: "session".into(),
+                cwd: workspace.display().to_string(),
+                provider: None,
+                model: None,
+                base_url: None,
+                no_tools: None,
+                delegation_depth: None,
+                channel: None,
+                auto_approve: None,
+            })
+            .await;
+        parent.session_id = loop {
+            if let ServerEvent::SessionStarted { session_id, .. } = parent.event().await {
+                break session_id;
+            }
+        };
+        parent
     }
-    panic!(
-        "the nested SCV {child} or its processes {:?} outlived the parent",
-        live_tagged(&handle)
-    );
+
+    async fn send(&mut self, message: ClientMessage) {
+        self.input
+            .write_all(format!("{}\n", serde_json::to_string(&message).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        self.input.flush().await.unwrap();
+    }
+
+    async fn event(&mut self) -> ServerEvent {
+        let line = timeout(Duration::from_secs(60), self.lines.next_line())
+            .await
+            .expect("server went quiet")
+            .unwrap()
+            .expect("server exited");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn turn_start(&mut self, request_id: &str, prompt: &str) {
+        self.send(ClientMessage::TurnStart {
+            request_id: request_id.into(),
+            session_id: self.session_id.clone(),
+            prompt: prompt.into(),
+            attachments: Vec::new(),
+        })
+        .await;
+    }
+
+    async fn resolve(&mut self, approval_id: String, approved: bool) {
+        self.send(ClientMessage::ApprovalResolve {
+            request_id: "approve".into(),
+            session_id: self.session_id.clone(),
+            approval_id,
+            approved,
+        })
+        .await;
+    }
+
+    /// The parent ends: its nested SCV `child`, recorded as `handle`, and
+    /// everything tagged with it go too.
+    async fn stop(mut self, child: u32, handle: &str) {
+        drop(self.input);
+        timeout(Duration::from_secs(20), self.server.wait())
+            .await
+            .expect("the parent did not exit")
+            .unwrap();
+        for _ in 0..100 {
+            if !alive(child) && live_tagged(handle).is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!(
+            "the nested SCV {child} or its processes {:?} outlived the parent",
+            live_tagged(handle)
+        );
+    }
 }
 
 #[tokio::test]
@@ -306,6 +342,132 @@ async fn a_nested_scv_serves_a_conversation_and_relays_approvals() {
 #[tokio::test]
 async fn a_denied_nested_approval_reaches_the_nested_agent() {
     delegate(false).await;
+}
+
+/// One provider for both SCVs. The parent delegates once; the nested SCV
+/// starts a Codex job in the background, ends its turn, and later answers
+/// the job's report in a turn of its own.
+fn serve_background_provider(listener: TcpListener) {
+    thread::spawn(move || {
+        let mut parent_step = 0;
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let body = read_http_request(&mut StdBufReader::new(stream.try_clone().unwrap()));
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let body = String::from_utf8_lossy(&body);
+            let response = if request["model"] == "child-model" {
+                if body.contains("Delegated work you started in the background has finished") {
+                    text("job-1 landed")
+                } else if body.contains("function_call_output") {
+                    text("started job-1")
+                } else {
+                    call(
+                        "call_1",
+                        "agent_codex",
+                        json!({"prompt":"land it","background":true}),
+                    )
+                }
+            } else {
+                parent_step += 1;
+                if parent_step == 1 {
+                    call(
+                        "call_1",
+                        "agent_scv",
+                        json!({"prompt":"land it in the background"}),
+                    )
+                } else {
+                    text("parent done")
+                }
+            };
+            stream
+                .write_all(sse_response(&response).as_bytes())
+                .unwrap();
+        }
+    });
+}
+
+#[tokio::test]
+async fn a_nested_scvs_own_background_job_keeps_it_at_work_between_turns() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    serve_background_provider(listener);
+
+    let home = tempfile::tempdir().unwrap();
+    let home_path = std::fs::canonicalize(home.path()).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    // The nested SCV's Codex works until the test lets it finish.
+    let finish = home_path.join("codex-may-finish");
+    let codex = home_path.join("fake-codex");
+    std::fs::write(
+        &codex,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "echo '{{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}}'\n",
+                "i=0\n",
+                "while [ ! -e {finish:?} ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done\n",
+                "echo '{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"landed 0.9.9\"}}}}'\n",
+                "echo '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
+            ),
+            finish = finish.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_private(
+        &home_path.join("agents/scv/config.toml"),
+        &format!(
+            "[provider]\nactive = \"t\"\n\n[providers.t]\nkind = \"openai-compatible\"\nmodel = \"child-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n\n[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\n",
+            codex.display().to_string()
+        ),
+    );
+    let registry = DelegationRegistry::new(&scv_client::Layout::new(&home_path));
+    let mut parent = Parent::start(&home_path, address, workspace.path()).await;
+
+    parent.turn_start("turn-0", "first").await;
+    let mut output = None;
+    loop {
+        match parent.event().await {
+            // The parent's agent_scv call and the nested agent_codex call.
+            ServerEvent::ApprovalRequested { approval_id, .. } => {
+                parent.resolve(approval_id, true).await;
+            }
+            ServerEvent::ToolCompleted {
+                output: completed, ..
+            } => output = Some(completed),
+            ServerEvent::TurnCompleted { .. } => break,
+            ServerEvent::TurnFailed { message, .. } | ServerEvent::Error { message, .. } => {
+                panic!("turn failed: {message}")
+            }
+            _ => {}
+        }
+    }
+    let output: Value = serde_json::from_str(&output.unwrap()).unwrap();
+    assert_eq!(output["reply"], "started job-1", "{output}");
+
+    // The nested SCV's turn has ended, but the job it started runs on inside
+    // it: it is still at work, which holds a planned restart.
+    let run = nested_run(&registry);
+    assert!(run.record.idle_since_unix.is_some(), "{run:?}");
+    assert_eq!(run.record.background_jobs, Some(1), "{run:?}");
+    assert!(run.working());
+
+    // The job finishes and the nested SCV reports it to its model in a turn
+    // of its own; once that ends, the nested SCV is idle.
+    std::fs::write(&finish, "").unwrap();
+    for _ in 0..600 {
+        if !nested_run(&registry).working() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let run = nested_run(&registry);
+    assert!(!run.working(), "{run:?}");
+    assert_eq!(run.record.background_jobs, None);
+    assert!(run.processes > 0);
+
+    let (child, handle) = delegation_pid(&home_path).expect("the nested SCV ended");
+    parent.stop(child, &handle).await;
 }
 
 /// Tagged processes that are still running.

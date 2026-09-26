@@ -169,7 +169,8 @@ pub struct DelegationSummary {
     /// Live agents waiting between turns count too.
     pub active: u64,
     /// How many of `active` are live agents (a nested SCV or an ACP agent)
-    /// waiting between turns; `None` from a daemon that does not tell.
+    /// waiting between turns, apart from a nested SCV whose own background
+    /// jobs still count; `None` from a daemon that does not tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle: Option<u64>,
     /// Orphaned delegations the daemon has stopped since it started.
@@ -216,6 +217,11 @@ pub struct DelegationInfo {
     /// and from older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since_unix_seconds: Option<u64>,
+    /// A nested SCV's own background jobs that still run or wait to be
+    /// reported to it; a planned restart waits for them even between turns.
+    /// Absent when there are none, for other agents, and from older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_jobs: Option<u32>,
 }
 
 /// What a `daemon.control` message asks the daemon to do.

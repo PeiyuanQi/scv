@@ -81,6 +81,7 @@ fn a_chain_names_the_run_this_process_started() {
         conversation: None,
         turn: None,
         idle_since_unix: None,
+        background_jobs: None,
     };
     write_record(
         registry.record_dir(),
@@ -310,6 +311,7 @@ fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
         conversation: None,
         turn: None,
         idle_since_unix: None,
+        background_jobs: None,
     };
     write_record(&dir, &record).unwrap();
     std::fs::copy(
@@ -325,7 +327,8 @@ fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
 /// watchdog or a rolled-back daemon.
 #[test]
 fn records_stay_readable_across_releases() {
-    /// 0.3.0's record: the same fields without `idle_since_unix`.
+    /// 0.3.0's record: the same fields without `idle_since_unix` and
+    /// `background_jobs`.
     #[derive(Deserialize)]
     #[allow(dead_code, reason = "only parsing matters")]
     struct Release030 {
@@ -344,22 +347,56 @@ fn records_stay_readable_across_releases() {
         #[serde(default)]
         turn: Option<u32>,
     }
-    // A record as 0.3.0 wrote it parses unchanged and says nothing of idling.
+    // A record as 0.3.0 wrote it parses unchanged and says nothing of idling
+    // or background jobs.
     let old = r#"{"handle":"scv-92f0c3","agent":"scv","instance":"8973cbc5","session":"s","owner":{"pid":10,"start_time":5},"process":{"pid":11,"start_time":6},"pgid":11,"cwd":"/w","started_unix":1,"depth":1,"conversation":"scv-1","turn":1}"#;
     let record: DelegationRecord = serde_json::from_str(old).unwrap();
     assert_eq!(record.idle_since_unix, None);
+    assert_eq!(record.background_jobs, None);
     assert_eq!(serde_json::to_string(&record).unwrap(), old);
-    // A live child between turns adds one field, which 0.3.0 skips.
+    // A live child between turns with a background job of its own adds two
+    // fields, which 0.3.0 skips.
     let idle = DelegationRecord {
         idle_since_unix: Some(7),
+        background_jobs: Some(2),
         ..record
     };
     let encoded = serde_json::to_string(&idle).unwrap();
     assert!(
-        encoded.ends_with(r#""turn":1,"idle_since_unix":7}"#),
+        encoded.ends_with(r#""turn":1,"idle_since_unix":7,"background_jobs":2}"#),
         "{encoded}"
     );
     let read: Release030 = serde_json::from_str(&encoded).unwrap();
     assert_eq!(read.handle, "scv-92f0c3");
     assert_eq!(read.turn, Some(1));
+    assert_eq!(
+        serde_json::from_str::<DelegationRecord>(&encoded).unwrap(),
+        idle
+    );
+}
+
+#[test]
+fn a_live_child_between_turns_works_only_while_its_own_jobs_do() {
+    let record: DelegationRecord = serde_json::from_str(
+        r#"{"handle":"scv-92f0c3","agent":"scv","instance":"8973cbc5","session":"s","owner":{"pid":10,"start_time":5},"process":{"pid":11,"start_time":6},"pgid":11,"cwd":"/w","started_unix":1,"depth":1,"conversation":"scv-1","turn":1}"#,
+    )
+    .unwrap();
+    let entry = |idle_since_unix, background_jobs, processes| DelegationEntry {
+        record: DelegationRecord {
+            idle_since_unix,
+            background_jobs,
+            ..record.clone()
+        },
+        orphaned: false,
+        processes,
+    };
+    // Mid-turn, or a per-turn run: at work while its processes live.
+    assert!(entry(None, None, 1).working());
+    assert!(!entry(None, None, 0).working());
+    // Between turns: at work only while its own background jobs are.
+    assert!(!entry(Some(7), None, 1).working());
+    assert!(!entry(Some(7), Some(0), 1).working());
+    assert!(entry(Some(7), Some(1), 1).working());
+    // A child that is gone does no work, whatever its record says.
+    assert!(!entry(Some(7), Some(1), 0).working());
 }

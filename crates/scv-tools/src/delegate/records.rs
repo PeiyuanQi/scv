@@ -100,6 +100,12 @@ pub struct DelegationRecord {
     /// while a turn runs, and always for a per-turn run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since_unix: Option<u64>,
+    /// A nested SCV's own background jobs that still run or whose results
+    /// its model has not yet taken in: finished and not yet reported, or in
+    /// the turn it started to report them, until that turn ends. Absent when
+    /// there are none, for every other agent, and from older releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_jobs: Option<u32>,
 }
 
 /// A record plus what SCV currently observes about it.
@@ -114,9 +120,12 @@ pub struct DelegationEntry {
 
 impl DelegationEntry {
     /// Whether the run is still at work: it has live processes and is not a
-    /// live child waiting between turns of its conversation.
+    /// live child waiting between turns of its conversation with no
+    /// background jobs of its own.
     pub fn working(&self) -> bool {
-        self.processes > 0 && self.record.idle_since_unix.is_none()
+        self.processes > 0
+            && (self.record.idle_since_unix.is_none()
+                || self.record.background_jobs.is_some_and(|jobs| jobs > 0))
     }
 }
 
@@ -291,6 +300,7 @@ impl DelegationRegistry {
                 .map(|(handle, _)| handle.clone()),
             turn: pending.conversation.as_ref().map(|(_, turn)| *turn),
             idle_since_unix: None,
+            background_jobs: None,
         };
         lock(&self.inner)
             .active
@@ -454,6 +464,13 @@ impl DelegationGuard {
     pub(crate) fn set_idle(&self) {
         let now = unix_now();
         self.update(|record| record.idle_since_unix = Some(now));
+    }
+
+    /// Record how many of a live child's own background jobs still run or
+    /// wait to be reported to it.
+    pub(crate) fn set_background_jobs(&self, jobs: usize) {
+        let jobs = (jobs > 0).then(|| u32::try_from(jobs).unwrap_or(u32::MAX));
+        self.update(|record| record.background_jobs = jobs);
     }
 
     /// Rewrite the record. Bookkeeping only: a failure never fails the turn,

@@ -252,9 +252,11 @@ an owner's chat request to change, publish, and deploy SCV itself.
    chat bridge holds an owner message it has not answered durably. A
    per-turn CLI run is at work while it has live processes. A live child (a
    nested SCV or an ACP agent) keeps its process for its whole conversation,
-   so it is at work only while a turn runs on it, which its delegation record
-   tells (`idle_since_unix` is absent then; `DelegationEntry::working`). At
-   the request's deadline it goes ahead anyway and the plan says so.
+   so it is at work only while a turn runs on it (`idle_since_unix` is absent
+   then) or, for a nested SCV, while background jobs of its own session still
+   run or wait to be reported to its model (`background_jobs`), which its
+   delegation record tells (`DelegationEntry::working`). At the request's
+   deadline it goes ahead anyway and the plan says so.
 3. It records the accounts connected at that moment, copies its own image
    (`/proc/self/exe`) to `<binary>.prev`, and starts `scv restart-watchdog`
    from that copy as a transient unit (`systemd-run --user`), outside its own
@@ -391,12 +393,24 @@ then a group kill and a sweep of tagged processes). Each call that runs a
 turn on the child holds `LiveChild::begin_turn`'s guard, and the record
 notes when the turn ended (`idle_since_unix`) once the guard drops, however
 the call ends, so `scv agents ps` lists the child idle between turns and a
-planned restart does not wait for it then. The conversation store
+planned restart does not wait for it then, unless a nested SCV's own
+background jobs still count (below). The conversation store
 keeps the child as the conversation's attachment, so forgetting, expiring, or
 ending the conversation's session is what shuts it down. `delegate/scv.rs`
-runs the SCV protocol client on top of it for `agent_scv`, and
-`delegate/acp/` runs an Agent Client Protocol (JSON-RPC 2.0) client on
-the same runtime for the agents whose adapter-table entry names an ACP server
+runs the SCV protocol client on top of it for `agent_scv`. A nested SCV's
+session can run background jobs that outlive the call that started them and
+are reported in turns the nested SCV starts itself, so between calls a
+watcher task keeps reading its events. The nested SCV never stalls on a full
+pipe, approval requests of its own turns are denied (no call is there to
+carry them to a person), and the record counts the nested session's jobs
+that still run or wait to be reported (`background_jobs`), which keeps the
+child at work between turns. As for a chat session, a job counts from the
+`tool.completed.jobs` entry of the call that started it until the nested
+model sees its result, through a later call or a report turn
+(`origin.jobs`), which counts until it ends. An ACP agent has no such jobs
+in its protocol, and nothing reads from it between turns. `delegate/acp/`
+runs an Agent Client Protocol (JSON-RPC 2.0) client on the same runtime for
+the agents whose adapter-table entry names an ACP server
 (`AcpLaunch`). The server resolves `[agents.<name>] transport` into an
 `AcpAgentLaunch`, and the registry registers the ACP tool when that server is
 installed, otherwise the per-turn CLI tool. Tools reach the session's approval

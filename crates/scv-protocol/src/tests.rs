@@ -402,10 +402,12 @@ fn delegation_control_round_trips_and_older_status_still_parses() {
 
 #[test]
 fn an_idle_live_delegation_is_additive() {
-    // As 0.3.0 lists a delegation: no idle time, and none written back.
+    // As 0.3.0 lists a delegation: no idle time or background jobs, and
+    // none written back.
     let listed = r#"{"handle":"scv-92f0c3","agent":"scv","session":"s","depth":1,"pid":4321,"owner_pid":1234,"processes":1,"cwd":"/w","started_unix_seconds":1750000000,"orphaned":false,"conversation":"scv-1","turn":1}"#;
     let entry: DelegationInfo = serde_json::from_str(listed).unwrap();
     assert_eq!(entry.idle_since_unix_seconds, None);
+    assert_eq!(entry.background_jobs, None);
     assert_eq!(serde_json::to_string(&entry).unwrap(), listed);
     let idle = DelegationInfo {
         idle_since_unix_seconds: Some(1_750_000_600),
@@ -419,6 +421,20 @@ fn an_idle_live_delegation_is_additive() {
     assert_eq!(
         serde_json::from_str::<DelegationInfo>(&encoded).unwrap(),
         idle
+    );
+    // A nested SCV between turns whose own background job still runs.
+    let background = DelegationInfo {
+        background_jobs: Some(1),
+        ..idle
+    };
+    let encoded = serde_json::to_string(&background).unwrap();
+    assert!(
+        encoded.ends_with(r#""idle_since_unix_seconds":1750000600,"background_jobs":1}"#),
+        "{encoded}"
+    );
+    assert_eq!(
+        serde_json::from_str::<DelegationInfo>(&encoded).unwrap(),
+        background
     );
 }
 

@@ -406,7 +406,8 @@ Each session remembers at most `agent.max_conversations` conversations
 forgets one left unused for `agent.conversation_idle_seconds` (default 86400).
 Handles end with the SCV session. `scv agents ps` shows a running turn's
 conversation and turn number, and lists a nested SCV or ACP agent that waits
-between turns of its conversation as `idle`.
+between turns of its conversation as `idle`, or `background` while a nested
+SCV's own background jobs still run or wait to be reported to it.
 
 The CLIs keep transcripts in their private agent homes (Claude Code under
 `.claude/projects`, Codex under `sessions`, pi under `.pi/agent/sessions`).
@@ -523,7 +524,9 @@ session, `cwd`, depth, and the PID plus start time of both the agent and the
 SCV process that owns it, so a reused PID never matches. A run that serves a
 conversation also records the conversation and its current turn, and a live
 agent (a nested SCV or an ACP agent) that waits between turns records when
-its last turn ended (`idle_since_unix`), until its next turn starts.
+its last turn ended (`idle_since_unix`), until its next turn starts. A nested
+SCV also records how many of its own background jobs still run or wait to be
+reported to its model (`background_jobs`, omitted when none).
 
 When a run ends, SCV stops its process group and then any process still tagged
 with its handle (TERM, then KILL after 2 seconds), including descendants that
@@ -545,8 +548,9 @@ scv agents kill codex-3f9a2c
 scv agents kill --orphans
 ```
 
-`scv status` counts the runs at work as `running` and the live agents waiting
-between turns as `idle`, as `scv agents ps` lists them, and shows how many
+`scv status` counts the runs at work as `running` (a nested SCV whose own
+background jobs still count among them) and the live agents waiting between
+turns as `idle`, as `scv agents ps` lists them, and shows how many
 orphans the daemon has stopped. Agent tools are offered only while the
 session's own depth is below `agent.max_delegation_depth` (default 2), and a
 delegated run may not start, stop, restart, update, or run a daemon, or manage
@@ -612,11 +616,20 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   resumable), otherwise the nested SCV is shut down and the conversation
   forgotten. A nested SCV that exits mid-turn fails the call with its stderr
   tail and ends the conversation.
+- The nested SCV's own session can run [background jobs](#background-jobs),
+  which outlive the call that started them and which it reports in turns it
+  starts itself. Between calls SCV keeps reading its events: it denies those
+  turns' approval requests, since no call is there to carry them to a person,
+  and counts the jobs that still run or wait to be reported, from the call
+  that started each (`tool.completed.jobs`) until the nested model has seen
+  its result, through a later call or a report turn, which counts until it
+  ends. A planned restart waits for them as for a running turn (see
+  [architecture](architecture.md#planned-restarts)).
 - The nested SCV is recorded like any delegation, so `scv agents ps` lists it
-  with its current turn (`running` during a turn, `idle` between turns),
-  `scv agents kill` stops it, and the orphan
-  reconcile reaps it if its parent dies. It ends when its conversation is
-  forgotten, expires, or its session ends: SCV closes its stdin (the server
+  with its current turn (`running` during a turn, `idle` between turns, or
+  `background` while its own jobs count), `scv agents kill` stops it, and the
+  orphan reconcile reaps it if its parent dies. It ends when its conversation
+  is forgotten, expires, or its session ends: SCV closes its stdin (the server
   exits on EOF), waits 2 seconds, then kills its process group and anything
   still tagged with it. A reaper task waits on the process from the start, so
   when it exits between turns, by itself or through `scv agents kill`, it is
