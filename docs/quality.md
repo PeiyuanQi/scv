@@ -52,6 +52,12 @@ Daemon and component changes require focused coverage for:
   acknowledgements without `ret` (empty or `{}`) completing delivery once, and
   explicit send rejections or permanent 4xx statuses dropping the reply and
   resuming polling, with only integer codes logged;
+- an account answering only its owner by default: another sender's message,
+  direct or in a group, dropped without a reply, busy notice, claim, session,
+  or turn, yet marked seen and checkpointed; the owner answered in groups too;
+  an unknown owner answering nobody, shown in status, `scv config show`, and
+  login; `senders = "anyone"` answering everyone as before; and the default
+  never written to `config.toml`;
 - remote tools only for an `owner`-mode account's known owner: owner sessions
   start with tools and auto-approve, while other senders and unknown owners
   stay tool-free and deny approvals, as do the owner's group messages (string
@@ -115,9 +121,10 @@ Daemon and component changes require focused coverage for:
 - the bridge's side-effect-free intake (`classify`): seen and unanswerable
   messages only marked seen, claimed or undelivered ones never run twice,
   direct and group conversation keys, tools and the owner limit only for the
-  tool owner's direct chat, the owner recognized without the grant, busy
-  beyond the claim and queue limits, and a full session table closing only an
-  idle conversation;
+  tool owner's direct chat, the owner recognized without the grant, other
+  senders dropped unless the account answers anyone (and everyone dropped
+  without a known owner), busy beyond the claim and queue limits, and a full
+  session table closing only an idle conversation;
 - refused replies held per conversation within count, byte, total, and age
   limits, delivered ahead of the next reply only as far as one message allows,
   restored when the carrying reply is refused, busy notices never held, and

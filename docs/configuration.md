@@ -263,6 +263,7 @@ args = ["server", "--stdio"]
 enabled = true
 workspace = "/absolute/path/to/workspace" # optional; the daemon's workspace otherwise
 remote_tools = "none"                     # or "owner"
+# senders = "anyone"                      # omitted, only the owner is answered
 ```
 
 Every table also accepts `prompt_args` (default `[]` except Grok),
@@ -636,6 +637,7 @@ settings are a table in the instance's `config.toml`:
 enabled = true
 workspace = "/absolute/path/to/workspace"
 remote_tools = "none"
+# senders = "anyone"
 ```
 
 Account tables may also limit the files senders send:
@@ -649,13 +651,20 @@ keep_days = 7
 
 `owner_max_mib` is the largest file downloaded from the account owner (0 turns
 downloads off for everyone), `others_image_max_mib` the largest image from any
-other sender, whose other files are never downloaded (0 turns their images off
-too), and `keep_days` how long received files and copies of sent files stay in
+other sender, on an account that answers anyone, whose other files are never
+downloaded (0 turns their images off too), and `keep_days` how long received
+files and copies of sent files stay in
 `$SCV_HOME/state/media`. SCV leaves the defaults above out of the file. See
 [channel media](channels.md#media).
 
-A missing table or key defaults to `enabled = true` and `remote_tools =
-"none"`; an omitted `workspace` uses the daemon workspace. An explicit workspace must be an existing absolute
+A missing table or key defaults to `enabled = true`, `remote_tools =
+"none"`, and `senders = "owner"`; an omitted `workspace` uses the daemon
+workspace. `senders` says whose messages the account answers: `"owner"`, only
+the account's authenticated owner, dropping everyone else's messages unanswered
+(with no owner on record, nobody), or `"anyone"`, every sender, tool-free
+unless the owner holds remote tools. SCV writes the key only as `"anyone"`, so
+an owner-only table stays readable by releases before `0.3.0`, which reject
+the key. An explicit workspace must be an existing absolute
 directory. Saved accounts autostart when enabled, but QR login is always
 explicit. Logging in again preserves a saved disabled setting. A Feishu
 account's credentials hold the app ID and secret, its brand (`feishu` or
@@ -679,7 +688,9 @@ resolved workspace through the live daemon, then returns. Adding
 `--remote-tools owner` grants the account's authenticated owner full,
 auto-approved tools from that chat account; `--remote-tools none` revokes it. The value is
 saved as `remote_tools` (`"none"` by default) in the account settings; see the
-[security model](security.md#supervised-remote-bridge) before enabling it. `scv channels stop
+[security model](security.md#supervised-remote-bridge) before enabling it.
+`--senders anyone` makes the account answer every sender, and `--senders owner`
+only its owner again; the value is saved as `senders`. `scv channels stop
 <channel> --account NAME` persists `enabled: false` and joins the instance while
 retaining credentials. Credential or settings changes join the old instance
 before a replacement starts. `scv channels logout <channel> --account NAME` requires a live daemon

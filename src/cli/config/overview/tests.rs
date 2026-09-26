@@ -33,3 +33,18 @@ fn media_limits_show_where_each_was_set() {
          keep_days = 7 [default]"
     );
 }
+
+#[test]
+fn an_owner_only_account_without_an_owner_answers_nobody() {
+    use scv_channels::state::Senders;
+    assert_eq!(
+        answers(Senders::Owner, Some(true)),
+        "answers only its owner"
+    );
+    assert_eq!(answers(Senders::Owner, None), "answers only its owner");
+    assert_eq!(
+        answers(Senders::Owner, Some(false)),
+        "answers nobody (only its owner, and no owner is recorded)"
+    );
+    assert_eq!(answers(Senders::Anyone, Some(false)), "answers anyone");
+}

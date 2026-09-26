@@ -160,7 +160,10 @@ without known identity. Stop any old `0.1.9` standalone ClawBot process before
 enabling the supervised account; those processes do not honor the new locks.
 
 `scv channels run wechat --account NAME --workspace /path/to/workspace`
-persistently enables the account in the running daemon and returns. WeChat
+persistently enables the account in the running daemon and returns. The bot
+answers only its own WeChat account (the owner) by default and silently drops
+everyone else's messages; `--senders anyone` answers every sender, tool-free,
+and `--senders owner` restores the default. WeChat
 sessions are tool-free by default; add `--remote-tools owner` to give the bot's
 own WeChat account every SCV tool, including delegated Claude Code and Codex,
 with approvals granted automatically. That equals shell access from that WeChat
@@ -186,14 +189,15 @@ grants the owner's direct chats every SCV tool, exactly as for WeChat.
 Both channels take pictures, voice messages, videos, files, quoted messages,
 and (on Feishu) forwarded bundles. SCV downloads them privately under
 `$SCV_HOME/state/media`, shows images to the model when it accepts image input,
-and hands the owner's agent the file paths; other senders' files are limited
-to pictures. In the owner's chat the agent can send files and pictures back
+and hands the owner's agent the file paths; on an account that answers anyone,
+other senders' files are limited to pictures. In the owner's chat the agent can send files and pictures back
 with its `chat_attach` tool. See [channel media](docs/channels.md#media).
 
 
 Account settings are `[channels.<channel>.<account>]` tables in
 `config.toml`, with
-`enabled` defaulting to `true`, `remote_tools` defaulting to `"none"`, and an
+`enabled` defaulting to `true`, `remote_tools` defaulting to `"none"`,
+`senders` defaulting to `"owner"` (`"anyone"` answers every sender), and an
 optional workspace defaulting to the daemon workspace. `scv channels run` and
 `stop` edit only that table and keep your comments. The daemon reconciles accounts and settings every two seconds
 or immediately on `scv reload`, so a hand edit takes effect without a restart.

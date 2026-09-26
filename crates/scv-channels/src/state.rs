@@ -8,7 +8,7 @@
 use crate::media::{MediaKind, MediaSettings};
 use anyhow::{Result, anyhow, bail};
 use scv_client::Layout;
-pub use scv_protocol::RemoteTools;
+pub use scv_protocol::{RemoteTools, Senders};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
@@ -29,6 +29,10 @@ pub struct AccountSettings {
     pub workspace: Option<PathBuf>,
     /// Remote tool authority; only local CLI/daemon control can change it.
     pub remote_tools: RemoteTools,
+    /// Whose messages the account answers. The default, `owner`, stays out
+    /// of the file, which releases before the setting can then still read.
+    #[serde(skip_serializing_if = "is_owner")]
+    pub senders: Senders,
     /// Limits on files senders send.
     #[serde(skip_serializing_if = "MediaSettings::is_default")]
     pub media: MediaSettings,
@@ -40,9 +44,18 @@ impl Default for AccountSettings {
             enabled: true,
             workspace: None,
             remote_tools: RemoteTools::None,
+            senders: Senders::Owner,
             media: MediaSettings::default(),
         }
     }
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_owner(senders: &Senders) -> bool {
+    *senders == Senders::Owner
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -561,6 +574,14 @@ impl<C: Credentials> Store<C> {
                 RemoteTools::None => "none",
                 RemoteTools::Owner => "owner",
             });
+            // The default stays out of the file, so a release that predates
+            // the setting still reads an owner-only account.
+            match settings.senders {
+                Senders::Owner => {
+                    table.remove("senders");
+                }
+                Senders::Anyone => table["senders"] = toml_edit::value("anyone"),
+            }
             // Default media limits stay out of the file.
             if settings.media.is_default() {
                 table.remove("media");

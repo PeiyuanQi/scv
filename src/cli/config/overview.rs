@@ -246,12 +246,18 @@ fn channel(
                     scv_channels::state::RemoteTools::None => "no remote tools",
                     scv_channels::state::RemoteTools::Owner => "owner has remote tools",
                 };
+                let owner_known = credentials
+                    .as_ref()
+                    .ok()
+                    .and_then(Option::as_ref)
+                    .map(|credentials| credentials.owner().is_some_and(|owner| !owner.is_empty()));
+                let senders = answers(settings.senders, owner_known);
                 let enabled = if settings.enabled {
                     "enabled"
                 } else {
                     "disabled"
                 };
-                format!("{enabled}, {tools}, workspace {workspace}")
+                format!("{enabled}, {senders}, {tools}, workspace {workspace}")
             }
             Err(error) => format!("invalid settings: {}", safe_error(&error)),
         };
@@ -274,6 +280,18 @@ fn channel(
         }
     }
     Ok(!accounts.is_empty())
+}
+
+/// Whose messages an account answers, given whether its sign-in records an
+/// owner (`None` when it is not signed in or unreadable).
+fn answers(senders: scv_channels::state::Senders, owner_known: Option<bool>) -> &'static str {
+    match (senders, owner_known) {
+        (scv_channels::state::Senders::Anyone, _) => "answers anyone",
+        (scv_channels::state::Senders::Owner, Some(false)) => {
+            "answers nobody (only its owner, and no owner is recorded)"
+        }
+        (scv_channels::state::Senders::Owner, _) => "answers only its owner",
+    }
 }
 
 /// An account's media limits (`[channels.<channel>.<account>.media]`), each

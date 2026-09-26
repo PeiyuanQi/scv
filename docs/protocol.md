@@ -52,6 +52,7 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d2","command":{"action":"reload"}}
 {"type":"daemon.control","request_id":"d3","command":{"action":"channel_set","channel":"wechat","account":"default","enabled":true,"workspace":"/workspace/project","remote_tools":"owner"}}
 {"type":"daemon.control","request_id":"d4","command":{"action":"channel_set","channel":"wechat","account":"default","enabled":false,"workspace":null}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"channel_set","channel":"feishu","account":"default","enabled":true,"workspace":null,"senders":"anyone"}}
 {"type":"daemon.control","request_id":"d5","command":{"action":"channel_logout","channel":"wechat","account":"default"}}
 {"type":"daemon.control","request_id":"d6","command":{"action":"delegations","all":false}}
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
@@ -65,9 +66,13 @@ settings immediately; periodic reconciliation also runs every two seconds.
 absolute workspace; `channel` names the channel (`wechat` or `feishu`), and an
 unknown one is a `component_error`;
 an omitted or null workspace leaves the saved workspace unchanged. The optional
-`remote_tools` (`none` or `owner`) likewise persists only when present.
-Component status reports the effective `remote_tools`, which is `owner` only
-when the account also has a known owner ID; older clients may omit the field. Without a
+`remote_tools` (`none` or `owner`) likewise persists only when present, as
+does the optional `senders` (`owner` or `anyone`), whose messages the account
+answers. Component status reports the effective `remote_tools`, which is
+`owner` only when the account also has a known owner ID; older clients may omit
+the field. It reports `senders` as set (an `owner` account without a known
+owner ID answers nobody). Daemons before 0.3.0 answer anyone, omit it from
+status, and ignore it in `channel_set`. Without a
 saved workspace, the account uses the daemon workspace. Replacements stop and
 join the old instance first. `channel_logout` persists disablement and joins
 before removing credentials, delivery state, and settings. Successful actions

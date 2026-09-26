@@ -341,6 +341,8 @@ pub(crate) struct BridgeRun<'a> {
     /// The owner, when the account grants it remote tools; every other
     /// sender stays tool-free.
     pub(crate) tool_owner: Option<ToolOwner>,
+    /// Whose messages the account answers; the rest are only marked seen.
+    pub(crate) senders: state::Senders,
     /// Where received and outgoing files live and how large they may be.
     pub(crate) media: MediaOptions,
     /// The account's connection to the daemon's hub, which then sees its
@@ -371,6 +373,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         socket,
         owner,
         tool_owner,
+        senders,
         media,
         link,
         report,
@@ -388,6 +391,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         report,
         owner,
         tool_owner: tool_owner.as_ref().map(|owner| owner.user_id.as_str()),
+        senders,
         registration,
         media: &media,
         state: Mutex::new(state),
@@ -482,6 +486,8 @@ struct Bridge<'a, C, T> {
     /// The owner granted remote tools, whose claimed messages count as owner
     /// work in the hub.
     tool_owner: Option<&'a str>,
+    /// Whose messages the account answers.
+    senders: state::Senders,
     registration: hub::Registration,
     media: &'a MediaOptions,
     /// The only copy of delivery state. Every change is saved while held.
@@ -615,10 +621,17 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 conversations,
                 owner: self.owner,
                 tool_owner,
+                senders: self.senders,
             },
         );
         let (sender, turn) = match verdict {
             Verdict::Ignore => {
+                mark_seen(&mut state, id);
+                return self.save(&state).await;
+            }
+            Verdict::Stranger => {
+                // Neither who sent it nor what it says reaches the log.
+                tracing::info!("ignored a message from someone other than the account owner");
                 mark_seen(&mut state, id);
                 return self.save(&state).await;
             }

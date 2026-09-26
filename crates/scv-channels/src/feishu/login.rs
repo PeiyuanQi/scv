@@ -55,13 +55,38 @@ pub(crate) async fn login(store: &Store, account: &str, brand: Brand) -> Result<
     let registered = poll(&client, &feishu, &pending).await?;
     let created = registered.account;
     credentials::save(store, account, &created)?;
-    println!(
-        "{} bot {} created and signed in; its creator is the owner.",
-        created.brand.title(),
-        created.app_id
-    );
+    if created.owner_open_id.is_some() {
+        println!(
+            "{} bot {} created and signed in; its creator is the owner.",
+            created.brand.title(),
+            created.app_id
+        );
+    } else {
+        println!(
+            "{} bot {} created and signed in.",
+            created.brand.title(),
+            created.app_id
+        );
+        println!(
+            "{}; log out and scan again to record one.",
+            no_owner_note(store, account)
+        );
+    }
     println!("{}", rename_hint(&created));
     Ok(())
+}
+
+/// What an account whose sign-in names no owner does: remote tools stay
+/// off, and with the default `senders = "owner"` it answers nobody.
+fn no_owner_note(store: &Store, account: &str) -> &'static str {
+    let anyone = store
+        .settings(account)
+        .is_ok_and(|settings| settings.senders == crate::state::Senders::Anyone);
+    if anyone {
+        "No owner is recorded, so remote tools stay off for everyone"
+    } else {
+        "No owner is recorded, so this account, which answers only its owner, answers nobody and remote tools stay off"
+    }
 }
 
 /// Sign in with an existing app. The secret is checked with Feishu before
@@ -93,7 +118,8 @@ pub(crate) async fn login_existing(
     println!("{} app {app_id} signed in.", brand.title());
     if owner_open_id.is_none() {
         println!(
-            "No owner is recorded, so remote tools stay off for everyone; sign in again with --owner-open-id to name one."
+            "{}; sign in again with --owner-open-id to name one.",
+            no_owner_note(store, account)
         );
     }
     Ok(())
@@ -240,7 +266,9 @@ pub async fn poll(
             .filter(|open_id| credentials::validate_open_id(open_id).is_ok())
             .map(str::to_owned);
         if owner.is_none() {
-            tracing::warn!("Feishu app registration returned no owner; remote tools stay off");
+            tracing::warn!(
+                "Feishu app registration returned no owner; an owner-only account answers nobody, and remote tools stay off"
+            );
         }
         let account = Account {
             app_id: app_id.into(),

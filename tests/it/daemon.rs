@@ -2,7 +2,7 @@
 use crate::support::Isolated;
 use scv_protocol::{
     ClientMessage, ComponentState, DaemonCommand, DaemonStatus, PROTOCOL_VERSION, PeerInfo,
-    RemoteTools, ServerEvent,
+    RemoteTools, Senders, ServerEvent,
 };
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -180,6 +180,7 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
                 enabled: true,
                 workspace: None,
                 remote_tools: Some(RemoteTools::Owner),
+                senders: None,
             },
         )
         .await
@@ -232,6 +233,7 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
             enabled: false,
             workspace: None,
             remote_tools: None,
+            senders: None,
         },
     )
     .await
@@ -331,13 +333,16 @@ async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_rea
     assert_eq!(ids, ["wechat:test"]);
     assert_eq!(loaded.components[0].state, ComponentState::Disabled);
     assert_eq!(loaded.components[0].remote_tools, RemoteTools::Owner);
+    // An account without the setting answers only its owner.
+    assert_eq!(loaded.components[0].senders, Some(Senders::Owner));
     assert!(
         home.path()
             .join("channels/wechat/accounts/old.json")
             .exists()
     );
 
-    // SCV's own change keeps the person's comments.
+    // SCV's own change keeps the person's comments, and never writes the
+    // default senders, so an older release still reads the table.
     scv_client::control(
         &socket,
         DaemonCommand::ChannelSet {
@@ -346,6 +351,7 @@ async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_rea
             enabled: false,
             workspace: Some(workspace.path().display().to_string()),
             remote_tools: Some(RemoteTools::None),
+            senders: None,
         },
     )
     .await
@@ -354,6 +360,26 @@ async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_rea
     assert!(edited.starts_with("# Chat accounts\n[channels.wechat.test] # hand-written\n"));
     assert!(edited.contains("remote_tools = \"none\""), "{edited}");
     assert!(edited.contains("workspace = "), "{edited}");
+    assert!(!edited.contains("senders"), "{edited}");
+    let senders = |senders| DaemonCommand::ChannelSet {
+        channel: "wechat".into(),
+        account: "test".into(),
+        enabled: false,
+        workspace: None,
+        remote_tools: None,
+        senders: Some(senders),
+    };
+    let opened = scv_client::control(&socket, senders(Senders::Anyone))
+        .await
+        .unwrap();
+    assert_eq!(opened.components[0].senders, Some(Senders::Anyone));
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("senders = \"anyone\""), "{text}");
+    let closed = scv_client::control(&socket, senders(Senders::Owner))
+        .await
+        .unwrap();
+    assert_eq!(closed.components[0].senders, Some(Senders::Owner));
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), edited);
 
     // A person's own edit takes effect at the next reconciliation.
     std::fs::write(
@@ -376,6 +402,10 @@ async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_rea
     assert!(output.status.success());
     let shown = String::from_utf8_lossy(&output.stdout);
     assert!(shown.contains("wechat:test"), "{shown}");
+    assert!(
+        shown.contains("disabled, answers only its owner, owner has remote tools"),
+        "{shown}"
+    );
     assert!(
         shown.contains("credentials/wechat/test.json 0600"),
         "{shown}"
@@ -614,5 +644,39 @@ async fn daemon_logs_carry_no_colour_codes_outside_a_terminal() {
     assert!(!line.contains('\u{1b}'), "{line:?}");
     status(home.path()).await;
     assert!(!home.path().join("state/update.json").exists());
+    terminate(&mut child).await;
+}
+
+#[tokio::test]
+async fn an_owner_only_account_without_an_owner_is_shown_answering_nobody() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    // Credentials from before logins recorded the owner.
+    let account = r#"{"token":"test-secret-never-in-status","base_url":"https://127.0.0.1:1","bot_id":null,"user_id":null}"#;
+    write_account_file(&home.path().join("credentials/wechat/legacy.json"), account);
+    write_config(home.path(), "[channels.wechat.legacy]\nenabled = false\n");
+    let mut child = start(home.path(), workspace.path());
+    status(home.path()).await;
+    let loaded = scv_client::control(
+        &home.path().join("state/server.sock"),
+        DaemonCommand::Reload,
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded.components[0].senders, Some(Senders::Owner));
+    assert_eq!(loaded.components[0].user_id, None);
+    for args in [&["channels", "status"][..], &["config", "show"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_scv"))
+            .isolated(home.path())
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        let shown = String::from_utf8_lossy(&output.stdout);
+        assert!(shown.contains("answers nobody"), "{shown}");
+        assert!(!shown.contains("test-secret"), "{shown}");
+    }
     terminate(&mut child).await;
 }

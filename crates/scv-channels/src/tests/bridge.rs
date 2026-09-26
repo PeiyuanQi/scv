@@ -70,6 +70,10 @@ struct Bench {
     store: state::Store<Test>,
     socket: std::path::PathBuf,
     transport: FakeTransport,
+    /// The account owner; `None` unless a test sets one.
+    owner: Option<&'static str>,
+    /// Whose messages the account answers: anyone, unless a test says so.
+    senders: state::Senders,
 }
 
 /// The test's side: the fake daemon, and the platform's two directions.
@@ -98,8 +102,21 @@ impl Bench {
             store,
             socket,
             transport,
+            owner: None,
+            senders: state::Senders::Anyone,
         };
         (bench, Peer { daemon, push, sent })
+    }
+
+    /// An account that answers only `owner`.
+    fn owned_by(owner: &'static str) -> (Self, Peer) {
+        let (bench, peer) = Self::new();
+        let bench = Self {
+            owner: Some(owner),
+            senders: state::Senders::Owner,
+            ..bench
+        };
+        (bench, peer)
     }
 
     /// Run the bridge next to `peer`, which plays the platform and the
@@ -118,8 +135,9 @@ impl Bench {
                 account: "default",
                 workspace: self.directory.path(),
                 socket: &self.socket,
-                owner: None,
+                owner: self.owner,
                 tool_owner: None,
+                senders: self.senders,
                 media,
                 link: &detached,
                 report: &|_| {},
@@ -329,6 +347,34 @@ async fn a_redelivered_message_is_answered_once() {
             finish_turn(&mut side, "ok").await;
             assert_eq!(peer.sent().await.reply_to, "re-m2");
             eventually(|| bench.state().seen == ["m1", "m2"]).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_owner_only_account_checkpoints_anothers_message_without_answering_it() {
+    let (bench, mut peer) = Bench::owned_by("alice");
+    peer.push(vec![message("m1", "mallory", "hello")]);
+    bench
+        .run(async {
+            // Handled like any message: seen, and the checkpoint moves past
+            // it, so it is never replayed. No claim and no reply.
+            eventually(|| {
+                let saved = bench.state();
+                saved.cursor == "c1" && saved.seen == ["m1"]
+            })
+            .await;
+            let saved = bench.state();
+            assert!(saved.in_flight.is_empty() && saved.pending.is_empty());
+            // The owner's next message is the first to reach the daemon.
+            peer.push(vec![message("m2", "alice", "hi")]);
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hi");
+            finish_turn(&mut side, "hello alice").await;
+            assert_eq!(peer.sent().await.to, "alice");
+            eventually(|| bench.state().seen == ["m1", "m2"]).await;
+            // Nothing ever went to the other sender.
+            assert!(peer.sent.try_recv().is_err());
         })
         .await;
 }

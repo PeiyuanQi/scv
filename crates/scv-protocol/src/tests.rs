@@ -242,6 +242,7 @@ fn remote_tools_fields_are_additive() {
         enabled: true,
         workspace: None,
         remote_tools: Some(RemoteTools::Owner),
+        senders: None,
     };
     let encoded = serde_json::to_string(&owner).unwrap();
     assert!(encoded.contains(r#""remote_tools":"owner""#));
@@ -256,6 +257,51 @@ fn remote_tools_fields_are_additive() {
     assert_eq!(health.remote_tools, RemoteTools::None);
     // Daemons before channels reported no channel.
     assert!(health.channel.is_empty());
+}
+
+#[test]
+fn senders_fields_are_additive() {
+    let legacy: DaemonCommand = serde_json::from_str(
+        r#"{"action":"channel_set","channel":"wechat","account":"a","enabled":true,"workspace":null,"remote_tools":"owner"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy,
+        DaemonCommand::ChannelSet { senders: None, .. }
+    ));
+    let anyone = DaemonCommand::ChannelSet {
+        channel: "feishu".into(),
+        account: "a".into(),
+        enabled: true,
+        workspace: None,
+        remote_tools: None,
+        senders: Some(Senders::Anyone),
+    };
+    let encoded = serde_json::to_string(&anyone).unwrap();
+    assert_eq!(
+        encoded,
+        r#"{"action":"channel_set","channel":"feishu","account":"a","enabled":true,"workspace":null,"senders":"anyone"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<DaemonCommand>(&encoded).unwrap(),
+        anyone
+    );
+    // A daemon before the setting reports none: it answers anyone.
+    let older: ComponentHealth = serde_json::from_str(
+        r#"{"id":"wechat:a","channel":"wechat","account":"a","bot_id":null,"user_id":null,"enabled":true,"state":"connected","last_success_unix_seconds":null,"error":null,"restarts":0,"remote_tools":"none"}"#,
+    )
+    .unwrap();
+    assert_eq!(older.senders, None);
+    let current = ComponentHealth {
+        senders: Some(Senders::Owner),
+        ..older
+    };
+    assert!(
+        serde_json::to_string(&current)
+            .unwrap()
+            .ends_with(r#""remote_tools":"none","senders":"owner"}"#)
+    );
+    assert_eq!(Senders::default(), Senders::Owner);
 }
 
 #[test]
