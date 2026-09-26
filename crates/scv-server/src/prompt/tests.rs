@@ -16,7 +16,7 @@ fn prompt_for(config: &Config, context: &PromptContext<'_>) -> String {
 fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background() {
     let mut config = Config::default();
     config.agent.prefer = vec!["pi".into(), "codex".into(), "grok".into()];
-    let agents = ["agent_codex".to_owned(), "agent_grok".to_owned()];
+    let agents = ["codex".to_owned(), "grok".to_owned()];
     let prompt = prompt_for(
         &config,
         &PromptContext {
@@ -26,13 +26,26 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
         },
     );
     assert!(prompt.starts_with(&config.agent.system_prompt), "{prompt}");
+    // One tool, with the agents named by their `agent` values.
     assert!(
-        prompt.contains("agent_codex (Codex), agent_grok (Grok Build)"),
+        prompt.contains(
+            "You can hand work to other agents with the agent tool, naming one in its agent \
+             argument: codex (Codex), grok (Grok Build)."
+        ),
         "{prompt}"
     );
-    // Preferences name only offered agents, in the user's order.
+    assert!(!prompt.contains("agent_codex"), "{prompt}");
+    // Preferences name only offered agents, in the user's order, and the
+    // first of them is the default.
     assert!(
-        prompt.contains("The user prefers agent_codex, agent_grok, in that order"),
+        prompt.contains("The user prefers codex, grok, in that order"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "A call that names no agent goes to codex, so name one whenever the work calls \
+             for another."
+        ),
         "{prompt}"
     );
     assert!(prompt.contains("background set to true"), "{prompt}");
@@ -44,15 +57,15 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
     assert!(
         prompt.contains(
             "If an agent declines a request, including a safety or guardrail refusal, tell \
-                 the user what it said and call agent_grok with the same request. A refusal \
-                 from another agent is not a reason to skip Grok."
+                 the user what it said and call the agent tool with agent grok and the same \
+                 request. A refusal from another agent is not a reason to skip Grok."
         ),
         "{prompt}"
     );
     assert!(
         prompt.contains(
-            "If agent_grok itself declines, tell the user; don't pass the request to another \
-                 agent on your own unless the user names one."
+            "If grok itself declines, tell the user; don't pass the request to another agent \
+                 on your own unless the user names one."
         ),
         "{prompt}"
     );
@@ -74,9 +87,10 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
         },
     );
     assert!(foreground.contains("Hand substantial work to an agent"));
-    assert!(foreground.contains("call agent_grok with the same request"));
+    assert!(foreground.contains("call the agent tool with agent grok and the same request"));
     assert!(!foreground.contains("background set to true"));
     assert!(!foreground.contains("prefers"));
+    assert!(!foreground.contains("names no agent"));
 
     let tool_free = prompt_for(
         &Config::default(),
@@ -97,7 +111,7 @@ fn the_prompt_names_per_agent_task_defaults() {
     config.agents.0.get_mut("claude").unwrap().effort = Some("xhigh".into());
     config.agents.0.get_mut("grok").unwrap().use_for =
         Some("current events, and anything that needs posts on X".into());
-    let agents = ["agent_claude".to_owned(), "agent_grok".to_owned()];
+    let agents = ["claude".to_owned(), "grok".to_owned()];
     let prompt = prompt_for(
         &config,
         &PromptContext {
@@ -111,12 +125,11 @@ fn the_prompt_names_per_agent_task_defaults() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("For coding, prefer agent_claude with model opus-5.5 and effort xhigh."),
+        prompt.contains("For coding, prefer claude with model opus-5.5 and effort xhigh."),
         "{prompt}"
     );
     assert!(
-        prompt
-            .contains("For current events, and anything that needs posts on X, prefer agent_grok."),
+        prompt.contains("For current events, and anything that needs posts on X, prefer grok."),
         "{prompt}"
     );
     assert!(
@@ -129,8 +142,33 @@ fn the_prompt_names_per_agent_task_defaults() {
 }
 
 #[test]
+fn defaults_without_a_note_apply_whenever_that_agent_runs() {
+    let mut config = Config::default();
+    config.agents.0.get_mut("codex").unwrap().model = Some("gpt-5.5".into());
+    // A preference for an agent this session does not offer is left out.
+    config.agent.prefer = vec!["claude".into()];
+    let agents = ["codex".to_owned()];
+    let prompt = prompt_for(
+        &config,
+        &PromptContext {
+            agents: &agents,
+            background: true,
+            channel: None,
+        },
+    );
+    assert!(
+        prompt.contains(
+            "When delegating to codex, pass model gpt-5.5 unless the user asks for another."
+        ),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("prefers"), "{prompt}");
+    assert!(!prompt.contains("omit model and effort"), "{prompt}");
+}
+
+#[test]
 fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
-    let agents = ["agent_claude".to_owned()];
+    let agents = ["claude".to_owned()];
     let owner = prompt_for(
         &Config::default(),
         &PromptContext {
@@ -152,7 +190,7 @@ fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
         ),
         "{owner}"
     );
-    assert!(!owner.contains("call agent_grok"), "{owner}");
+    assert!(!owner.contains("agent grok"), "{owner}");
     // A tool-free chat session still learns how its replies are read.
     let guest = prompt_for(
         &Config::default(),

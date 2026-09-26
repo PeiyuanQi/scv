@@ -137,8 +137,7 @@ pub(crate) fn stopped_jobs_notice(
         }
     };
     for job in jobs {
-        let agent = job.tool.strip_prefix("agent_").unwrap_or(&job.tool);
-        notice.push_str(&format!("\n- {} ({agent})", job.job));
+        notice.push_str(&format!("\n- {} ({})", job.job, job.agent_name()));
         if !job.task.is_empty() {
             notice.push_str(&format!(": {}", job.task));
         }
@@ -656,6 +655,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 to_user_id: recipient.to_owned(),
                 job,
                 tool: info.tool,
+                agent: info.agent,
                 task: info.task,
                 started_at,
             });

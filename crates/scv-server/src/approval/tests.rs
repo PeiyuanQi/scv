@@ -8,7 +8,7 @@ use super::*;
 async fn background_requests_get_only_the_unattended_answer() {
     let request = |risk| ApprovalRequest {
         call_id: "job-1".into(),
-        name: "agent_codex".into(),
+        name: "agent".into(),
         risk,
         cwd: PathBuf::from("/"),
         summary: "nested".into(),

@@ -1,4 +1,4 @@
-//! Background delegations: an `agent_*` call with `background: true` returns
+//! Background delegations: an `agent` call with `background: true` returns
 //! a job at once, and when the job finishes the server reports it in a turn
 //! of its own unless the model already waited for it.
 
@@ -41,7 +41,8 @@ fn serve_provider(listener: TcpListener, bodies: Vec<String>) -> mpsc::Receiver<
     received
 }
 
-/// An SCV home whose Codex is a script that works for about a second.
+/// An SCV home whose Codex, the user's preferred agent, is a script that
+/// works for about a second.
 fn home_with_fake_codex() -> (tempfile::TempDir, std::path::PathBuf) {
     let home = tempfile::tempdir().unwrap();
     let home_path = std::fs::canonicalize(home.path()).unwrap();
@@ -61,7 +62,7 @@ fn home_with_fake_codex() -> (tempfile::TempDir, std::path::PathBuf) {
     write_private(
         &home_path.join("config.toml"),
         &format!(
-            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\n",
+            "[agent]\nprefer = [\"codex\"]\n\n[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\n",
             agent.display().to_string()
         ),
     );
@@ -191,9 +192,10 @@ async fn a_finished_background_job_is_reported_in_a_turn_the_server_starts() {
     let requests = serve_provider(
         listener,
         vec![
+            // No agent named: the user's preferred one runs it.
             call(
                 "call_1",
-                "agent_codex",
+                "agent",
                 json!({"prompt":"land it","background":true}),
             ),
             text("Started job-1."),
@@ -212,7 +214,7 @@ async fn a_finished_background_job_is_reported_in_a_turn_the_server_starts() {
     loop {
         let event = server.next().await.expect("server went quiet");
         match event {
-            ServerEvent::ToolCompleted { name, output, .. } if name == "agent_codex" => {
+            ServerEvent::ToolCompleted { name, output, .. } if name == "agent" => {
                 started_output = Some(output);
             }
             ServerEvent::TurnCompleted {
@@ -250,10 +252,11 @@ async fn a_finished_background_job_is_reported_in_a_turn_the_server_starts() {
     assert_eq!(
         (
             started["job"].as_str(),
+            started["agent"].as_str(),
             started["status"].as_str(),
             started["background"].as_bool()
         ),
-        (Some("job-1"), Some("running"), Some(true))
+        (Some("job-1"), Some("codex"), Some("running"), Some(true))
     );
     let origin = report_origin.unwrap();
     assert_eq!(origin.kind, OriginKind::Background);
@@ -265,7 +268,7 @@ async fn a_finished_background_job_is_reported_in_a_turn_the_server_starts() {
     let report = &bodies[2];
     assert!(report.contains("[SCV background report]"), "{report}");
     assert!(
-        report.contains("job-1 (agent_codex, conversation codex-1): completed"),
+        report.contains("job-1 (codex, conversation codex-1): completed"),
         "{report}"
     );
     assert!(report.contains("landed 0.9.9"), "{report}");
@@ -280,8 +283,8 @@ async fn a_job_the_model_waited_for_is_not_reported_again() {
         vec![
             call(
                 "call_1",
-                "agent_codex",
-                json!({"prompt":"land it","background":true}),
+                "agent",
+                json!({"agent":"codex","prompt":"land it","background":true}),
             ),
             call(
                 "call_2",
@@ -334,8 +337,8 @@ async fn tool_calls_carry_the_jobs_they_start_and_settle() {
         vec![
             call(
                 "call_1",
-                "agent_codex",
-                json!({"prompt":"Land the fix\nthen publish","background":true}),
+                "agent",
+                json!({"agent":"codex","prompt":"Land the fix\nthen publish","background":true}),
             ),
             call(
                 "call_2",
@@ -360,7 +363,8 @@ async fn tool_calls_carry_the_jobs_they_start_and_settle() {
     }
     let job = |status| scv_protocol::JobChange {
         job: "job-1".into(),
-        tool: "agent_codex".into(),
+        tool: "agent".into(),
+        agent: "codex".into(),
         status,
         task: "Land the fix".into(),
     };
@@ -388,8 +392,8 @@ async fn scv_exec_stays_until_its_background_jobs_are_reported() {
         vec![
             call(
                 "call_1",
-                "agent_codex",
-                json!({"prompt":"land it","background":true}),
+                "agent",
+                json!({"agent":"codex","prompt":"land it","background":true}),
             ),
             text("Started job-1."),
             text("job-1 landed 0.9.9."),
@@ -453,15 +457,27 @@ async fn a_chat_session_is_told_its_channel_and_to_delegate_in_the_background() 
     let text = body.to_string();
     assert!(text.contains("takes place on WeChat"), "{text}");
     assert!(text.contains("# Delegating work"), "{text}");
-    assert!(text.contains("agent_codex (Codex)"), "{text}");
+    assert!(text.contains("codex (Codex)"), "{text}");
+    assert!(
+        text.contains("A call that names no agent goes to codex"),
+        "{text}"
+    );
     assert!(text.contains("background set to true"), "{text}");
-    let tools: Vec<&str> = body["tools"]
-        .as_array()
-        .unwrap()
+    let tools: Vec<&Value> = body["tools"].as_array().unwrap().iter().collect();
+    let names: Vec<&str> = tools
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    for tool in ["agent_codex", "agent_status", "agent_wait", "agent_cancel"] {
-        assert!(tools.contains(&tool), "{tool} missing from {tools:?}");
+    for tool in ["agent", "agent_status", "agent_wait", "agent_cancel"] {
+        assert!(names.contains(&tool), "{tool} missing from {names:?}");
     }
+    // One delegation tool; the agent is its argument.
+    assert!(!names.contains(&"agent_codex"), "{names:?}");
+    let agent = tools.iter().find(|tool| tool["name"] == "agent").unwrap();
+    let agents = agent["parameters"]["properties"]["agent"]["enum"]
+        .as_array()
+        .unwrap();
+    assert!(agents.contains(&json!("codex")), "{agents:?}");
+    // The preferred agent is the default, so `agent` may be left out.
+    assert_eq!(agent["parameters"]["required"], json!(["prompt"]));
 }

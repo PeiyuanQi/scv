@@ -29,11 +29,11 @@ const TEXT_ERROR_BYTES: usize = 500;
 pub(crate) const DECLINED_NOTE: &str = "The agent declined this request. Tell the user what it \
      said; don't pass the request to another agent on your own. If the user then asks for a \
      specific agent, use it.";
-/// What a declined run's result tells the calling model when `agent_grok` is
+/// What a declined run's result tells the calling model when `grok` is
 /// offered: a safety or guardrail refusal is not a reason to skip Grok.
 pub(crate) const DECLINED_NOTE_TRY_GROK: &str = "The agent declined this request. Tell the user \
-     what it said, then call agent_grok with the same request. A safety or guardrail refusal is \
-     not a reason to skip Grok.";
+     what it said, then call agent again with agent grok and the same request. A safety or \
+     guardrail refusal is not a reason to skip Grok.";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentUsage {

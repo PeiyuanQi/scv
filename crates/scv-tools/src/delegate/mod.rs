@@ -1,8 +1,10 @@
-//! The `agent_*` tools, which hand a turn to another agent.
+//! The `agent` tool, which hands a turn to another agent.
 //!
-//! An agent runs one of three ways: [`native`] starts its CLI once per turn,
-//! [`acp`] keeps an Agent Client Protocol server per conversation, and
-//! [`scv`] keeps a nested `scv server --stdio`. The rest is shared:
+//! [`agent`] is the tool the model calls, with the agent as an argument. It
+//! passes the call to that agent's backend, which runs one of three ways:
+//! [`native`] starts its CLI once per turn, [`acp`] keeps an Agent Client
+//! Protocol server per conversation, and [`scv`] keeps a nested
+//! `scv server --stdio`. The rest is shared:
 //!
 //! - [`adapters`]: the built-in agents and how to launch each one.
 //! - [`request`]: the arguments every agent call takes.
@@ -19,6 +21,7 @@
 
 pub(crate) mod acp;
 pub mod adapters;
+pub(crate) mod agent;
 pub mod background;
 pub mod choice;
 pub mod conversation;

@@ -1,4 +1,4 @@
-//! `agent_scv`: delegate to a nested SCV over the SCV protocol.
+//! The `scv` agent: delegate to a nested SCV over the SCV protocol.
 //!
 //! Each conversation runs one `scv server --stdio` in SCV's private adapter
 //! home ([`LiveChild`]). The first turn performs the handshake (`initialize`,
@@ -24,9 +24,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
+use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
 use scv_protocol::{ClientMessage, PROTOCOL_VERSION, ServerEvent};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::{
     task::JoinHandle,
     time::{Instant, timeout_at},
@@ -35,8 +35,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DelegationContext,
-    args::{Timeouts, bounded, parse_args, timeout_schema, validate_process_args},
+    args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
+        agent::{Accepts, Backend},
         choice,
         conversation::{Attachment, ConversationStore, TurnGuard},
         live::{LiveChild, LiveLine, LiveSpec, LiveTurn},
@@ -288,6 +289,14 @@ enum Interrupt {
 }
 
 impl ScvAgentTool {
+    /// What a nested SCV takes: `model`, for a new conversation, and
+    /// `session`; its provider has no per-call effort.
+    pub(crate) const ACCEPTS: Accepts = Accepts {
+        model: true,
+        effort: false,
+        session: true,
+    };
+
     fn validate(&self, args: &AgentArgs) -> Result<(), ToolError> {
         validate_process_args(&args.prompt)?;
         self.timeouts.resolve(args.timeout_seconds)?;
@@ -770,46 +779,7 @@ impl LineProgress {
 }
 
 #[async_trait]
-impl Tool for ScvAgentTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.name.clone(),
-            description: "Runs in its own private home, working with its own context and tools \
-                while you keep yours, and does not see this conversation, so give it a \
-                self-contained brief. It can also run SCV's own tools in another project \
-                directory. Its tool approvals come \
-                back to this session, so the same policy and user decide them. Each result \
-                carries a `session` handle: pass it back to continue the same nested session \
-                with its context."
-                .into(),
-            parameters: json!({
-                "type":"object",
-                "properties":{
-                    "prompt":{"type":"string"},
-                    "cwd":{
-                        "type":"string",
-                        "description":"Directory inside the workspace for the nested session, such as a project directory (\"scv\"). \
-                            It loads that directory's AGENTS.md and skills. Defaults to the workspace root."
-                    },
-                    "session":{
-                        "type":"string",
-                        "description":"The `session` handle an earlier agent_scv call returned, such as \"scv-1\". \
-                            Pass it to continue that nested session; omit it to start a new one for unrelated work."
-                    },
-                    "model":{
-                        "type":"string",
-                        "description":"Model for a new nested session. Set when the user asks, or when \
-                            the work matches a configured use_for default; omit to use the nested \
-                            SCV's configured model."
-                    },
-                    "timeout_seconds":timeout_schema(self.timeouts)
-                },
-                "required":["prompt"],
-                "additionalProperties":false
-            }),
-        }
-    }
-
+impl Backend for ScvAgentTool {
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
         let args: AgentArgs = parse_args(arguments)?;
         self.validate(&args)?;

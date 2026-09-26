@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     args::bounded,
     delegate::{
+        agent::AGENT_TOOL,
         conversation::TurnGuard,
         live::{LiveChild, LiveSpec},
         output::{AgentResult, AgentUsage, RunStatus, add_sign_in_hint},
@@ -128,7 +129,7 @@ impl AcpAgentTool {
         let pending = self.delegation.as_ref().map(|delegation| {
             delegation.registry.begin_at(
                 owner_depth,
-                &self.agent,
+                &self.name,
                 &delegation.session,
                 cwd,
                 Some((turn.handle.as_str(), turn.turn)),
@@ -201,7 +202,7 @@ impl AcpAgentTool {
         if version != Some(PROTOCOL_VERSION) {
             let message = format!(
                 "the {} ACP server speaks protocol version {}, not {PROTOCOL_VERSION}",
-                self.agent,
+                self.name,
                 version.map_or_else(|| "unknown".into(), |version| version.to_string())
             );
             return Err((rpc, message));
@@ -289,7 +290,7 @@ impl AcpAgentTool {
             return Err(format!(
                 "permissions = \"full\" needs the {} ACP session mode {mode:?}, which this \
                  agent does not offer",
-                self.agent
+                self.name
             ));
         };
         match result {
@@ -453,7 +454,7 @@ impl AcpAgentTool {
                     progress.lines.flush(&context.progress);
                     let (risk, summary) = describe_permission(&params, &label);
                     let request = context.approvals.request(
-                        self.name.clone(),
+                        AGENT_TOOL,
                         risk,
                         cwd.to_owned(),
                         summary,
@@ -507,14 +508,14 @@ impl AcpAgentTool {
             session: None,
         };
         let (content, truncated) =
-            result.to_json(&self.agent, conversation, None, "", self.output_limit);
+            result.to_json(&self.name, conversation, None, "", self.output_limit);
         let mut output = ToolOutput {
             content,
             failure: status.failure(),
             truncated,
         };
         if output.is_error() {
-            add_sign_in_hint(&mut output, &self.agent);
+            add_sign_in_hint(&mut output, &self.name);
         }
         output
     }

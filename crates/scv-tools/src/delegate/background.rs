@@ -1,4 +1,4 @@
-//! Background delegations: an `agent_*` call with `background: true` returns a
+//! Background delegations: an `agent` call with `background: true` returns a
 //! job handle at once while the agent keeps working; `agent_status` and
 //! `agent_wait` observe the job, `agent_cancel` stops it, and the session is
 //! told when it finishes so the server can report it in a turn of its own.
@@ -26,7 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     args::{Timeouts, bounded, parse_args, timeout_schema},
-    delegate::output::AgentReply,
+    delegate::{
+        agent::{AGENT_TOOL, AgentTool},
+        output::AgentReply,
+    },
     sync::lock,
 };
 
@@ -90,7 +93,10 @@ impl JobsState {
 
 struct Job {
     id: String,
+    /// The tool that started it, `agent`.
     tool: String,
+    /// The agent that runs it, such as `codex`.
+    agent: String,
     /// The first line of the delegated prompt, shortened.
     task: String,
     started: Instant,
@@ -117,7 +123,8 @@ struct Outcome {
 #[derive(Debug, Clone)]
 pub struct JobReport {
     pub job: String,
-    pub(crate) tool: String,
+    /// The agent that ran it, such as `codex`.
+    pub(crate) agent: String,
     pub(crate) status: JobStatus,
     pub(crate) session: Option<String>,
     pub(crate) reply: String,
@@ -158,12 +165,13 @@ impl BackgroundJobs {
     }
 
     /// Start `tool` with `arguments` in the background for the call
-    /// `call_id` and return its job's
-    /// `{"job","status":"running","background":true}` description.
+    /// `call_id`, on `agent`, and return its job's
+    /// `{"job","agent","status":"running","background":true}` description.
     fn start(
         self: &Arc<Self>,
         tool: Arc<dyn Tool>,
         name: &str,
+        agent: &str,
         arguments: Value,
         workspace: PathBuf,
         call_id: &str,
@@ -198,6 +206,7 @@ impl BackgroundJobs {
                 JobChange {
                     job: id.clone(),
                     tool: name.to_owned(),
+                    agent: agent.to_owned(),
                     status: JobStatus::Running,
                     task: task.clone(),
                 },
@@ -205,6 +214,7 @@ impl BackgroundJobs {
             state.jobs.push(Job {
                 id: id.clone(),
                 tool: name.to_owned(),
+                agent: agent.to_owned(),
                 task,
                 started: Instant::now(),
                 progress: progress.clone(),
@@ -238,7 +248,7 @@ impl BackgroundJobs {
         });
         Ok(json!({
             "job": id,
-            "tool": name,
+            "agent": agent,
             "status": "running",
             "background": true,
             "note": "The agent is working in the background. SCV reports the result in a new \
@@ -367,7 +377,7 @@ impl BackgroundJobs {
                 let reply = AgentReply::read(&result_value(&outcome.output)).unwrap_or_default();
                 JobReport {
                     job: job.id.clone(),
-                    tool: job.tool.clone(),
+                    agent: job.agent.clone(),
                     status: job_status(&outcome.output, &reply),
                     session: reply.session,
                     reply: bounded(
@@ -432,6 +442,7 @@ impl Job {
         JobChange {
             job: self.id.clone(),
             tool: self.tool.clone(),
+            agent: self.agent.clone(),
             status,
             task: self.task.clone(),
         }
@@ -446,7 +457,7 @@ impl Job {
         let mut change = None;
         let mut value = Map::new();
         value.insert("job".into(), self.id.clone().into());
-        value.insert("tool".into(), self.tool.clone().into());
+        value.insert("agent".into(), self.agent.clone().into());
         match &self.outcome {
             None => {
                 value.insert("status".into(), "running".into());
@@ -536,7 +547,7 @@ pub fn report_prompt(reports: &[JobReport]) -> String {
         prompt.push_str(&format!(
             "\n{} ({}{}): {}\n{}\n",
             report.job,
-            report.tool,
+            report.agent,
             report
                 .session
                 .as_deref()
@@ -548,9 +559,9 @@ pub fn report_prompt(reports: &[JobReport]) -> String {
     prompt
 }
 
-/// An agent tool that can also run in the background.
+/// The `agent` tool, able to run a call in the background as well.
 pub(crate) struct BackgroundCapable {
-    pub(crate) inner: Arc<dyn Tool>,
+    pub(crate) inner: Arc<AgentTool>,
     pub(crate) jobs: Arc<BackgroundJobs>,
 }
 
@@ -622,11 +633,13 @@ impl Tool for BackgroundCapable {
             return self.inner.execute(arguments, context).await;
         }
         // Validate before returning a job handle, so a bad call fails now.
-        self.inner.risk(&arguments)?;
-        let name = self.inner.spec().name;
+        let agent = self.inner.route(&arguments)?;
+        agent.backend.risk(&arguments)?;
+        let agent = agent.name.clone();
         let started = self.jobs.start(
-            Arc::clone(&self.inner),
-            &name,
+            Arc::clone(&self.inner) as Arc<dyn Tool>,
+            AGENT_TOOL,
+            &agent,
             arguments,
             context.workspace,
             &context.call_id,
@@ -666,7 +679,7 @@ impl Tool for WaitTool {
         .into();
         ToolSpec {
             name: "agent_wait".into(),
-            description: "Wait for a background agent job (the `job` handle an agent_* call with \
+            description: "Wait for a background agent job (the `job` handle an agent call with \
                 background: true returned) to finish, and return its result. Returns early with \
                 status running when the timeout passes. Waiting holds your turn open, so the \
                 user cannot reach you meanwhile; usually let SCV report the result instead."
@@ -770,7 +783,7 @@ impl Tool for CancelTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "agent_cancel".into(),
-            description: "Stop a running background agent job (the `job` handle an agent_* call \
+            description: "Stop a running background agent job (the `job` handle an agent call \
                 with background: true returned), for example when the user no longer wants \
                 it. The agent and every process it started are stopped; work it already wrote \
                 stays. Returns the job with status cancelled, and no report turn follows."

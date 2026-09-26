@@ -551,7 +551,7 @@ model sees `[… download failed]`.
 
 ## Background reports
 
-When the owner's session starts a background delegation (an `agent_*` call
+When the owner's session starts a background delegation (an `agent` call
 with `background: true`; see [tools](tools.md#background-jobs)), the bridge
 notes the job from the call's `tool.completed.jobs` (see
 [protocol](protocol.md#tool-lifecycle-and-approval)) and keeps that
@@ -581,11 +581,14 @@ which would cancel the jobs; the owner still gets the failure reply.
 The bridge keeps reading a report turn that starts during one of the owner's
 turns and finishes after it, so its answer goes out without waiting for the
 owner's next message. It also records each running job in the account's
-delivery state (`jobs`: the chat, job handle, delegating tool, and the task
-the daemon named, the first line of the delegated prompt) until the job is
-reported or its session closes.
+delivery state (`jobs`: the chat, job handle, delegating tool, the agent that
+runs it, and the task the daemon named, the first line of the delegated
+prompt) until the job is reported or its session closes. A job saved by SCV
+0.3.0 names its agent only in the tool (`agent_codex`), and one saved now
+still carries the tool, so either release reads the other's state.
 A restart ends every session and so every job: on the account's next run, each
-chat whose jobs were recorded gets one message listing the jobs that stopped.
+chat whose jobs were recorded gets one message listing the jobs that stopped,
+each with its agent, such as `- job-1 (codex): Land the fix`.
 
 ## Restarts and notices
 
@@ -787,7 +790,7 @@ CLI or daemon control can change:
 actually applied the grant; a login without an owner ID leaves it inactive with
 a warning. `--senders` likewise reports what the daemon applied, and warns when
 an owner-only account has no owner ID and so answers nobody. Logout resets
-`senders` to `owner` along with the tool grant. Delegated `agent_claude` and `agent_codex` calls need
+`senders` to `owner` along with the tool grant. Delegated calls to `claude` and `codex` need
 their CLIs signed in for SCV first; see `scv agents login` in the
 [tools reference](tools.md#signing-in-delegated-agents).
 

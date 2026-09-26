@@ -2,15 +2,14 @@
 
 use std::{os::unix::fs::symlink, time::Duration};
 
+use scv_core::Tool as _;
+use serde_json::json;
+
 use super::*;
 use crate::{
     ToolsConfig,
     builtin::shell::BashTool,
-    delegate::{
-        adapters::Transport,
-        choice,
-        request::{AGENT_EFFORTS, MAX_AGENT_CWD_BYTES},
-    },
+    delegate::{adapters::Transport, agent::AgentTool, request::MAX_AGENT_CWD_BYTES},
 };
 
 fn test_conversations() -> Arc<ConversationStore> {
@@ -57,12 +56,7 @@ fn fake_agent_with_prompt_args(
             full_permission_args: None,
             model_args: vec!["--model".into(), "{model}".into()],
             effort_args: vec!["--effort".into(), "{effort}".into()],
-            model_hint: adapters::adapter(name.trim_start_matches("agent_"))
-                .map_or(
-                    "Model ID in the form this agent's CLI accepts.",
-                    |adapter| adapter.model_hint,
-                )
-                .into(),
+            model_hint: String::new(),
             environment,
             search_dirs: Vec::new(),
             output: OutputFormat::Text,
@@ -96,7 +90,7 @@ async fn native_agent_preserves_argument_boundaries() {
     let workspace = tempfile::tempdir().unwrap();
     let tool = fake_agent(
         workspace.path(),
-        "agent_fake",
+        "fake",
         "pwd\nprintf '%s\\n' \"$@\"\n",
         &["--fixed"],
         Vec::new(),
@@ -122,14 +116,19 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
     let workspace = tempfile::tempdir().unwrap();
     let tool = fake_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         "printf '%s\\n' \"$@\"\n",
         &["-p"],
         Vec::new(),
     );
-    let properties = &tool.spec().parameters["properties"];
-    assert_eq!(properties["effort"]["enum"], json!(AGENT_EFFORTS));
-    assert_eq!(properties["model"]["type"], "string");
+    assert_eq!(
+        tool.accepts(),
+        Accepts {
+            model: true,
+            effort: true,
+            session: false
+        }
+    );
     let arguments = json!({"prompt":"hi","model":"sonnet","effort":"medium"});
     assert!(
         tool.approval_summary(&arguments)
@@ -152,7 +151,7 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
         assert!(tool.risk(&invalid).is_err());
     }
     let fixed_only = NativeAgentTool::new(
-        "agent_pi".into(),
+        "pi".into(),
         AgentAdapterConfig {
             command: "pi".into(),
             args: vec!["-p".into()],
@@ -180,11 +179,8 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
         None,
         test_conversations(),
     );
-    assert!(
-        fixed_only.spec().parameters["properties"]
-            .get("model")
-            .is_none()
-    );
+    assert!(!fixed_only.accepts().model);
+    assert!(!fixed_only.accepts().effort);
     let error = fixed_only
         .risk(&json!({"prompt":"hi","model":"sonnet"}))
         .unwrap_err();
@@ -195,40 +191,13 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
     );
 }
 
-#[test]
-fn native_agent_model_hints_name_the_adapter_family_and_default() {
-    let workspace = tempfile::tempdir().unwrap();
-    let description = |name: &str, field: &str| {
-        fake_agent(workspace.path(), name, "", &[], Vec::new())
-            .spec()
-            .parameters["properties"][field]["description"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    };
-    let claude = description("agent_claude", "model");
-    let codex = description("agent_codex", "model");
-    let other = description("agent_other", "model");
-    assert!(claude.contains("sonnet or opus"));
-    for text in [&codex, &other] {
-        assert!(!text.contains("sonnet"), "{text}");
-    }
-    assert!(codex.contains("not a Claude alias"));
-    for text in [claude, codex, other, description("agent_codex", "effort")] {
-        assert!(
-            text.contains("omit to use the agent's configured default"),
-            "{text}"
-        );
-    }
-}
-
 #[tokio::test]
 async fn signed_out_dsh_failure_names_the_host_login_command() {
     let workspace = tempfile::tempdir().unwrap();
     // DeepSeek Harness 0.1.7-rc.1's startup error without a key.
     let tool = fake_agent(
         workspace.path(),
-        "agent_dsh",
+        "dsh",
         "echo 'dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route \"deepseek-official\"' >&2\nexit 1\n",
         &[],
         Vec::new(),
@@ -253,7 +222,7 @@ async fn signed_out_agent_failure_names_the_host_login_command() {
     let workspace = tempfile::tempdir().unwrap();
     let tool = fake_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         "echo 'Not logged in · Please run /login'\nexit 1\n",
         &[],
         Vec::new(),
@@ -272,7 +241,7 @@ async fn signed_out_agent_failure_names_the_host_login_command() {
     );
     let other = fake_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         "echo 'disk full'\nexit 1\n",
         &[],
         Vec::new(),
@@ -291,7 +260,7 @@ async fn native_agent_uses_instance_private_environment() {
     let home = workspace.path().join("private-home");
     let tool = fake_agent(
         workspace.path(),
-        "agent_codex",
+        "codex",
         "printf 'HOME=%s\\nSCV_HOME=%s\\nCODEX_HOME=%s\\nSCV_CONFIG=%s\\nOPENAI_API_KEY=%s\\nCODEX_API_KEY=%s\\n' \"$HOME\" \"$SCV_HOME\" \"$CODEX_HOME\" \"${SCV_CONFIG-unset}\" \"${OPENAI_API_KEY-unset}\" \"${CODEX_API_KEY-unset}\"\n",
         &[],
         vec![
@@ -323,7 +292,7 @@ async fn native_agent_places_prompt_flags_just_before_the_prompt() {
     let workspace = tempfile::tempdir().unwrap();
     let tool = fake_agent_with_prompt_args(
         workspace.path(),
-        "agent_grok",
+        "grok",
         "printf '%s\\n' \"$@\"\n",
         &[],
         &["-p"],
@@ -348,7 +317,7 @@ async fn full_permissions_follow_the_fixed_arguments_and_are_announced() {
     let workspace = tempfile::tempdir().unwrap();
     let mut tool = fake_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         "printf '%s\\n' \"$@\"\n",
         &["-p"],
         Vec::new(),
@@ -381,7 +350,7 @@ async fn native_agent_runs_in_a_contained_directory() {
     std::fs::write(root.join("notes.txt"), "not a directory").unwrap();
     symlink(outside.path(), root.join("escape")).unwrap();
     symlink(root.join("project"), root.join("inner-link")).unwrap();
-    let tool = fake_agent(&root, "agent_codex", "pwd\n", &[], Vec::new());
+    let tool = fake_agent(&root, "codex", "pwd\n", &[], Vec::new());
     let run = |arguments: Value| tool.execute(arguments, context(&root));
 
     for arguments in [
@@ -434,11 +403,6 @@ async fn native_agent_runs_in_a_contained_directory() {
             .unwrap()
             .contains("in the workspace root for up to 2 seconds")
     );
-    let description = tool.spec().parameters["properties"]["cwd"]["description"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(description.contains("AGENTS.md"));
 }
 
 #[tokio::test]
@@ -463,21 +427,7 @@ async fn per_call_timeouts_may_rise_to_the_ceiling_but_not_past_it() {
     );
 
     let workspace = tempfile::tempdir().unwrap();
-    let agent = fake_agent(
-        workspace.path(),
-        "agent_codex",
-        "echo ran\n",
-        &[],
-        Vec::new(),
-    );
-    let schema = &agent.spec().parameters["properties"]["timeout_seconds"];
-    assert_eq!(schema["maximum"], 5);
-    assert!(
-        schema["description"]
-            .as_str()
-            .unwrap()
-            .contains("Defaults to 2; at most 5")
-    );
+    let agent = fake_agent(workspace.path(), "codex", "echo ran\n", &[], Vec::new());
     assert!(
         agent
             .risk(&json!({"prompt":"hi","timeout_seconds":5}))
@@ -619,7 +569,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"all done"
     let context_home = delegation_context(home.path());
     let tool = conversing_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         OutputFormat::ClaudeStreamJson,
         adapters::adapter("claude").unwrap().resume,
         &script,
@@ -701,7 +651,7 @@ async fn conversations_continue_the_cli_session_in_the_same_cwd() {
     let store = test_conversations();
     let tool = conversing_agent(
         workspace.path(),
-        "agent_codex",
+        "codex",
         OutputFormat::CodexJsonl,
         codex_resume,
         &fake_codex(workspace.path(), false),
@@ -755,7 +705,7 @@ async fn conversations_continue_the_cli_session_in_the_same_cwd() {
     // Another session's tools do not know this session's handles.
     let other_session = conversing_agent(
         workspace.path(),
-        "agent_codex",
+        "codex",
         OutputFormat::CodexJsonl,
         codex_resume,
         &fake_codex(workspace.path(), false),
@@ -789,11 +739,7 @@ async fn conversations_continue_the_cli_session_in_the_same_cwd() {
             .message
             .contains("not a conversation handle")
     );
-    assert!(
-        tool.spec().parameters["properties"]
-            .get("session")
-            .is_some()
-    );
+    assert!(tool.accepts().session);
 }
 
 #[tokio::test]
@@ -801,7 +747,7 @@ async fn a_timed_out_turn_stays_resumable_and_unsupported_agents_refuse_sessions
     let workspace = tempfile::tempdir().unwrap();
     let tool = conversing_agent(
         workspace.path(),
-        "agent_codex",
+        "codex",
         OutputFormat::CodexJsonl,
         adapters::adapter("codex").unwrap().resume,
         &fake_codex(workspace.path(), true),
@@ -830,7 +776,7 @@ async fn a_timed_out_turn_stays_resumable_and_unsupported_agents_refuse_sessions
 
     let plain = structured_agent(
         workspace.path(),
-        "agent_grok",
+        "grok",
         OutputFormat::Text,
         "echo hi\n",
         None,
@@ -845,11 +791,7 @@ async fn a_timed_out_turn_stays_resumable_and_unsupported_agents_refuse_sessions
         "{}",
         refused.message
     );
-    assert!(
-        plain.spec().parameters["properties"]
-            .get("session")
-            .is_none()
-    );
+    assert!(!plain.accepts().session);
     let output = plain
         .execute(json!({"prompt":"x"}), context(workspace.path()))
         .await
@@ -874,7 +816,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
 "#;
     let tool = structured_agent(
         workspace.path(),
-        "agent_codex",
+        "codex",
         OutputFormat::CodexJsonl,
         script,
         Some(home.path().to_owned()),
@@ -905,7 +847,7 @@ async fn pi_json_and_signed_out_claude_results() {
     let workspace = tempfile::tempdir().unwrap();
     let pi = structured_agent(
         workspace.path(),
-        "agent_pi",
+        "pi",
         OutputFormat::PiJson,
         r#"echo '{"type":"session","id":"p"}'
 echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"pi ok"}],"usage":{"input":7,"output":2}}}'
@@ -924,7 +866,7 @@ echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"te
 
     let claude = structured_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         OutputFormat::ClaudeStreamJson,
         r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}'
 exit 1
@@ -952,18 +894,17 @@ exit 1
 #[tokio::test]
 async fn cli_refusals_are_declined_and_only_availability_failures_offer_other_agents() {
     let workspace = tempfile::tempdir().unwrap();
-    let chosen = |tool: NativeAgentTool| choice::ChosenAgent {
-        inner: Arc::new(tool),
-        use_for: None,
-        model: None,
-        effort: None,
-        alternatives: vec!["agent_codex".into(), "agent_grok".into()],
+    // As the model sees each result, beside the other agents.
+    let chosen = |tool: NativeAgentTool| {
+        let accepts = tool.accepts();
+        let name = tool.name.clone();
+        AgentTool::beside(&name, Arc::new(tool), accepts, &["codex", "grok"])
     };
     // Claude Code relays the API's `refusal` stop reason; the reply
     // mentions authentication and a 403, and the run exits 0.
     let refusing = chosen(structured_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         OutputFormat::ClaudeStreamJson,
         r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I cannot help bypass authentication or the 403."}],"stop_reason":"refusal"}}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot help bypass authentication or the 403."}'
@@ -986,7 +927,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot h
     // A signed-out CLI, reported on stderr: the other agents are named.
     let signed_out = chosen(fake_agent(
         workspace.path(),
-        "agent_dsh",
+        "dsh",
         "echo 'dsh: MISSING_CREDENTIAL: no API key' >&2\nexit 1\n",
         &[],
         Vec::new(),
@@ -1008,13 +949,13 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot h
         value["fallback"]
             .as_str()
             .unwrap()
-            .ends_with("agent_codex, agent_grok."),
+            .ends_with("codex, grok. Call agent again with one of them."),
         "{value}"
     );
     // A rate-limited one too.
     let limited = chosen(structured_agent(
         workspace.path(),
-        "agent_claude",
+        "claude",
         OutputFormat::ClaudeStreamJson,
         r#"echo '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate limit exceeded"}'
 exit 1
@@ -1030,7 +971,7 @@ exit 1
     let value: Value = serde_json::from_str(&output.content).unwrap();
     assert!(value["fallback"].is_string(), "{value}");
     // A missing executable fails before running, in SCV's own words.
-    let mut missing = fake_agent(workspace.path(), "agent_pi", "exit 0\n", &[], Vec::new());
+    let mut missing = fake_agent(workspace.path(), "pi", "exit 0\n", &[], Vec::new());
     missing.resolved = None;
     let error = chosen(missing)
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
@@ -1038,7 +979,9 @@ exit 1
         .unwrap_err();
     assert_eq!(error.kind, scv_core::ToolFailure::Unavailable);
     assert!(
-        error.message.ends_with("agent_codex, agent_grok."),
+        error
+            .message
+            .ends_with("codex, grok. Call agent again with one of them."),
         "{error}"
     );
 }
@@ -1051,7 +994,7 @@ async fn a_timed_out_run_and_its_detached_descendants_are_stopped() {
     let delegation = delegation_context(home.path());
     let tool = structured_agent(
         workspace.path(),
-        "agent_codex",
+        "codex",
         OutputFormat::CodexJsonl,
         // The detached sleep leaves the agent's process group and session.
         "setsid sleep 60 &\necho \"$SCV_PARENT\" > chain.txt\nexec sleep 60\n",

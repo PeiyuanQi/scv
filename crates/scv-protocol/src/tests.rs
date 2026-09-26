@@ -503,14 +503,16 @@ fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
 fn tool_calls_report_the_jobs_they_start_and_settle() {
     let started = JobChange {
         job: "job-1".into(),
-        tool: "agent_codex".into(),
+        tool: "agent".into(),
+        agent: "codex".into(),
         status: JobStatus::Running,
         task: "Land the fix".into(),
     };
     assert!(started.started());
+    assert_eq!(started.agent_name(), "codex");
     assert_eq!(
         serde_json::to_value(&started).unwrap(),
-        serde_json::json!({"job":"job-1","tool":"agent_codex","status":"running","task":"Land the fix"})
+        serde_json::json!({"job":"job-1","tool":"agent","agent":"codex","status":"running","task":"Land the fix"})
     );
     // The statuses are the strings the model reads in the job tools' results.
     for (status, wire) in [
@@ -525,7 +527,8 @@ fn tool_calls_report_the_jobs_they_start_and_settle() {
         assert_eq!(status.to_string(), wire);
     }
     let settled: JobChange =
-        serde_json::from_str(r#"{"job":"job-1","tool":"agent_codex","status":"paused"}"#).unwrap();
+        serde_json::from_str(r#"{"job":"job-1","tool":"agent","agent":"codex","status":"paused"}"#)
+            .unwrap();
     assert_eq!(settled.status, JobStatus::Unknown);
     assert!(settled.task.is_empty());
     assert!(!settled.started());
@@ -535,7 +538,7 @@ fn tool_calls_report_the_jobs_they_start_and_settle() {
         turn_id: "t".into(),
         seq: 3,
         call_id: "c".into(),
-        name: "agent_codex".into(),
+        name: "agent".into(),
         success: true,
         output: "{}".into(),
         truncated: false,

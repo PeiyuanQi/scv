@@ -1,28 +1,26 @@
-//! What lets the model choose between delegated agents: each `agent_*` tool
-//! names its product and what that harness offers, carries the user's own
-//! `use_for` note, and, when a call fails because the agent is missing,
-//! signed out, or its provider returned an error, names the other agents to
-//! fall back on.
+//! What lets the model choose between delegated agents: the `agent` tool
+//! lists each agent with its product, what that harness offers, what it
+//! takes, and the user's own `use_for` note, and, when a call fails because
+//! the agent is missing, signed out, or its provider returned an error,
+//! names the other agents to call instead.
 //!
 //! That fallback is decided from the structured failure alone: the result's
 //! `status` and the `error` the agent reported, read against a list of
 //! phrases, or SCV's own error when SCV classed it as
 //! [`ToolFailure::Unavailable`]; never from the agent's reply or the wording
 //! of SCV's other errors. A `declined` result, where the agent's model
-//! refused the request, never gets one. When `agent_grok` is among the other
+//! refused the request, never gets one. When `grok` is among the other
 //! agents, the result's `note` tells the calling model to call it; otherwise
 //! the calling model tells the user, and only the user may then name another
 //! agent.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use scv_core::{Tool, ToolContext, ToolError, ToolFailure, ToolOutput, ToolRisk, ToolSpec};
+use scv_core::{ToolError, ToolFailure, ToolOutput};
 use scv_protocol::JobStatus;
 use serde_json::Value;
 
 use crate::delegate::{
     adapters,
+    agent::{Accepts, Offered},
     output::{self, AgentReply},
 };
 
@@ -70,19 +68,6 @@ pub(crate) fn reports_unavailable(text: &str) -> bool {
     UNAVAILABLE.iter().any(|needle| lower.contains(needle))
 }
 
-/// An `agent_*` tool as the model sees it.
-pub(crate) struct ChosenAgent {
-    pub(crate) inner: Arc<dyn Tool>,
-    /// The user's `[agents.<name>] use_for` note.
-    pub(crate) use_for: Option<String>,
-    /// `[agents.<name>] model`, passed when the work matches `use_for`.
-    pub(crate) model: Option<String>,
-    /// `[agents.<name>] effort`, passed the same way as `model`.
-    pub(crate) effort: Option<String>,
-    /// The other agent tools offered in this session.
-    pub(crate) alternatives: Vec<String>,
-}
-
 /// `model opus-5.5 and effort xhigh`, when either default is set.
 pub fn model_effort_phrase(model: Option<&str>, effort: Option<&str>) -> Option<String> {
     match (model, effort) {
@@ -93,7 +78,7 @@ pub fn model_effort_phrase(model: Option<&str>, effort: Option<&str>) -> Option<
     }
 }
 
-/// Tool-description suffix for `use_for` and configured model/effort defaults.
+/// The `use_for` note and configured model/effort defaults, as a suffix.
 fn choice_note(use_for: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Option<String> {
     let defaults = model_effort_phrase(model, effort);
     match (use_for, defaults) {
@@ -110,20 +95,63 @@ fn choice_note(use_for: Option<&str>, model: Option<&str>, effort: Option<&str>)
     }
 }
 
-impl ChosenAgent {
-    fn fallback(&self) -> Option<String> {
-        (!self.alternatives.is_empty()).then(|| {
-            format!(
-                "This agent could not run: it is missing, signed out, or its provider \
-                 returned an error. Other agents are available: {}.",
-                self.alternatives.join(", ")
-            )
-        })
+/// What an agent takes of `model` (with its hint), `effort`, and `session`.
+fn takes(accepts: Accepts, model_hint: &str) -> String {
+    let mut taken = Vec::new();
+    if accepts.model {
+        let hint = model_hint.trim().trim_end_matches('.');
+        taken.push(if hint.is_empty() {
+            "model".to_owned()
+        } else {
+            format!("model ({hint})")
+        });
     }
+    if accepts.effort {
+        taken.push("effort".to_owned());
+    }
+    if accepts.session {
+        taken.push("session".to_owned());
+    }
+    match taken.as_slice() {
+        [] => "Takes no model, effort, or session.".to_owned(),
+        [one] => format!("Takes {one}."),
+        [first, second] => format!("Takes {first} and {second}."),
+        [rest @ .., last] => format!("Takes {}, and {last}.", rest.join(", ")),
+    }
+}
 
-    fn offers_grok(&self) -> bool {
-        self.alternatives.iter().any(|name| name == "agent_grok")
+/// One agent's line in the `agent` argument's description: its name,
+/// product, and what that harness offers, then what it takes, then the
+/// user's note and defaults.
+pub(crate) fn entry(agent: &Offered) -> String {
+    let mut line = match adapters::adapter(&agent.name) {
+        Some(descriptor) => format!(
+            "{} ({}): {}.",
+            agent.name, descriptor.product, descriptor.offers
+        ),
+        None => format!("{}.", agent.name),
+    };
+    line.push(' ');
+    line.push_str(&takes(agent.accepts, &agent.model_hint));
+    if let Some(note) = choice_note(
+        agent.use_for.as_deref(),
+        agent.model.as_deref(),
+        agent.effort.as_deref(),
+    ) {
+        line.push_str(&note);
     }
+    line
+}
+
+/// The `fallback` naming `others`, the other agents offered, if any.
+fn fallback(others: &[&str]) -> Option<String> {
+    (!others.is_empty()).then(|| {
+        format!(
+            "This agent could not run: it is missing, signed out, or its provider returned an \
+             error. Other agents are available: {}. Call agent again with one of them.",
+            others.join(", ")
+        )
+    })
 }
 
 /// Whether a failed agent result shows the agent was unavailable, judged by
@@ -134,77 +162,45 @@ fn unavailable_result(reply: &AgentReply) -> bool {
         && reply.error.as_deref().is_some_and(reports_unavailable)
 }
 
-/// `agent_codex` → the Codex descriptor, when it is a known adapter.
-fn descriptor(tool: &str) -> Option<&'static adapters::AdapterDescriptor> {
-    adapters::adapter(tool.strip_prefix("agent_")?)
-}
-
-#[async_trait]
-impl Tool for ChosenAgent {
-    fn spec(&self) -> ToolSpec {
-        let mut spec = self.inner.spec();
-        if let Some(descriptor) = descriptor(&spec.name) {
-            spec.description = format!(
-                "{}: {}. {}",
-                descriptor.product, descriptor.offers, spec.description
-            );
-        }
-        if let Some(note) = choice_note(
-            self.use_for.as_deref(),
-            self.model.as_deref(),
-            self.effort.as_deref(),
-        ) {
-            spec.description.push_str(&note);
-        }
-        spec
-    }
-
-    fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
-        self.inner.risk(arguments)
-    }
-
-    fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
-        self.inner.approval_summary(arguments)
-    }
-
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        match self.inner.execute(arguments, context).await {
-            Ok(mut result) if result.is_error() => {
-                if let Ok(value) = serde_json::from_str::<Value>(&result.content)
-                    && let Some(reply) = AgentReply::read(&value)
-                    && let Value::Object(mut content) = value
-                {
-                    if unavailable_result(&reply) {
-                        result.failure = Some(ToolFailure::Unavailable);
-                        if let Some(fallback) = self.fallback() {
-                            content.insert("fallback".into(), fallback.into());
-                            result.content = Value::Object(content).to_string();
-                        }
-                    } else if reply.status == Some(JobStatus::Declined) && self.offers_grok() {
-                        content.insert("note".into(), output::DECLINED_NOTE_TRY_GROK.into());
+/// One agent's call result as the model sees it, given `others`, the other
+/// agents this session offers: an availability failure names them as a
+/// `fallback`, and a declined request points to `grok` when it is among them.
+pub(crate) fn settle(
+    result: Result<ToolOutput, ToolError>,
+    others: &[&str],
+) -> Result<ToolOutput, ToolError> {
+    match result {
+        Ok(mut result) if result.is_error() => {
+            if let Ok(value) = serde_json::from_str::<Value>(&result.content)
+                && let Some(reply) = AgentReply::read(&value)
+                && let Value::Object(mut content) = value
+            {
+                if unavailable_result(&reply) {
+                    result.failure = Some(ToolFailure::Unavailable);
+                    if let Some(fallback) = fallback(others) {
+                        content.insert("fallback".into(), fallback.into());
                         result.content = Value::Object(content).to_string();
                     }
+                } else if reply.status == Some(JobStatus::Declined) && others.contains(&"grok") {
+                    content.insert("note".into(), output::DECLINED_NOTE_TRY_GROK.into());
+                    result.content = Value::Object(content).to_string();
                 }
-                Ok(result)
             }
-            // SCV's own errors that it classed as unavailable, such as a
-            // missing executable.
-            Err(error) if error.kind == ToolFailure::Unavailable => Err(match self.fallback() {
-                Some(fallback) => ToolError::unavailable(format!("{} {fallback}", error.message)),
-                None => error,
-            }),
-            other => other,
+            Ok(result)
         }
+        // SCV's own errors that it classed as unavailable, such as a
+        // missing executable.
+        Err(error) if error.kind == ToolFailure::Unavailable => Err(match fallback(others) {
+            Some(fallback) => ToolError::unavailable(format!("{} {fallback}", error.message)),
+            None => error,
+        }),
+        other => other,
     }
 }
 
-/// The product name of an `agent_*` tool, such as `Codex`, or the tool name.
-pub fn product(tool: &str) -> &str {
-    descriptor(tool).map_or(tool, |descriptor| descriptor.product)
+/// The product name of an agent, such as `Codex` for `codex`, or the name.
+pub fn product(agent: &str) -> &str {
+    adapters::adapter(agent).map_or(agent, |descriptor| descriptor.product)
 }
 
 #[cfg(test)]

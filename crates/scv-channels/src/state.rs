@@ -169,13 +169,25 @@ pub(crate) struct RunningJob {
     pub(crate) to_user_id: String,
     /// The session's job handle, such as `job-1`.
     pub(crate) job: String,
-    /// The delegating tool, such as `agent_codex`.
+    /// The delegating tool: `agent`, or `agent_codex` as SCV 0.3.0, which
+    /// had one tool per agent, saved it.
     pub(crate) tool: String,
+    /// The agent that runs it, such as `codex`; empty as SCV 0.3.0 saved
+    /// it. [`RunningJob::agent_name`] reads either form.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) agent: String,
     /// The first line of the delegated prompt, shortened.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) task: String,
     /// Unix seconds when it was first recorded.
     pub(crate) started_at: u64,
+}
+
+impl RunningJob {
+    /// The agent that runs the job, such as `codex`, from either form.
+    pub(crate) fn agent_name(&self) -> &str {
+        scv_protocol::job_agent(&self.agent, &self.tool)
+    }
 }
 
 /// Older bridges stored at most one pending reply and one claim as a single

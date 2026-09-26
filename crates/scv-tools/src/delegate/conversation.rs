@@ -1,7 +1,7 @@
 //! Multi-turn conversations with delegated agents.
 //!
 //! A session's conversations live in one `ConversationStore` shared by its
-//! `agent_*` tools, and end with the session. The model sees only SCV-issued
+//! agents' backends, and end with the session. The model sees only SCV-issued
 //! handles such as `codex-2`; the CLI's own session IDs stay here and are
 //! never accepted from the model. While a conversation exists, a marker file
 //! named after its session ID tells `scv agents gc` to keep its transcript.
@@ -120,6 +120,13 @@ pub(crate) fn is_handle(value: &str) -> bool {
         })
 }
 
+/// The agent whose conversation `handle` names, such as `codex` for
+/// `codex-2`, when it has the shape of a handle.
+pub(crate) fn handle_agent(handle: &str) -> Option<&str> {
+    let (agent, _) = handle.split_once('-')?;
+    is_handle(handle).then_some(agent)
+}
+
 impl ConversationStore {
     /// `marker_dir` is `$SCV_HOME/state/conversations`; `None` keeps no markers.
     pub(crate) fn new(limits: ConversationLimits, marker_dir: Option<PathBuf>) -> Self {
@@ -181,7 +188,7 @@ impl ConversationStore {
         };
         if conversation.agent != agent {
             return Err(ToolError::invalid_arguments(format!(
-                "conversation {handle} belongs to agent_{}, not agent_{agent}",
+                "conversation {handle} belongs to {}, not {agent}",
                 conversation.agent
             )));
         }

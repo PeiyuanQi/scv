@@ -25,13 +25,16 @@ pub struct ToolsConfig {
     pub output_limit_bytes: usize,
     pub max_read_bytes: usize,
     pub max_write_bytes: usize,
-    /// Agent tools are offered only below this delegation depth.
+    /// The `agent` tool is offered only below this delegation depth.
     pub max_delegation_depth: u32,
+    /// Agents the user prefers, in order (`[agent] prefer`); the first one
+    /// offered runs an `agent` call that names none.
+    pub prefer: Vec<String>,
     /// How many delegated conversations a session remembers, and for how long.
     pub conversations: ConversationLimits,
     /// Records delegated runs for listing and cleanup; `None` runs them untracked.
     pub delegation: Option<DelegationContext>,
-    /// Background jobs an agent call may start at once (`background: true`);
+    /// Background jobs `agent` calls may run at once (`background: true`);
     /// 0 turns background calls and `agent_wait` / `agent_status` /
     /// `agent_cancel` off.
     pub max_background: usize,
@@ -52,6 +55,7 @@ impl Default for ToolsConfig {
             max_read_bytes: 256 * 1024,
             max_write_bytes: 1024 * 1024,
             max_delegation_depth: 2,
+            prefer: Vec::new(),
             conversations: ConversationLimits {
                 max: 8,
                 idle: Duration::from_secs(86400),
@@ -115,7 +119,7 @@ pub struct AgentAdapterConfig {
     /// the adapter table has one.
     pub acp: Option<AcpAgentLaunch>,
     /// The user's note on when to choose this agent (`[agents.<name>]
-    /// use_for`), added to its tool description.
+    /// use_for`), added to its line in the `agent` tool's description.
     pub use_for: Option<String>,
     /// Default model to pass when the work matches `use_for` (or on every
     /// call to this agent, when `use_for` is unset).

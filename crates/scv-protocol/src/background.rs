@@ -75,7 +75,7 @@ impl fmt::Display for JobStatus {
 /// the model (`tool.completed.jobs`). A session's clients keep it open while
 /// its jobs run, since closing the session cancels them.
 ///
-/// A job appears once as `running`, from the `agent_*` call that started it,
+/// A job appears once as `running`, from the `agent` call that started it,
 /// and once more with how it ended, from the `agent_wait`, `agent_status`, or
 /// `agent_cancel` call through which the model saw that result. A job whose
 /// result the model sees in a report turn is settled by that turn's
@@ -84,8 +84,13 @@ impl fmt::Display for JobStatus {
 pub struct JobChange {
     /// The job's handle, such as `job-1`.
     pub job: String,
-    /// The delegating tool, such as `agent_codex`.
+    /// The delegating tool: `agent`, or `agent_<name>` from SCV 0.3.0 and
+    /// older, which had one tool per agent.
     pub tool: String,
+    /// The agent that runs the job, such as `codex`; empty from SCV 0.3.0
+    /// and older. [`JobChange::agent_name`] reads either form.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
     /// `running` when the call started it; otherwise how it ended.
     pub status: JobStatus,
     /// The first line of the delegated prompt, shortened; empty when unknown.
@@ -97,5 +102,21 @@ impl JobChange {
     /// Whether the call started the job, rather than settled it.
     pub fn started(&self) -> bool {
         self.status == JobStatus::Running
+    }
+
+    /// The agent that runs the job, such as `codex`, from either form.
+    pub fn agent_name(&self) -> &str {
+        job_agent(&self.agent, &self.tool)
+    }
+}
+
+/// The agent a background job runs, such as `codex`: `agent` when it is
+/// set, otherwise what follows `agent_` in the delegating `tool`, as SCV
+/// 0.3.0 and older named it (`agent_codex`), otherwise `tool` itself.
+pub fn job_agent<'a>(agent: &'a str, tool: &'a str) -> &'a str {
+    if agent.is_empty() {
+        tool.strip_prefix("agent_").unwrap_or(tool)
+    } else {
+        agent
     }
 }

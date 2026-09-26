@@ -144,12 +144,12 @@ sessions set it for every sender except an account owner granted
 delegated agent, such as a nested SCV or an `scv` command run by one (from its
 `SCV_DELEGATION_DEPTH`). The session's delegated runs count from the larger of
 it and the server process's own depth, so `agent.max_delegation_depth` holds
-across processes. A direct client omits it. `agent_scv` is such a client: it
+across processes. A direct client omits it. The `scv` agent is such a client: it
 opens its nested SCV's session with its own depth plus one, runs each
 delegated prompt as a `turn.start` on that session, answers the nested
 `approval.requested` events with `approval.resolve` after asking its own
 session's approval gate, and sends `turn.cancel` when its call is cancelled or
-times out (see [Nested SCV](tools.md#nested-scv-agent_scv)).
+times out (see [Nested SCV](tools.md#nested-scv-scv)).
 
 `channel` is optional and set by a chat bridge: the channel's name as its
 users know it (`WeChat`, `Feishu`, or `Lark`), at most 32 bytes without control
@@ -335,9 +335,9 @@ daemon socket does not imply cross-client queue broadcast or session attachment.
 ```json
 {"type":"tool.proposed","request_id":"3","session_id":"...","turn_id":"...","seq":5,"call_id":"call_123","name":"bash","arguments":{"command":"cargo test"}}
 {"type":"approval.requested","request_id":"3","session_id":"...","turn_id":"...","seq":6,"approval_id":"...","call_id":"call_123","name":"bash","risk":"process","cwd":"/workspace/project","summary":"Run shell command: cargo test"}
-{"type":"tool.started","request_id":"3","session_id":"...","turn_id":"...","seq":7,"call_id":"call_123","name":"agent_codex"}
+{"type":"tool.started","request_id":"3","session_id":"...","turn_id":"...","seq":7,"call_id":"call_123","name":"agent"}
 {"type":"tool.progress","request_id":"3","session_id":"...","turn_id":"...","seq":8,"call_id":"call_123","text":"$ cargo test --workspace\nupdate …/src/lib.rs"}
-{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":9,"call_id":"call_123","name":"agent_codex","success":true,"output":"...","truncated":false}
+{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":9,"call_id":"call_123","name":"agent","success":true,"output":"...","truncated":false}
 {"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":12,"call_id":"call_124","name":"bash","success":false,"output":"tool call denied by policy or user","truncated":false,"error":"denied"}
 ```
 
@@ -353,16 +353,20 @@ successful call omits it, as do servers before 0.3.0.
 
 A call that starts a [background job](tools.md#background-jobs), or shows the
 model a job's result, also carries `jobs`: one entry per job, with its `job`
-handle, the delegating `tool`, its `status` (`scv_protocol::JobStatus`), and
-its `task`, the first line of the delegated prompt, shortened (omitted when
-empty).
+handle, the delegating `tool` (`agent`), the `agent` that runs it (such as
+`codex`), its `status` (`scv_protocol::JobStatus`), and its `task`, the first
+line of the delegated prompt, shortened (omitted when empty). Servers of 0.3.0
+and older, which had one delegation tool per agent, send no `agent` and name
+the agent in the tool instead (`agent_codex`); `JobChange::agent_name` reads
+either form, taking `agent` when present and otherwise what follows `agent_`
+in `tool`.
 
 ```json
-{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":14,"call_id":"call_125","name":"agent_codex","success":true,"output":"{\"job\":\"job-1\",…}","truncated":false,"jobs":[{"job":"job-1","tool":"agent_codex","status":"running","task":"Land the fix"}]}
-{"type":"tool.completed","request_id":"7","session_id":"...","turn_id":"...","seq":31,"call_id":"call_140","name":"agent_wait","success":true,"output":"…","truncated":false,"jobs":[{"job":"job-1","tool":"agent_codex","status":"completed","task":"Land the fix"}]}
+{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":14,"call_id":"call_125","name":"agent","success":true,"output":"{\"job\":\"job-1\",…}","truncated":false,"jobs":[{"job":"job-1","tool":"agent","agent":"codex","status":"running","task":"Land the fix"}]}
+{"type":"tool.completed","request_id":"7","session_id":"...","turn_id":"...","seq":31,"call_id":"call_140","name":"agent_wait","success":true,"output":"…","truncated":false,"jobs":[{"job":"job-1","tool":"agent","agent":"codex","status":"completed","task":"Land the fix"}]}
 ```
 
-A job appears as `running` in the `agent_*` call that started it, and once
+A job appears as `running` in the `agent` call that started it, and once
 more, with how it ended (`completed`, `failed`, `declined`, `timeout`, or
 `cancelled`), in the `agent_wait`, `agent_status`, or `agent_cancel` call
 through which the model saw its result or asked for its stop; a job reported

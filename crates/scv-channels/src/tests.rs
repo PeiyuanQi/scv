@@ -208,12 +208,19 @@ fn owner_turns_outlast_the_longest_tool_call() {
 fn recovery_tells_each_chat_which_background_jobs_stopped() {
     let directory = tempfile::tempdir().unwrap();
     let store = test_store(directory.path());
-    let job = |to: &str, job: &str, task: &str| state::RunningJob {
+    let job = |to: &str, job: &str, agent: &str, task: &str| state::RunningJob {
         to_user_id: to.into(),
         job: job.into(),
-        tool: "agent_codex".into(),
+        tool: "agent".into(),
+        agent: agent.into(),
         task: task.into(),
         started_at: 1,
+    };
+    // As 0.3.0 saved it, with the agent in the tool's name.
+    let saved_by_0_3_0 = state::RunningJob {
+        tool: "agent_codex".into(),
+        agent: String::new(),
+        ..job("bob", "job-1", "", "")
     };
     let mut saved = state::BridgeState {
         in_flight: vec![state::InFlight {
@@ -223,9 +230,9 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
             key: "alice".into(),
         }],
         jobs: vec![
-            job("alice", "job-1", "Fix the build"),
-            job("bob", "job-1", ""),
-            job("alice", "job-2", "Publish"),
+            job("alice", "job-1", "codex", "Fix the build"),
+            saved_by_0_3_0,
+            job("alice", "job-2", "claude", "Publish"),
         ],
         ..Default::default()
     };
@@ -245,7 +252,7 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
             (
                 "alice",
                 "An unexpected interruption stopped background work that was still running:\n\
-                 - job-1 (codex): Fix the build\n- job-2 (codex): Publish\n\
+                 - job-1 (codex): Fix the build\n- job-2 (claude): Publish\n\
                  Ask again if you still need it."
             ),
             (
@@ -305,7 +312,8 @@ fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_label()
         jobs: vec![state::RunningJob {
             to_user_id: "alice".into(),
             job: "job-1".into(),
-            tool: "agent_codex".into(),
+            tool: "agent".into(),
+            agent: "codex".into(),
             task: String::new(),
             started_at: 1,
         }],

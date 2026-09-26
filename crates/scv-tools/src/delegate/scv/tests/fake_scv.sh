@@ -45,7 +45,7 @@ while IFS= read -r line; do
           emit '{"type":"assistant.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":6,"content":"reply '$turns'"}'
           emit '{"type":"turn.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":7,"steps":1,"usage":{"input_tokens":3,"output_tokens":4}}' ;;
         background)
-          emit '{"type":"tool.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":2,"call_id":"c","name":"agent_codex","success":true,"output":"{}","truncated":false,"jobs":[{"job":"job-1","tool":"agent_codex","status":"running","task":"Land it"}]}'
+          emit '{"type":"tool.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":2,"call_id":"c","name":"agent","success":true,"output":"{}","truncated":false,"jobs":[{"job":"job-1","tool":"agent","agent":"codex","status":"running","task":"Land it"}]}'
           emit '{"type":"assistant.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":3,"content":"started job-1"}'
           emit '{"type":"turn.completed","request_id":"'$id'","session_id":"fake-session","turn_id":"t'$turns'","seq":4,"steps":1,"usage":{}}'
           report_later & ;;

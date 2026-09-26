@@ -14,13 +14,13 @@ use tokio::{
     time::timeout,
 };
 
-/// A provider that asks for one `agent_codex` call, then answers "done".
+/// A provider that asks for one `agent` call to codex, then answers "done".
 fn serve_provider(listener: TcpListener) {
     thread::spawn(move || {
         let bodies = [
             concat!(
-                "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"prompt\\\":\\\"work\\\"}\"}\n\n",
-                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"agent_codex\"}}\n\n",
+                "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"agent\\\":\\\"codex\\\",\\\"prompt\\\":\\\"work\\\"}\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"agent\"}}\n\n",
                 "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
             ),
             concat!(

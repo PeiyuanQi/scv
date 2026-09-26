@@ -1,16 +1,17 @@
-//! [`AcpAgentTool`]: the `agent_*` tool for an agent reached over ACP.
+//! [`AcpAgentTool`]: the backend of an agent reached over ACP.
 
 use std::{ffi::OsString, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
-use serde_json::{Value, json};
+use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
+use serde_json::Value;
 use tokio::time::Instant;
 
 use crate::{
     AcpAgentLaunch, AgentAdapterConfig, DelegationContext,
-    args::{Timeouts, bounded, parse_args, timeout_schema, validate_process_args},
+    args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
+        agent::{Accepts, Backend},
         conversation::{Attachment, ConversationStore},
         output::RunStatus,
         progress::redact,
@@ -22,15 +23,16 @@ use crate::{
 use super::{AcpChild, TurnEnd};
 
 pub(crate) struct AcpAgentTool {
-    pub(super) name: String,
     /// The adapter name, such as `claude`: conversation handles and results.
-    pub(super) agent: String,
+    pub(super) name: String,
     pub(super) launch: AcpAgentLaunch,
     pub(super) resolved: Option<PathBuf>,
     pub(super) environment: Vec<(OsString, OsString)>,
     /// `permissions = "full"`.
     pub(super) full: bool,
-    pub(super) model_hint: String,
+    /// `model` and `effort` as the adapter offers them, and always
+    /// `session`, since an ACP session continues.
+    accepts: Accepts,
     pub(super) timeouts: Timeouts,
     pub(super) output_limit: usize,
     pub(super) delegation: Option<DelegationContext>,
@@ -50,18 +52,26 @@ impl AcpAgentTool {
         conversations: Arc<ConversationStore>,
     ) -> Self {
         Self {
-            agent: name.trim_start_matches("agent_").to_owned(),
             name,
             launch,
             resolved,
             environment: adapter.environment.clone(),
             full: adapter.full_permission_args.is_some(),
-            model_hint: adapter.model_hint.clone(),
+            accepts: Accepts {
+                model: !adapter.model_args.is_empty(),
+                effort: !adapter.effort_args.is_empty(),
+                session: true,
+            },
             timeouts,
             output_limit,
             delegation,
             conversations,
         }
+    }
+
+    /// What this agent takes.
+    pub(crate) fn accepts(&self) -> Accepts {
+        self.accepts
     }
 
     pub(super) fn validate(&self, args: &AgentArgs) -> Result<(), ToolError> {
@@ -109,62 +119,7 @@ impl AcpAgentTool {
 }
 
 #[async_trait]
-impl Tool for AcpAgentTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.name.clone(),
-            description: "Runs as a nested coding agent over the Agent Client Protocol (not \
-                 sandboxed). Delegate substantial work here rather than doing it step by step \
-                 with bash: research and web lookups, multi-file coding, and running tools, \
-                 builds, and tests. Give it a self-contained brief, since it does not see this \
-                 conversation, and set cwd to the project the work is in so it follows that \
-                 project's instructions and skills. Its permission requests come back to \
-                 this session for approval. Each result carries a `session` handle: pass it \
-                 back to follow up on the same work (answers, fixes, next steps) instead of \
-                 repeating the context."
-                .into(),
-            parameters: json!({
-                "type":"object",
-                "properties":{
-                    "prompt":{"type":"string"},
-                    "cwd":{
-                        "type":"string",
-                        "description":"Directory inside the workspace to run in, such as a project directory (\"scv\"). \
-                            The agent loads that directory's AGENTS.md or CLAUDE.md and its project skills. \
-                            Defaults to the workspace root."
-                    },
-                    "session":{
-                        "type":"string",
-                        "description":format!(
-                            "The `session` handle an earlier call to this tool returned, such as \"{}-1\". \
-                             Pass it to continue that conversation: the agent keeps its context, in the same cwd. \
-                             Omit it to start a new conversation for unrelated work.",
-                            self.agent
-                        )
-                    },
-                    "model":{
-                        "type":"string",
-                        "description":format!(
-                            "{} Set when the user asks, or when the work matches a configured \
-                             use_for default; omit to use the agent's configured default. An \
-                             unoffered value fails with the list of choices.",
-                            self.model_hint
-                        )
-                    },
-                    "effort":{
-                        "type":"string",
-                        "description":"Reasoning effort, such as low, medium, or high. Set when the user \
-                            asks, or when the work matches a configured use_for default; omit to use \
-                            the agent's configured default."
-                    },
-                    "timeout_seconds":timeout_schema(self.timeouts)
-                },
-                "required":["prompt"],
-                "additionalProperties":false
-            }),
-        }
-    }
-
+impl Backend for AcpAgentTool {
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
         let args: AgentArgs = parse_args(arguments)?;
         self.validate(&args)?;
@@ -219,7 +174,7 @@ impl Tool for AcpAgentTool {
         let deadline = Instant::now() + limit;
         let mut turn =
             self.conversations
-                .begin(&self.agent, args.session.as_deref(), &cwd, false)?;
+                .begin(&self.name, args.session.as_deref(), &cwd, false)?;
         let child: Arc<AcpChild> = match turn.attachment() {
             Some(Attachment(attachment)) => {
                 let Ok(child) = Arc::clone(attachment).downcast::<AcpChild>() else {

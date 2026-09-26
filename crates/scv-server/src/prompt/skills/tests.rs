@@ -87,7 +87,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
         listing: skills.listing.clone(),
         project_listing: skills.project_listing.clone(),
     };
-    let agents = ["agent_claude".to_owned(), "agent_pi".to_owned()];
+    let agents = ["claude".to_owned(), "pi".to_owned()];
     let prompt = build_system_prompt(
         &workspace,
         &config,
@@ -100,11 +100,12 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
     )
     .unwrap();
     assert!(prompt.contains("# Project skills"));
-    assert!(
-        prompt.contains("such as agent_claude or agent_pi, set its cwd to the skill's project")
-    );
+    assert!(prompt.contains(
+        "call the agent tool with an agent such as claude or pi, set its cwd to the skill's \
+         project"
+    ));
     // Only agents this session offers are named.
-    assert!(!prompt.contains("agent_codex"), "{prompt}");
+    assert!(!prompt.contains("codex"), "{prompt}");
     let without_agents = build_system_prompt(
         &workspace,
         &config,
@@ -116,10 +117,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
         },
     )
     .unwrap();
-    assert!(
-        !without_agents.contains("delegate with"),
-        "{without_agents}"
-    );
+    assert!(!without_agents.contains("agent tool"), "{without_agents}");
     assert!(without_agents.contains("read_skill loads one for reference"));
 
     let registry = builtin_registry(

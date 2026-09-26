@@ -247,7 +247,7 @@ impl App {
                 ..
             } => self.push_item(TranscriptItem::Tool {
                 call_id,
-                name,
+                name: call_label(&name, &arguments),
                 status: ToolStatus::Proposed,
                 arguments: arguments.to_string(),
                 output: String::new(),
@@ -515,6 +515,28 @@ impl App {
                 *current = status;
             }
         });
+    }
+}
+
+/// How the transcript names a call: an `agent` call with the agent it
+/// names (`agent codex`), or else the conversation it continues (`agent
+/// codex-1`), since every delegation is the same tool; any other call by its
+/// tool. A value that is not a plain name is left to the arguments shown
+/// beside it.
+pub(crate) fn call_label(name: &str, arguments: &serde_json::Value) -> String {
+    let plain = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 64
+                    && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+    };
+    match plain("agent").or_else(|| plain("session")) {
+        Some(agent) if name == "agent" => format!("{name} {agent}"),
+        _ => name.to_owned(),
     }
 }
 

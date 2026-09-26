@@ -308,7 +308,7 @@ to land a change. Three keys bound this:
 
 - `command_timeout_seconds` (default 600) applies to `bash` calls that do not
   choose a timeout, enough for a cold release build or strict Clippy;
-- `agent_timeout_seconds` (default 3600) applies to `agent_*` calls that do not
+- `agent_timeout_seconds` (default 3600) applies to `agent` calls that do not
   choose one, enough for a delegated feature through CI, landing, release, and
   deploy (such runs have taken 27 to 48 minutes);
 - `max_timeout_seconds` (default 14400, four hours) is the ceiling any single call may
@@ -327,7 +327,7 @@ A channel owner turn (WeChat or Feishu) may run for the ceiling plus five minute
 and never less than 30 minutes, so four hours and five minutes by default; the
 component reads the ceiling from the workspace configuration each time it
 starts. `agent.max_steps` (default 128) bounds model/tool rounds per turn.
-`agent.max_delegation_depth` (default 2) offers the `agent_*` tools only while
+`agent.max_delegation_depth` (default 2) offers the `agent` tool only while
 the session's own delegation depth is below it: the top SCV (depth 0) and an
 SCV started by one of its agents (depth 1) may delegate, one more level down
 may not, and `0` turns delegation off. It lives under `[agent]` rather than
@@ -343,8 +343,9 @@ only lower it. The default leaves room for a main agent that hands most work to
 background jobs; see [Background jobs](tools.md#background-jobs).
 `agent.prefer` (default empty) lists the agents the user prefers, in order,
 such as `["codex", "claude"]`; the system prompt names the ones a session
-offers. Unknown names fail validation, and project configuration cannot set
-it. `[agents.<name>] use_for`, `model`, and `effort` add per-agent defaults
+offers, and the first of those runs an `agent` call that names no agent.
+Without one the model must name the agent in every call. Unknown names fail
+validation, and project configuration cannot set it. `[agents.<name>] use_for`, `model`, and `effort` add per-agent defaults
 for a kind of work (see [Choosing an agent](tools.md#choosing-an-agent)).
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,
 including its streamed response, not just idle time, so it must cover the
@@ -464,7 +465,7 @@ directory: `SKILL.md` files under `.agents/skills/<name>/` (Codex) and
 `.claude/skills/<name>/` (Claude Code). A child project's skill is listed as
 `<project>:<name>`, a workspace-root skill as `<name>`, and names from
 `skills.project_dir` or `skills.user_dir` win collisions. The listing tells the
-model to delegate with `agent_*` and `cwd` set to the project: the nested agent
+model to delegate with the `agent` tool and `cwd` set to the project: the nested agent
 then loads that project's instructions and skills natively, so a repository
 adds skills without any SCV registration. `read_skill` can load a listed skill
 for reference. At most 256 child projects and `skills.max_skills` skills in
@@ -512,7 +513,7 @@ Approval policies are:
 
 - `on-risk` (default): approve ordinary `read` calls, `web_search`, and
   `web_fetch` of auto-approved hosts; prompt for secret-like reads, `write`,
-  `bash`, other `web_fetch` URLs, and every `agent_*` tool;
+  `bash`, other `web_fetch` URLs, and every `agent` call;
 - `always`: prompt for every tool;
 - `never`: deny tools whose declared risk is not read-only.
 
@@ -607,9 +608,9 @@ your Codex provider setup with `scv agents import codex` or your Grok model
 profiles with `scv agents import grok`, or point pi at SCV's own provider with
 `scv agents import pi --from-scv-provider`; see
 [Signing in delegated agents](tools.md#signing-in-delegated-agents). The nested
-SCV behind `agent_scv` gets `SCV_HOME=$SCV_HOME/agents/scv`, so its own
+SCV behind the `scv` agent gets `SCV_HOME=$SCV_HOME/agents/scv`, so its own
 `config.toml`, skills, and delegations live there; give it SCV's own provider
-with `scv agents import scv` (see [Nested SCV](tools.md#nested-scv-agent_scv)).
+with `scv agents import scv` (see [Nested SCV](tools.md#nested-scv-scv)).
 
 Secrets are never included in diagnostics, protocol events, approval summaries,
 or tool results.

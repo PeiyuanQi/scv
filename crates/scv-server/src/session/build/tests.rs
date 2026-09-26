@@ -11,13 +11,13 @@ fn signed_out_agents_with_a_local_sign_in_check_are_not_offered() {
     };
     let offered = offered_adapters(&config);
     // Nothing stored for dsh, pi, grok, or the nested SCV: all hidden.
-    for hidden in ["agent_dsh", "agent_pi", "agent_grok", "agent_scv"] {
+    for hidden in ["dsh", "pi", "grok", "scv"] {
         assert!(!offered.contains_key(hidden), "{hidden} offered");
     }
     // Claude and Codex report sign-in through their own CLI, which is
     // too slow to run at every session start, so they stay offered.
-    assert!(offered.contains_key("agent_claude"));
-    assert!(offered.contains_key("agent_codex"));
+    assert!(offered.contains_key("claude"));
+    assert!(offered.contains_key("codex"));
     // A stored dsh key makes it available.
     let dsh = home.path().join("agents/dsh/.dsh");
     std::fs::create_dir_all(&dsh).unwrap();
@@ -26,5 +26,5 @@ fn signed_out_agents_with_a_local_sign_in_check_are_not_offered() {
         "version: 1\n\nrefs:\n  DEEPSEEK_API_KEY: test-only\n",
     )
     .unwrap();
-    assert!(offered_adapters(&config).contains_key("agent_dsh"));
+    assert!(offered_adapters(&config).contains_key("dsh"));
 }
