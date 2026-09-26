@@ -10,11 +10,11 @@ wherever `feishu` is).
 
 Each account runs as a supervised component inside the single SCV daemon,
 which remains authoritative for sessions, provider selection, policy, and turn
-execution. `scv-channels` holds the bridge every channel shares; a channel
-crate (`scv-clawbot` for WeChat, `scv-feishu` for Feishu) supplies only its
-transport. `scv-server` depends on the channel crates, which use
-`scv-channels` and, through it, `scv-client` and `scv-protocol`; no channel
-crate depends on the server crate.
+execution. `scv-channels` holds the bridge every channel shares and, in a
+module behind a Cargo feature of the same name, each channel's transport
+(`wechat`, `feishu`; both on by default), which supplies only receiving and
+sending. `scv-server` runs accounts through `scv_channels::run`; the crate
+uses `scv-client` and `scv-protocol` and never depends on the server crate.
 
 ## User workflow
 
@@ -273,7 +273,7 @@ nobody.
 (`feishu.cn` or `larksuite.com`) over TLS on port 443; any other host is
 refused before dialing, and connection errors never include the URL, which
 carries one-time keys. Frames are protobuf `pbbp2.Frame`
-(`crates/scv-feishu/proto/pbbp2.proto`). SCV pings the connection's
+(`crates/scv-channels/proto/pbbp2.proto`). SCV pings the connection's
 `service_id` at once and then at the server's `PingInterval` (90 seconds
 live), applies intervals a pong reports, and treats two intervals plus 30
 seconds of silence as a lost connection. Events split by the `sum` and `seq`
@@ -571,10 +571,11 @@ state use atomic writes and mode `0600` on Unix; the directories between the
 SCV home and them are mode `0700`. Account names contain only ASCII letters, digits, `_`, and `-`.
 Project configuration cannot select accounts, workspaces, or remote authority.
 
-`scv-channels` owns durable state, claims, sender sessions, held replies,
-media fetching, storage, and retention, and delivery retries; `scv-clawbot`
-owns iLink authentication, polling, message parsing, the CDN's encryption, and
-sending; `scv-feishu` owns Feishu sign-in, the long connection, catch-up,
-message parsing, resources, uploads, and sending. `scv-server::components` owns lifecycle and
+The shared bridge in `scv-channels` owns durable state, claims, sender
+sessions, held replies, media fetching, storage, and retention, and delivery
+retries; its `wechat` module owns iLink authentication, polling, message
+parsing, the CDN's encryption, and sending; its `feishu` module owns Feishu
+sign-in, the long connection, catch-up, message parsing, resources, uploads,
+and sending. `scv-server::components` owns lifecycle and
 health. Account selection uses `--account` (default `default`), not project
 configuration. The [quality contract](quality.md) defines local-only verification.

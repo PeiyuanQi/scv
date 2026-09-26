@@ -4,28 +4,44 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Shared chat-channel bridge core for the SCV daemon"
+description = "Chat channels for the SCV daemon: the shared bridge and the WeChat and Feishu/Lark transports"
 repository.workspace = true
 
 [lints]
 workspace = true
 
+[features]
+default = ["wechat", "feishu"]
+# WeChat through a ClawBot (iLink) bot.
+wechat = ["dep:aes", "dep:md-5", "dep:base64", "dep:reqwest"]
+# Feishu and Lark through a bot app on the event long connection.
+feishu = ["dep:prost", "dep:qrcode", "dep:reqwest", "dep:tokio-tungstenite", "futures-util/sink"]
+
 [dependencies]
-sha2.workspace = true
+aes = { workspace = true, optional = true }
 anyhow.workspace = true
 async-trait.workspace = true
-serde_json.workspace = true
-uuid.workspace = true
-tokio.workspace = true
-scv-protocol.workspace = true
+base64 = { workspace = true, optional = true }
+futures-util.workspace = true
+libc.workspace = true
+md-5 = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+qrcode = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 scv-client.workspace = true
-tempfile.workspace = true
+scv-protocol.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 toml.workspace = true
 toml_edit.workspace = true
-libc.workspace = true
 tracing.workspace = true
-futures-util.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tokio-util.workspace = true
+tracing-subscriber.workspace = true

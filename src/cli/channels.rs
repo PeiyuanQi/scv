@@ -2,6 +2,9 @@
 //! daemon, and remove them.
 
 use anyhow::{Context, Result, bail};
+use scv_channels::Channel as _;
+use scv_channels::feishu::{self, Feishu};
+use scv_channels::wechat::{self, WeChat};
 use scv_protocol::{DaemonCommand, RemoteTools};
 use std::path::Path;
 
@@ -19,40 +22,40 @@ pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
             app_id,
             owner_open_id,
         } => {
+            let layout = scv_client::Layout::from_env()?;
             match channel {
                 ChannelArg::Wechat => {
                     if app_id.is_some() {
                         bail!("--app-id and --owner-open-id are Feishu options");
                     }
-                    let login_url =
+                    let base_url =
                         login_url.unwrap_or_else(|| "https://ilinkai.weixin.qq.com".into());
-                    scv_clawbot::login(&login_url, &account).await?;
+                    WeChat::login(&layout, &account, wechat::Login { base_url }).await?;
                 }
                 ChannelArg::Feishu | ChannelArg::Lark => {
                     if login_url.is_some() {
                         bail!("--login-url is a WeChat option");
                     }
                     let brand = match channel {
-                        ChannelArg::Lark => scv_feishu::state::Brand::Lark,
-                        _ => scv_feishu::state::Brand::Feishu,
+                        ChannelArg::Lark => feishu::Brand::Lark,
+                        _ => feishu::Brand::Feishu,
                     };
-                    match app_id {
+                    let login = match app_id {
                         Some(app_id) => {
                             let secret = read_secret(&format!(
                                 "{} app secret (input hidden)",
                                 brand.title()
                             ))?;
-                            scv_feishu::login::login_existing(
-                                &account,
-                                &app_id,
-                                &secret,
-                                owner_open_id.as_deref(),
+                            feishu::Login::Existing {
                                 brand,
-                            )
-                            .await?;
+                                app_id,
+                                app_secret: secret.into(),
+                                owner_open_id,
+                            }
                         }
-                        None => scv_feishu::login::login(&account, brand).await?,
-                    }
+                        None => feishu::Login::Scan { brand },
+                    };
+                    Feishu::login(&layout, &account, login).await?;
                 }
             }
             reload_after_login().await

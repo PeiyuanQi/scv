@@ -68,10 +68,6 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn spawn(workspace: &Path) -> Result<Self> {
-        Self::connect(&scv_client::default_socket_path()?, workspace, false, None).await
-    }
-
     /// Start a session for a conversation on `channel` (its user-facing
     /// name, such as `WeChat`), so the model knows it is answering a chat
     /// and, with tools, may attach files to its replies.

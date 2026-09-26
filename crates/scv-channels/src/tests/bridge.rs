@@ -1,4 +1,4 @@
-//! Tests of `run` in `src/lib.rs` through an in-memory transport and a fake
+//! Tests of `serve` in `src/lib.rs` through an in-memory transport and a fake
 //! SCV daemon, so the shared bridge is exercised without any platform's
 //! HTTP API: claims, ordering, concurrency, busy replies, and redelivery.
 
@@ -111,16 +111,21 @@ impl Bench {
             "default",
             MediaSettings::default(),
         );
-        let bridge = run(
+        let detached = hub::Link::detached();
+        let bridge = serve(
             &self.transport,
-            "default",
-            self.directory.path(),
-            &self.socket,
-            None,
-            &media,
+            BridgeRun {
+                account: "default",
+                workspace: self.directory.path(),
+                socket: &self.socket,
+                owner: None,
+                tool_owner: None,
+                media,
+                link: &detached,
+                report: &|_| {},
+            },
             &self.store,
             |_| Ok(true),
-            &|_| {},
         );
         let outcome = tokio::time::timeout(Duration::from_secs(15), async {
             tokio::select! {

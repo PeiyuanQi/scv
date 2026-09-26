@@ -16,24 +16,16 @@ updates this diagram in the same commit.
 flowchart LR
     cli["scv-cli"] --> server["scv-server"]
     cli --> tui["scv-tui"]
-    cli --> clawbot["scv-clawbot"]
-    cli --> feishu["scv-feishu"]
     cli --> channels["scv-channels"]
     cli --> tools["scv-tools"]
     cli --> client["scv-client"]
     cli --> protocol["scv-protocol"]
-    server --> clawbot
-    server --> feishu
     server --> channels
     server --> client
     server --> protocol
     server --> core["scv-core"]
     server --> tools
     server --> provider["scv-provider-openai"]
-    clawbot --> channels
-    clawbot --> client
-    feishu --> channels
-    feishu --> client
     channels --> client
     channels --> protocol
     tui --> client
@@ -87,23 +79,16 @@ The repository is one Cargo workspace with these packages:
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
-| `scv-channels` | The bridge every chat channel shares: the `Transport` trait, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, restart context). |
-| `scv-clawbot` | The WeChat channel: iLink authentication, polling, and sending behind `Transport`, and its credentials. |
-| `scv-feishu` | The Feishu/Lark channel: app registration by QR scan, the event long connection with catch-up from chat history, and sending behind `Transport`, and its credentials. |
+| `scv-channels` | The chat channels. The bridge they share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, restart context). Behind Cargo features, both on by default: `wechat` (iLink authentication, polling, and sending, and its credentials) and `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark). |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in and importing their setups (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
 The integration dependency chain is
-`server -> clawbot|feishu -> channels -> client -> protocol`.
+`server -> channels -> client -> protocol`.
 The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types `agent_scv` speaks to a
 nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
 `0.2.2` and exact workspace dependency pins.
-
-The WeChat and Feishu transports are accepted to move into `scv-channels` as
-its `wechat` and `feishu` modules, retiring the `scv-clawbot` and
-`scv-feishu` crates; until that change lands, each platform keeps its own
-crate as described here.
 
 ## Finding your way
 
@@ -118,8 +103,9 @@ Start reading in this order:
    which runs a turn.
 4. `scv-tools` (`registry.rs`): `builtin_registry`, which decides the tools
    a session gets.
-5. `scv-channels` (`lib.rs`): the `Transport` trait and `run`, the bridge
-   every chat account runs.
+5. `scv-channels`: `channel.rs`, the `Channel` trait and `run`, which the
+   daemon calls for each chat account, then `lib.rs`, the `Transport` trait
+   and the bridge every account runs.
 
 A TUI turn: `scv-tui` sends `turn.start` over the daemon socket; the server's
 `run_managed` hands it to `Connection::turn_start`, which queues it or has
@@ -130,10 +116,10 @@ and the client's `approval.resolve` answers it. Core events become
 `ServerEvent`s in `ProtocolSink`, which the TUI applies in
 `App::handle_server_event` and draws.
 
-A WeChat message: the WeChat transport's `receive` returns it to
-`scv_channels::run`, which claims it durably and hands it to the
-conversation's `channels::session::Session`, a daemon session on the same
-socket. The turn then runs exactly like the TUI's, and the bridge sends the
+A WeChat message: the WeChat transport's `receive` returns it to the bridge
+that `scv_channels::run` started, which classifies it (`intake::classify`),
+claims it durably, and hands it to the conversation's
+`channels::session::Session`, a daemon session on the same socket. The turn then runs exactly like the TUI's, and the bridge sends the
 final answer back through the transport's `send`. Feishu differs only in its
 transport.
 
@@ -162,14 +148,12 @@ What lives where in the largest crates:
 | | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
-| `scv-channels` | `lib.rs`, `session.rs` | The bridge and a conversation's daemon session |
+| `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
+| | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`), and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs` | Durable account state, what the daemon shares with running bridges, and chat media |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
-| `scv-clawbot` | `lib.rs`, `bridge.rs` | WeChat login, polling `getupdates`, and sending through iLink |
-| | `state.rs`, `media.rs` | WeChat credentials, and CDN files (AES-encrypted uploads and downloads) |
-| `scv-feishu` | `lib.rs`, `api.rs` | The Feishu transport and its Open Platform client |
-| | `socket.rs`, `frame.rs`, `inbound.rs` | The event long connection, its protobuf frames, and parsing events and catch-up history |
-| | `login.rs`, `state.rs` | Signing in, by QR scan (which creates the bot app) or with an existing app, and Feishu credentials |
+| | `wechat/` | WeChat login, polling `getupdates`, and sending (`mod.rs`); iLink requests (`ilink.rs`); credentials (`credentials.rs`); CDN files, AES-encrypted both ways (`cdn.rs`) |
+| | `feishu/` | The Feishu transport (`mod.rs`) and its Open Platform client (`api.rs`); the event long connection, its protobuf frames, and parsing events and catch-up history (`socket.rs`, `frame.rs`, `inbound.rs`); signing in by QR scan or with an existing app (`login.rs`); credentials (`credentials.rs`) |
 | `scv-core` | `message.rs`, `tool.rs` | History messages; the `Tool` trait, its context and output, and `ToolRegistry` |
 | | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` |
 | | `progress.rs` | Bounded, paced tool progress lines |
@@ -188,14 +172,20 @@ Black-box tests of the binaries are one test program, `tests/it/`, with a
 module per area (`server`, `daemon`, `config`, `delegation`, `restart`,
 `update`) and shared helpers in `tests/it/support.rs`.
 
-Each channel account is a component hosted by the daemon's supervisor. A
-channel crate (WeChat's `scv-clawbot`, Feishu's `scv-feishu`) implements
-`scv-channels::Transport`: it signs in, receives a batch of messages after a
-checkpoint, and sends one part of a message. A push transport such as Feishu's
+Each channel account is a component hosted by the daemon's supervisor, which
+hands it to `scv_channels::run` with an `AccountRun`: the instance layout,
+the account's credentials and whole settings table, its owner (whether or not
+the owner holds the tool grant), the owner turn timeout when it does, the
+workspace, the daemon socket, the hub link, and a health callback; the
+supervisor cancels the run by dropping it. Each channel module (`wechat`,
+`feishu`) implements `Channel`, which signs in and runs an account, and the
+crate-internal `Transport`, which receives a batch of messages after a
+checkpoint and sends one part of a message. A push transport such as Feishu's
 acknowledges a batch when the bridge asks for the next one, which it does only
-after the batch's claims and checkpoint are durable. `scv-channels::run` does the rest for every channel. It
-speaks the versioned protocol over the daemon socket, using one long-lived
-session per remote sender (and per group and sender in group chats). Sessions
+after the batch's claims and checkpoint are durable. The shared bridge does
+the rest for every channel. It speaks the versioned protocol over the daemon
+socket, using one long-lived session per remote sender (and per group and
+sender in group chats). Sessions
 are tool-free unless the account's `remote_tools = "owner"` setting grants the
 authenticated owner's direct chats full, auto-approved tools.
 Session policy, history, queueing, cancellation, and approvals remain

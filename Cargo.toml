@@ -106,8 +106,6 @@ which = "8.0.0"
 scv-core = { version = "=0.2.2", path = "crates/scv-core" }
 scv-client = { version = "=0.2.2", path = "crates/scv-client" }
 scv-channels = { version = "=0.2.2", path = "crates/scv-channels" }
-scv-clawbot = { version = "=0.2.2", path = "crates/scv-clawbot" }
-scv-feishu = { version = "=0.2.2", path = "crates/scv-feishu" }
 scv-protocol = { version = "=0.2.2", path = "crates/scv-protocol" }
 scv-provider-openai = { version = "=0.2.2", path = "crates/scv-provider-openai" }
 scv-server = { version = "=0.2.2", path = "crates/scv-server" }
@@ -123,8 +121,6 @@ scv-server.workspace = true
 scv-channels.workspace = true
 scv-client.workspace = true
 scv-protocol.workspace = true
-scv-clawbot.workspace = true
-scv-feishu.workspace = true
 scv-tools.workspace = true
 scv-tui.workspace = true
 sha2.workspace = true

@@ -3,6 +3,7 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use scv_channels::state::{self, AccountSettings};
+use scv_channels::{Accounts, ChannelCredentials, ChannelKind, Layout};
 use scv_protocol::{ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, RemoteTools};
 use std::{
     collections::BTreeMap,
@@ -191,175 +192,65 @@ impl Supervisor {
     }
 }
 
-/// A chat channel whose accounts the daemon supervises.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Channel {
-    Wechat,
-    Feishu,
+/// A channel's saved accounts in this daemon's instance, or why they cannot
+/// be reached.
+fn accounts(kind: ChannelKind) -> Result<Accounts> {
+    Ok(kind.accounts(&Layout::from_env()?))
 }
 
-const CHANNELS: [Channel; 2] = [Channel::Wechat, Channel::Feishu];
-
-/// A channel account's saved credentials.
-#[derive(Clone, PartialEq)]
-enum Credentials {
-    Wechat(scv_clawbot::state::Account),
-    Feishu(scv_feishu::state::Account),
-}
-
-impl Channel {
-    fn parse(name: &str) -> Result<Self> {
-        CHANNELS
-            .into_iter()
-            .find(|channel| channel.name() == name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown channel {name:?}"))
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Wechat => scv_clawbot::CHANNEL,
-            Self::Feishu => scv_feishu::CHANNEL,
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Wechat => "WeChat",
-            Self::Feishu => "Feishu",
-        }
-    }
-
-    /// Account discovery from saved credentials.
-    fn account_names(self) -> std::result::Result<Vec<String>, &'static str> {
-        const DISCOVERY: &str =
-            "Account discovery failed; components stopped until configuration is readable";
-        match self {
-            Self::Wechat => scv_clawbot::state::account_names(),
-            Self::Feishu => scv_feishu::state::account_names(),
-        }
+/// Account discovery from saved credentials.
+fn account_names(kind: ChannelKind) -> std::result::Result<Vec<String>, &'static str> {
+    const DISCOVERY: &str =
+        "Account discovery failed; components stopped until configuration is readable";
+    accounts(kind)
+        .and_then(|accounts| accounts.names())
         .map_err(|_| DISCOVERY)
-    }
-
-    fn snapshot(self, account: &str) -> Result<(Option<Credentials>, AccountSettings)> {
-        Ok(match self {
-            Self::Wechat => {
-                let (credentials, settings) = scv_clawbot::state::account_snapshot(account)?;
-                (credentials.map(Credentials::Wechat), settings)
-            }
-            Self::Feishu => {
-                let (credentials, settings) = scv_feishu::state::account_snapshot(account)?;
-                (credentials.map(Credentials::Feishu), settings)
-            }
-        })
-    }
-
-    fn signed_in(self, account: &str) -> Result<bool> {
-        Ok(match self {
-            Self::Wechat => scv_clawbot::state::account(account)?.is_some(),
-            Self::Feishu => scv_feishu::state::account(account)?.is_some(),
-        })
-    }
-
-    fn settings(self, account: &str) -> Result<AccountSettings> {
-        match self {
-            Self::Wechat => scv_clawbot::state::settings(account),
-            Self::Feishu => scv_feishu::state::settings(account),
-        }
-    }
-
-    fn save_settings(self, account: &str, settings: &AccountSettings) -> Result<()> {
-        match self {
-            Self::Wechat => scv_clawbot::state::save_settings(account, settings),
-            Self::Feishu => scv_feishu::state::save_settings(account, settings),
-        }
-    }
-
-    fn remove(self, account: &str) -> Result<()> {
-        match self {
-            Self::Wechat => scv_clawbot::state::remove(account),
-            Self::Feishu => scv_feishu::state::remove(account),
-        }
-    }
-}
-
-impl Credentials {
-    /// The authenticated owner, the only sender remote tools may reach.
-    fn owner(&self) -> Option<&str> {
-        match self {
-            Self::Wechat(account) => account.user_id.as_deref(),
-            Self::Feishu(account) => account.owner_open_id.as_deref(),
-        }
-    }
-
-    /// The bot's identity shown in status: the iLink bot or the Feishu app.
-    fn bot_id(&self) -> Option<String> {
-        match self {
-            Self::Wechat(account) => account.bot_id.clone(),
-            Self::Feishu(account) => Some(account.app_id.clone()),
-        }
-    }
 }
 
 struct ChannelAccount {
-    channel: Channel,
+    kind: ChannelKind,
     account: String,
-    credentials: Credentials,
+    credentials: ChannelCredentials,
+    settings: AccountSettings,
     workspace: PathBuf,
     socket: PathBuf,
-    tool_owner: Option<String>,
+    /// The account owner holds remote tools.
+    tools: bool,
     link: scv_channels::hub::Link,
-    media: scv_channels::MediaSettings,
 }
 
 #[async_trait]
 impl Component for ChannelAccount {
     async fn run(&self, cancellation: CancellationToken, health: HealthReporter) -> Result<()> {
-        let tool_owner = self.tool_owner.clone().map(|user_id| {
+        let tool_turn_timeout = self.tools.then(|| {
             let turn_timeout = scv_channels::owner_turn_timeout(max_tool_timeout(&self.workspace));
             tracing::info!(
                 "{} {} owner turns may run up to {} seconds",
-                self.channel.title(),
+                self.kind.title(),
                 self.account,
                 turn_timeout.as_secs()
             );
-            scv_channels::ToolOwner {
-                user_id,
-                turn_timeout,
-            }
+            turn_timeout
         });
-        let report = Arc::new(move |connected| health.contact(connected));
-        match &self.credentials {
-            Credentials::Wechat(credentials) => {
-                let media = scv_clawbot::state::media_options(&self.account, self.media.clone())?;
-                scv_clawbot::run_supervised(
-                    &credentials.token,
-                    &credentials.base_url,
-                    &self.account,
-                    &self.workspace,
-                    &self.socket,
-                    tool_owner.as_ref(),
-                    &media,
-                    cancellation,
-                    report,
-                    self.link.clone(),
-                )
-                .await
-            }
-            Credentials::Feishu(credentials) => {
-                let media = scv_feishu::state::media_options(&self.account, self.media.clone())?;
-                scv_feishu::run_supervised(
-                    credentials,
-                    &self.account,
-                    &self.workspace,
-                    &self.socket,
-                    tool_owner.as_ref(),
-                    &media,
-                    cancellation,
-                    report,
-                    self.link.clone(),
-                )
-                .await
-            }
+        let layout = Layout::from_env()?;
+        let report = move |connected| health.contact(connected);
+        let run = scv_channels::AccountRun {
+            layout: &layout,
+            account: &self.account,
+            credentials: &self.credentials,
+            settings: &self.settings,
+            owner: self.credentials.owner().filter(|owner| !owner.is_empty()),
+            tool_turn_timeout,
+            workspace: &self.workspace,
+            socket: &self.socket,
+            link: &self.link,
+            health: &report,
+        };
+        // Cancellation drops the run's I/O and sessions; it spawns no tasks.
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Ok(()),
+            result = scv_channels::run(run) => result,
         }
     }
 }
@@ -367,7 +258,7 @@ impl Component for ChannelAccount {
 pub(crate) struct Components {
     supervisor: Supervisor,
     /// Running or disabled accounts by component ID, `<channel>:<account>`.
-    desired: BTreeMap<String, (Credentials, AccountSettings)>,
+    desired: BTreeMap<String, (ChannelCredentials, AccountSettings)>,
     inactive: BTreeMap<String, ComponentHealth>,
     socket: PathBuf,
     workspace: PathBuf,
@@ -421,8 +312,8 @@ impl Components {
     /// reports why; other channels keep running.
     pub async fn reconcile(&mut self) -> Result<()> {
         let mut failed = false;
-        for channel in CHANNELS {
-            match channel.account_names() {
+        for &channel in ChannelKind::ALL {
+            match account_names(channel) {
                 Ok(names) => self.reconcile_channel(channel, names).await,
                 Err(message) => {
                     failed = true;
@@ -446,7 +337,7 @@ impl Components {
     }
 
     /// Component IDs of one channel, running or not.
-    fn ids(&self, channel: Channel) -> Vec<String> {
+    fn ids(&self, channel: ChannelKind) -> Vec<String> {
         let prefix = format!("{}:", channel.name());
         self.desired
             .keys()
@@ -456,7 +347,7 @@ impl Components {
             .collect()
     }
 
-    async fn reconcile_channel(&mut self, channel: Channel, names: Vec<String>) {
+    async fn reconcile_channel(&mut self, channel: ChannelKind, names: Vec<String>) {
         let wanted: Vec<String> = names
             .iter()
             .map(|name| component_id(channel, name))
@@ -471,7 +362,7 @@ impl Components {
         for name in names {
             let id = component_id(channel, &name);
             let loaded = (|| -> Result<_> {
-                let (account, settings) = channel.snapshot(&name)?;
+                let (account, settings) = accounts(channel)?.snapshot(&name)?;
                 Ok((
                     account.ok_or_else(|| anyhow::anyhow!("missing account"))?,
                     settings,
@@ -490,8 +381,8 @@ impl Components {
             self.supervisor.stop(&id).await;
             self.inactive.remove(&id);
             let mut health = initial_health(channel, &name, Some(&credentials), settings.enabled);
-            let tool_owner = tool_owner(&credentials, &settings);
-            if tool_owner.is_some() {
+            let tools = tool_owner(&credentials, &settings).is_some();
+            if tools {
                 health.remote_tools = RemoteTools::Owner;
             }
             if settings.enabled {
@@ -514,14 +405,14 @@ impl Components {
                 );
                 self.supervisor.start(
                     Arc::new(ChannelAccount {
-                        channel,
+                        kind: channel,
                         account: name.clone(),
                         credentials: credentials.clone(),
+                        settings: settings.clone(),
                         workspace,
                         socket: self.socket.clone(),
-                        tool_owner,
+                        tools,
                         link,
-                        media: settings.media.clone(),
                     }),
                     health,
                 );
@@ -533,7 +424,7 @@ impl Components {
         }
     }
 
-    async fn account_error(&mut self, channel: Channel, name: &str, error: anyhow::Error) {
+    async fn account_error(&mut self, channel: ChannelKind, name: &str, error: anyhow::Error) {
         // A bridge state commit briefly holds this same lock. Retry next refresh
         // rather than interrupting healthy work for ordinary lock contention.
         if is_busy(&error) {
@@ -565,7 +456,7 @@ impl Components {
                 workspace,
                 remote_tools,
             } => {
-                let channel = Channel::parse(&channel)?;
+                let channel = ChannelKind::parse(&channel)?;
                 state::validate_name(&account)?;
                 let workspace = match workspace {
                     Some(path) => {
@@ -578,10 +469,11 @@ impl Components {
                     None => None,
                 };
                 retry_while_busy(|| {
-                    if !channel.signed_in(&account)? {
+                    let accounts = accounts(channel)?;
+                    if !accounts.signed_in(&account)? {
                         bail!("Account is not logged in");
                     }
-                    let mut settings = channel.settings(&account)?;
+                    let mut settings = accounts.settings(&account)?;
                     settings.enabled = enabled;
                     if let Some(path) = &workspace {
                         settings.workspace = Some(path.clone());
@@ -589,27 +481,28 @@ impl Components {
                     if let Some(mode) = remote_tools {
                         settings.remote_tools = mode;
                     }
-                    channel.save_settings(&account, &settings)
+                    accounts.save_settings(&account, &settings)
                 })
                 .await?;
             }
             DaemonCommand::ChannelLogout { channel, account } => {
-                let channel = Channel::parse(&channel)?;
+                let channel = ChannelKind::parse(&channel)?;
                 state::validate_name(&account)?;
                 // Persist disabled and tool-free first, so failed deletion can
                 // neither resurrect a live account nor hand a later login the grant.
                 retry_while_busy(|| {
-                    let mut settings = channel.settings(&account)?;
+                    let accounts = accounts(channel)?;
+                    let mut settings = accounts.settings(&account)?;
                     settings.enabled = false;
                     settings.remote_tools = RemoteTools::None;
-                    channel.save_settings(&account, &settings)
+                    accounts.save_settings(&account, &settings)
                 })
                 .await?;
                 let id = component_id(channel, &account);
                 self.supervisor.stop(&id).await;
                 self.desired.remove(&id);
                 self.inactive.remove(&id);
-                retry_while_busy(|| channel.remove(&account)).await?;
+                retry_while_busy(|| accounts(channel)?.remove(&account)).await?;
             }
         }
         self.reconcile().await?;
@@ -657,28 +550,28 @@ fn is_busy(error: &anyhow::Error) -> bool {
 
 /// Only the authenticated account owner may receive tools. Credentials without
 /// a known owner ID grant tools to nobody, even when the setting asks for it.
-fn tool_owner(credentials: &Credentials, settings: &AccountSettings) -> Option<String> {
+fn tool_owner(credentials: &ChannelCredentials, settings: &AccountSettings) -> Option<String> {
     (settings.remote_tools == RemoteTools::Owner)
         .then(|| credentials.owner().map(str::to_owned))
         .flatten()
         .filter(|owner| !owner.is_empty())
 }
 
-fn component_id(channel: Channel, account: &str) -> String {
+fn component_id(channel: ChannelKind, account: &str) -> String {
     format!("{}:{account}", channel.name())
 }
 
 fn initial_health(
-    channel: Channel,
+    channel: ChannelKind,
     account: &str,
-    credentials: Option<&Credentials>,
+    credentials: Option<&ChannelCredentials>,
     enabled: bool,
 ) -> ComponentHealth {
     ComponentHealth {
         id: component_id(channel, account),
         channel: channel.name().into(),
         account: account.into(),
-        bot_id: credentials.and_then(Credentials::bot_id),
+        bot_id: credentials.and_then(ChannelCredentials::bot_id),
         user_id: credentials.and_then(|c| c.owner().map(str::to_owned)),
         enabled,
         state: ComponentState::Starting,

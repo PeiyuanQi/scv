@@ -1,25 +1,46 @@
 # SCV Channels
 
-The bridge every SCV chat channel shares. A channel crate implements
-`Transport` (receive a batch of messages after a checkpoint, send one part of a
-message) and `state::Credentials` (how its saved credentials bind delivery
-state); `run(transport, account, workspace, socket, tool_owner, store, running,
-report)` does the rest on the caller's daemon socket. It launches no process and
-spawns no tasks: cancelling the future drops active requests and protocol
-sessions, and callers enforce an external bounded stop timeout. `report(true)`
-follows only a successful `receive`; receive and send failures report false.
+SCV's chat channels and the bridge they share. Each channel is a module behind
+a Cargo feature of the same name, both on by default:
 
-`run_linked` adds a `hub::Link` for accounts the daemon runs. Through the
-daemon's `hub::Hub` it sees which direct chat each daemon session answers,
-how many owner messages are claimed but unanswered, each chat's background
-work not yet reported, and the chat the account owner last wrote from; it can
-queue a notice into an account's durable outbox. Each account's first
-recovery after a planned restart answers interrupted claims with
-`restarted_reply` instead of the failure reply.
+- `wechat`: WeChat through a ClawBot (iLink) bot: QR sign-in, long-polled
+  `getupdates`, replies, and files on the AES-encrypted CDN;
+- `feishu`: Feishu and Lark through a bot app: sign-in by QR scan (which
+  creates the app) or with an existing app, the event long connection with
+  catch-up from chat history, replies, and files.
 
-`tool_owner` is the authenticated owner when the account grants remote tools;
-only that sender's direct-chat sessions get tools and auto-approval, and every
-other session, including the owner's group messages, stays tool-free.
+A channel implements `Channel` (`WeChat`, `Feishu`): signing an account in
+under a `Layout`, what its credentials say (owner, bot, platform name), and
+running it. The daemon reaches channels only through `ChannelKind` (`ALL`,
+`name`, `parse`, `accounts`), `ChannelCredentials`, `Accounts` (one channel's
+saved accounts: discovery, snapshots, settings, removal, inspection), and
+`run(AccountRun)`. `AccountRun` carries the instance layout, the account, its
+credentials and whole settings table, the account owner (whether or not it
+holds the remote-tool grant), the owner turn timeout exactly when it does, the
+workspace, the daemon socket, the `hub::Link`, and a health callback. `run`
+launches no process and spawns no tasks: dropping its future drops active
+requests and protocol sessions, and callers enforce an external bounded stop
+timeout. The health callback reports `true` only after a successful receive,
+and `false` when receiving, sending, or the run fails.
+
+Inside the crate each channel supplies a `Transport` (receive a batch of
+messages after a checkpoint, send one part of a message) and
+`state::Credentials` (how its saved credentials bind delivery state); the
+shared bridge does the rest on the daemon socket. `intake::classify` decides,
+without side effects, what the bridge does with each received message: ignore
+it, leave an existing claim alone, answer with the busy notice, or claim it
+and run a turn in its conversation.
+
+Through the daemon's `hub::Hub` the daemon sees which direct chat each daemon
+session answers, how many owner messages are claimed but unanswered, each
+chat's background work not yet reported, and the chat the account owner last
+wrote from; it can queue a notice into an account's durable outbox. Each
+account's first recovery after a planned restart answers interrupted claims
+with `restarted_reply` instead of the failure reply.
+
+Only the account owner's direct-chat sessions get tools and auto-approval,
+and only when the account grants the owner remote tools; every other session,
+including the owner's group messages, stays tool-free.
 
 Before any inbound turn, the bridge durably records its message identity,
 sender, reply handle, and conversation, and saves the batch's checkpoint only
@@ -50,9 +71,13 @@ while one is held. `inspect` reads an account for display without any lock.
 Discovery fails on more than 128 entries or
 directory-entry errors and leaves credential validation to the caller.
 
+The Feishu long connection's frames follow `proto/pbbp2.proto`.
+
 Focused verification:
 
 ```sh
 cargo test -p scv-channels --locked
 cargo clippy -p scv-channels --all-targets --locked -- -D warnings
+cargo clippy -p scv-channels --all-targets --locked --no-default-features --features wechat -- -D warnings
+cargo clippy -p scv-channels --all-targets --locked --no-default-features --features feishu -- -D warnings
 ```

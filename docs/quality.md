@@ -104,6 +104,12 @@ Daemon and component changes require focused coverage for:
   most four turns at once, busy notices beyond the queue limits without a
   turn, recovery answering every claim once without replay, and shutdown
   closing every running turn while keeping its claim;
+- the bridge's side-effect-free intake (`classify`): seen and unanswerable
+  messages only marked seen, claimed or undelivered ones never run twice,
+  direct and group conversation keys, tools and the owner limit only for the
+  tool owner's direct chat, the owner recognized without the grant, busy
+  beyond the claim and queue limits, and a full session table closing only an
+  idle conversation;
 - refused replies held per conversation within count, byte, total, and age
   limits, delivered ahead of the next reply only as far as one message allows,
   restored when the carrying reply is refused, busy notices never held, and
@@ -140,7 +146,8 @@ git diff --check
 Run `cargo-deny` locally when installed; CI requires it. This document defines
 required coverage and checks, not verification results for a particular change.
 
-CI runs formatting, strict Clippy, workspace tests/builds, and `cargo-deny`.
+CI runs formatting, strict Clippy (also for `scv-channels` with each channel
+feature alone and with none), workspace tests/builds, and `cargo-deny`.
 Tests also run on macOS and under the declared Rust 1.88 MSRV. The tagged-release
 workflow builds release archives and smoke-tests them on their native Linux and
 macOS runners.
