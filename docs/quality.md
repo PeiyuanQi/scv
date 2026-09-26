@@ -98,15 +98,20 @@ Daemon and component changes require focused coverage for:
   accepted (including a returned regional host) with the TLS port pinned and
   redirects not followed, oversized responses rejected before parsing, and
   replies chunked on UTF-8 boundaries within the byte limit;
-- WeChat's `system msg: ` prefix on SCV's own messages: a daemon notice, the
-  failure reply, a question, and its acknowledgement sent with it while the
+- WeChat's `system msg: ` code block on SCV's own messages: a daemon notice,
+  the failure reply, a question, and its acknowledgement sent in it while the
   model's answer and each continuation part go without it; the busy, voice,
-  file-refusal, and restart replies and the stopped-jobs notice prefixed; a
-  prefixed notice still split within 16 KiB at a character boundary; a
-  retried send keeping its client ID and exactly one prefix; a refused notice
-  held with its prefix and carried once ahead of the next reply; recovery
-  prefixing only its own part when it carries a held answer; and the same
-  notice sent on Feishu as written;
+  file-refusal, and restart replies and the stopped-jobs notice in it; a
+  question holding a triple-backtick run getting a longer fence with its text
+  unchanged; a block too long for one message sent as complete blocks, one
+  per part, each part but the last exactly 16 KiB and cut at a character
+  boundary, for texts of every character width and backtick run; a retried
+  send keeping its client ID, one label, and one block; a refused notice held
+  as its block and carried once ahead of the next reply; recovery marking
+  only its own part when it carries a held answer; model answers that start
+  with `system msg: `, hold code blocks, or copy SCV's block sent byte for
+  byte and split as any answer is; text stored with the bare label sent as
+  stored; and the same notices sent on Feishu as written;
 - Feishu: registration posting `init`, `begin`, and `poll` forms, waiting out
   pending polls, following a Lark tenant once, and stopping when declined or
   when secret-based apps are not offered; the long-connection URL refused

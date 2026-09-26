@@ -59,14 +59,57 @@ pub(crate) const FAILURE_REPLY: &str = "SCV could not complete that request.";
 /// The reply to a turn whose answer has neither text nor files.
 pub(crate) const EMPTY_REPLY: &str = "SCV completed without a text response.";
 
-/// Text SCV wrote itself, not the model, as the chat shows it: after
-/// `prefix`, the transport's [`Transport::system_prefix`].
+/// Text SCV wrote itself, not the model, as the chat shows it: `text` alone
+/// when `label`, the transport's [`Transport::system_label`], is empty, and
+/// otherwise `label` and `text` in a Markdown code block.
 ///
-/// This is the only place the prefix is added, once, when the text is
+/// This is the only place SCV's words are marked, once, when the text is
 /// queued. Every part, retry, and held copy then sends what was stored, so
-/// the prefix counts toward the first part's size and is never repeated.
-pub(crate) fn system_text(prefix: &str, text: &str) -> String {
-    format!("{prefix}{text}")
+/// the block counts toward the parts' size and is never repeated. `text`
+/// itself is never changed: see [`code_blocks`] for the fence and parts.
+pub(crate) fn system_text(label: &str, text: &str) -> String {
+    if label.is_empty() {
+        return text.to_owned();
+    }
+    code_blocks(&format!("{label}{text}"), MAX_REPLY_BYTES)
+}
+
+/// `body` as Markdown code blocks that [`split_utf8`] sends one per part of
+/// `max` bytes: one block when it fits, else blocks cut on character
+/// boundaries, each but the last exactly `max` bytes long, its closing fence
+/// line padded with the spaces Markdown ignores there, so the splitter cuts
+/// exactly between them. The fence is one backtick longer than `body`'s
+/// longest run of them, and at least three, as CommonMark requires, so
+/// nothing in `body` is escaped or ends the block early. A run so long that
+/// two fences leave no room for a character in a part (never in SCV's own
+/// words) sends `body` without a fence.
+fn code_blocks(body: &str, max: usize) -> String {
+    let run = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(run.max(2) + 1);
+    // The opening and closing fence lines.
+    let frame = 2 * (fence.len() + 1);
+    if frame + body.len() <= max {
+        return format!("{fence}\n{body}\n{fence}");
+    }
+    // Room for the body in a full part: at least one character of any size.
+    let room = max.saturating_sub(frame);
+    if room < 4 {
+        return body.to_owned();
+    }
+    let mut blocks = String::new();
+    let mut rest = body;
+    while rest.len() > room {
+        let mut end = room;
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (piece, tail) = rest.split_at(end);
+        let padding = " ".repeat(room - end);
+        blocks.push_str(&format!("{fence}\n{piece}\n{fence}{padding}"));
+        rest = tail;
+    }
+    blocks.push_str(&format!("{fence}\n{rest}\n{fence}"));
+    blocks
 }
 
 /// The reply to a message whose turn a planned restart interrupted.
@@ -325,11 +368,11 @@ pub(crate) trait Transport: Send + Sync {
     /// model is told so it writes for a chat.
     fn channel(&self) -> &'static str;
 
-    /// What every message SCV writes itself starts with (a notice, a fixed
-    /// reply, a question to the owner), so the chat can tell it from the
-    /// model's answers; see [`system_text`]. Empty, the default, sends SCV's
-    /// words as they are.
-    fn system_prefix(&self) -> &'static str {
+    /// The label every message SCV writes itself (a notice, a fixed reply, a
+    /// question to the owner) starts with, inside the Markdown code block
+    /// that sets it apart from the model's answers; see [`system_text`].
+    /// Empty, the default, sends SCV's words as they are.
+    fn system_label(&self) -> &'static str {
         ""
     }
 
@@ -433,7 +476,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         account,
         &mut state,
         link.take_restart().as_ref(),
-        transport.system_prefix(),
+        transport.system_label(),
     )?;
     let (registration, notices) = link.register();
     let bridge = Bridge {
@@ -556,7 +599,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     /// `text`, which SCV wrote itself, as this channel shows it; see
     /// [`system_text`].
     fn system(&self, text: &str) -> String {
-        system_text(self.transport.system_prefix(), text)
+        system_text(self.transport.system_label(), text)
     }
 
     /// Save state, waiting out a daemon command's short transaction.
@@ -1208,8 +1251,8 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     }
 
     /// A response's text as the chat shows it, and the files it sends: the
-    /// model's reply through [`Bridge::outgoing`], or SCV's own words after
-    /// the system prefix, with no files.
+    /// model's reply through [`Bridge::outgoing`], or SCV's own words marked
+    /// by [`Bridge::system`], with no files.
     fn render(&self, response: session::Response) -> (String, Vec<state::PendingFile>) {
         match response {
             session::Response::Model(reply) => self.outgoing(reply),
@@ -1627,7 +1670,7 @@ fn prune_held(state: &mut state::BridgeState, now: u64) {
 }
 
 /// [`recover_interrupted_after`] without a planned restart, on a channel
-/// whose system prefix is empty.
+/// whose system label is empty.
 #[cfg(test)]
 pub(crate) fn recover_interrupted<C: state::Credentials>(
     store: &state::Store<C>,
@@ -1641,21 +1684,21 @@ pub(crate) fn recover_interrupted<C: state::Credentials>(
 /// interrupted work is never resubmitted. After a planned `restart`, claims
 /// get [`restarted_reply`] instead of [`FAILURE_REPLY`].
 /// Each direct chat whose background jobs the previous run left running is
-/// told which stopped. Both are SCV's own words, after the transport's
-/// `system_prefix`. Everything is saved in one write.
+/// told which stopped. Both are SCV's own words, marked with the transport's
+/// `system_label` by [`system_text`]. Everything is saved in one write.
 pub(crate) fn recover_interrupted_after<C: state::Credentials>(
     store: &state::Store<C>,
     account: &str,
     state: &mut state::BridgeState,
     restart: Option<&hub::Restart>,
-    system_prefix: &str,
+    system_label: &str,
 ) -> Result<()> {
     if state.in_flight.is_empty() && state.jobs.is_empty() {
         return Ok(());
     }
     let now = unix_now();
     let reply = system_text(
-        system_prefix,
+        system_label,
         &restart.map_or_else(|| FAILURE_REPLY.to_owned(), restarted_reply),
     );
     for claim in std::mem::take(&mut state.in_flight) {
@@ -1675,7 +1718,7 @@ pub(crate) fn recover_interrupted_after<C: state::Credentials>(
             .filter(|job| job.to_user_id == recipient)
             .cloned()
             .collect();
-        let notice = system_text(system_prefix, &stopped_jobs_notice(restart, &stopped));
+        let notice = system_text(system_label, &stopped_jobs_notice(restart, &stopped));
         let mut pending = new_pending("", recipient, "", &notice, MAX_REPLY_BYTES);
         pending.key = recipient.to_owned();
         state.pending.push(pending);

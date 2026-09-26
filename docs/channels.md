@@ -236,8 +236,18 @@ not sent.
 ### SCV's own messages
 
 WeChat shows every message from the bot the same way, so on WeChat each
-message SCV writes itself, rather than the model, starts with `system msg: `
-(one space after the colon):
+message SCV writes itself, rather than the model, goes out as a Markdown code
+block, which WeChat renders apart from the model's plain-text answers. The
+block's first line starts with the label `system msg: ` (one space after the
+colon):
+
+````text
+```
+system msg: SCV restarted to update to v0.3.1 before finishing this; ask again if you still need it.
+```
+````
+
+That covers:
 
 - the busy notice, the voice reply, and the short reply to a message with
   nothing SCV can read (see [Media](#media));
@@ -250,23 +260,44 @@ message SCV writes itself, rather than the model, starts with `system msg: `
 - a question to the owner and each of its outcomes (see
   [Questions to the owner](#questions-to-the-owner)).
 
-The model's answers go out as written: turn replies and background reports,
-every continuation part of a long one, the held-reply headers, the
+The model's answers go out exactly as written: turn replies and background
+reports, every continuation part of a long one, the held-reply headers, the
 `[reply truncated]` and `[N attached files could not be sent]` notes inside
-them, and files sent with `chat_attach`. Feishu shows SCV's words unchanged.
+them, and files sent with `chat_attach`. SCV never escapes, strips, or
+rewrites the model's output, even an answer that starts with `system msg: `
+or holds code blocks of its own. Feishu shows SCV's words unchanged, with no
+label and no block.
 
-The bridge adds the prefix once, when it queues the message, and stores the
-result as the message's text. The prefix therefore counts toward the first
-part's 16 KiB, a retry resends the same bytes with the same client ID, and a
-refused message that is held keeps its prefix, exactly once, when a later
-reply carries it. When SCV's own reply to a message, such as the failure
-reply, carries held replies, its own part, after
-`[Reply to your latest message]`, starts with the prefix, and the carried
-answers do not. Delivery state has no new field, so a release without the
-prefix sends stored text as it is. The owner's answers to a question are read
-from the owner's own messages, so the prefix changes nothing there. It is a
-label, not proof: a model answer can begin with the same words (see
-[security](security.md)).
+SCV's words are never changed either. The fence is one backtick longer than
+the longest run of backticks in the text, and at least three, as CommonMark
+requires, so nothing is escaped or stripped, and a question whose asker wrote
+a code block into it stays whole inside SCV's block.
+
+The bridge builds the block once, when it queues the message, and stores the
+result as the message's text. The block therefore counts toward the 16 KiB
+of a part, a retry resends the same bytes with the same client ID, and a
+refused message that is held is carried by a later reply as that one block
+(SCV's own messages stay well under the 8 KiB a held reply is cut to). When
+SCV's own reply to a message, such as the failure reply, carries held
+replies, its own part, after `[Reply to your latest message]`, is the block,
+and the carried answers are not.
+
+A message too long for one part is cut on character boundaries into complete
+blocks, one per part, and only the first has the label. Each part but the
+last is exactly 16 KiB, its closing fence line padded with the spaces
+Markdown ignores there, so the ordinary splitter, which every message goes
+through, cuts exactly between blocks. A text whose backtick runs are too long
+for two fences and a character to fit in a part, which SCV's own words never
+hold, goes out after the label without a block.
+
+Delivery state has no new field, and stored text is always sent as stored:
+a message queued before SCV used the block, with the bare label or none,
+goes out as it was queued, and a release without the block, 0.3.0 included,
+sends a stored block as it is. The owner's answers to a question are read
+from the owner's own messages, and nothing matches the question's sent text,
+so the block changes nothing there. The block is a visual cue, not proof of
+where a message came from: the model's answer goes out as written and can
+look the same (see [security](security.md)).
 
 ## Feishu contract
 
@@ -417,13 +448,14 @@ the 50 MB limit]`. A voice message with the platform's transcript keeps it,
 in the attachment or in the note. A message with no text, no downloaded file,
 and no voice transcript gets a short reply instead of a turn, such as `SCV can
 read text and pictures from you here, but not a file.` (on WeChat, like the
-voice reply below, after `system msg: `; see
+voice reply below, in SCV's `system msg: ` code block; see
 [SCV's own messages](#scvs-own-messages)).
 
 The model cannot listen to audio, so a voice message that carries no
 transcript and no text is answered as soon as it arrives with "SCV cannot
 listen to voice messages yet. Please type your message instead." (on WeChat,
-"system msg: SCV cannot listen…"): no download, no daemon session, and no
+a code block holding "system msg: SCV cannot listen…"): no download, no
+daemon session, and no
 model turn. That is every Feishu voice message, which comes without a
 transcript, and a WeChat one whose iLink transcript is missing. Like the
 busy notice, the reply is queued as a durable pending delivery on the
@@ -579,9 +611,14 @@ and no owner message is being answered, or after ten minutes at the latest (see
   chat does not connect within two minutes, the announcement goes to the
   `[notify]` accounts, saying which chat asked.
 
-On WeChat each of these messages, like the notices below, starts with
-`system msg: ` (see [SCV's own messages](#scvs-own-messages)), as in
-"system msg: SCV updated: now running v0.3.1 (abc1234).".
+On WeChat each of these messages, like the notices below, is a code block
+labelled `system msg: ` (see [SCV's own messages](#scvs-own-messages)):
+
+````text
+```
+system msg: SCV updated: now running v0.3.1 (abc1234).
+```
+````
 
 Checked live with the owner on 2026-09-26: asked from WeChat, a delegated
 agent installed 0.3.0 over a 0.2.1 daemon and scheduled the restart; the
@@ -593,8 +630,8 @@ the daemon stopped unexpectedly, an enabled account disconnected for ten
 minutes, which may mean its sign-in expired) go to the owner of the first
 connected account in `[notify].owner`, or else to the chat the owner last
 wrote from, and never through the account the notice is about. Each is queued
-in that account's outbox like a background report, after `system msg: ` on
-WeChat. The daemon waits up to 30
+in that account's outbox like a background report, in SCV's `system msg: `
+code block on WeChat. The daemon waits up to 30
 seconds for the account to store a notice and otherwise counts it as not sent,
 possibly trying another account; the account then drops it rather than sending
 it late. See
@@ -624,7 +661,8 @@ Reply yes or no. No answer in <N> minutes counts as no.
 
 On WeChat that message, and each reply below ("OK, going ahead.", "OK,
 stopped.", "No answer, so stopped.", "The question was withdrawn, so
-stopped."), starts with `system msg: ` (see
+stopped."), is a code block labelled `system msg: `, with a longer fence
+when the question holds three or more backticks in a row (see
 [SCV's own messages](#scvs-own-messages)).
 
 The question opens only once the platform has accepted that message. Until

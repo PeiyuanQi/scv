@@ -50,7 +50,7 @@ pub struct LastOwner {
 
 /// A message for one account's outbox, sent like a background report. Its
 /// text is SCV's own, never the model's, so a channel that marks SCV's words
-/// (WeChat's `system msg: `) marks it when the bridge stores it.
+/// (WeChat's `system msg: ` code block) marks it when the bridge stores it.
 pub struct Notice {
     pub to: String,
     pub text: String,

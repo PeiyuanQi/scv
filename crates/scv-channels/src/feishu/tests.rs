@@ -911,7 +911,7 @@ async fn full_bridge_never_takes_a_caught_up_yes_from_before_the_question_as_its
 }
 
 #[tokio::test]
-async fn full_bridge_sends_scvs_notices_without_a_prefix() {
+async fn full_bridge_sends_scvs_notices_without_a_label_or_code_block() {
     let mut fake = Fake::start().await;
     let directory = tempfile::tempdir().unwrap();
     let store = credentials::Store::new(
@@ -953,19 +953,23 @@ async fn full_bridge_sends_scvs_notices_without_a_prefix() {
         })
         .await
         .unwrap();
-        // The notice WeChat marks with `system msg: ` goes out as written:
-        // Feishu keeps SCV's words unchanged.
-        let text = "SCV updated: now running v0.3.1 (abc1234).";
-        hub.notify("feishu:default", "ou_owner", text)
-            .await
-            .unwrap();
-        let notice = fake
-            .request("/open-apis/im/v1/messages?receive_id_type=open_id")
-            .await;
-        assert_eq!(notice.body["receive_id"], "ou_owner");
-        let content: Value =
-            serde_json::from_str(notice.body["content"].as_str().unwrap()).unwrap();
-        assert_eq!(content["text"], text);
+        // Notices WeChat puts in a `system msg: ` code block go out as
+        // written: Feishu keeps SCV's words unchanged, backticks and all.
+        for text in [
+            "SCV updated: now running v0.3.1 (abc1234).",
+            "Publish v0.3.1?\n```\ncargo publish\n```",
+        ] {
+            hub.notify("feishu:default", "ou_owner", text)
+                .await
+                .unwrap();
+            let notice = fake
+                .request("/open-apis/im/v1/messages?receive_id_type=open_id")
+                .await;
+            assert_eq!(notice.body["receive_id"], "ou_owner");
+            let content: Value =
+                serde_json::from_str(notice.body["content"].as_str().unwrap()).unwrap();
+            assert_eq!(content["text"], text);
+        }
     };
     tokio::select! {
         result = run => panic!("the bridge stopped: {result:?}"),

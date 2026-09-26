@@ -284,7 +284,7 @@ fn after_a_planned_restart_claims_are_told_why() {
 }
 
 #[test]
-fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_prefix() {
+fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_label() {
     let directory = tempfile::tempdir().unwrap();
     let store = test_store(directory.path());
     let now = unix_now();
@@ -311,28 +311,135 @@ fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_prefix(
         }],
         ..Default::default()
     };
-    recover_interrupted_after(&store, "default", &mut saved, None, "PREFIX: ").unwrap();
+    recover_interrupted_after(&store, "default", &mut saved, None, "LABEL: ").unwrap();
     let restarted = store.load_state("default").unwrap();
     let replies: Vec<_> = restarted
         .pending
         .iter()
         .map(|pending| pending.reply.as_str())
         .collect();
-    // The failure reply carries the held answer: the prefix marks SCV's own
-    // part, never the model's answer ahead of it.
+    // The failure reply carries the held answer: the code block marks SCV's
+    // own part, never the model's answer ahead of it.
     assert_eq!(
         replies,
         [
             format!(
-                "{HELD_HEADER}the model's earlier answer\n\n{LATEST_HEADER}PREFIX: {FAILURE_REPLY}"
+                "{HELD_HEADER}the model's earlier answer\n\n{LATEST_HEADER}```\nLABEL: {FAILURE_REPLY}\n```"
             ),
-            "PREFIX: An unexpected interruption stopped background work that was still \
-             running:\n- job-1 (codex)\nAsk again if you still need it."
+            "```\nLABEL: An unexpected interruption stopped background work that was still \
+             running:\n- job-1 (codex)\nAsk again if you still need it.\n```"
                 .to_owned(),
         ]
     );
     assert_eq!(
         restarted.pending[0].own.as_deref(),
-        Some(format!("PREFIX: {FAILURE_REPLY}").as_str())
+        Some(format!("```\nLABEL: {FAILURE_REPLY}\n```").as_str())
     );
+}
+
+/// A part's fence and what its code block holds, checking that the part is
+/// one complete block: a fence line, the content, and a closing fence line
+/// of the same fence, padded with spaces at most.
+fn code_block(part: &str) -> (&str, &str) {
+    let (fence, rest) = part.split_once('\n').expect("an opening fence line");
+    assert!(
+        fence.len() >= 3 && fence.bytes().all(|byte| byte == b'`'),
+        "{part:?}"
+    );
+    let (content, closing) = rest.rsplit_once('\n').expect("a closing fence line");
+    assert_eq!(closing.trim_end_matches(' '), fence, "{part:?}");
+    assert!(closing.len() - fence.len() < 4, "{part:?}");
+    (fence, content)
+}
+
+#[test]
+fn scvs_own_words_go_in_a_labelled_code_block_only_where_the_channel_labels_them() {
+    assert_eq!(
+        system_text("system msg: ", "SCV updated: now running v0.3.1 (abc1234)."),
+        "```\nsystem msg: SCV updated: now running v0.3.1 (abc1234).\n```"
+    );
+    // A channel without a label, such as Feishu, sends SCV's words as they
+    // are, fences and all.
+    for text in ["SCV updated.", "Run ```cargo test```?", ""] {
+        assert_eq!(system_text("", text), text);
+    }
+}
+
+#[test]
+fn a_backtick_run_gets_a_longer_fence_and_the_text_stays_as_written() {
+    let text = "Publish v0.3.1?\n```sh\ncargo publish\n```\nReply yes or no.";
+    let sent = system_text("system msg: ", text);
+    assert_eq!(sent, format!("````\nsystem msg: {text}\n````"));
+    assert_eq!(
+        code_block(&sent),
+        ("````", format!("system msg: {text}").as_str())
+    );
+    // The fence outgrows the longest run, wherever it is.
+    let text = "``a````` `` ```";
+    assert_eq!(
+        system_text("system msg: ", text),
+        format!("``````\nsystem msg: {text}\n``````")
+    );
+    // Nothing is escaped or stripped, even a text that ends in backticks or
+    // a line break.
+    for text in ["ends in `", "ends in ```", "ends in a break\n", "\\`\\`\\`"] {
+        let sent = system_text("system msg: ", text);
+        assert_eq!(code_block(&sent).1, format!("system msg: {text}"));
+    }
+}
+
+#[test]
+fn a_block_too_long_for_one_message_is_sent_as_complete_blocks_one_per_part() {
+    // The real size: one full part, exactly as long as a message, and the
+    // rest, each its own block, with the label once.
+    let long = "中".repeat(MAX_REPLY_BYTES / 3);
+    let sent = system_text("system msg: ", &long);
+    let parts = split_utf8(&sent, MAX_REPLY_BYTES);
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].len(), MAX_REPLY_BYTES);
+    let (first, rest) = (code_block(&parts[0]).1, code_block(&parts[1]).1);
+    assert!(first.starts_with("system msg: 中") && !rest.contains("system msg: "));
+    assert_eq!(format!("{first}{rest}"), format!("system msg: {long}"));
+    // Small parts, with characters of every width, long backtick runs, and
+    // line breaks, cut wherever they fall.
+    let texts = [
+        "a".repeat(200),
+        "é中🙂".repeat(40),
+        "x```y````z\n".repeat(20),
+        format!("{}`````{}", "🙂".repeat(20), "中\n".repeat(30)),
+    ];
+    for text in &texts {
+        let body = format!("system msg: {text}");
+        for max in 24..=90 {
+            let sent = code_blocks(&body, max);
+            let parts = split_utf8(&sent, max);
+            let mut contents = String::new();
+            let mut fences = Vec::new();
+            for (index, part) in parts.iter().enumerate() {
+                assert!(part.len() <= max, "{max}: {part:?}");
+                if index + 1 < parts.len() {
+                    assert_eq!(part.len(), max, "{max}: {part:?}");
+                }
+                let (fence, content) = code_block(part);
+                fences.push(fence);
+                contents.push_str(content);
+            }
+            assert_eq!(contents, body, "{max}");
+            // One fence throughout, longer than any run it holds.
+            assert!(fences.iter().all(|fence| *fence == fences[0]));
+            assert!(!body.contains(fences[0]), "{max}");
+        }
+    }
+}
+
+#[test]
+fn a_run_too_long_to_fence_within_a_message_goes_out_unfenced() {
+    let body = format!("system msg: {}", "`".repeat(30));
+    // Two 31-backtick fences leave no room in a 64-byte part.
+    assert_eq!(code_blocks(&body, 64), body);
+    // One more byte of room than a character needs is enough.
+    let sent = code_blocks(&body, 68);
+    let parts = split_utf8(&sent, 68);
+    let contents: String = parts.iter().map(|part| code_block(part).1).collect();
+    assert_eq!(contents, body);
 }
