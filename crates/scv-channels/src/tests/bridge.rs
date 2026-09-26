@@ -23,6 +23,8 @@ struct FakeTransport {
     batches: tokio::sync::Mutex<UnboundedReceiver<Vec<Inbound>>>,
     received: StdMutex<u32>,
     sent: UnboundedSender<Sent>,
+    /// Files the bridge asked to download, all of which fail.
+    downloads: StdMutex<u32>,
 }
 
 #[async_trait]
@@ -62,6 +64,11 @@ impl Transport for FakeTransport {
             .unwrap();
         Ok(SendOutcome::Delivered)
     }
+
+    async fn download(&self, _media: &Media, _max_bytes: u64) -> Result<Downloaded> {
+        *self.downloads.lock().unwrap() += 1;
+        bail!("the fake platform serves no files")
+    }
 }
 
 /// One account's bridge under test: its store and the transport it runs.
@@ -96,6 +103,7 @@ impl Bench {
             batches: tokio::sync::Mutex::new(batches),
             received: StdMutex::new(0),
             sent: sender,
+            downloads: StdMutex::new(0),
         };
         let bench = Self {
             directory,
@@ -377,4 +385,47 @@ async fn an_owner_only_account_checkpoints_anothers_message_without_answering_it
             assert!(peer.sent.try_recv().is_err());
         })
         .await;
+}
+
+#[tokio::test]
+async fn a_voice_message_without_a_transcript_gets_the_voice_reply_and_nothing_else() {
+    let (bench, mut peer) = Bench::owned_by("alice");
+    let Inbound::Text(mut voice) = message("v1", "alice", "") else {
+        unreachable!()
+    };
+    voice.media.push(Media {
+        kind: MediaKind::Audio,
+        name: String::new(),
+        size: Some(1024),
+        mime: Some("audio/opus".into()),
+        transcript: None,
+        source: "file_v3_voice".into(),
+    });
+    peer.push(vec![Inbound::Text(voice)]);
+    bench
+        .run(async {
+            let reply = peer.sent().await;
+            assert_eq!(
+                reply,
+                Sent {
+                    to: "alice".into(),
+                    reply_to: "re-v1".into(),
+                    text: VOICE_REPLY.into(),
+                }
+            );
+            eventually(|| {
+                let saved = bench.state();
+                saved.cursor == "c1" && saved.seen == ["v1"] && saved.pending.is_empty()
+            })
+            .await;
+            assert!(bench.state().in_flight.is_empty());
+            // No session was opened: the next message's is the first.
+            peer.push(vec![message("m2", "alice", "hi")]);
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hi");
+            finish_turn(&mut side, "hello").await;
+            assert_eq!(peer.sent().await.reply_to, "re-m2");
+        })
+        .await;
+    assert_eq!(*bench.transport.downloads.lock().unwrap(), 0);
 }

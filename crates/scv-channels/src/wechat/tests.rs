@@ -106,6 +106,38 @@ fn voice_transcripts_quotes_and_files_come_through() {
 }
 
 #[test]
+fn a_voice_message_is_answered_by_a_turn_only_with_its_transcript() {
+    use crate::intake::{Intake, Verdict, classify};
+    use base64::Engine as _;
+    let key = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+    let voice = |transcript: serde_json::Value| {
+        let message = serde_json::json!({"message_id":"m", "message_type":1,
+            "from_user_id":"u", "context_token":"c", "item_list":[{"type":3,
+            "voice_item":{"encode_type":6,"text":transcript,
+            "media":{"encrypt_query_param":"p","aes_key":key}}}]});
+        inbound(&message).unwrap()
+    };
+    let state = crate::state::BridgeState::default();
+    let conversations = std::collections::HashMap::new();
+    let intake = Intake {
+        state: &state,
+        conversations: &conversations,
+        owner: Some("u"),
+        tool_owner: None,
+        senders: crate::state::Senders::Owner,
+    };
+    let heard = voice(serde_json::json!("call me"));
+    assert!(matches!(classify(&heard, &intake), Verdict::Turn { .. }));
+    for missing in [serde_json::Value::Null, serde_json::json!("")] {
+        let unheard = voice(missing);
+        assert!(matches!(
+            classify(&unheard, &intake),
+            Verdict::Unheard(sender) if sender.key == "u"
+        ));
+    }
+}
+
+#[test]
 fn preserves_string_and_unsigned_numeric_message_ids() {
     assert_eq!(
         message_id(&serde_json::json!({"message_id": "string-id"})).as_deref(),

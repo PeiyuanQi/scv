@@ -323,3 +323,34 @@ fn checkpoint_keeps_the_newest_time_per_chat_within_bounds() {
     assert_eq!(checkpoint.chats["oc_10"].last_ms, before);
     assert!(Checkpoint::parse("garbage").chats.is_empty());
 }
+
+#[test]
+fn a_voice_message_gets_the_voice_reply_because_feishu_sends_no_transcript() {
+    use crate::intake::{Intake, Verdict, classify};
+    let parsed = parse_event(
+        &event(
+            "p2p",
+            "audio",
+            json!({"file_key": "file_v3_voice", "duration": 2000}),
+            json!([]),
+        ),
+        Some(BOT),
+    );
+    let Some(Event::Message(received)) = parsed else {
+        panic!("expected a message")
+    };
+    let state = crate::state::BridgeState::default();
+    let conversations = std::collections::HashMap::new();
+    let intake = Intake {
+        state: &state,
+        conversations: &conversations,
+        owner: Some("ou_user"),
+        tool_owner: None,
+        senders: crate::state::Senders::Owner,
+    };
+    let Verdict::Unheard(sender) = classify(&received.inbound, &intake) else {
+        panic!("a Feishu voice message gets the voice reply");
+    };
+    assert_eq!(sender.message.reply_to, "om_1");
+    assert!(sender.owner_chat);
+}

@@ -699,6 +699,105 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
 }
 
 #[tokio::test]
+async fn full_bridge_answers_the_owners_voice_message_with_the_voice_reply() {
+    let mut fake = Fake::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = credentials::Store::new(
+        &crate::Layout::new(directory.path()),
+        crate::feishu::CHANNEL,
+    );
+    store.save_account("default", &account()).unwrap();
+    let last = now_ms() - 60_000;
+    let mut saved = store.load_state("default").unwrap();
+    saved.cursor = Checkpoint {
+        chats: [(
+            "oc_dm".to_owned(),
+            inbound::ChatMark {
+                group: false,
+                last_ms: last,
+            },
+        )]
+        .into(),
+    }
+    .to_json();
+    store.save_state("default", &saved).unwrap();
+    // Feishu sends a voice message as an Opus file and never a transcript.
+    let mut voice = history_item("om_voice", "", last + 1_000);
+    voice["msg_type"] = json!("audio");
+    voice["body"]["content"] =
+        json!(json!({"file_key": "file_v3_voice", "duration": 2000}).to_string());
+    fake.script(
+        "/open-apis/im/v1/messages?",
+        200,
+        json!({"code": 0, "data": {"has_more": false, "items": [voice]}}),
+    );
+    let transport = fake.transport();
+    // No daemon listens here: a turn would fail with the failure reply.
+    let socket = directory.path().join("missing.sock");
+    let media = crate::MediaOptions::new(
+        &crate::Layout::new(directory.path()),
+        "feishu",
+        "default",
+        crate::MediaSettings::default(),
+    );
+    let detached = crate::hub::Link::detached();
+    let run = crate::serve(
+        &transport,
+        crate::BridgeRun {
+            account: "default",
+            workspace: directory.path(),
+            socket: &socket,
+            owner: Some("ou_owner"),
+            tool_owner: None,
+            senders: crate::state::Senders::Owner,
+            media,
+            link: &detached,
+            report: &|_| {},
+        },
+        &store,
+        |credentials| Ok(credentials == &account()),
+    );
+    let peer = async {
+        // Every request up to the reply, none of them for the voice file.
+        let reply = tokio::time::timeout(WAIT, async {
+            loop {
+                let request = fake.requests.recv().await.unwrap();
+                assert!(!request.route.contains("/resources/"), "{}", request.route);
+                if request
+                    .route
+                    .starts_with("/open-apis/im/v1/messages/om_voice/reply")
+                {
+                    return request;
+                }
+            }
+        })
+        .await
+        .expect("the voice reply is sent");
+        let content: Value = serde_json::from_str(reply.body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["text"], crate::VOICE_REPLY);
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let state = store.load_state("default").unwrap();
+                if state.pending.is_empty() && state.seen.iter().any(|id| id == "om_voice") {
+                    assert!(state.in_flight.is_empty());
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        while let Ok(request) = fake.requests.try_recv() {
+            assert!(!request.route.contains("/resources/"), "{}", request.route);
+        }
+    };
+    tokio::select! {
+        result = run => panic!("the bridge stopped: {result:?}"),
+        () = peer => {}
+    }
+}
+
+#[tokio::test]
 async fn registration_waits_for_the_scan_and_follows_a_lark_tenant() {
     let mut fake = Fake::start().await;
     let endpoints = Endpoints::local(&fake.origin);

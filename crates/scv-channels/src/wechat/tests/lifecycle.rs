@@ -152,6 +152,11 @@ impl<'a> Bridge<'a> {
         self
     }
 
+    fn senders(mut self, senders: crate::state::Senders) -> Self {
+        self.senders = senders;
+        self
+    }
+
     fn media(mut self, media: crate::MediaOptions) -> Self {
         self.media = Some(media);
         self
@@ -753,6 +758,8 @@ struct FakeIlink {
     /// CDN downloads by route, and the bodies posted to `/cdn/upload`.
     files: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
     uploads: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Every CDN download route requested, in order.
+    downloads: Arc<Mutex<Vec<String>>>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -769,18 +776,24 @@ impl FakeIlink {
             std::collections::HashMap::<String, Vec<u8>>::new(),
         ));
         let uploads = Arc::new(Mutex::new(Vec::new()));
-        let (served, posted) = (Arc::clone(&files), Arc::clone(&uploads));
+        let downloads = Arc::new(Mutex::new(Vec::new()));
+        let (served, posted, fetched) = (
+            Arc::clone(&files),
+            Arc::clone(&uploads),
+            Arc::clone(&downloads),
+        );
         let server = tokio::spawn(async move {
             let cursor = Arc::new(std::sync::atomic::AtomicU64::new(0));
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                let (queue, sent, script, cursor, served, posted) = (
+                let (queue, sent, script, cursor, served, posted, fetched) = (
                     Arc::clone(&queue),
                     sent.clone(),
                     Arc::clone(&script),
                     Arc::clone(&cursor),
                     Arc::clone(&served),
                     Arc::clone(&posted),
+                    Arc::clone(&fetched),
                 );
                 tokio::spawn(async move {
                     let (mut stream, route, raw) = read_raw_request(stream).await;
@@ -800,6 +813,7 @@ impl FakeIlink {
                         return;
                     }
                     if route.starts_with("/cdn/") {
+                        fetched.lock().unwrap().push(route.clone());
                         let file = served.lock().unwrap().get(&route).cloned();
                         match file {
                             Some(bytes) => {
@@ -851,6 +865,7 @@ impl FakeIlink {
             responses,
             files,
             uploads,
+            downloads,
             server,
         }
     }
@@ -2177,6 +2192,60 @@ async fn a_restart_resumes_sending_files_where_it_stopped_with_the_same_client_i
         .await;
         assert!(!second.exists());
         assert_eq!(ilink.uploads.lock().unwrap().len(), 1);
+        cancel.cancel();
+    };
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
+}
+
+#[tokio::test]
+async fn an_untranscribed_voice_message_gets_the_voice_reply_without_a_download() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("owner");
+    let base = ilink.base.clone();
+    let key = [5u8; 16];
+    let aes_key = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(key)
+    };
+    let url = ilink.serve_file("voice", crate::wechat::cdn::encrypt(b"#!SILK_V3", &key));
+    let voice = |id: &str, transcript: Option<&str>| {
+        json!({"message_id":id, "message_type":1, "from_user_id":"owner",
+            "context_token":format!("ctx-{id}"), "item_list":[{"type":3,"voice_item":{
+            "encode_type":6,"text":transcript,"media":{"full_url":url,"aes_key":aes_key}}}]})
+    };
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store)
+        .owner(&owner)
+        .senders(crate::state::Senders::Owner);
+    let peer = async {
+        // iLink sent no transcript: the fixed reply, on the message's own
+        // context token, with no download and no session.
+        ilink.push(vec![voice("v1", None)]);
+        let body = ilink.sent().await;
+        assert_eq!(body["msg"]["context_token"], "ctx-v1");
+        assert_eq!(sent_text(&body), crate::VOICE_REPLY);
+        assert!(ilink.downloads.lock().unwrap().is_empty());
+        // With a transcript it works as before: downloaded for the owner and
+        // attached to a turn with what it says.
+        ilink.push(vec![voice("v2", Some("call me"))]);
+        let (mut side, _) = accept_session(&daemon).await;
+        let turn = next_frame(&mut side).await;
+        let attachments = turn["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 1, "{turn}");
+        assert_eq!(attachments[0]["kind"], "audio");
+        assert_eq!(attachments[0]["mime"], "audio/silk");
+        assert_eq!(attachments[0]["transcript"], "call me");
+        assert_eq!(
+            std::fs::read(attachments[0]["path"].as_str().unwrap()).unwrap(),
+            b"#!SILK_V3"
+        );
+        assert_eq!(ilink.downloads.lock().unwrap().len(), 1);
+        finish_turn(&mut side, "calling").await;
+        assert_eq!(sent_text(&ilink.sent().await), "calling");
         cancel.cancel();
     };
     bridge.run(&cancel, Duration::from_secs(10), peer).await;

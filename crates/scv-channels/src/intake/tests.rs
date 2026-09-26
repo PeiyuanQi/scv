@@ -357,3 +357,78 @@ fn a_dropped_sender_never_gets_the_busy_reply_and_seen_ids_stay_ignored() {
         Verdict::Claimed
     );
 }
+
+/// A voice message from `sender` with `transcript`, `text` beside it, and
+/// `more` files.
+fn voice(sender: &str, transcript: Option<&str>, text: &str, more: &[MediaKind]) -> Inbound {
+    let file = |kind: MediaKind, transcript: Option<&str>| crate::Media {
+        kind,
+        name: String::new(),
+        size: None,
+        mime: None,
+        transcript: transcript.map(str::to_owned),
+        source: "source".into(),
+    };
+    let mut message = Message::text("v", sender, text, "context", None);
+    message.media.push(file(MediaKind::Audio, transcript));
+    message
+        .media
+        .extend(more.iter().map(|kind| file(*kind, None)));
+    Inbound::Text(message)
+}
+
+#[test]
+fn a_voice_message_nobody_transcribed_gets_the_voice_reply_instead_of_a_turn() {
+    let state = state::BridgeState::default();
+    let conversations = HashMap::new();
+    let anyone = quiet(&state, &conversations);
+    for unheard in [
+        voice("other", None, "", &[]),
+        voice("other", Some(" "), " ", &[]),
+    ] {
+        let Verdict::Unheard(sender) = classify(&unheard, &anyone) else {
+            panic!("an untranscribed voice message gets the voice reply");
+        };
+        assert_eq!(sender.key, "other");
+    }
+    // A transcript, text, or another file leaves something for a turn.
+    for heard in [
+        voice("other", Some("call me"), "", &[]),
+        voice("other", None, "listen", &[]),
+        voice("other", None, "", &[MediaKind::Image]),
+    ] {
+        assert!(
+            matches!(classify(&heard, &anyone), Verdict::Turn { .. }),
+            "a voice message with something else runs a turn"
+        );
+    }
+    // Only those the account answers get it.
+    let owned = owned(&state, &conversations, Some("owner"));
+    let from_owner = voice("owner", None, "", &[]);
+    let Verdict::Unheard(sender) = classify(&from_owner, &owned) else {
+        panic!("the owner gets the voice reply");
+    };
+    assert!(sender.owner_chat);
+    assert_eq!(
+        classify(&voice("other", None, "", &[]), &owned),
+        Verdict::Stranger
+    );
+}
+
+#[test]
+fn the_voice_reply_needs_no_turn_slot() {
+    let conversations = HashMap::new();
+    let full = state::BridgeState {
+        in_flight: (0..MAX_CLAIMS)
+            .map(|index| claim(&index.to_string(), &format!("sender-{index}")))
+            .collect(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        classify(
+            &voice("other", None, "", &[]),
+            &quiet(&full, &conversations)
+        ),
+        Verdict::Unheard(_)
+    ));
+}

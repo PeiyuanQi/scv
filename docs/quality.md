@@ -123,11 +123,19 @@ Daemon and component changes require focused coverage for:
   direct and group conversation keys, tools and the owner limit only for the
   tool owner's direct chat, the owner recognized without the grant, other
   senders dropped unless the account answers anyone (and everyone dropped
-  without a known owner), busy beyond the claim and queue limits, and a full
-  session table closing only an idle conversation;
+  without a known owner), the voice reply for a voice message with neither a
+  transcript nor text (even at the work limits) while a transcript, text, or
+  another file still runs a turn, busy beyond the claim and queue limits, and
+  a full session table closing only an idle conversation;
+- the voice reply sent through the durable outbound path on the message's own
+  reply handle and the message checkpointed, with no download, session, or
+  turn: for any voice message on the bridge, for every Feishu voice message
+  (parsed and through the full bridge), and for a WeChat voice message whose
+  transcript is missing, while one with a transcript is still downloaded for
+  the owner and attached with it;
 - refused replies held per conversation within count, byte, total, and age
   limits, delivered ahead of the next reply only as far as one message allows,
-  restored when the carrying reply is refused, busy notices never held, and
+  restored when the carrying reply is refused, busy and voice notices never held, and
   reply content absent from logs;
 - no-tools remote sessions by default, SIGTERM/Ctrl+C shutdown, and tracked
   session cleanup;

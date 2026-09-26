@@ -218,7 +218,7 @@ following one. A held reply is cut to half the message limit, and the store
 keeps at most 4 replies and 32 KiB per conversation, 128 in total, for 7 days,
 discarding the oldest first and logging only how many it discarded. If the
 carrying reply is refused too, the carried replies return to the store ahead
-of it. The busy notice described below is never held. Text replies are split at
+of it. The busy and voice notices described below are never held. Text replies are split at
 Unicode boundaries into messages of at most 16 KiB; only the first carries the
 context token. A turn's answer is kept to 64 KiB, and a longer one is cut with
 a `[reply truncated]` note instead of failing the turn. Typing indicators are
@@ -360,12 +360,24 @@ accepts image input, and the owner's model sees every file's path, so it can
 read it or hand it to an agent. A file that is not downloaded leaves a note
 for the model, such as `[file a.zip: not opened for this sender]`,
 `[image: download failed]`, or `[video clip.mp4: not downloaded, larger than
-the 50 MB limit]`; a voice message keeps its transcript in the note. A message
-with no text, no downloaded file, and no voice transcript gets a short reply
-instead of a turn, such as `SCV can read text and pictures from you here, but
-not a file.` Files
-and copies of sent files are removed after `keep_days` (7), checked when the
-account starts and hourly.
+the 50 MB limit]`. A voice message with the platform's transcript keeps it,
+in the attachment or in the note. A message with no text, no downloaded file,
+and no voice transcript gets a short reply instead of a turn, such as `SCV can
+read text and pictures from you here, but not a file.`
+
+The model cannot listen to audio, so a voice message that carries no
+transcript and no text is answered as soon as it arrives with "SCV cannot
+listen to voice messages yet. Please type your message instead.": no
+download, no daemon session, and no model turn. That is every Feishu voice
+message, which comes without a transcript, and a WeChat one whose iLink
+transcript is missing. Like the busy notice, the reply is queued as a durable
+pending delivery on the message's own reply handle, retried with the same
+client ID, and never held if the platform refuses it; the message is then
+marked seen like any answered one. It goes to whoever the account answers
+(see [Sessions and safety](#sessions-and-safety)), and needs no turn slot.
+
+Files and copies of sent files are removed after `keep_days` (7), checked
+when the account starts and hourly.
 
 **Sending.** In an owner's session the model can call
 [`chat_attach`](tools.md#sending-files-to-a-chat-chat_attach), which copies
@@ -392,7 +404,8 @@ CDN stores files encrypted with AES-128-ECB and PKCS#7 padding. SCV downloads
 only over HTTPS from `qq.com` hosts, decrypts, and checks the padding. Voice
 items give their encoding (`encode_type` 6 is SILK, 5 AMR, 7 MP3, 8 Ogg) and
 often iLink's transcript (`voice_item.text`); SCV keeps the audio as it is
-and passes the transcript. A quoted message (`ref_msg`) becomes
+and passes the transcript. A voice message without one gets the voice reply
+described above instead. A quoted message (`ref_msg`) becomes
 `[Quoting: <title> | <text or [image]>]` before the text, and its file, if
 any, is downloaded like the message's own. File names come from
 `file_item.file_name`.
@@ -414,7 +427,9 @@ backoff, then again later with the same client ID.
 
 Message types map as follows. `image` (`image_key`), `file` (`file_key`,
 `file_name`), `audio` (`file_key`, Opus), and `media` (video, `file_key`,
-`file_name`) become files; a `post` keeps its embedded `img` and `media`
+`file_name`) become files, although a voice message, which Feishu sends
+without a transcript, gets the voice reply above rather than a download; a
+`post` keeps its embedded `img` and `media`
 elements as files and `emotion` elements as `[emoji]`. `sticker`,
 `share_chat`, `share_user`, `location`, and `interactive` cards become text:
 `[sticker]` (Feishu does not serve sticker files), `[shared a group chat]`,
