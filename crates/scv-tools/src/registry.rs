@@ -9,6 +9,7 @@ use crate::{
     args::Timeouts,
     builtin::{
         chat_attach,
+        chat_history::{ChatHistoryTool, ChatKeepTool},
         fs::{ReadTool, WriteTool},
         shell::BashTool,
         skill::ReadSkillTool,
@@ -55,6 +56,12 @@ pub fn builtin_registry(
     }))?;
     if let Some(chat) = config.chat_attach.clone() {
         registry.register(Arc::new(chat_attach::ChatAttachTool { config: chat }))?;
+    }
+    if let Some(history) = config.chat_history.clone() {
+        registry.register(Arc::new(ChatHistoryTool {
+            config: history.clone(),
+        }))?;
+        registry.register(Arc::new(ChatKeepTool { config: history }))?;
     }
     // A delegated SCV at the depth limit may not delegate further.
     let depth = config

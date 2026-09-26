@@ -26,6 +26,7 @@ pub struct Config {
     pub(crate) tui: TuiConfig,
     pub update: UpdateConfig,
     pub(crate) notify: NotifyConfig,
+    pub(crate) history: HistoryConfig,
     pub(crate) provider_limits: ProviderLimitsFile,
     pub(crate) skills: SkillsConfig,
     pub(crate) agents: AgentsConfig,
@@ -74,6 +75,33 @@ pub(crate) struct NotifyConfig {
     /// goes to the owner of the first one that is connected, on that one
     /// account only. Empty: the chat the owner last wrote from.
     pub(crate) owner: Vec<String>,
+}
+
+/// The chat log of the owner's direct chats and the files kept from them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct HistoryConfig {
+    /// Minutes without a message after which the next one starts a new
+    /// episode, which a new session no longer reloads.
+    pub(crate) episode_gap_minutes: u64,
+    /// The share of each disk holding the chat log, chat media, or kept
+    /// files that must stay free; below it the owner is told and SCV stops
+    /// saving new files from chat. 0 turns the check off.
+    pub(crate) min_free_percent: u8,
+    /// Where files the owner asks to keep go, under
+    /// `<channel>/<account>/<conversation>/files/`; the history directory
+    /// when unset.
+    pub(crate) archive_dir: Option<PathBuf>,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            episode_gap_minutes: 120,
+            min_free_percent: 20,
+            archive_dir: None,
+        }
+    }
 }
 
 impl Default for ProviderConfig {

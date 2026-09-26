@@ -69,12 +69,14 @@ pub(crate) struct Session {
 impl Session {
     /// Start a session for a conversation on `channel` (its user-facing
     /// name, such as `WeChat`), so the model knows it is answering a chat
-    /// and, with tools, may attach files to its replies.
+    /// and, with tools, may attach files to its replies. A conversation with
+    /// a `chat` log starts with its open episode.
     pub(crate) async fn connect(
         socket: &Path,
         workspace: &Path,
         tools: bool,
         channel: Option<&str>,
+        chat: Option<scv_protocol::ChatLog>,
     ) -> Result<Self> {
         let stream = UnixStream::connect(socket).await.with_context(|| {
             format!(
@@ -128,6 +130,7 @@ impl Session {
                 // (and a tool-free one makes none), so background jobs may
                 // get the same answer without a turn to carry it.
                 auto_approve: Some(tools),
+                chat,
             })
             .await?;
         loop {
@@ -373,6 +376,48 @@ impl Session {
         })
         .await?;
         Ok(true)
+    }
+
+    /// Read events until no server-started turn (a background report) runs,
+    /// so the session can be cleared. Their answers wait in `take_reports`.
+    /// Cancel-safe.
+    pub(crate) async fn settle(&mut self) -> Result<()> {
+        while self.reporting() {
+            let event = self.event().await?;
+            self.observe(&event);
+            self.absorb(event).await?;
+        }
+        Ok(())
+    }
+
+    /// Forget the session's history (`/new`), keeping its background jobs.
+    /// Fails while a turn runs, such as a background report.
+    pub(crate) async fn clear(&mut self) -> Result<()> {
+        let request_id = Uuid::new_v4().to_string();
+        self.send(&ClientMessage::SessionClear {
+            request_id: request_id.clone(),
+            session_id: self.session_id.clone(),
+        })
+        .await?;
+        loop {
+            let event = self.event().await?;
+            self.observe(&event);
+            if self.is_other(&event) {
+                self.absorb(event).await?;
+                continue;
+            }
+            match event {
+                ServerEvent::SessionCleared { request_id: id, .. } if id == request_id => {
+                    return Ok(());
+                }
+                ServerEvent::Error {
+                    request_id: Some(id),
+                    message,
+                    ..
+                } if id == request_id => bail!("{message}"),
+                _ => {}
+            }
+        }
     }
 
     /// Run one turn and return its answer, at most `max_bytes` (a longer

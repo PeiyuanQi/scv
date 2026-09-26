@@ -464,8 +464,14 @@ if the platform refuses it; the message is then marked seen like any
 answered one. It goes to whoever the account answers
 (see [Sessions and safety](#sessions-and-safety)), and needs no turn slot.
 
-Files and copies of sent files are removed after `keep_days` (7), checked
-when the account starts and hourly.
+Files and copies of sent files are removed after `keep_days` (365), checked
+when the account starts and hourly; a file the owner keeps
+([`chat_keep`](tools.md#keeping-chat-files-chat_keep)) leaves the media
+directory for good (see [Chat history](#chat-history)). While a disk holding
+chat files is nearly full, nothing is downloaded: the model gets a note such
+as `[image cat.jpg: not saved, the disk is nearly full]`, and a message with
+nothing else gets "SCV's disk is nearly full, so it cannot save files from
+chat right now."
 
 **Sending.** In an owner's session the model can call
 [`chat_attach`](tools.md#sending-files-to-a-chat-chat_attach), which copies
@@ -549,6 +555,91 @@ scope gets code 99991672; SCV then logs that `im:resource` or `im:message` must
 be added in the app's developer console and a version published, and the
 model sees `[… download failed]`.
 
+## Chat history
+
+The account owner's direct chat on each account is logged, so a conversation
+carries on when its daemon session ends and the model can look further back
+when the owner refers to something older. Other senders and group chats,
+including the owner's messages in a group, are not logged.
+
+**What is recorded.** Each record is one JSON line holding Unix milliseconds,
+the host's local time (`2026-09-26 14:04:05 -07:00`), and who wrote it:
+
+- `owner`: the owner's messages, with what they quoted or forwarded, their
+  files (kind, name, where they were saved, and a voice message's platform
+  transcript), and notes about files that did not come in;
+- `scv`: the model's answers, with the names of the files it sent, and its
+  background reports (marked `report`);
+- `system`: SCV's own messages in that chat: notices, questions to the owner
+  and their acknowledgements, and fixed replies such as the busy, voice, or
+  failure reply, including those written after a crash or restart for a
+  message that was never answered and the list of stopped background jobs.
+
+Tool calls, tool output, and other senders' messages are never recorded.
+Text over 256 KiB is cut with a note. An account whose name is longer than 64
+characters, which `session.start` cannot name, is not logged.
+
+**Episodes.** A chat's log is a series of episodes. A message starts a new
+episode when the chat was quiet for `[history] episode_gap_minutes` (two
+hours), or after the owner sent `/new`; otherwise it joins the newest one.
+Each episode is one file,
+`$SCV_HOME/history/<channel>/<account>/<conversation>/<year>/<Monday>_<Sunday>/<start>.jsonl`,
+named in the host's local time after its first message: the calendar year,
+the Monday-to-Sunday week, and the time, such as
+`2026/2026-09-21_2026-09-27/2026-09-26T14-04-05.jsonl` (`-2` and up for a
+second episode started in the same second). The conversation directory is the
+same digest the media directory uses, so sender IDs never become paths. Files
+are mode `0600` and directories `0700`. The daemon uses the time zone it
+started with, so after the host's zone changes a restart picks up the new one.
+Years older than 120 are removed, checked when the account starts and hourly.
+
+**Carrying on.** When the owner's conversation starts a daemon session (its
+first message, or the first after its session idled out, broke, or the
+daemon restarted), the bridge names the log in `session.start` (`chat`; see
+[protocol](protocol.md#sessionstart)). The server then starts the session
+with the open episode (the newest one, unless it ended with `/new` or its last
+message is older than the gap, or dated more than five minutes ahead of the
+host's clock, as after the clock was set back) after a note saying where it came from: the
+newest messages up to 64 KiB of text, the owner's as user messages, the
+model's answers as its own, and SCV's own messages marked as such. The
+owner's new message is logged only after that, so it is not reloaded as well.
+A session that stays open keeps its context across an episode boundary:
+episodes decide only what a new session starts with.
+
+**Looking back.** An owner session with tools also gets
+[`chat_history`](tools.md#chat-history-chat_history), which searches, lists,
+and reads the log, and [`chat_keep`](tools.md#keeping-chat-files-chat_keep),
+which keeps a file the owner sent; its system prompt tells the model to look
+things up rather than guess or ask the owner to repeat them.
+
+**`/new`.** A message that is exactly `/new` (in any case, with no files and
+quoting nothing) starts a fresh conversation without a turn. In order with the
+chat's other messages, the bridge clears the session's history
+(`session.clear`; its background jobs keep running). A background report turn
+running then would block that, so the bridge lets it finish, for up to two
+minutes, sends its report, and clears afterwards. A session that still cannot
+be cleared is closed instead, unless it has background work left, in which case
+nothing changes and the owner is told "SCV is still reporting on background
+work here, so it kept this conversation going. Send /new again once that is
+done." Otherwise the bridge ends the open episode and replies "Started a new
+conversation. The earlier one stays in SCV's chat history." In a conversation
+that is not logged it only clears the session and replies "Started a new
+conversation." That reply is not logged, so the next message opens the new
+episode.
+
+**Kept files and disk space.** Received files stay in `state/media` for
+`keep_days` (365). `chat_keep` moves one to
+`<archive>/<channel>/<account>/<conversation>/files/`, where nothing removes
+it; the archive is `[history] archive_dir`, or else the history directory.
+`chat_attach` may send a chat's own kept files back to it. The daemon checks the free space of
+the disks holding the history directory, the media directory, and the archive
+at startup and every ten minutes. When one has less than `[history]
+min_free_percent` (20%) free, it tells the owner once, like the other
+[notices](#restarts-and-notices), and the bridges save no new files from chat
+(see [Media](#media)) until every such disk is at least two points above the
+floor again, which a second notice announces. The text of the chat is still
+logged.
+
 ## Background reports
 
 When the owner's session starts a background delegation (an `agent` call
@@ -630,7 +721,8 @@ restarting the unit, and the announcement reached the WeChat chat that asked.
 
 Notices nobody asked for (an update started from a terminal, a restart after
 the daemon stopped unexpectedly, an enabled account disconnected for ten
-minutes, which may mean its sign-in expired) go to the owner of the first
+minutes, which may mean its sign-in expired, and a disk holding chat files
+running low or recovering) go to the owner of the first
 connected account in `[notify].owner`, or else to the chat the owner last
 wrote from, and never through the account the notice is about. Each is queued
 in that account's outbox like a background report, in SCV's `system msg: `
@@ -738,7 +830,8 @@ only local CLI or daemon control (or an edit of `config.toml`) can change:
 Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A
 group message (a non-empty WeChat `group_id`, or a Feishu chat other than
 `p2p`) uses a separate session per group and sender, so group members never see the sender's direct-chat history. Sessions
-idle for 30 minutes after their last turn ends are dropped, and at most 32
+idle for 30 minutes after their last turn ends are dropped (the owner's next
+one carries on from the [chat history](#chat-history)), and at most 32
 sessions are live; a new conversation closes the least recently used idle one
 that has no background jobs running or reports to send, and gets the busy
 notice when every live conversation is busy that way.

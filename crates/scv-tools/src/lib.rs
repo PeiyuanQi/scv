@@ -31,7 +31,7 @@ mod process;
 mod registry;
 mod sync;
 
-pub use builtin::{chat_attach, web};
+pub use builtin::{chat_attach, chat_history, web};
 pub use config::{AcpAgentLaunch, AgentAdapterConfig, DelegationContext, SkillMap, ToolsConfig};
 pub use delegate::{
     adapters,

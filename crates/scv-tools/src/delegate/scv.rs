@@ -421,6 +421,7 @@ impl ScvAgentTool {
                 delegation_depth: Some(depth),
                 channel: None,
                 auto_approve: None,
+                chat: None,
             })
             .await?;
             loop {

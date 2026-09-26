@@ -105,6 +105,7 @@ async fn session(
             delegation_depth: None,
             channel: None,
             auto_approve: None,
+            chat: None,
         },
     ] {
         write

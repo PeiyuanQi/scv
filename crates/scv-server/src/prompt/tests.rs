@@ -23,6 +23,7 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
             agents: &agents,
             background: true,
             channel: None,
+            chat_history: false,
         },
     );
     assert!(prompt.starts_with(&config.agent.system_prompt), "{prompt}");
@@ -84,6 +85,7 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
             agents: &agents,
             background: false,
             channel: None,
+            chat_history: false,
         },
     );
     assert!(foreground.contains("Hand substantial work to an agent"));
@@ -98,6 +100,7 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
             agents: &[],
             background: false,
             channel: None,
+            chat_history: false,
         },
     );
     assert!(!tool_free.contains("# Delegating work"), "{tool_free}");
@@ -118,6 +121,7 @@ fn the_prompt_names_per_agent_task_defaults() {
             agents: &agents,
             background: false,
             channel: None,
+            chat_history: false,
         },
     );
     assert!(
@@ -154,6 +158,7 @@ fn defaults_without_a_note_apply_whenever_that_agent_runs() {
             agents: &agents,
             background: true,
             channel: None,
+            chat_history: false,
         },
     );
     assert!(
@@ -175,6 +180,7 @@ fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
             agents: &agents,
             background: true,
             channel: Some("WeChat"),
+            chat_history: false,
         },
     );
     assert!(owner.contains("# Chat channel"), "{owner}");
@@ -198,6 +204,7 @@ fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
             agents: &[],
             background: false,
             channel: Some("Feishu"),
+            chat_history: false,
         },
     );
     assert!(guest.contains("takes place on Feishu"), "{guest}");

@@ -18,7 +18,7 @@ use crate::{
     config::{ConfigOverrides, Instance},
     confirm,
     connection::run_managed,
-    restart,
+    disk, restart,
 };
 
 /// Serve one session over stdin and stdout for the instance at `layout`.
@@ -125,6 +125,13 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
         &components,
         cancellation.clone(),
     );
+    let disk = tokio::spawn(disk::monitor(
+        instance.clone(),
+        Arc::clone(&hub),
+        restarter.notifier().clone(),
+        cancellation.clone(),
+    ));
+    let _disk_abort = AbortGuard(disk.abort_handle());
     let confirmer = confirm::Confirmer::new(
         hub,
         Arc::clone(&registry),

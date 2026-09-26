@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub use attachment::{Attachment, ReplyAttachment, reply_attachment};
 pub use background::{JobChange, JobStatus, OriginKind, TurnOrigin, job_agent};
-pub use client::ClientMessage;
+pub use client::{ChatLog, ClientMessage};
 pub use daemon::{
     ComponentHealth, ComponentState, ConfirmInfo, ConfirmState, DEFAULT_CONFIRM_SECONDS,
     DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary, MAX_CONFIRM_SECONDS,

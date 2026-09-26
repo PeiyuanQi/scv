@@ -23,6 +23,9 @@ pub(crate) struct PromptContext<'a> {
     pub(crate) background: bool,
     /// The chat channel the session answers on.
     pub(crate) channel: Option<&'a str>,
+    /// Whether the model can look through the chat's log (`chat_history`)
+    /// and keep files from it (`chat_keep`).
+    pub(crate) chat_history: bool,
 }
 
 pub(crate) fn build_system_prompt(
@@ -90,6 +93,15 @@ pub(crate) fn build_system_prompt(
              reaches the user, and they never see your tool calls or their output, so put what \
              you did and what you found into that message in words.\n"
         ));
+        if context.chat_history {
+            prompt.push_str(
+                "Earlier conversations in this chat are kept in a log that outlasts this \
+                 session. When the user refers to something that is not in this conversation, \
+                 look it up with chat_history instead of guessing or asking them to repeat it. \
+                 Files the user sends are removed after a while; when they ask to keep one, \
+                 use chat_keep.\n",
+            );
+        }
     }
     Ok(prompt)
 }

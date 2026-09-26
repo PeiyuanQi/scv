@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.1`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.1` pins.
+The current workspace release is `0.3.2`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.2` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,38 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.2
+
+`0.3.2` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.1` checks the new release and can roll it back.
+
+What changes for a person running SCV:
+
+- **SCV remembers the owner's chats.** Each account owner's direct chat is
+  logged under `$SCV_HOME/history/`, in episodes split by two quiet hours. A
+  new session carries on from the open episode, so a conversation survives
+  the daemon restarting or its session idling out, and the model can search
+  and read earlier episodes with `chat_history`. `/new` in chat starts a
+  fresh conversation. See [chat history](channels.md#chat-history).
+- **Chat files are kept a year** instead of 7 days (`keep_days` now defaults
+  to 365), and the owner can have one kept for good (`chat_keep`, "keep
+  this").
+- **A nearly full disk** (below `[history] min_free_percent`, 20%, of the
+  disks holding chat files) is announced to the owner, and SCV saves no new
+  files from chat until there is room.
+- The new `[history]` table sets the episode gap, the free-space floor, and
+  where kept files go. `0.3.1` rejects that table, so remove it before
+  going back to `0.3.1` by hand. A rollback also shows `history/` under "Not
+  used by SCV" and removes chat media older than 7 days.
+
+What changes for code that embeds SCV's crates:
+
+- `session.start` takes an optional `chat` log reference
+  (`scv_protocol::ChatLog`), and `scv_client::history` reads and writes the
+  log. `AccountRun` has an `episode_gap`, `Layout` a `history()` path, the
+  tools configuration a `chat_history` entry, and the channel hub a low-disk
+  flag.
 
 ## Upgrading to 0.3.1
 

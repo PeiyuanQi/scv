@@ -4,6 +4,7 @@
 
 pub(crate) mod build;
 mod queue;
+mod reload;
 pub(crate) mod turn;
 
 use std::{
@@ -64,6 +65,8 @@ pub(crate) struct SessionClient {
     pub(crate) channel: Option<String>,
     /// The client approves every approval request without asking anyone.
     pub(crate) auto_approve: bool,
+    /// The conversation's chat log, relative to the history directory.
+    pub(crate) chat: Option<PathBuf>,
 }
 
 pub(crate) fn valid_channel_name(name: &str) -> bool {

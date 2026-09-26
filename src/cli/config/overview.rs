@@ -34,6 +34,10 @@ pub(crate) fn render(
         (layout.credentials(), "channel sign-ins SCV writes"),
         (layout.agents(), "private homes of delegated agents"),
         (layout.skills(), "your skills"),
+        (
+            layout.history(),
+            "chat log of the owners' direct chats, and files kept from them",
+        ),
         (layout.state(), "runtime state SCV writes; not for editing"),
     ];
     if let Some(explicit) = &overrides.config_file {

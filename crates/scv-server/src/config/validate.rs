@@ -14,6 +14,8 @@ pub(super) const MAX_PROVIDER_RETRIES: usize = 10;
 pub(super) const MAX_BACKGROUND_JOBS: usize = 16;
 /// Longest `[agents.<name>] use_for` note.
 pub(super) const MAX_USE_FOR_BYTES: usize = 500;
+/// The longest episode gap: a year.
+const MAX_EPISODE_GAP_MINUTES: u64 = 365 * 24 * 60;
 
 impl ApprovalPolicy {
     fn strictness(self) -> u8 {
@@ -150,6 +152,20 @@ impl Config {
                     "notify.owner entries must look like \"feishu:default\" (<channel>:<account>)"
                 );
             }
+        }
+        if !(1..=MAX_EPISODE_GAP_MINUTES).contains(&self.history.episode_gap_minutes) {
+            bail!("history.episode_gap_minutes must be between 1 and {MAX_EPISODE_GAP_MINUTES}");
+        }
+        if self.history.min_free_percent > 90 {
+            bail!("history.min_free_percent must be at most 90");
+        }
+        if self
+            .history
+            .archive_dir
+            .as_ref()
+            .is_some_and(|dir| !dir.is_absolute())
+        {
+            bail!("history.archive_dir must be an absolute path (or start with ~/)");
         }
         if self.provider.kind != "openai-compatible" {
             bail!("provider.kind must be openai-compatible");
@@ -460,6 +476,7 @@ pub(super) fn validate_project_keys(value: &toml::Value) -> Result<()> {
         "update",
         "channels",
         "notify",
+        "history",
     ] {
         if table.contains_key(forbidden) {
             bail!("project configuration cannot set [{forbidden}]");

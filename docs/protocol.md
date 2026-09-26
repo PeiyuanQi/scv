@@ -39,7 +39,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.1"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.2"}}
 ```
 
 ### `daemon.control`
@@ -58,7 +58,7 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 {"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
-{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.1 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.2 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
 {"type":"daemon.control","request_id":"d11","command":{"action":"confirm_status","id":"5f0c9a1e2b3d"}}
 ```
 
@@ -171,9 +171,20 @@ could carry their requests, get the same answer (see
 [Background jobs](tools.md#background-jobs)). It grants nothing the client
 could not grant itself. Both fields are additive and keep protocol version 3.
 
+`chat` names the chat log of the conversation the session answers, as
+`channel`, `account`, and `conversation` (a digest of the conversation), each
+at most 64 ASCII letters, digits, `-`, or `_`; anything else is refused with
+`invalid_request`. The server finds the log under its own
+`$SCV_HOME/history/<channel>/<account>/<conversation>/` and starts the
+session with the log's open episode, and a session with tools offers
+`chat_history` and `chat_keep` for it (see
+[Chat history](channels.md#chat-history)). A chat bridge sends it for its
+account owner's direct chat. It is additive too: a server that predates it
+ignores it.
+
 ```json
 {"type":"session.start","request_id":"2","cwd":"/workspace/project"}
-{"type":"session.start","request_id":"channel-session","cwd":"/workspace","no_tools":false,"channel":"WeChat","auto_approve":true}
+{"type":"session.start","request_id":"channel-session","cwd":"/workspace","no_tools":false,"channel":"WeChat","auto_approve":true,"chat":{"channel":"wechat","account":"default","conversation":"3fa9c2d17e5b8a04"}}
 ```
 
 ### `turn.start`
@@ -241,7 +252,8 @@ the protocol has no "always allow" state.
 
 The session must be idle. The server drops canonical messages, history
 compaction metadata, usage totals, and queued prompts while preserving the
-monotonic session sequence, then replies with `session.cleared`. The client
+monotonic session sequence and any background jobs, then replies with
+`session.cleared`. A chat bridge sends it when the user writes `/new`. The client
 clears its transcript only after that event.
 
 ## Server events
@@ -249,16 +261,16 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.1"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.2"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.1","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.1","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
-{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.1","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.2","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.2","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.2","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.

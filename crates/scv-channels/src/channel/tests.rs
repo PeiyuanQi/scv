@@ -100,6 +100,7 @@ fn the_bridge_grants_tools_only_with_an_owner_and_a_turn_timeout() {
         settings: &settings,
         owner: Some("owner@im.wechat"),
         tool_turn_timeout: None,
+        episode_gap: Duration::from_secs(7200),
         workspace: home.path(),
         socket: &home.path().join("state/server.sock"),
         link: &link,
@@ -126,6 +127,9 @@ fn the_bridge_grants_tools_only_with_an_owner_and_a_turn_timeout() {
         bridge.media.inbox,
         home.path().join("state/media/wechat/default")
     );
+    assert_eq!(bridge.log.root, home.path().join("history/wechat/default"));
+    assert_eq!(bridge.log.channel, "wechat");
+    assert_eq!(bridge.log.gap, Duration::from_secs(7200));
     let granted = AccountRun {
         tool_turn_timeout: Some(Duration::from_secs(1800)),
         ..run

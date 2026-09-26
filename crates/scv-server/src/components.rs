@@ -230,6 +230,13 @@ impl Component for ChannelAccount {
         });
         let socket = self.instance.layout.socket();
         let report = move |connected| health.contact(connected);
+        let episode_gap = self.instance.load(&self.workspace).map_or_else(
+            |error| {
+                tracing::warn!("The chat log uses the default episode gap: {error:#}");
+                crate::config::Config::default().episode_gap()
+            },
+            |config| config.episode_gap(),
+        );
         let run = scv_channels::AccountRun {
             layout: &self.instance.layout,
             account: &self.account,
@@ -237,6 +244,7 @@ impl Component for ChannelAccount {
             settings: &self.settings,
             owner: self.credentials.owner().filter(|owner| !owner.is_empty()),
             tool_turn_timeout,
+            episode_gap,
             workspace: &self.workspace,
             socket: &socket,
             link: &self.link,

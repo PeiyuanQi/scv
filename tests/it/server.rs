@@ -142,6 +142,7 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             delegation_depth: None,
             channel: None,
             auto_approve: None,
+            chat: None,
         },
     )
     .await;
@@ -249,6 +250,7 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
             delegation_depth: None,
             channel: None,
             auto_approve: None,
+            chat: None,
         },
     )
     .await;
@@ -369,6 +371,7 @@ async fn tool_results_are_replayed_after_their_calls() {
             delegation_depth: None,
             channel: None,
             auto_approve: None,
+            chat: None,
         },
     )
     .await;
@@ -553,6 +556,7 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
             delegation_depth: None,
             channel: None,
             auto_approve: None,
+            chat: None,
         },
     )
     .await;
@@ -715,6 +719,7 @@ async fn tool_free_sessions_get_no_web_access() {
             delegation_depth: None,
             channel: None,
             auto_approve: None,
+            chat: None,
         },
     )
     .await;
@@ -826,6 +831,7 @@ async fn chat_sessions_attach_files_and_show_images() {
             delegation_depth: None,
             channel: Some("WeChat".into()),
             auto_approve: None,
+            chat: None,
         },
     )
     .await;
@@ -912,5 +918,155 @@ async fn chat_sessions_attach_files_and_show_images() {
             .unwrap()
             .unwrap()
             .success()
+    );
+}
+
+#[tokio::test]
+async fn chat_sessions_carry_on_their_open_episode_and_can_search_their_log() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = read_json_body(&mut stream);
+        let events = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"blue\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        body
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    crate::support::write_private(
+        &home.path().join("config.toml"),
+        &format!(
+            "[provider]\nactive = \"fake\"\n\n[providers.fake]\nkind = \"openai-compatible\"\nmodel = \"fake-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n"
+        ),
+    );
+    // Half an hour ago the owner said something the new session must know.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let conversation = scv_client::history::conversation_path("wechat", "default", "0a1b").unwrap();
+    let mut log = scv_client::history::Log::new(
+        home.path().join("history").join(&conversation),
+        Duration::from_secs(7200),
+    );
+    log.append(
+        scv_client::history::Entry {
+            at: (now as u64 - 1800) * 1000,
+            text: "the door is blue".into(),
+            ..scv_client::history::Entry::default()
+        },
+        &scv_client::history::LocalTime::at(now - 1800, 0),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(home.path())
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    send(
+        &mut input,
+        &ClientMessage::Initialize {
+            request_id: "init".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "integration-test".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .await;
+    next_event(&mut lines).await;
+    let start = |conversation: &str| ClientMessage::SessionStart {
+        request_id: "session".into(),
+        cwd: workspace.path().display().to_string(),
+        provider: None,
+        model: None,
+        base_url: None,
+        no_tools: Some(false),
+        delegation_depth: None,
+        channel: Some("WeChat".into()),
+        auto_approve: Some(true),
+        chat: Some(scv_protocol::ChatLog {
+            channel: "wechat".into(),
+            account: "default".into(),
+            conversation: conversation.into(),
+        }),
+    };
+    // A log named with anything but plain parts is refused.
+    send(&mut input, &start("../0a1b")).await;
+    match next_event(&mut lines).await {
+        ServerEvent::Error { message, .. } => assert!(message.contains("chat"), "{message}"),
+        event => panic!("expected an error, received {event:?}"),
+    }
+    send(&mut input, &start("0a1b")).await;
+    let session_id = match next_event(&mut lines).await {
+        ServerEvent::SessionStarted { session_id, .. } => session_id,
+        event => panic!("expected session.started, received {event:?}"),
+    };
+    send(
+        &mut input,
+        &ClientMessage::TurnStart {
+            request_id: "turn".into(),
+            session_id,
+            prompt: "what colour was the door?".into(),
+            attachments: Vec::new(),
+        },
+    )
+    .await;
+    loop {
+        match next_event(&mut lines).await {
+            ServerEvent::TurnCompleted { .. } => break,
+            ServerEvent::TurnFailed { code, message, .. } => {
+                panic!("turn failed with {code}: {message}")
+            }
+            _ => {}
+        }
+    }
+    input.shutdown().await.unwrap();
+    drop(input);
+    let body = provider.join().unwrap();
+    let tools: Vec<&str> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        tools.contains(&"chat_history") && tools.contains(&"chat_keep"),
+        "{tools:?}"
+    );
+    assert!(
+        body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("look it up with chat_history"),
+    );
+    let texts: Vec<String> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["content"].to_string())
+        .collect();
+    assert_eq!(texts.len(), 3, "{texts:?}");
+    assert!(
+        texts[0].contains("reloaded the conversation so far"),
+        "{}",
+        texts[0]
+    );
+    assert!(texts[1].contains("the door is blue"), "{}", texts[1]);
+    assert!(
+        texts[2].contains("what colour was the door?"),
+        "{}",
+        texts[2]
     );
 }
