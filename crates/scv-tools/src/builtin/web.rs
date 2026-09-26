@@ -20,7 +20,9 @@ use reqwest::{
     dns::{Addrs, Name, Resolve, Resolving},
     redirect,
 };
-use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRisk, ToolSpec};
+use scv_core::{
+    Tool, ToolContext, ToolError, ToolFailure, ToolOutput, ToolRegistry, ToolRisk, ToolSpec,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -111,10 +113,12 @@ struct FetchArgs {
 impl WebFetchTool {
     fn parse_url(&self, value: &str) -> Result<Url, ToolError> {
         if value.len() > MAX_URL_BYTES {
-            return Err(ToolError(format!("url exceeds {MAX_URL_BYTES} bytes")));
+            return Err(ToolError::invalid_arguments(format!(
+                "url exceeds {MAX_URL_BYTES} bytes"
+            )));
         }
-        let url =
-            Url::parse(value.trim()).map_err(|error| ToolError(format!("invalid url: {error}")))?;
+        let url = Url::parse(value.trim())
+            .map_err(|error| ToolError::invalid_arguments(format!("invalid url: {error}")))?;
         check_url_shape(&url)?;
         Ok(url)
     }
@@ -130,17 +134,17 @@ impl WebFetchTool {
 /// Only plain HTTP(S) URLs with a host and no embedded credentials.
 fn check_url_shape(url: &Url) -> Result<(), ToolError> {
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(ToolError(format!(
+        return Err(ToolError::invalid_arguments(format!(
             "web_fetch supports only http and https URLs, not {}",
             url.scheme()
         )));
     }
     if url.host_str().is_none_or(str::is_empty) {
-        return Err(ToolError("url has no host".into()));
+        return Err(ToolError::invalid_arguments("url has no host"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(ToolError(
-            "urls with embedded credentials are not allowed".into(),
+        return Err(ToolError::invalid_arguments(
+            "urls with embedded credentials are not allowed",
         ));
     }
     Ok(())
@@ -421,7 +425,7 @@ impl Tool for WebFetchTool {
     ) -> Result<ToolOutput, ToolError> {
         let args: FetchArgs = parse_args(&arguments)?;
         let url = self.parse_url(&args.url)?;
-        check_literal(&url, &self.address_allowed).map_err(ToolError)?;
+        check_literal(&url, &self.address_allowed).map_err(ToolError::invalid_arguments)?;
         let auto_approved = self.auto_approved(&url);
         let max_redirects = self.config.max_redirects;
         let domains = self.config.auto_approve_domains.clone();
@@ -432,7 +436,7 @@ impl Tool for WebFetchTool {
             }
             let next = attempt.url().clone();
             if let Err(error) = check_url_shape(&next) {
-                return attempt.error(error.0);
+                return attempt.error(error.message);
             }
             if let Err(error) = check_literal(&next, &allowed) {
                 return attempt.error(error);
@@ -460,14 +464,14 @@ impl Tool for WebFetchTool {
                 allowed: Arc::clone(&self.address_allowed),
             }))
             .build()
-            .map_err(|error| ToolError(format!("create HTTP client: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("create HTTP client: {error}")))?;
         let request = client.get(url.clone()).header(
             reqwest::header::ACCEPT,
             "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.9,*/*;q=0.5",
         );
         let response = tokio::select! {
-            result = request.send() => result.map_err(|error| ToolError(format!("fetch {url}: {}", error_chain(&error))))?,
-            () = context.cancellation.cancelled() => return Err(ToolError("web fetch cancelled".into())),
+            result = request.send() => result.map_err(|error| ToolError::failed(format!("fetch {url}: {}", error_chain(&error))))?,
+            () = context.cancellation.cancelled() => return Err(ToolError::cancelled("web fetch cancelled")),
         };
         let status = response.status();
         let final_url = response.url().clone();
@@ -480,10 +484,10 @@ impl Tool for WebFetchTool {
         if content_type.is_some()
             && let Err(message) = classify(content_type.as_deref(), &[])
         {
-            return Ok(ToolOutput::failure(format!(
-                "URL: {final_url}\nStatus: {}\n{message}",
-                status.as_u16()
-            )));
+            return Ok(ToolOutput::failed(
+                ToolFailure::Failed,
+                format!("URL: {final_url}\nStatus: {}\n{message}", status.as_u16()),
+            ));
         }
         let limit = self.config.fetch_max_bytes;
         let mut stream = response.bytes_stream();
@@ -492,11 +496,12 @@ impl Tool for WebFetchTool {
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                () = context.cancellation.cancelled() => return Err(ToolError("web fetch cancelled".into())),
+                () = context.cancellation.cancelled() => return Err(ToolError::cancelled("web fetch cancelled")),
             };
             let Some(chunk) = chunk else { break };
-            let chunk = chunk
-                .map_err(|error| ToolError(format!("read {final_url}: {}", error_chain(&error))))?;
+            let chunk = chunk.map_err(|error| {
+                ToolError::failed(format!("read {final_url}: {}", error_chain(&error)))
+            })?;
             let remaining = limit - bytes.len();
             if chunk.len() > remaining {
                 bytes.extend_from_slice(&chunk[..remaining]);
@@ -508,20 +513,22 @@ impl Tool for WebFetchTool {
         let kind = match classify(content_type.as_deref(), &bytes) {
             Ok(kind) => kind,
             Err(message) => {
-                return Ok(ToolOutput::failure(format!(
-                    "URL: {final_url}\nStatus: {}\n{message}",
-                    status.as_u16()
-                )));
+                return Ok(ToolOutput::failed(
+                    ToolFailure::Failed,
+                    format!("URL: {final_url}\nStatus: {}\n{message}", status.as_u16()),
+                ));
             }
         };
         let text = match kind {
             Body::Text => String::from_utf8_lossy(&bytes).into_owned(),
             Body::Html => tokio::task::spawn_blocking(move || {
                 html2text::from_read(bytes.as_slice(), HTML_WIDTH)
-                    .map_err(|error| ToolError(format!("convert HTML: {error}")))
+                    .map_err(|error| ToolError::failed(format!("convert HTML: {error}")))
             })
             .await
-            .map_err(|error| ToolError(format!("HTML conversion task failed: {error}")))??,
+            .map_err(|error| {
+                ToolError::failed(format!("HTML conversion task failed: {error}"))
+            })??,
         };
         let offset = args.offset.unwrap_or(0);
         let total = text.chars().count();
@@ -553,7 +560,8 @@ impl Tool for WebFetchTool {
         }
         Ok(ToolOutput {
             content,
-            is_error: status.is_client_error() || status.is_server_error(),
+            failure: (status.is_client_error() || status.is_server_error())
+                .then_some(ToolFailure::Failed),
             truncated: next.is_some() || download_truncated,
         })
     }
@@ -576,10 +584,12 @@ impl WebSearchTool {
     fn validate(&self, args: &SearchArgs) -> Result<(), ToolError> {
         let query = args.query.trim();
         if query.is_empty() {
-            return Err(ToolError("query must not be empty".into()));
+            return Err(ToolError::invalid_arguments("query must not be empty"));
         }
         if query.len() > MAX_QUERY_BYTES {
-            return Err(ToolError(format!("query exceeds {MAX_QUERY_BYTES} bytes")));
+            return Err(ToolError::invalid_arguments(format!(
+                "query exceeds {MAX_QUERY_BYTES} bytes"
+            )));
         }
         Ok(())
     }
@@ -738,7 +748,7 @@ impl Tool for WebSearchTool {
             .timeout(self.config.fetch_timeout)
             .redirect(redirect::Policy::limited(3))
             .build()
-            .map_err(|error| ToolError(format!("create HTTP client: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("create HTTP client: {error}")))?;
         let request = match &self.backend {
             SearchBackend::Searxng { url } => {
                 let endpoint = format!("{}/search", url.trim_end_matches('/'));
@@ -753,8 +763,8 @@ impl Tool for WebSearchTool {
                 .header("X-Subscription-Token", api_key),
         };
         let response = tokio::select! {
-            result = request.send() => result.map_err(|error| ToolError(format!("{} request failed: {}", self.backend_name(), error_chain(&error))))?,
-            () = context.cancellation.cancelled() => return Err(ToolError("web search cancelled".into())),
+            result = request.send() => result.map_err(|error| ToolError::failed(format!("{} request failed: {}", self.backend_name(), error_chain(&error))))?,
+            () = context.cancellation.cancelled() => return Err(ToolError::cancelled("web search cancelled")),
         };
         let status = response.status();
         let mut stream = response.bytes_stream();
@@ -762,18 +772,18 @@ impl Tool for WebSearchTool {
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                () = context.cancellation.cancelled() => return Err(ToolError("web search cancelled".into())),
+                () = context.cancellation.cancelled() => return Err(ToolError::cancelled("web search cancelled")),
             };
             let Some(chunk) = chunk else { break };
             let chunk = chunk.map_err(|error| {
-                ToolError(format!(
+                ToolError::failed(format!(
                     "{} response failed: {}",
                     self.backend_name(),
                     error_chain(&error)
                 ))
             })?;
             if bytes.len() + chunk.len() > MAX_SEARCH_RESPONSE_BYTES {
-                return Err(ToolError(format!(
+                return Err(ToolError::limit(format!(
                     "{} response exceeded {MAX_SEARCH_RESPONSE_BYTES} bytes",
                     self.backend_name()
                 )));
@@ -791,20 +801,23 @@ impl Tool for WebSearchTool {
                 }
                 _ => "",
             };
-            return Ok(ToolOutput::failure(format!(
-                "{} returned HTTP {}{hint}: {}",
-                self.backend_name(),
-                status.as_u16(),
-                bounded(&body, 300)
-            )));
+            return Ok(ToolOutput::failed(
+                ToolFailure::Failed,
+                format!(
+                    "{} returned HTTP {}{hint}: {}",
+                    self.backend_name(),
+                    status.as_u16(),
+                    bounded(&body, 300)
+                ),
+            ));
         }
         let body: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            ToolError(format!(
+            ToolError::failed(format!(
                 "{} returned invalid JSON: {error}",
                 self.backend_name()
             ))
         })?;
-        let mut results = parse_results(&self.backend, &body).map_err(ToolError)?;
+        let mut results = parse_results(&self.backend, &body).map_err(ToolError::failed)?;
         results.truncate(count);
         Ok(ToolOutput::success(format_results(
             &query,

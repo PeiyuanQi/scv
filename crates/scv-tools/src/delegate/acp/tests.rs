@@ -389,7 +389,7 @@ async fn cancellation_sends_session_cancel() {
         .execute(json!({"prompt":"hang"}), context)
         .await
         .unwrap_err();
-    assert!(error.0.contains("cancelled"), "{}", error.0);
+    assert!(error.message.contains("cancelled"), "{}", error.message);
     assert!(calls(dir.path()).contains("cancel"));
 }
 
@@ -443,7 +443,7 @@ async fn failures_are_structured_redacted_and_hint_at_sign_in() {
         .execute(json!({"prompt":"refuse"}), context(dir.path(), None))
         .await
         .unwrap();
-    assert!(refused.is_error);
+    assert!(refused.is_error());
     let value = json(&refused);
     assert_eq!(value["status"], "declined");
     assert!(value["reply"].as_str().unwrap().contains("403"), "{value}");
@@ -760,7 +760,7 @@ async fn an_idle_conversation_whose_agent_dies_is_collected_and_forgotten() {
         )
         .await
         .unwrap_err();
-    assert!(next.0.contains("ACP server exited"), "{next}");
+    assert!(next.message.contains("ACP server exited"), "{next}");
 }
 
 #[tokio::test]

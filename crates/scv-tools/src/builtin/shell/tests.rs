@@ -46,7 +46,7 @@ async fn bash_timeout_terminates_the_process() {
         )
         .await
         .unwrap();
-    assert!(output.is_error);
+    assert_eq!(output.failure, Some(scv_core::ToolFailure::Limit));
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
@@ -95,6 +95,7 @@ async fn bash_cancellation_terminates_the_process_group() {
     cancel.cancel();
     let error = execution.await.unwrap().unwrap_err();
     assert!(error.to_string().contains("cancelled"));
+    assert_eq!(error.kind, scv_core::ToolFailure::Cancelled);
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
@@ -115,7 +116,7 @@ async fn background_descendant_cannot_hold_output_pipes_open() {
         .await
         .unwrap();
     let returned = std::time::SystemTime::now();
-    assert!(!output.is_error);
+    assert!(!output.is_error());
     // Time from the shell's last write, which excludes its startup.
     let exited = std::fs::metadata(root.join("background.pid"))
         .unwrap()

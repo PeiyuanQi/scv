@@ -1,7 +1,7 @@
 //! The session's turn queue: prompts submitted while a turn runs, which a
 //! client may edit, reorder, or remove until they start.
 
-use scv_protocol::{Attachment, QueueEntry};
+use scv_protocol::{Attachment, ErrorCode, QueueEntry};
 use uuid::Uuid;
 
 use super::Session;
@@ -15,7 +15,7 @@ impl Session {
         prompt: String,
         submitter: String,
         attachments: Vec<Attachment>,
-    ) -> std::result::Result<QueueEntry, &'static str> {
+    ) -> std::result::Result<QueueEntry, ErrorCode> {
         let entry = QueueEntry {
             queue_id: Uuid::new_v4().to_string(),
             revision: 1,
@@ -28,7 +28,7 @@ impl Session {
         if queue.len() >= MAX_QUEUE_ITEMS
             || bytes.saturating_add(entry.prompt.len()) > MAX_QUEUE_BYTES
         {
-            return Err("queue_limit");
+            return Err(ErrorCode::QueueLimit);
         }
         queue.push_back(entry.clone());
         Ok(entry)
@@ -39,22 +39,22 @@ impl Session {
         id: &str,
         revision: u64,
         prompt: String,
-    ) -> std::result::Result<QueueEntry, &'static str> {
+    ) -> std::result::Result<QueueEntry, ErrorCode> {
         let mut queue = self.queue.lock().await;
         let bytes: usize = queue.iter().map(|item| item.prompt.len()).sum();
         let entry = queue
             .iter_mut()
             .find(|entry| entry.queue_id == id)
-            .ok_or("queue_not_found")?;
+            .ok_or(ErrorCode::QueueNotFound)?;
         if entry.revision != revision {
-            return Err("queue_conflict");
+            return Err(ErrorCode::QueueConflict);
         }
         if bytes
             .saturating_sub(entry.prompt.len())
             .saturating_add(prompt.len())
             > MAX_QUEUE_BYTES
         {
-            return Err("queue_limit");
+            return Err(ErrorCode::QueueLimit);
         }
         entry.prompt = prompt;
         entry.revision += 1;
@@ -67,17 +67,17 @@ impl Session {
         id: &str,
         revision: u64,
         before: Option<String>,
-    ) -> std::result::Result<(String, u64, usize), &'static str> {
+    ) -> std::result::Result<(String, u64, usize), ErrorCode> {
         if self.id != session_id {
-            return Err("session_not_found");
+            return Err(ErrorCode::SessionNotFound);
         }
         let mut queue = self.queue.lock().await;
         let index = queue
             .iter()
             .position(|entry| entry.queue_id == id)
-            .ok_or("queue_not_found")?;
+            .ok_or(ErrorCode::QueueNotFound)?;
         if queue[index].revision != revision {
-            return Err("queue_conflict");
+            return Err(ErrorCode::QueueConflict);
         }
         // Validate the destination while the source is still present. This keeps
         // the operation atomic and handles a self move as a no-op reorder.
@@ -87,7 +87,7 @@ impl Session {
                 queue
                     .iter()
                     .position(|item| item.queue_id == target)
-                    .ok_or("queue_not_found")?,
+                    .ok_or(ErrorCode::QueueNotFound)?,
             ),
             None => None,
         };
@@ -108,17 +108,17 @@ impl Session {
         session_id: &str,
         id: &str,
         revision: u64,
-    ) -> std::result::Result<(String, u64), &'static str> {
+    ) -> std::result::Result<(String, u64), ErrorCode> {
         if self.id != session_id {
-            return Err("session_not_found");
+            return Err(ErrorCode::SessionNotFound);
         }
         let mut queue = self.queue.lock().await;
         let index = queue
             .iter()
             .position(|entry| entry.queue_id == id)
-            .ok_or("queue_not_found")?;
+            .ok_or(ErrorCode::QueueNotFound)?;
         if queue[index].revision != revision {
-            return Err("queue_conflict");
+            return Err(ErrorCode::QueueConflict);
         }
         let entry = queue.remove(index).expect("queue index exists");
         Ok((entry.queue_id, entry.revision))

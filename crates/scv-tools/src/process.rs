@@ -6,7 +6,7 @@ use std::{
     ffi::OsString, os::unix::process::CommandExt as _, path::PathBuf, sync::Arc, time::Duration,
 };
 
-use scv_core::{ToolError, ToolOutput};
+use scv_core::{ToolError, ToolFailure, ToolOutput};
 use serde_json::json;
 use tokio::{
     io::AsyncReadExt,
@@ -94,9 +94,14 @@ pub(crate) async fn execute_process(
         "truncated": collected.truncated
     })
     .to_string();
+    let failure = if finished.timed_out {
+        Some(ToolFailure::Limit)
+    } else {
+        (!finished.status.success()).then_some(ToolFailure::Failed)
+    };
     Ok(ToolOutput {
         content,
-        is_error: finished.timed_out || !finished.status.success(),
+        failure,
         truncated: collected.truncated,
     })
 }
@@ -116,9 +121,9 @@ pub(crate) fn spawn_process(spec: &ProcessSpec) -> Result<tokio::process::Child,
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
-    let child = command
-        .spawn()
-        .map_err(|error| ToolError(format!("launch {:?}: {error}", spec.executable)))?;
+    let child = command.spawn().map_err(|error| {
+        ToolError::unavailable(format!("launch {:?}: {error}", spec.executable))
+    })?;
     if let Some(pid) = child.id() {
         records::track_spawned(pid);
     }
@@ -129,7 +134,7 @@ pub(crate) fn child_pid(child: &tokio::process::Child) -> Result<i32, ToolError>
     child
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
-        .ok_or_else(|| ToolError("child process has no pid".into()))
+        .ok_or_else(|| ToolError::failed("child process has no pid"))
 }
 
 pub(crate) struct Finished {
@@ -153,7 +158,7 @@ pub(crate) async fn supervise(
         Cancelled,
     }
     let completion = tokio::select! {
-        status = child.wait() => Completion::Exited(status.map_err(|error| ToolError(format!("wait for child: {error}")))?),
+        status = child.wait() => Completion::Exited(status.map_err(|error| ToolError::failed(format!("wait for child: {error}")))?),
         () = cancellation.cancelled() => {
             Completion::Cancelled
         },
@@ -179,7 +184,7 @@ pub(crate) async fn supervise(
             let _ = terminate_group(pid, child, None, cleanup_deadline, true).await;
             finish_drain(stdout_task, Instant::now() + Duration::from_millis(250)).await;
             finish_drain(stderr_task, Instant::now() + Duration::from_millis(250)).await;
-            return Err(ToolError("process cancelled".into()));
+            return Err(ToolError::cancelled("process cancelled"));
         }
     };
     finish_drain(stdout_task, drain_deadline).await;
@@ -207,7 +212,7 @@ async fn terminate_group(
         if status.is_none() {
             status = child
                 .try_wait()
-                .map_err(|error| ToolError(format!("wait for child: {error}")))?;
+                .map_err(|error| ToolError::failed(format!("wait for child: {error}")))?;
         }
         if !group.is_some_and(ProcessGroup::is_signalable)
             && let Some(status) = status
@@ -225,8 +230,8 @@ async fn terminate_group(
     }
     timeout(Duration::from_secs(1), child.wait())
         .await
-        .map_err(|_| ToolError("child did not exit after process-group kill".into()))?
-        .map_err(|error| ToolError(format!("wait after KILL: {error}")))
+        .map_err(|_| ToolError::failed("child did not exit after process-group kill"))?
+        .map_err(|error| ToolError::failed(format!("wait after KILL: {error}")))
 }
 
 /// A process group SCV may signal. It is never group 0 or 1 (this process's

@@ -4,24 +4,27 @@
 //! signed out, or its provider returned an error, names the other agents to
 //! fall back on.
 //!
-//! That fallback is decided from the structured failure alone (the result's
-//! `status` and `error`, or SCV's own error message), never from the agent's
-//! reply. A `declined` result, where the agent's model refused the request,
-//! never gets one. When `agent_grok` is among the other agents, the result's
-//! `note` tells the calling model to call it; otherwise the calling model
-//! tells the user, and only the user may then name another agent.
+//! That fallback is decided from the structured failure alone: the result's
+//! `status` and the `error` the agent reported, read against a list of
+//! phrases, or SCV's own error when SCV classed it as
+//! [`ToolFailure::Unavailable`]; never from the agent's reply or the wording
+//! of SCV's other errors. A `declined` result, where the agent's model
+//! refused the request, never gets one. When `agent_grok` is among the other
+//! agents, the result's `note` tells the calling model to call it; otherwise
+//! the calling model tells the user, and only the user may then name another
+//! agent.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
+use scv_core::{Tool, ToolContext, ToolError, ToolFailure, ToolOutput, ToolRisk, ToolSpec};
 use serde_json::Value;
 
 use crate::delegate::{adapters, output};
 
-/// Lowercase fragments of a reported failure that another agent could avoid:
-/// the agent is missing or died, is signed out, or its provider returned an
-/// error.
+/// Lowercase fragments of an error an agent reported that another agent
+/// could avoid: the agent is missing or died, is signed out, or its provider
+/// returned an error.
 const UNAVAILABLE: &[&str] = &[
     "not found on path",
     "no such file or directory",
@@ -57,7 +60,8 @@ const UNAVAILABLE: &[&str] = &[
     "connection reset",
 ];
 
-fn unavailable(text: &str) -> bool {
+/// Whether an error an agent reported reads like it was unavailable.
+pub(crate) fn reports_unavailable(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     UNAVAILABLE.iter().any(|needle| lower.contains(needle))
 }
@@ -126,7 +130,7 @@ fn unavailable_result(content: &serde_json::Map<String, Value>) -> bool {
         && content
             .get("error")
             .and_then(Value::as_str)
-            .is_some_and(unavailable)
+            .is_some_and(reports_unavailable)
 }
 
 /// `agent_codex` → the Codex descriptor, when it is a known adapter.
@@ -168,15 +172,16 @@ impl Tool for ChosenAgent {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         match self.inner.execute(arguments, context).await {
-            Ok(mut result) if result.is_error => {
+            Ok(mut result) if result.is_error() => {
                 if let Ok(Value::Object(mut content)) =
                     serde_json::from_str::<Value>(&result.content)
                 {
-                    if unavailable_result(&content)
-                        && let Some(fallback) = self.fallback()
-                    {
-                        content.insert("fallback".into(), fallback.into());
-                        result.content = Value::Object(content).to_string();
+                    if unavailable_result(&content) {
+                        result.failure = Some(ToolFailure::Unavailable);
+                        if let Some(fallback) = self.fallback() {
+                            content.insert("fallback".into(), fallback.into());
+                            result.content = Value::Object(content).to_string();
+                        }
                     } else if content.get("status").and_then(Value::as_str) == Some("declined")
                         && self.offers_grok()
                     {
@@ -186,9 +191,10 @@ impl Tool for ChosenAgent {
                 }
                 Ok(result)
             }
-            // SCV's own messages, such as a missing executable.
-            Err(error) if unavailable(&error.0) => Err(match self.fallback() {
-                Some(fallback) => ToolError(format!("{} {fallback}", error.0)),
+            // SCV's own errors that it classed as unavailable, such as a
+            // missing executable.
+            Err(error) if error.kind == ToolFailure::Unavailable => Err(match self.fallback() {
+                Some(fallback) => ToolError::unavailable(format!("{} {fallback}", error.message)),
                 None => error,
             }),
             other => other,

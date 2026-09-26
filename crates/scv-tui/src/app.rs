@@ -4,7 +4,7 @@
 use std::{collections::VecDeque, time::Instant};
 
 use anyhow::Result;
-use scv_protocol::{QueueEntry, ServerEvent, TurnOrigin, Usage};
+use scv_protocol::{QueueEntry, ServerEvent, ToolErrorKind, TurnOrigin, Usage};
 
 use crate::{
     client::{SessionInfo, is_transport_error},
@@ -54,6 +54,9 @@ pub(crate) struct App {
     pub(crate) queue_editing: Option<QueueEntry>,
     pub(crate) queue_selected: Option<usize>,
     pub(crate) last_seq: u64,
+    /// Events of types this client does not know since `last_seq`; each may
+    /// have used a sequence number.
+    pub(crate) skipped_events: u64,
     pub(crate) connected: bool,
     pub(crate) quit: bool,
 }
@@ -84,6 +87,7 @@ impl App {
             queue_editing: None,
             queue_selected: None,
             last_seq: 0,
+            skipped_events: 0,
             connected: true,
             quit: false,
         }
@@ -121,6 +125,7 @@ impl App {
         self.queue_editing = None;
         self.queue_selected = None;
         self.last_seq = 0;
+        self.skipped_events = 0;
         self.connected = true;
         self.history_index = None;
         self.prompt_history.trim();
@@ -146,6 +151,7 @@ impl App {
         self.context_after_tokens = None;
         self.history_bytes = None;
         self.last_seq = 0;
+        self.skipped_events = 0;
         self.history_index = None;
         self.finish_pending_tools(ToolStatus::Failed);
         self.items.update_all(|item| {
@@ -188,14 +194,20 @@ impl App {
     }
 
     fn update_seq(&mut self, event: &ServerEvent) {
+        if matches!(event, ServerEvent::Unknown) {
+            self.skipped_events += 1;
+            return;
+        }
         let Some(seq) = event_seq(event) else { return };
-        if self.last_seq != 0 && seq != self.last_seq + 1 {
+        let next = self.last_seq + 1;
+        if self.last_seq != 0 && !(next..=next + self.skipped_events).contains(&seq) {
             self.push_item(TranscriptItem::Error(format!(
                 "Protocol event sequence jumped from {} to {seq}",
                 self.last_seq
             )));
         }
         self.last_seq = seq;
+        self.skipped_events = 0;
     }
 
     pub(crate) fn handle_server_event(&mut self, event: ServerEvent) {
@@ -271,8 +283,9 @@ impl App {
                 call_id,
                 success,
                 output,
+                error,
                 ..
-            } => self.tool_completed(&call_id, success, output),
+            } => self.tool_completed(&call_id, success, error, output),
             ServerEvent::ContextCompacted {
                 after_tokens,
                 removed_messages,
@@ -310,9 +323,11 @@ impl App {
             ServerEvent::Error { code, message, .. } => {
                 self.push_item(TranscriptItem::Error(format!("{code}: {message}")));
             }
+            // Events a newer server added are skipped.
             ServerEvent::Initialized { .. }
             | ServerEvent::SessionStarted { .. }
-            | ServerEvent::DaemonStatus { .. } => {}
+            | ServerEvent::DaemonStatus { .. }
+            | ServerEvent::Unknown => {}
         }
         self.items.trim();
     }
@@ -408,16 +423,19 @@ impl App {
         }
     }
 
-    fn tool_completed(&mut self, call_id: &str, success: bool, output: String) {
+    fn tool_completed(
+        &mut self,
+        call_id: &str,
+        success: bool,
+        error: Option<ToolErrorKind>,
+        output: String,
+    ) {
         self.pending_approval = None;
-        let status = if success {
-            ToolStatus::Success
-        } else if output.contains("denied by policy or user") {
-            ToolStatus::Denied
-        } else if output.to_ascii_lowercase().contains("cancelled") {
-            ToolStatus::Cancelled
-        } else {
-            ToolStatus::Failed
+        let status = match error {
+            _ if success => ToolStatus::Success,
+            Some(ToolErrorKind::Denied) => ToolStatus::Denied,
+            Some(ToolErrorKind::Cancelled) => ToolStatus::Cancelled,
+            _ => ToolStatus::Failed,
         };
         self.set_tool_status(call_id, status, Some(output));
     }
@@ -527,6 +545,7 @@ fn event_seq(event: &ServerEvent) -> Option<u64> {
         ServerEvent::Initialized { .. }
         | ServerEvent::SessionStarted { .. }
         | ServerEvent::DaemonStatus { .. }
-        | ServerEvent::Error { .. } => None,
+        | ServerEvent::Error { .. }
+        | ServerEvent::Unknown => None,
     }
 }

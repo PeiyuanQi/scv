@@ -63,9 +63,9 @@ fn secrets_are_refused_even_through_symlinks() {
     ] {
         let error = config.check(&workspace, &path).unwrap_err();
         assert!(
-            error.0.contains("credentials or keys"),
+            error.message.contains("credentials or keys"),
             "{path}: {}",
-            error.0
+            error.message
         );
     }
 }
@@ -93,21 +93,21 @@ fn directories_missing_empty_and_oversized_files_are_refused() {
         config
             .check(&workspace, "dir")
             .unwrap_err()
-            .0
+            .message
             .contains("regular file")
     );
     assert!(
         config
             .check(&workspace, "empty")
             .unwrap_err()
-            .0
+            .message
             .contains("empty")
     );
     assert!(
         config
             .check(&workspace, "big")
             .unwrap_err()
-            .0
+            .message
             .contains("limit")
     );
     assert!(config.check(&workspace, "missing").is_err());
@@ -131,7 +131,7 @@ async fn the_tool_reports_the_attachment_the_client_reads() {
         .await
         .unwrap();
     let attached =
-        scv_protocol::reply_attachment(CHAT_ATTACH_TOOL, !output.is_error, &output.content)
+        scv_protocol::reply_attachment(CHAT_ATTACH_TOOL, !output.is_error(), &output.content)
             .unwrap();
     assert_eq!(attached.name, "notes.txt");
     assert_eq!(attached.caption, "today's notes");

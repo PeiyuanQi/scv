@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use scv_core::AgentError;
-use scv_protocol::ServerEvent;
+use scv_protocol::{ErrorCode, ServerEvent};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -206,7 +206,7 @@ pub(crate) fn encode_event(event: &ServerEvent, max_bytes: usize) -> Result<Vec<
 pub(crate) async fn send_error(
     output: &OutboundSender,
     request_id: &str,
-    code: &str,
+    code: ErrorCode,
     message: &str,
     fatal: bool,
     max_bytes: usize,
@@ -215,7 +215,7 @@ pub(crate) async fn send_error(
         output,
         ServerEvent::Error {
             request_id: (!request_id.is_empty()).then(|| request_id.to_owned()),
-            code: code.into(),
+            code,
             message: message.into(),
             fatal,
         },

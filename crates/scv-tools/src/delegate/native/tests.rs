@@ -237,7 +237,7 @@ async fn signed_out_dsh_failure_names_the_host_login_command() {
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap();
-    assert!(output.is_error);
+    assert!(output.is_error());
     let content: Value = serde_json::from_str(&output.content).unwrap();
     assert!(
         content["hint"]
@@ -262,7 +262,7 @@ async fn signed_out_agent_failure_names_the_host_login_command() {
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap();
-    assert!(output.is_error);
+    assert!(output.is_error());
     let content: Value = serde_json::from_str(&output.content).unwrap();
     assert!(
         content["hint"]
@@ -281,7 +281,7 @@ async fn signed_out_agent_failure_names_the_host_login_command() {
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap();
-    assert!(output.is_error);
+    assert!(output.is_error());
     assert!(!output.content.contains("hint"));
 }
 
@@ -632,7 +632,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"all done"
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap();
-    assert!(!output.is_error, "{}", output.content);
+    assert!(!output.is_error(), "{}", output.content);
     let value: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(value["agent"], "claude");
     assert_eq!(
@@ -751,7 +751,7 @@ async fn conversations_continue_the_cli_session_in_the_same_cwd() {
         )
         .await
         .unwrap_err();
-    assert!(moved.0.contains("runs in"), "{}", moved.0);
+    assert!(moved.message.contains("runs in"), "{}", moved.message);
     // Another session's tools do not know this session's handles.
     let other_session = conversing_agent(
         workspace.path(),
@@ -772,9 +772,9 @@ async fn conversations_continue_the_cli_session_in_the_same_cwd() {
         .await
         .unwrap_err();
     assert!(
-        unknown.0.contains("unknown in this session"),
+        unknown.message.contains("unknown in this session"),
         "{}",
-        unknown.0
+        unknown.message
     );
     assert_eq!(
         calls(workspace.path()).len(),
@@ -786,7 +786,7 @@ async fn conversations_continue_the_cli_session_in_the_same_cwd() {
     assert!(
         tool.risk(&vendor)
             .unwrap_err()
-            .0
+            .message
             .contains("not a conversation handle")
     );
     assert!(
@@ -841,9 +841,9 @@ async fn a_timed_out_turn_stays_resumable_and_unsupported_agents_refuse_sessions
         .risk(&json!({"prompt":"x","session":"grok-1"}))
         .unwrap_err();
     assert!(
-        refused.0.contains("cannot continue a conversation"),
+        refused.message.contains("cannot continue a conversation"),
         "{}",
-        refused.0
+        refused.message
     );
     assert!(
         plain.spec().parameters["properties"]
@@ -937,7 +937,7 @@ exit 1
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap();
-    assert!(output.is_error);
+    assert!(output.is_error());
     let value: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(value["status"], "failed");
     assert_eq!(value["exit_code"], 1);
@@ -976,7 +976,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot h
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap();
-    assert!(output.is_error);
+    assert_eq!(output.failure, Some(scv_core::ToolFailure::Failed));
     let value: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(value["status"], "declined");
     assert_eq!(value["note"], output::DECLINED_NOTE_TRY_GROK);
@@ -995,6 +995,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot h
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap();
+    assert_eq!(output.failure, Some(scv_core::ToolFailure::Unavailable));
     let value: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(value["status"], "failed");
     assert!(
@@ -1035,7 +1036,11 @@ exit 1
         .execute(json!({"prompt":"hi"}), context(workspace.path()))
         .await
         .unwrap_err();
-    assert!(error.0.ends_with("agent_codex, agent_grok."), "{error}");
+    assert_eq!(error.kind, scv_core::ToolFailure::Unavailable);
+    assert!(
+        error.message.ends_with("agent_codex, agent_grok."),
+        "{error}"
+    );
 }
 
 #[cfg(target_os = "linux")]

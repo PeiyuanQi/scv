@@ -9,9 +9,12 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     ApprovalGate, ApprovalRequest, ContextPolicy, CoreEvent, EventSink, HistoryLimits, Message,
     PROGRESS_INTERVAL, ProgressSink, Provider, ProviderError, ProviderErrorKind, ProviderRequest,
-    TextDeltaSink, ToolApprovals, ToolCall, ToolContext, ToolOutput, ToolRegistry, TurnInput,
-    Usage,
+    TextDeltaSink, ToolApprovals, ToolCall, ToolContext, ToolError, ToolFailure, ToolOutput,
+    ToolRegistry, TurnInput, Usage,
 };
+
+/// What the model reads for a call the approval policy or the user refused.
+const DENIED: &str = "tool call denied by policy or user";
 
 /// Settings of an [`AgentRuntime`].
 #[derive(Debug, Clone)]
@@ -29,7 +32,7 @@ pub struct TurnOutcome {
     pub usage: Usage,
 }
 
-/// Why a turn failed. [`code`](AgentError::code) is its stable wire name.
+/// Why a turn failed. The server maps each variant to a stable wire code.
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error("turn cancelled")]
@@ -48,21 +51,6 @@ pub enum AgentError {
     ToolLimit(String),
     #[error("{0}")]
     Internal(String),
-}
-
-impl AgentError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::Cancelled => "cancelled",
-            Self::Provider(_) => "provider_error",
-            Self::ContextLimit(_) => "context_limit",
-            Self::StepLimit => "step_limit",
-            Self::HistoryLimit(_) => "history_limit",
-            Self::ResponseLimit(_) => "response_limit",
-            Self::ToolLimit(_) => "tool_limit",
-            Self::Internal(_) => "internal_error",
-        }
-    }
 }
 
 /// Runs user turns against one provider, tool registry, and context policy.
@@ -203,26 +191,19 @@ impl AgentRuntime {
                 })
                 .await?;
                 let Some(tool) = self.tools.get(&call.name) else {
-                    let output = ToolOutput::failure(format!("unknown tool: {}", call.name));
-                    sink.emit(CoreEvent::ToolCompleted {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        output: output.clone(),
-                    })
-                    .await?;
-                    history.push(Message::Tool {
-                        call_id: call.id,
-                        name: call.name,
-                        content: output.content,
-                        is_error: true,
-                    });
+                    let error = ToolError::new(
+                        ToolFailure::UnknownTool,
+                        format!("unknown tool: {}", call.name),
+                    );
+                    self.record_tool_error(history, sink.as_ref(), &call, error)
+                        .await?;
                     self.enforce_history_limits(history, sink.as_ref()).await?;
                     continue;
                 };
                 let risk = match tool.risk(&call.arguments) {
                     Ok(risk) => risk,
                     Err(error) => {
-                        self.record_tool_error(history, sink.as_ref(), &call, error.to_string())
+                        self.record_tool_error(history, sink.as_ref(), &call, error)
                             .await?;
                         self.enforce_history_limits(history, sink.as_ref()).await?;
                         continue;
@@ -231,7 +212,7 @@ impl AgentRuntime {
                 let summary = match tool.approval_summary(&call.arguments) {
                     Ok(summary) => summary,
                     Err(error) => {
-                        self.record_tool_error(history, sink.as_ref(), &call, error.to_string())
+                        self.record_tool_error(history, sink.as_ref(), &call, error)
                             .await?;
                         self.enforce_history_limits(history, sink.as_ref()).await?;
                         continue;
@@ -267,9 +248,9 @@ impl AgentRuntime {
                     );
                     forward_progress(execution, &progress, sink.as_ref(), &call.id)
                         .await
-                        .unwrap_or_else(|error| ToolOutput::failure(error.to_string()))
+                        .unwrap_or_else(ToolOutput::from)
                 } else {
-                    ToolOutput::failure("tool call denied by policy or user")
+                    ToolOutput::failed(ToolFailure::Denied, DENIED)
                 };
                 sink.emit(CoreEvent::ToolCompleted {
                     call_id: call.id.clone(),
@@ -277,11 +258,12 @@ impl AgentRuntime {
                     output: output.clone(),
                 })
                 .await?;
+                let is_error = output.is_error();
                 history.push(Message::Tool {
                     call_id: call.id,
                     name: call.name,
                     content: output.content,
-                    is_error: output.is_error,
+                    is_error,
                 });
                 self.enforce_history_limits(history, sink.as_ref()).await?;
             }
@@ -289,14 +271,15 @@ impl AgentRuntime {
         Err(AgentError::StepLimit)
     }
 
+    /// Record a call that could not run as its failed result.
     async fn record_tool_error(
         &self,
         history: &mut Vec<Message>,
         sink: &dyn EventSink,
         call: &ToolCall,
-        message: String,
+        error: ToolError,
     ) -> Result<(), AgentError> {
-        let output = ToolOutput::failure(message);
+        let output = ToolOutput::from(error);
         sink.emit(CoreEvent::ToolCompleted {
             call_id: call.id.clone(),
             name: call.name.clone(),

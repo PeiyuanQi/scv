@@ -3,11 +3,15 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{DaemonStatus, PeerInfo, QueueEntry, TurnOrigin, Usage};
+use crate::{DaemonStatus, ErrorCode, PeerInfo, QueueEntry, ToolErrorKind, TurnOrigin, Usage};
 
 /// A message from server to client. Serialized as one JSON object per line,
 /// tagged by `type` (such as `turn.completed`). Turn events carry the
 /// session's consecutive `seq`.
+///
+/// A `type` this client does not know parses as [`ServerEvent::Unknown`], so
+/// a newer server can add events without breaking older clients; a client
+/// ignores them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
@@ -289,6 +293,10 @@ pub enum ServerEvent {
         output: String,
         /// Whether `output` was cut to its limit.
         truncated: bool,
+        /// Why the call failed; absent when it succeeded, and from servers
+        /// before 0.3.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ToolErrorKind>,
     },
     /// Older history was summarized to fit the model's context window.
     #[serde(rename = "context.compacted")]
@@ -380,7 +388,7 @@ pub enum ServerEvent {
         /// The session's event sequence number: consecutive, so a gap means events were lost.
         seq: u64,
         /// Stable machine-readable error code.
-        code: String,
+        code: ErrorCode,
         /// What went wrong, for people.
         message: String,
         /// Set when the server started this turn itself, such as to report
@@ -395,12 +403,15 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         /// Stable machine-readable error code.
-        code: String,
+        code: ErrorCode,
         /// What went wrong, for people.
         message: String,
         /// Whether the connection is unusable after this error.
         fatal: bool,
     },
+    /// An event this client does not know, from a newer server. Never sent.
+    #[serde(other, rename = "unknown")]
+    Unknown,
 }
 
 impl ServerEvent {

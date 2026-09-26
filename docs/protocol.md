@@ -19,7 +19,17 @@ Session and turn events carry their identifiers explicitly.
 Unknown object fields are ignored. Unknown message types are rejected with an
 `error` event. A client must initialize before sending other messages. A version
 mismatch is a fatal error so neither side silently interprets incompatible
-semantics. Version 3 added `tool.progress`, which a version 2 client could not
+semantics.
+
+Clients since 0.3.0 tolerate what a newer server adds within version 3: an
+event `type` they do not know parses as `ServerEvent::Unknown` and is skipped
+(it may have used a `seq` number, so a skipped event excuses one gap), and an
+error `code` or tool error kind they do not know parses as `unknown`. Older
+clients fail to parse an unknown event type, so the server sends an event added
+later only in answer to a request that only newer clients make. The daemon
+answers a `daemon.control` action it does not know with `invalid_json`, which
+is how a client tells that the daemon predates the action; replies to new
+actions come as additive `daemon.status` fields. Version 3 added `tool.progress`, which a version 2 client could not
 parse, so a v2 client receives `version_mismatch`; a TUI started before an
 update must be restarted after it.
 
@@ -286,10 +296,18 @@ daemon socket does not imply cross-client queue broadcast or session attachment.
 {"type":"tool.started","request_id":"3","session_id":"...","turn_id":"...","seq":7,"call_id":"call_123","name":"agent_codex"}
 {"type":"tool.progress","request_id":"3","session_id":"...","turn_id":"...","seq":8,"call_id":"call_123","text":"$ cargo test --workspace\nupdate …/src/lib.rs"}
 {"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":9,"call_id":"call_123","name":"agent_codex","success":true,"output":"...","truncated":false}
+{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":12,"call_id":"call_124","name":"bash","success":false,"output":"tool call denied by policy or user","truncated":false,"error":"denied"}
 ```
 
 Arguments and outputs are bounded by configuration before serialization. A
 denied call completes with `success: false` and a model-visible denial message.
+A failed call also carries `error`, why it failed
+(`scv_protocol::ToolErrorKind`): `denied` by the approval policy or the user,
+`cancelled`, `invalid_arguments` refused before it ran, `unavailable` (the tool
+or the agent it runs is missing, signed out, or its provider unreachable), a
+size, count, depth, or time `limit`, `unknown_tool`, or `failed` otherwise.
+Clients show a call's outcome from `error`, never by reading `output`. A
+successful call omits it, as do servers before 0.3.0.
 
 A successful `chat_attach` call's output is
 `{"attached":{"path":…,"name":…,"size":…,"caption":…},"note":…}`, where
@@ -348,15 +366,17 @@ the turn as an ordinary one.
 {"type":"error","request_id":"2","code":"invalid_request","message":"cwd is not a directory","fatal":false}
 ```
 
-Stable request/server error codes are `invalid_json`, `not_initialized`,
-`version_mismatch`, `invalid_request`, `session_not_found`, `turn_active`,
-`turn_not_found`, `approval_not_found`, `queue_not_found`, `queue_conflict`,
-`unsupported`, `component_error`, `delegation_error`, and `internal_error`. Component failures use
-sanitized messages without credential or raw transport details. Stable
-`turn.failed` codes are `provider_error`, `context_limit`, `step_limit`,
-`history_limit`, `response_limit`, `tool_limit`, and `internal_error`. An error
-after `turn.started`, including a provider error, is represented only by
-`turn.failed`. A terminal turn event is exactly one of `turn.completed`,
+The `code` of `error` and `turn.failed` is a `scv_protocol::ErrorCode`, written
+in snake_case; that enum is the list of codes and says what each means. An
+`error` answers a message the server refused: one it cannot parse
+(`invalid_json`, also for a message type or `daemon.control` action it does not
+know), one before `initialize` (`not_initialized`), a different protocol
+version (`version_mismatch`, fatal), or a request it declines, such as
+`invalid_request`, `session_not_found`, `queue_limit`, or `component_error`.
+`turn.failed` carries `provider_error`, one of the `*_limit` codes, or
+`internal_error`. Component failures use sanitized messages without credential
+or raw transport details. An error after `turn.started`, including a provider
+error, is represented only by `turn.failed`. A terminal turn event is exactly one of `turn.completed`,
 `turn.cancelled`, or `turn.failed`.
 
 ## Ordering and backpressure

@@ -158,7 +158,7 @@ impl AcpAgentTool {
             },
             registration,
         )
-        .map_err(|error| error.0)?;
+        .map_err(|error| error.message)?;
         let rpc = Rpc {
             live,
             next_id: AtomicU64::new(1),
@@ -360,7 +360,7 @@ impl AcpAgentTool {
 
     pub(super) async fn call_error(&self, rpc: &Rpc, what: &str, error: CallError) -> String {
         match error {
-            CallError::Io(error) => format!("{what}: {}", error.0),
+            CallError::Io(error) => format!("{what}: {}", error.message),
             CallError::Rpc(error) => format!("{what} failed: {}", describe_rpc_error(&error)),
             CallError::Interrupted(Interrupt::TimedOut) => format!("{what}: timed out"),
             CallError::Interrupted(Interrupt::Cancelled) => format!("{what}: cancelled"),
@@ -398,7 +398,7 @@ impl AcpAgentTool {
             .await
         {
             Ok(id) => json!(id),
-            Err(error) => return TurnEnd::Lost(error.0),
+            Err(error) => return TurnEnd::Lost(error.message),
         };
         let label = format!("[{handle} acp]");
         let mut reply = Reply::new(self.output_limit);
@@ -446,7 +446,7 @@ impl AcpAgentTool {
                 Incoming::Request { id, method, params } => {
                     if method != "session/request_permission" {
                         if let Err(error) = child.rpc.refuse(id, &method).await {
-                            return TurnEnd::Lost(error.0);
+                            return TurnEnd::Lost(error.message);
                         }
                         continue;
                     }
@@ -478,7 +478,7 @@ impl AcpAgentTool {
                     };
                     let outcome = choose_option(params.get("options"), approved);
                     if let Err(error) = child.rpc.respond(id, json!({"outcome": outcome})).await {
-                        return TurnEnd::Lost(error.0);
+                        return TurnEnd::Lost(error.message);
                     }
                 }
             }
@@ -510,10 +510,10 @@ impl AcpAgentTool {
             result.to_json(&self.agent, conversation, None, "", self.output_limit);
         let mut output = ToolOutput {
             content,
-            is_error: status != RunStatus::Completed,
+            failure: status.failure(),
             truncated,
         };
-        if output.is_error {
+        if output.is_error() {
             add_sign_in_hint(&mut output, &self.agent);
         }
         output

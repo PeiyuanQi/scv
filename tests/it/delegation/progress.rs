@@ -241,7 +241,7 @@ async fn protocol_version_2_clients_are_told_to_upgrade() {
         .unwrap();
     match serde_json::from_str::<ServerEvent>(&line).unwrap() {
         ServerEvent::Error { code, message, .. } => {
-            assert_eq!(code, "version_mismatch");
+            assert_eq!(code, scv_protocol::ErrorCode::VersionMismatch);
             assert!(message.contains(&PROTOCOL_VERSION.to_string()), "{message}");
         }
         other => panic!("expected version_mismatch, got {other:?}"),

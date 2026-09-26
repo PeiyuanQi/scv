@@ -10,13 +10,15 @@ use serde_json::{Value, json};
 /// A tool call's arguments as `T`, or a model-facing error naming what failed.
 pub(crate) fn parse_args<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, ToolError> {
     serde_json::from_value(value.clone())
-        .map_err(|error| ToolError(format!("invalid arguments: {error}")))
+        .map_err(|error| ToolError::invalid_arguments(format!("invalid arguments: {error}")))
 }
 
 /// A shell command or agent prompt must say something.
 pub(crate) fn validate_process_args(value: &str) -> Result<(), ToolError> {
     if value.trim().is_empty() {
-        return Err(ToolError("command or prompt must be non-empty".into()));
+        return Err(ToolError::invalid_arguments(
+            "command or prompt must be non-empty",
+        ));
     }
     Ok(())
 }
@@ -35,12 +37,16 @@ impl Timeouts {
     pub(crate) fn resolve(self, requested: Option<u64>) -> Result<Duration, ToolError> {
         match requested {
             None => Ok(self.default.min(self.max)),
-            Some(0) => Err(ToolError("timeout_seconds must be positive".into())),
-            Some(seconds) if seconds > self.max.as_secs() => Err(ToolError(format!(
-                "timeout_seconds {seconds} exceeds the configured maximum of {} seconds \
+            Some(0) => Err(ToolError::invalid_arguments(
+                "timeout_seconds must be positive",
+            )),
+            Some(seconds) if seconds > self.max.as_secs() => {
+                Err(ToolError::invalid_arguments(format!(
+                    "timeout_seconds {seconds} exceeds the configured maximum of {} seconds \
                  (tools.max_timeout_seconds)",
-                self.max.as_secs()
-            ))),
+                    self.max.as_secs()
+                )))
+            }
             Some(seconds) => Ok(Duration::from_secs(seconds)),
         }
     }

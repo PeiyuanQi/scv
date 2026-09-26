@@ -24,7 +24,7 @@ pub(crate) enum TranscriptItem {
     Error(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolStatus {
     Proposed,
     Approval,

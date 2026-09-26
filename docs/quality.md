@@ -11,7 +11,16 @@ third-party agent. The correctness contract covers:
 - OpenAI-compatible request shaping, fragmented streamed text/tool arguments,
   usage, bounded error handling, and credential redaction through a local fake
   server;
-- protocol round trips and forward-compatible additive fields;
+- protocol round trips and forward-compatible additive fields; every error
+  code and tool error kind keeping its wire name, and unknown event types,
+  codes, and kinds parsing as `unknown`;
+- a frozen copy of every event 0.2.2 sent decoding with today's types and
+  encoding back to the same bytes, and a failed call adding only its `error`
+  kind, so the previous release (the planned-restart watchdog) reads what the
+  new server sends;
+- tool results typed by `ToolFailure`, the model's text byte-identical (the
+  denial message included), and the TUI and the agent fallback reading the
+  kind rather than the text;
 - filesystem containment, symlink escape, bounded reads, atomic writes, stale
   hashes, process timeout, process-group cancellation, bounded process output,
   and native-agent argument/cwd and model/effort mapping behavior;

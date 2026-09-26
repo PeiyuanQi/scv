@@ -185,7 +185,7 @@ async fn html_is_converted_to_text_and_json_passes_through() {
         )
         .await
         .unwrap();
-    assert!(!html.is_error, "{}", html.content);
+    assert!(!html.is_error(), "{}", html.content);
     assert!(html.content.contains("Serde"), "{}", html.content);
     assert!(html.content.contains("1.0.228"), "{}", html.content);
     assert!(
@@ -239,7 +239,7 @@ async fn binary_content_is_refused_and_large_bodies_are_bounded_and_paged() {
         )
         .await
         .unwrap();
-    assert!(binary.is_error);
+    assert!(binary.is_error());
     assert!(binary.content.contains("image/png"), "{}", binary.content);
     let first = tool
         .execute(
@@ -295,7 +295,7 @@ async fn loopback_and_private_targets_are_refused_directly_by_name_and_by_redire
         )
         .await
         .unwrap_err();
-    assert!(direct.0.contains("non-public"), "{}", direct.0);
+    assert!(direct.message.contains("non-public"), "{}", direct.message);
     let metadata = tool
         .execute(
             json!({"url":"http://169.254.169.254/latest/meta-data/"}),
@@ -303,7 +303,11 @@ async fn loopback_and_private_targets_are_refused_directly_by_name_and_by_redire
         )
         .await
         .unwrap_err();
-    assert!(metadata.0.contains("non-public"), "{}", metadata.0);
+    assert!(
+        metadata.message.contains("non-public"),
+        "{}",
+        metadata.message
+    );
     let named = tool
         .execute(
             json!({"url":format!("http://localhost:{port}/")}),
@@ -311,7 +315,7 @@ async fn loopback_and_private_targets_are_refused_directly_by_name_and_by_redire
         )
         .await
         .unwrap_err();
-    assert!(named.0.contains("non-public"), "{}", named.0);
+    assert!(named.message.contains("non-public"), "{}", named.message);
     let redirected = tool
         .execute(
             json!({"url":format!("http://127.0.0.1:{port}/go")}),
@@ -319,7 +323,11 @@ async fn loopback_and_private_targets_are_refused_directly_by_name_and_by_redire
         )
         .await
         .unwrap_err();
-    assert!(redirected.0.contains("non-public"), "{}", redirected.0);
+    assert!(
+        redirected.message.contains("non-public"),
+        "{}",
+        redirected.message
+    );
     server.join().unwrap();
 }
 
@@ -352,7 +360,7 @@ async fn redirects_are_limited() {
         )
         .await
         .unwrap_err();
-    assert!(error.0.contains("redirects"), "{}", error.0);
+    assert!(error.message.contains("redirects"), "{}", error.message);
     looping.join().unwrap();
 }
 
@@ -476,7 +484,7 @@ async fn search_backends_are_queried_with_their_parameters() {
         .execute(json!({"query":"tokio"}), context())
         .await
         .unwrap();
-    assert!(failure.is_error);
+    assert!(failure.is_error());
     assert!(failure.content.contains("API key"), "{}", failure.content);
 
     let heads = server.join().unwrap();

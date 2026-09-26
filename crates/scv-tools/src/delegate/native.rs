@@ -63,13 +63,13 @@ impl NativeAgentTool {
         }
         if let Some(session) = &args.session {
             if !self.resume.is_supported() {
-                return Err(ToolError(format!(
+                return Err(ToolError::invalid_arguments(format!(
                     "{} cannot continue a conversation; omit session to start a new one",
                     self.name
                 )));
             }
             if !conversation::is_handle(session) {
-                return Err(ToolError(format!(
+                return Err(ToolError::invalid_arguments(format!(
                     "session {:?} is not a conversation handle; pass the `session` value an \
                      earlier {} call returned, or omit it to start a new conversation",
                     bounded(session, 80),
@@ -80,7 +80,9 @@ impl NativeAgentTool {
         // The prompt follows the flags as a positional argument, so it must
         // not be readable as one.
         if args.prompt.starts_with('-') {
-            return Err(ToolError("agent prompt must not start with '-'".into()));
+            return Err(ToolError::invalid_arguments(
+                "agent prompt must not start with '-'",
+            ));
         }
         let mut command = self.args.clone();
         command.extend(self.full_permission_args.iter().flatten().cloned());
@@ -93,7 +95,7 @@ impl NativeAgentTool {
                 continue;
             };
             if template.is_empty() {
-                return Err(ToolError(format!(
+                return Err(ToolError::invalid_arguments(format!(
                     "{} does not support selecting a {field}",
                     self.name
                 )));
@@ -104,7 +106,9 @@ impl NativeAgentTool {
                 valid_effort(value)
             };
             if !valid {
-                return Err(ToolError(format!("invalid {field} {value:?}")));
+                return Err(ToolError::invalid_arguments(format!(
+                    "invalid {field} {value:?}"
+                )));
             }
             command.extend(template.iter().map(|part| part.replace(placeholder, value)));
         }
@@ -298,7 +302,7 @@ impl Tool for NativeAgentTool {
         let command_args = self.command_args(&args)?;
         let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
         let executable = self.resolved.as_ref().ok_or_else(|| {
-            ToolError(format!(
+            ToolError::unavailable(format!(
                 "{} executable {:?} was not found on PATH or in the user's install directories",
                 self.name, self.command
             ))
@@ -441,10 +445,10 @@ impl Tool for NativeAgentTool {
         );
         let mut output = ToolOutput {
             content,
-            is_error: result.status != output::RunStatus::Completed,
+            failure: result.status.failure(),
             truncated,
         };
-        if output.is_error {
+        if output.is_error() {
             add_sign_in_hint(&mut output, agent);
         }
         Ok(output)
@@ -511,7 +515,7 @@ async fn execute_agent_process(
     };
     let stderr_tail = stderr.lock().await.text();
     let stream = Arc::try_unwrap(stdout)
-        .map_err(|_| ToolError("agent output reader is still running".into()))?
+        .map_err(|_| ToolError::failed("agent output reader is still running"))?
         .into_inner();
     Ok(AgentRun {
         stream,
