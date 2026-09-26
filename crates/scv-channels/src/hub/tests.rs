@@ -61,6 +61,22 @@ async fn a_dropped_notice_is_reported_as_not_stored() {
     assert_eq!(result, Err(NotifyError::NotStored));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_notice_not_stored_in_time_is_abandoned() {
+    let hub = Hub::new(None);
+    let link = Link::new(Arc::clone(&hub), "wechat:default", None);
+    let (_registration, mut notices) = link.register();
+    let notify = hub.notify("wechat:default", "owner", "text");
+    let waiting = async {
+        let notice = notices.recv().await.unwrap();
+        assert!(!notice.abandoned(), "its sender is still waiting");
+        notice
+    };
+    let (result, notice) = tokio::join!(notify, waiting);
+    assert_eq!(result, Err(NotifyError::NotStored));
+    assert!(notice.abandoned(), "the bridge must not store it late");
+}
+
 #[test]
 fn a_replaced_bridge_is_not_withdrawn_by_its_predecessor() {
     let hub = Hub::new(None);

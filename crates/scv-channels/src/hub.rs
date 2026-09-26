@@ -59,6 +59,13 @@ impl Notice {
     pub fn stored(self) {
         let _ = self.stored.send(());
     }
+
+    /// Whoever queued the notice stopped waiting for it, as [`Hub::notify`]
+    /// does after [`NOTIFY_TIMEOUT`]; it was told the notice was not stored,
+    /// so the bridge must not send it late.
+    pub(crate) fn abandoned(&self) -> bool {
+        self.stored.is_closed()
+    }
 }
 
 /// Why [`Hub::notify`] could not hand a notice over.
@@ -219,6 +226,8 @@ impl Hub {
 
     /// Queue `text` for `to` in `component`'s durable outbox and wait until
     /// it is stored. Delivery then follows the account's normal retries.
+    /// Once this returns an error, or its future is dropped, the bridge
+    /// drops the notice instead of storing it late.
     pub async fn notify(&self, component: &str, to: &str, text: &str) -> Result<(), NotifyError> {
         let (stored, done) = oneshot::channel();
         let notice = Notice {

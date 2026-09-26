@@ -388,7 +388,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
     let _lock = store.lock(account)?;
     let mut state = store.bind_state(account, running)?;
     recover_interrupted_after(store, account, &mut state, link.take_restart().as_ref())?;
-    let (registration, mut notices) = link.register();
+    let (registration, notices) = link.register();
     let bridge = Bridge {
         transport,
         account,
@@ -414,19 +414,19 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
     let mut conversations = FuturesUnordered::new();
     let poll = bridge.poll(tool_owner.as_ref(), &start);
     let deliver = bridge.deliver();
-    tokio::pin!(poll, deliver);
+    let notices = bridge.store_notices(notices);
+    tokio::pin!(poll, deliver, notices);
+    // Every future that changes delivery state is polled side by side here,
+    // and no arm awaits: a future waiting out a busy account in `save` holds
+    // the state lock until it is polled again, so an arm that waited for
+    // that lock would stop the whole account.
     loop {
         tokio::select! {
             result = &mut poll => return result,
             result = &mut deliver => return result,
+            result = &mut notices => return result,
             Some((owner, recipient, jobs, watching)) = started.recv() => conversations.push(bridge.converse(owner, recipient, jobs, watching)),
             Some(result) = conversations.next(), if !conversations.is_empty() => result?,
-            Some(notice) = notices.recv() => {
-                bridge
-                    .queue_unprompted(&notice.to, session::Reply::text(notice.text.clone()))
-                    .await?;
-                notice.stored();
-            }
         }
     }
 }
@@ -1220,6 +1220,37 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         self.save(&state).await?;
         drop(state);
         self.replies.notify_one();
+        Ok(())
+    }
+
+    /// Store the notices the daemon queues for this account, in order, for
+    /// the life of the run, each as an unprompted message.
+    async fn store_notices(&self, mut notices: mpsc::UnboundedReceiver<hub::Notice>) -> Result<()> {
+        while let Some(notice) = notices.recv().await {
+            self.store_notice(notice).await?;
+        }
+        // A newer bridge of this account took over the hub's queue.
+        std::future::pending().await
+    }
+
+    /// Store one notice and tell the daemon, unless the daemon already
+    /// stopped waiting for it: it counted the notice as not stored and may
+    /// have sent it elsewhere, so a late copy would repeat it or ask what
+    /// can no longer be answered.
+    async fn store_notice(&self, notice: hub::Notice) -> Result<()> {
+        let mut state = self.state.lock().await;
+        // Checked under the lock, as close to storing as it gets.
+        if notice.abandoned() {
+            tracing::warn!("dropped a notice the daemon stopped waiting for");
+            return Ok(());
+        }
+        let mut pending = new_pending("", &notice.to, "", &notice.text, MAX_REPLY_BYTES);
+        pending.key.clone_from(&notice.to);
+        state.pending.push(pending);
+        self.save(&state).await?;
+        drop(state);
+        self.replies.notify_one();
+        notice.stored();
         Ok(())
     }
 
