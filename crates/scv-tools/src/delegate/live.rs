@@ -9,10 +9,11 @@
 //! ACP JSON-RPC client) runs on top of it.
 //!
 //! A conversation keeps its child between turns, when no turn is reading
-//! from it. A reaper task therefore owns the process and waits for it from
-//! the start: whenever the child exits, whether it ends by itself or `scv
-//! agents kill` stops it, the reaper collects it at once, stops what is left
-//! of its group, and removes its delegation record.
+//! from it, and its delegation record says so ([`LiveChild::begin_turn`]).
+//! A reaper task owns the process and waits for it from the start: whenever
+//! the child exits, whether it ends by itself or `scv agents kill` stops it,
+//! the reaper collects it at once, stops what is left of its group, and
+//! removes its delegation record.
 
 use std::{
     ffi::OsString,
@@ -188,11 +189,16 @@ impl LiveChild {
         !self.closed.load(Ordering::Acquire) && *self.life.borrow() == Life::Running
     }
 
-    /// Record the conversation turn this child is serving.
-    pub(crate) fn set_turn(&self, turn: u32) {
+    /// Record that this child serves `turn` of its conversation until the
+    /// returned guard drops, which records it idle between turns. A planned
+    /// restart waits for a live child only while a turn runs.
+    pub(crate) fn begin_turn(&self, turn: u32) -> LiveTurn<'_> {
+        // Held while the record is rewritten, so the reaper, which takes the
+        // guard before removing the record, never sees it written back.
         if let Some(guard) = lock(&self.guard).as_ref() {
             guard.set_turn(turn);
         }
+        LiveTurn(self)
     }
 
     /// Shut the child down and wait for it: close its input, give it
@@ -204,6 +210,20 @@ impl LiveChild {
         }
         let stdin = self.stdin.lock().await.take();
         shut_down(self.pid, stdin, self.life.clone()).await;
+    }
+}
+
+/// A turn a live child is serving, from [`LiveChild::begin_turn`]. However
+/// the turn ends, dropping this records the child idle; a child already
+/// stopped has no record left to change.
+#[must_use = "the turn ends when this guard drops"]
+pub(crate) struct LiveTurn<'a>(&'a LiveChild);
+
+impl Drop for LiveTurn<'_> {
+    fn drop(&mut self) {
+        if let Some(guard) = lock(&self.0.guard).as_ref() {
+            guard.set_idle();
+        }
     }
 }
 

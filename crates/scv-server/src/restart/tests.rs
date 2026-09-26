@@ -475,6 +475,7 @@ async fn a_restart_waits_for_the_requesting_job_its_report_and_owner_messages() 
         depth: 1,
         conversation: None,
         turn: None,
+        idle_since_unix: None,
     };
     std::fs::create_dir_all(registry.record_dir()).unwrap();
     std::fs::write(
@@ -569,6 +570,109 @@ async fn a_restart_goes_ahead_at_its_deadline_and_says_so() {
     );
     eventually(|| launched.lock().unwrap().len() == 1).await;
     assert!(launched.lock().unwrap()[0].waited_out);
+}
+
+/// A nested SCV this daemon started for conversation `scv-1`, whose process
+/// keeps running between turns, recorded mid-turn or `idle_since_unix`.
+fn live_agent(
+    registry: &DelegationRegistry,
+    idle_since_unix: Option<u64>,
+) -> (std::process::Child, scv_tools::delegation::DelegationRecord) {
+    use scv_tools::delegation::{DelegationRecord, ProcessIdentity};
+    use std::os::unix::process::CommandExt as _;
+    let agent = std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let record = DelegationRecord {
+        handle: "scv-92f0c3".into(),
+        agent: "scv".into(),
+        instance: registry.instance().into(),
+        session: "s".into(),
+        owner: ProcessIdentity::current().unwrap(),
+        process: ProcessIdentity::of(agent.id()).unwrap(),
+        pgid: agent.id(),
+        cwd: "/work".into(),
+        started_unix: 1,
+        depth: 1,
+        conversation: Some("scv-1".into()),
+        turn: Some(1),
+        idle_since_unix,
+    };
+    write_record(registry, &record);
+    (agent, record)
+}
+
+fn write_record(registry: &DelegationRegistry, record: &scv_tools::delegation::DelegationRecord) {
+    std::fs::create_dir_all(registry.record_dir()).unwrap();
+    std::fs::write(
+        registry
+            .record_dir()
+            .join(format!("{}.json", record.handle)),
+        serde_json::to_vec(record).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Arm a restart that the delegation `handle` of session `s` asked for.
+fn arm_for(restarter: &Arc<Restarter>, registry: &DelegationRegistry, handle: &str) -> RestartInfo {
+    let mut waiting = plan(PlanState::Waiting);
+    waiting.requester = restarter.requester(&format!("{}/s/{handle}", registry.instance()));
+    assert!(waiting.requester.is_some());
+    waiting.requested_unix = unix_now();
+    waiting.deadline_unix = unix_now() + 600;
+    restarter.arm(waiting).unwrap()
+}
+
+#[tokio::test]
+async fn a_live_agent_between_turns_does_not_hold_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    // The turn that ran the deploy has ended; the nested SCV waits for the
+    // next one, as the owner's scv-92f0c3 did on 2026-09-26.
+    let (mut agent, record) = live_agent(&registry, Some(unix_now()));
+    let info = arm_for(&restarter, &registry, &record.handle);
+    assert_eq!(info.waiting_for, None);
+    eventually(|| launched.lock().unwrap().len() == 1).await;
+    assert!(!launched.lock().unwrap()[0].waited_out);
+    assert!(record.process.is_alive(), "the agent itself was left alone");
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_live_agent_mid_turn_holds_a_restart_until_its_turn_ends() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    let (mut agent, mut record) = live_agent(&registry, None);
+    let info = arm_for(&restarter, &registry, &record.handle);
+    assert_eq!(info.waiting_for.as_deref(), Some("scv-92f0c3 to finish"));
+    // More checks than a restart needs clear pass while the turn runs.
+    tokio::time::sleep(Duration::from_millis(u64::from(CLEAR_CHECKS + 1) * 1000)).await;
+    assert!(launched.lock().unwrap().is_empty());
+    assert_eq!(
+        restarter
+            .info()
+            .and_then(|info| info.waiting_for)
+            .as_deref(),
+        Some("scv-92f0c3 to finish")
+    );
+    // Its turn ends and it stays for the next one.
+    record.idle_since_unix = Some(unix_now());
+    write_record(&registry, &record);
+    eventually(|| launched.lock().unwrap().len() == 1).await;
+    assert!(!launched.lock().unwrap()[0].waited_out);
+    agent.kill().unwrap();
+    agent.wait().unwrap();
 }
 
 #[test]

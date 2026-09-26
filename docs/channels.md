@@ -524,8 +524,9 @@ the delegated agent runs the feature flow, whose `publish.sh` first asks the
 owner in that chat whether to publish (see
 [Questions to the owner](#questions-to-the-owner)) and whose `deploy.sh` ends
 with `scv restart --when-idle`. The daemon then restarts only once that agent has
-finished, its report is stored in the chat's outbox, and no owner message is
-being answered, or after ten minutes at the latest (see
+finished (a nested SCV or ACP agent, which lives for its whole conversation:
+once its turn has ended), its report is stored in the chat's outbox, and no
+owner message is being answered, or after ten minutes at the latest (see
 [architecture](architecture.md#planned-restarts)). Across the restart:
 
 - Messages whose turns the restart interrupted are answered with "SCV

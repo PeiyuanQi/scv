@@ -1,7 +1,8 @@
 //! `agent_scv` end to end: a real `scv server --stdio` delegates to a real
 //! nested SCV over the SCV protocol. The nested SCV's `bash` approval comes
 //! back to the parent's client, its events arrive as progress, a second turn
-//! continues the same nested session, and nothing outlives the parent.
+//! continues the same nested session, its record shows it at work during a
+//! turn and idle between turns, and nothing outlives the parent.
 
 use crate::support::{
     Isolated, alive, call, read_http_request, sse_response, tagged, text, write_private,
@@ -16,6 +17,7 @@ use std::{
 };
 
 use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_tools::delegation::{DelegationEntry, DelegationRegistry};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -96,7 +98,13 @@ fn delegation_pid(home: &Path) -> Option<(u32, String)> {
     None
 }
 
-/// Processes still carrying `handle` in their `SCV_PARENT` chain (Linux).
+/// The nested SCV's run as `scv agents ps` lists it.
+fn nested_run(registry: &DelegationRegistry) -> DelegationEntry {
+    let mut entries = registry.list(false);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    entries.remove(0)
+}
+
 async fn delegate(approve_nested: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -116,6 +124,7 @@ async fn delegate(approve_nested: bool) {
             "[provider]\nactive = \"t\"\n\n[providers.t]\nkind = \"openai-compatible\"\nmodel = \"child-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n"
         ),
     );
+    let registry = DelegationRegistry::new(&scv_client::Layout::new(&home_path));
 
     let mut server = Command::new(env!("CARGO_BIN_EXE_scv"))
         .isolated(&home_path)
@@ -201,6 +210,13 @@ async fn delegate(approve_nested: bool) {
                     summary,
                     ..
                 } => {
+                    if name == "bash" {
+                        // The nested SCV asks mid-turn: it is at work, which
+                        // holds a planned restart.
+                        let run = nested_run(&registry);
+                        assert!(run.working(), "{run:?}");
+                        assert_eq!(run.record.turn, Some(1));
+                    }
                     let approved = name == "agent_scv" || approve_nested;
                     turn.approvals.push((name, summary));
                     send(ClientMessage::ApprovalResolve {
@@ -224,12 +240,13 @@ async fn delegate(approve_nested: bool) {
             }
         }
         turns.push(turn);
-        if index == 0 {
-            assert!(
-                delegation_pid(&home_path).is_some(),
-                "the nested SCV is not recorded"
-            );
-        }
+        // Between turns the nested SCV lives on, idle: a planned restart
+        // does not wait for it.
+        let run = nested_run(&registry);
+        assert!(run.processes > 0, "{run:?}");
+        assert!(run.record.idle_since_unix.is_some(), "{run:?}");
+        assert!(!run.working());
+        assert_eq!(run.record.turn, Some(u32::try_from(index).unwrap() + 1));
     }
     let (child, handle) = delegation_pid(&home_path).expect("the nested SCV ended between turns");
     assert!(alive(child));

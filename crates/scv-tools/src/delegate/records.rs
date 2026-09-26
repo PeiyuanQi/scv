@@ -95,6 +95,11 @@ pub struct DelegationRecord {
     pub conversation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<u32>,
+    /// A live child that keeps its process between turns (a nested SCV or an
+    /// ACP agent) and has no turn running: when its last turn ended. Absent
+    /// while a turn runs, and always for a per-turn run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since_unix: Option<u64>,
 }
 
 /// A record plus what SCV currently observes about it.
@@ -105,6 +110,14 @@ pub struct DelegationEntry {
     pub orphaned: bool,
     /// Live processes in its group plus tagged processes outside it.
     pub processes: usize,
+}
+
+impl DelegationEntry {
+    /// Whether the run is still at work: it has live processes and is not a
+    /// live child waiting between turns of its conversation.
+    pub fn working(&self) -> bool {
+        self.processes > 0 && self.record.idle_since_unix.is_none()
+    }
 }
 
 /// A delegation named in an `SCV_PARENT` chain, and the session that
@@ -270,15 +283,14 @@ impl DelegationRegistry {
             process: ProcessIdentity::of(pid).unwrap_or(ProcessIdentity { pid, start_time: 0 }),
             pgid: pid,
             cwd: pending.cwd,
-            started_unix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_secs()),
+            started_unix: unix_now(),
             depth: pending.depth,
             conversation: pending
                 .conversation
                 .as_ref()
                 .map(|(handle, _)| handle.clone()),
             turn: pending.conversation.as_ref().map(|(_, turn)| *turn),
+            idle_since_unix: None,
         };
         lock(&self.inner)
             .active
@@ -429,13 +441,27 @@ impl DelegationGuard {
         &self.handle
     }
 
-    /// Record that the run moved on to `turn` of its conversation, for a
-    /// live child that serves every turn. Bookkeeping only: a failure to
-    /// rewrite the record never fails the turn.
+    /// Record that the run moved on to `turn` of its conversation and is at
+    /// work, for a live child that serves every turn.
     pub(crate) fn set_turn(&self, turn: u32) {
+        self.update(|record| {
+            record.turn = Some(turn);
+            record.idle_since_unix = None;
+        });
+    }
+
+    /// Record that a live child ended its turn and waits for the next one.
+    pub(crate) fn set_idle(&self) {
+        let now = unix_now();
+        self.update(|record| record.idle_since_unix = Some(now));
+    }
+
+    /// Rewrite the record. Bookkeeping only: a failure never fails the turn,
+    /// and a record already removed stays removed.
+    fn update(&self, change: impl FnOnce(&mut DelegationRecord)) {
         let dir = &self.registry.record_dir;
         if let Some(mut record) = read_record(&dir.join(format!("{}.json", self.handle))) {
-            record.turn = Some(turn);
+            change(&mut record);
             if let Err(error) = write_record(dir, &record) {
                 tracing::debug!(handle = %record.handle, %error, "could not update a delegation record");
             }
@@ -572,6 +598,12 @@ pub(crate) fn group_exists(pgid: u32) -> bool {
     {
         signalable
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn write_record(dir: &Path, record: &DelegationRecord) -> std::io::Result<()> {

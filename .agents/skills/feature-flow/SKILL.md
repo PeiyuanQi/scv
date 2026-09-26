@@ -193,8 +193,9 @@ scripts/deploy.sh <version>
   `scv-cli@<version>` from crates.io, retrying while the index catches up.
 - Asks the daemon to restart into it with `scv restart --when-idle`. The
   daemon restarts once no owner message is being answered and, when this
-  flow runs as its delegated agent, once your job has finished and its report
-  is stored, or after `SCV_RESTART_MAX_WAIT` seconds (600) at the latest. A
+  flow runs as its delegated agent, once your job has finished (as a nested
+  SCV or ACP agent: once your turn has ended) and its report is stored, or
+  after `SCV_RESTART_MAX_WAIT` seconds (600) at the latest. A
   watchdog outside the daemon then checks that the new version comes up with
   its channel accounts connected, and puts `scv.prev` back if it does not
   (only between releases with the same config layout). Never pass

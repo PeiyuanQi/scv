@@ -244,11 +244,15 @@ an owner's chat request to change, publish, and deploy SCV itself.
    (version and `CONFIG_LAYOUT`); otherwise nothing is scheduled.
 2. The daemon saves a plan in `$SCV_HOME/state/update.json` (mode 0600) and
    waits, checking every second. It goes ahead after two clear checks in a
-   row: the delegation named by the request's `SCV_PARENT` chain has no live
-   processes, its daemon session has no running turn, running or unreported
+   row: the delegation named by the request's `SCV_PARENT` chain is no longer
+   at work, its daemon session has no running turn, running or unreported
    background job, and (through the channel hub) no unstored report; and no
-   chat bridge holds an owner message it has not answered durably. At the
-   request's deadline it goes ahead anyway and the plan says so.
+   chat bridge holds an owner message it has not answered durably. A
+   per-turn CLI run is at work while it has live processes. A live child (a
+   nested SCV or an ACP agent) keeps its process for its whole conversation,
+   so it is at work only while a turn runs on it, which its delegation record
+   tells (`idle_since_unix` is absent then; `DelegationEntry::working`). At
+   the request's deadline it goes ahead anyway and the plan says so.
 3. It records the accounts connected at that moment, copies its own image
    (`/proc/self/exe`) to `<binary>.prev`, and starts `scv restart-watchdog`
    from that copy as a transient unit (`systemd-run --user`), outside its own
@@ -381,7 +385,11 @@ Live delegations keep one child for a whole conversation. `delegate/live.rs`
 holds the protocol-neutral part: `LiveChild` starts the child in its adapter
 environment and own process group, records it as a delegation, frames its
 stdout into bounded lines, and shuts it down (stdin closed, a 2-second grace,
-then a group kill and a sweep of tagged processes). The conversation store
+then a group kill and a sweep of tagged processes). Each call that runs a
+turn on the child holds `LiveChild::begin_turn`'s guard, and the record
+notes when the turn ended (`idle_since_unix`) once the guard drops, however
+the call ends, so `scv agents ps` lists the child idle between turns and a
+planned restart does not wait for it then. The conversation store
 keeps the child as the conversation's attachment, so forgetting, expiring, or
 ending the conversation's session is what shuts it down. `delegate/scv.rs`
 runs the SCV protocol client on top of it for `agent_scv`, and

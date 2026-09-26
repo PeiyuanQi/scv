@@ -265,6 +265,8 @@ impl Tool for AcpAgentTool {
                 }
             },
         };
+        // Recorded at work until this call returns, however it ends.
+        let _serving = child.rpc.live.begin_turn(turn.turn);
         if let Err(error) = self
             .configure(&child, &args, deadline, &context.cancellation)
             .await
@@ -281,7 +283,6 @@ impl Tool for AcpAgentTool {
                 kept.as_deref().map(|_| (handle.as_str(), number)),
             ));
         }
-        child.rpc.live.set_turn(turn.turn);
         let handle = turn.handle.clone();
         let number = turn.turn;
         let end = self

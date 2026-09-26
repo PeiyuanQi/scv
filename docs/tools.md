@@ -405,7 +405,8 @@ Each session remembers at most `agent.max_conversations` conversations
 (default 8; starting another forgets the least recently used idle one) and
 forgets one left unused for `agent.conversation_idle_seconds` (default 86400).
 Handles end with the SCV session. `scv agents ps` shows a running turn's
-conversation and turn number.
+conversation and turn number, and lists a nested SCV or ACP agent that waits
+between turns of its conversation as `idle`.
 
 The CLIs keep transcripts in their private agent homes (Claude Code under
 `.claude/projects`, Codex under `sessions`, pi under `.pi/agent/sessions`).
@@ -519,7 +520,10 @@ Every delegated process gets `SCV_PARENT=<instance>/<session>/<handle>`
 both. While it runs, SCV records it in `$SCV_HOME/state/delegations/<handle>.json`
 (mode `0600`, directories `0700`, written atomically): handle, agent, parent
 session, `cwd`, depth, and the PID plus start time of both the agent and the
-SCV process that owns it, so a reused PID never matches.
+SCV process that owns it, so a reused PID never matches. A run that serves a
+conversation also records the conversation and its current turn, and a live
+agent (a nested SCV or an ACP agent) that waits between turns records when
+its last turn ended (`idle_since_unix`), until its next turn starts.
 
 When a run ends, SCV stops its process group and then any process still tagged
 with its handle (TERM, then KILL after 2 seconds), including descendants that
@@ -608,7 +612,8 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   forgotten. A nested SCV that exits mid-turn fails the call with its stderr
   tail and ends the conversation.
 - The nested SCV is recorded like any delegation, so `scv agents ps` lists it
-  with its current turn, `scv agents kill` stops it, and the orphan
+  with its current turn (`running` during a turn, `idle` between turns),
+  `scv agents kill` stops it, and the orphan
   reconcile reaps it if its parent dies. It ends when its conversation is
   forgotten, expires, or its session ends: SCV closes its stdin (the server
   exits on EOF), waits 2 seconds, then kills its process group and anything

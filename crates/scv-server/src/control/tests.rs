@@ -39,6 +39,7 @@ async fn daemon_control_lists_and_stops_delegations() {
         depth: 1,
         conversation: Some("codex-2".into()),
         turn: Some(3),
+        idle_since_unix: None,
     };
     std::fs::create_dir_all(registry.record_dir()).unwrap();
     std::fs::write(

@@ -212,7 +212,15 @@ async fn a_conversation_continues_one_session_with_bounded_progress() {
     assert_eq!(init["clientCapabilities"]["fs"]["writeTextFile"], false);
     assert_eq!(init["clientCapabilities"]["terminal"], false);
     let agent_pid = pid(dir.path());
-    assert_eq!(registry.list(false).len(), 1, "the live agent is recorded");
+    let idle = |turn: u32| {
+        let runs = registry.list(false);
+        assert_eq!(runs.len(), 1, "the live agent is recorded");
+        // Between turns the agent waits, and a planned restart does not.
+        assert!(runs[0].record.idle_since_unix.is_some(), "{:?}", runs[0]);
+        assert!(!runs[0].working());
+        assert_eq!(runs[0].record.turn, Some(turn));
+    };
+    idle(1);
 
     let second = tool
         .execute(
@@ -236,6 +244,7 @@ async fn a_conversation_continues_one_session_with_bounded_progress() {
         "one process serves the conversation"
     );
     assert_eq!(calls(dir.path()).matches("session/new").count(), 1);
+    idle(2);
 
     // Ending the calling session shuts the agent down.
     drop(tool);

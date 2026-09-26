@@ -147,6 +147,7 @@ fn delegation(registry: &DelegationRegistry, session: &str) -> String {
         depth: 1,
         conversation: None,
         turn: None,
+        idle_since_unix: None,
     };
     std::fs::create_dir_all(registry.record_dir()).unwrap();
     std::fs::write(

@@ -365,11 +365,7 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
             entry.handle,
             entry.agent,
             conversation,
-            if entry.orphaned {
-                "orphaned"
-            } else {
-                "running"
-            },
+            delegation_state(entry),
             entry.pid,
             entry.processes,
             format!("{}m{:02}s", age / 60, age % 60),
@@ -378,3 +374,17 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
         );
     }
 }
+
+/// A run's STATE in `scv agents ps`: a live agent between turns is idle.
+fn delegation_state(entry: &scv_protocol::DelegationInfo) -> &'static str {
+    if entry.orphaned {
+        "orphaned"
+    } else if entry.idle_since_unix_seconds.is_some() {
+        "idle"
+    } else {
+        "running"
+    }
+}
+
+#[cfg(test)]
+mod tests;

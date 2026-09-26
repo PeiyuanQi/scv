@@ -116,6 +116,7 @@ pub(crate) async fn daemon_control(
             orphaned: entry.orphaned,
             conversation: entry.record.conversation,
             turn: entry.record.turn,
+            idle_since_unix_seconds: entry.record.idle_since_unix,
         })
         .collect(),
         killed,

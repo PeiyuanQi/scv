@@ -80,6 +80,7 @@ fn a_chain_names_the_run_this_process_started() {
         depth: 1,
         conversation: None,
         turn: None,
+        idle_since_unix: None,
     };
     write_record(
         registry.record_dir(),
@@ -308,6 +309,7 @@ fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
         depth: 1,
         conversation: None,
         turn: None,
+        idle_since_unix: None,
     };
     write_record(&dir, &record).unwrap();
     std::fs::copy(
@@ -316,4 +318,48 @@ fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
     )
     .unwrap();
     assert!(registry.list(true).is_empty());
+}
+
+/// Records are read across SCV processes of different releases: the daemon,
+/// `scv exec` servers, and after a planned restart the previous release's
+/// watchdog or a rolled-back daemon.
+#[test]
+fn records_stay_readable_across_releases() {
+    /// 0.3.0's record: the same fields without `idle_since_unix`.
+    #[derive(Deserialize)]
+    #[allow(dead_code, reason = "only parsing matters")]
+    struct Release030 {
+        handle: String,
+        agent: String,
+        instance: String,
+        session: String,
+        owner: ProcessIdentity,
+        process: ProcessIdentity,
+        pgid: u32,
+        cwd: PathBuf,
+        started_unix: u64,
+        depth: u32,
+        #[serde(default)]
+        conversation: Option<String>,
+        #[serde(default)]
+        turn: Option<u32>,
+    }
+    // A record as 0.3.0 wrote it parses unchanged and says nothing of idling.
+    let old = r#"{"handle":"scv-92f0c3","agent":"scv","instance":"8973cbc5","session":"s","owner":{"pid":10,"start_time":5},"process":{"pid":11,"start_time":6},"pgid":11,"cwd":"/w","started_unix":1,"depth":1,"conversation":"scv-1","turn":1}"#;
+    let record: DelegationRecord = serde_json::from_str(old).unwrap();
+    assert_eq!(record.idle_since_unix, None);
+    assert_eq!(serde_json::to_string(&record).unwrap(), old);
+    // A live child between turns adds one field, which 0.3.0 skips.
+    let idle = DelegationRecord {
+        idle_since_unix: Some(7),
+        ..record
+    };
+    let encoded = serde_json::to_string(&idle).unwrap();
+    assert!(
+        encoded.ends_with(r#""turn":1,"idle_since_unix":7}"#),
+        "{encoded}"
+    );
+    let read: Release030 = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(read.handle, "scv-92f0c3");
+    assert_eq!(read.turn, Some(1));
 }
