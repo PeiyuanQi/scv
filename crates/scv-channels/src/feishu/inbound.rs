@@ -196,6 +196,7 @@ fn received(
             group: group.then(|| chat_id.to_owned()),
             media: parsed.media,
             reference,
+            sent_ms: (created_ms > 0).then_some(created_ms),
         }),
         chat_id: chat_id.to_owned(),
         group,

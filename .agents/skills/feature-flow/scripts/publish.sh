@@ -7,6 +7,9 @@
 # set), it first asks the owner yes or no in chat (`scv confirm`, in the chat
 # that started the work) and publishes only on yes. SCV_CONFIRM_TIMEOUT sets
 # how many seconds no answer waits before it counts as no (default 1800).
+# There is no way around the question: an `scv` too old to ask (before 0.3.0)
+# stops the run, so the first release with `scv confirm` is published from a
+# terminal.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -72,6 +75,17 @@ fi
 
 # An agent SCV delegated to publishes only on the owner's yes in chat.
 if [ -n "${SCV_PARENT:-}" ]; then
+  if ! "$here/host.sh" scv confirm --help >/dev/null 2>&1; then
+    installed=$("$here/host.sh" scv --version 2>/dev/null || echo "scv of an unknown version")
+    cat >&2 <<EOF
+publish.sh: the installed $installed cannot ask the owner in chat: \`scv confirm\`
+arrived in 0.3.0, so nothing was published. The first release that includes
+\`scv confirm\` (0.3.0) must be published from a terminal: run
+scripts/publish.sh there, outside SCV. Later releases can be published from
+chat. Tell the owner; do not publish around the question.
+EOF
+    exit 1
+  fi
   confirm_timeout=${SCV_CONFIRM_TIMEOUT:-1800}
   names=$(printf '%s, ' "${pending[@]}")
   question="Publish SCV $version to crates.io from origin/main $(git log -1 --format='%h %s' HEAD)?
@@ -89,7 +103,12 @@ Publishing cannot be undone."
       exit 1
       ;;
     *)
-      echo "publish.sh: could not ask the owner (scv confirm exited $answer); nothing was published" >&2
+      cat >&2 <<EOF
+publish.sh: could not ask the owner (scv confirm exited $answer, for the reason
+above); nothing was published. If the running daemon is too old to ask (before
+0.3.0), publish this release from a terminal; otherwise tell the owner why.
+Do not publish around the question.
+EOF
       exit 1
       ;;
   esac

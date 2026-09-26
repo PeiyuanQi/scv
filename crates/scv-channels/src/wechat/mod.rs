@@ -395,7 +395,19 @@ fn inbound(msg: &Value) -> Option<Inbound> {
         group,
         media: files,
         reference: None,
+        sent_ms: sent_ms(msg),
     }))
+}
+
+/// When the sender sent the message: iLink's `create_time_ms`, in Unix
+/// milliseconds, as a JSON number or a numeric string.
+fn sent_ms(msg: &Value) -> Option<u64> {
+    match msg.get("create_time_ms")? {
+        Value::Number(ms) => ms.as_u64(),
+        Value::String(ms) => ms.parse().ok(),
+        _ => None,
+    }
+    .filter(|ms| *ms > 0)
 }
 
 fn message_id(msg: &Value) -> Option<String> {

@@ -171,6 +171,11 @@ file (see [WeChat media](#wechat-media)); anything else, such as tool-call
 items, is only marked seen. iLink message IDs may be strings up to
 256 bytes or unsigned 64-bit JSON integers; SCV preserves either form as an
 exact string for durable deduplication. Ignored messages are durably marked.
+A message's `create_time_ms` (Unix milliseconds, a number or numeric string)
+is kept as when it was sent, which only
+[questions to the owner](#questions-to-the-owner) use. The field comes from
+the message type in Tencent's iLink client and ports of it; it has not been
+checked live, and a message without it never answers a question.
 Before queueing accepted work, the bridge persists an in-flight claim with the
 message ID, recipient, context token, and conversation, and it saves the
 batch's cursor only after every claim in the batch is durable. Recovery never
@@ -309,7 +314,10 @@ yet seen are not caught up.
 **Messages.** Every kind of user message is answered, from whoever the
 account answers (see [Sessions and safety](#sessions-and-safety)), except
 `system` messages, which are only marked seen; see [Feishu media](#feishu-media) for
-files, quotes, and forwarded messages. Rich text (`post`) becomes plain text,
+files, quotes, and forwarded messages. A message's own `create_time` (Unix
+milliseconds, in socket events and chat history alike) is kept as when it was
+sent, so a caught-up message keeps its original time; only
+[questions to the owner](#questions-to-the-owner) use it. Rich text (`post`) becomes plain text,
 one paragraph per line. In a group (any `chat_type` other than `p2p`) the bot answers
 only messages that mention it, identified by its own `open_id` from
 `/open-apis/bot/v3/info`; without that ID, group messages go unanswered.
@@ -556,26 +564,47 @@ unprompted message:
 Reply yes or no. No answer in <N> minutes counts as no.
 ```
 
-Once the question is in the outbox, the owner's next direct message in that
-chat that is an explicit answer decides it. After trimming, lowercasing, and dropping trailing `.`, `!`, `。`,
-and `！`, the words `yes`, `y`, `ok`, `okay`, `是`, `是的`, `好`, `好的`,
-`确认`, `可以`, and `同意` mean yes, and `no`, `n`, `否`, `不`, `不要`, `取消`,
-`算了`, and `stop` mean no; a message with files is not an answer. An answer
-starts no turn: the bridge replies to it "OK, going ahead." or "OK, stopped."
-once that reply is durable, and only then hands the answer to the asker. Any
-other message runs as a normal turn while the question keeps waiting. Other
-senders and group messages, the owner's own in a group included, never answer.
-With no answer in time (default 30 minutes, at most 4 hours) the chat is told
-"No answer, so stopped."; an asker that stops following the question for a
-minute (it was killed) has it withdrawn, and the chat is told "The question
-was withdrawn, so stopped."
+The question opens only once the platform has accepted that message. Until
+then it waits in the outbox behind anything queued before it, such as a reply
+that keeps failing, and nothing answers it. The pending delivery records the
+question's ID (`question`, which releases before 0.3.0 ignore). A question the
+platform refuses fails at once, and one still undelivered at its deadline fails
+too, since the owner was never asked; either way the chat is told nothing
+more. A question's message is never held for a later reply to carry, and one
+that no longer waits (answered, run out, withdrawn, or dropped by a daemon
+restart) is dropped from the outbox unsent. iLink can drop an unprompted
+message silently (see [WeChat iLink contract](#wechat-ilink-contract)); such
+a question looks delivered and simply goes unanswered.
+
+Once the question is open, the owner's next direct message in that chat that
+is an explicit answer, and that the platform says was sent no earlier than the
+question's delivery, decides it. The platform's time is Feishu's message
+`create_time` or iLink's `create_time_ms`, compared with this host's clock when
+the platform accepted the question. A message written earlier, such as one
+that Feishu's catch-up hands over after a reconnect or that a WeChat poll picks
+up after its backoff, was meant for something else, and a message without a
+platform time never answers either. After trimming, lowercasing, and dropping
+trailing `.`, `!`, `。`, and `！`, the words `yes`, `y`, `是`, `是的`, `确认`,
+and `同意` mean yes, and `no`, `n`, `否`, `不`, `不要`, `取消`, `算了`, and
+`stop` mean no. Casual replies the owner may send about anything else, such as
+`ok`, `好`, or `可以`, are not answers, and neither is a message with files. An
+answer starts no turn: the bridge replies to it "OK, going ahead." or "OK,
+stopped." once that reply is durable, and only then hands the answer to the
+asker. Any other message runs as a normal turn while the question keeps
+waiting. Other senders and group messages, the owner's own in a group
+included, never answer. With no answer in time (default 30 minutes, at most 4
+hours) the chat is told "No answer, so stopped."; an asker that stops
+following the question for a minute (it was killed) has it withdrawn, and the
+chat is told "The question was withdrawn, so stopped." if it had seen the
+question.
 
 A chat holds at most one question; asking again while one waits is refused.
 Questions live only in the daemon's memory, in the channel hub next to the
 notices, and a daemon restart drops them. `scv confirm` exits 0 for yes; 1 for
 no or no answer in time; and 2 when nothing could be asked or the answer was
 not learned: no daemon, a daemon too old for the command, no owner chat to
-ask in, a question already waiting there, or the daemon restarting while it
+ask in, a question already waiting there, the question refused by the platform
+or still undelivered at its deadline, or the daemon restarting while it
 waited. A delegated agent may run it; it manages nothing.
 
 ## Sessions and safety

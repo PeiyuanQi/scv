@@ -300,19 +300,26 @@ when SCV delegated the flow.
    or the owner's last chat). It must be an account owner's direct chat;
    otherwise nothing is asked.
 2. The daemon holds the question in the hub under that chat (one per chat),
-   replies with its ID at once, and queues the question in the account's
-   durable outbox like a notice; only then may an answer count
-   (`Hub::open`). The CLI follows it with `confirm_status` every two
-   seconds, since one control request is capped at 20 seconds; a question
-   nobody follows for a minute is withdrawn.
-3. The bridge's `classify` returns `Verdict::Answer` for the owner's explicit
-   yes or no in that direct chat while the hub holds a question there. The
-   bridge takes the question from the hub, stores its acknowledgement as the
+   replies with its ID at once, and queues the question's text in the
+   account's durable outbox with `Hub::send_question`, a notice tagged with
+   the question's ID, which the pending delivery keeps. The CLI follows it
+   with `confirm_status` every two seconds, since one control request is
+   capped at 20 seconds; a question nobody follows for a minute is withdrawn.
+3. The bridge delivers the outbox in order. Once the platform accepts the
+   question's text, the bridge records the delivery time in the hub
+   (`Registration::question_delivered`), which opens the question; a refusal
+   fails it (`question_undelivered`), and text whose question no longer
+   waits is dropped unsent.
+4. The bridge's `classify` returns `Verdict::Answer` for the owner's explicit
+   yes or no in that direct chat, sent (by the platform's message time,
+   `Message::sent_ms`) no earlier than the question's delivery. The bridge
+   takes the question from the hub, stores its acknowledgement as the
    message's reply, and only then hands the answer over; no turn starts.
-4. The daemon records the answer, or at the deadline withdraws the question
-   and tells the chat that no answer counts as no. `scv confirm` exits 0 on
-   yes, 1 on no or no answer, and 2 when nothing could be asked or the answer
-   was not learned.
+5. The daemon records the answer, or at the deadline withdraws the question:
+   one the chat saw is told that no answer counts as no, and one never
+   delivered fails without a word to the chat. `scv confirm` exits 0 on yes,
+   1 on no or no answer, and 2 when nothing could be asked or the answer was
+   not learned.
 
 Questions live in memory only: a restart drops them, and the waiting CLI,
 finding the question unknown or the daemon gone, exits 2.

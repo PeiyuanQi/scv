@@ -57,6 +57,8 @@ fn direct_text_becomes_a_message_to_answer() {
     );
     assert_eq!(message.reply_to, "om_1");
     assert_eq!(message.group, None);
+    // The message's own creation time is when the sender sent it.
+    assert_eq!(message.sent_ms, Some(1790221416232));
 }
 
 #[test]
@@ -289,6 +291,14 @@ fn history_items_skip_the_bot_and_deleted_messages() {
     assert!(
         matches!(&received.inbound, Inbound::Text(m) if m.text == "while offline" && m.sender == "ou_user")
     );
+    // A caught-up message keeps when it was sent, not when it arrived.
+    assert!(matches!(&received.inbound, Inbound::Text(m) if m.sent_ms == Some(1790221500000)));
+    let mut untimed = user.clone();
+    untimed.as_object_mut().unwrap().remove("create_time");
+    assert!(matches!(
+        parse_history(&untimed, false, Some(BOT)).unwrap().inbound,
+        Inbound::Text(Message { sent_ms: None, .. })
+    ));
     let mut bot = user.clone();
     bot["sender"] = json!({"id": "cli_x", "id_type": "app_id", "sender_type": "app"});
     assert!(parse_history(&bot, false, Some(BOT)).is_none());
@@ -347,7 +357,7 @@ fn a_voice_message_gets_the_voice_reply_because_feishu_sends_no_transcript() {
         owner: Some("ou_user"),
         tool_owner: None,
         senders: crate::state::Senders::Owner,
-        question: false,
+        question: None,
     };
     let Verdict::Unheard(sender) = classify(&received.inbound, &intake) else {
         panic!("a Feishu voice message gets the voice reply");

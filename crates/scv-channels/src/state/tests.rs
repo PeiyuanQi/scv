@@ -101,6 +101,44 @@ fn pending_state_reads_legacy_shape() {
 }
 
 #[test]
+fn a_question_tag_is_written_only_when_set_and_older_readers_ignore_it() {
+    let mut pending = PendingDelivery {
+        to_user_id: "owner".into(),
+        reply: "Publish?".into(),
+        ..Default::default()
+    };
+    // Untagged deliveries are written exactly as before.
+    assert!(
+        serde_json::to_value(&pending)
+            .unwrap()
+            .get("question")
+            .is_none()
+    );
+    pending.question = Some("q1".into());
+    let state = BridgeState {
+        pending: vec![pending],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&state).unwrap();
+    let restored: BridgeState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.pending[0].question.as_deref(), Some("q1"));
+    // 0.2.1 (d24a386), which a rollback runs, reads pending deliveries
+    // without `deny_unknown_fields`, so the tag is ignored there.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code, reason = "only whether it parses matters")]
+    struct Release021Pending {
+        #[serde(default)]
+        message_id: String,
+        to_user_id: String,
+        context_token: String,
+        reply: String,
+    }
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let older: Release021Pending = serde_json::from_value(value["pending"].clone()).unwrap();
+    assert_eq!(older.reply, "Publish?");
+}
+
+#[test]
 fn single_entries_keep_the_legacy_shape_and_many_become_lists() {
     let claim = |id: &str| InFlight {
         message_id: id.into(),

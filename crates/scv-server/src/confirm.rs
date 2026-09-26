@@ -5,10 +5,13 @@
 //! (its `SCV_PARENT` chain names the delegation, whose daemon session a chat
 //! bridge answers), or else to the owner chat an unprompted notice would go
 //! to. It is sent through the account's durable outbox and held in the
-//! channel hub, where the owner's next explicit yes or no in that chat
-//! answers it without starting a turn. The asker follows it with
-//! `confirm_status`; a question nobody follows for [`LEASE`] is withdrawn.
-//! Questions live in memory only: a daemon restart drops them.
+//! channel hub. Once the bridge has delivered its text, the owner's next
+//! explicit yes or no in that chat, sent after that, answers it without
+//! starting a turn; text the platform refuses, or that is still undelivered
+//! at the deadline, fails the question, since the owner was never asked.
+//! The asker follows it with `confirm_status`; a question nobody follows for
+//! [`LEASE`] is withdrawn. Questions live in memory only: a daemon restart
+//! drops them.
 
 use std::{
     collections::HashMap,
@@ -16,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use scv_channels::hub::{Hub, Origin};
+use scv_channels::hub::{Hub, Origin, Withdrawal};
 use scv_protocol::{ConfirmInfo, ConfirmState, DEFAULT_CONFIRM_SECONDS, MAX_CONFIRM_SECONDS};
 use scv_tools::delegation::DelegationRegistry;
 use tokio::sync::oneshot;
@@ -178,7 +181,7 @@ impl Confirmer {
         }
     }
 
-    /// Send the question, then wait for its answer, deadline, lease, or the
+    /// Queue the question, then wait for its answer, deadline, lease, or the
     /// daemon's shutdown, and record the outcome.
     async fn follow(
         self: Arc<Self>,
@@ -192,17 +195,14 @@ impl Confirmer {
                 self.hub.withdraw(&id);
                 return;
             }
-            stored = self.hub.notify(&chat.component, &chat.peer, &text) => stored,
+            stored = self.hub.send_question(&id, &chat.component, &chat.peer, &text) => stored,
         };
-        match stored {
-            // In the outbox: the owner's answer counts from now on.
-            Ok(()) => self.hub.open(&id),
-            Err(error) => {
-                tracing::warn!("Question {id} for {} not sent: {error}", chat.component);
-                self.hub.withdraw(&id);
-                self.settle(&id, ConfirmState::Failed);
-                return;
-            }
+        // In the outbox, the question opens once the bridge delivers it.
+        if let Err(error) = stored {
+            tracing::warn!("Question {id} for {} not sent: {error}", chat.component);
+            self.hub.withdraw(&id);
+            self.settle(&id, ConfirmState::Failed);
+            return;
         }
         loop {
             let answered = tokio::select! {
@@ -226,7 +226,9 @@ impl Confirmer {
                     return;
                 }
                 Some(Err(_)) => {
-                    tracing::warn!("The answer to question {id} was lost");
+                    tracing::warn!(
+                        "Question {id} ended unanswered: the platform refused it, or the answer was lost"
+                    );
                     self.settle(&id, ConfirmState::Failed);
                     return;
                 }
@@ -235,20 +237,39 @@ impl Confirmer {
             let Some((state, reply)) = self.overdue(&id) else {
                 continue;
             };
-            // Unless an answer is already on its way, which the next pass
-            // receives.
-            if self.hub.withdraw(&id) {
-                tracing::info!("Question {id} ended without an answer: {state:?}");
-                self.settle(&id, state);
-                tokio::select! {
-                    () = self.cancel.cancelled() => {}
-                    told = self.hub.notify(&chat.component, &chat.peer, reply) => {
-                        if let Err(error) = told {
-                            tracing::warn!("Could not tell {} how question {id} ended: {error}", chat.component);
+            match self.hub.withdraw(&id) {
+                // An answer or a failure is already on its way, which the
+                // next pass receives.
+                Withdrawal::Settled => {}
+                // The owner saw it: tell the chat it is over.
+                Withdrawal::Unanswered => {
+                    tracing::info!("Question {id} ended without an answer: {state:?}");
+                    self.settle(&id, state);
+                    tokio::select! {
+                        () = self.cancel.cancelled() => {}
+                        told = self.hub.notify(&chat.component, &chat.peer, reply) => {
+                            if let Err(error) = told {
+                                tracing::warn!("Could not tell {} how question {id} ended: {error}", chat.component);
+                            }
                         }
                     }
+                    return;
                 }
-                return;
+                // The owner never saw it, and the bridge drops it unsent:
+                // nothing was asked.
+                Withdrawal::Unsent => {
+                    let state = if state == ConfirmState::Expired {
+                        ConfirmState::Failed
+                    } else {
+                        state
+                    };
+                    tracing::warn!(
+                        "Question {id} never reached {} before it ended: {state:?}",
+                        chat.component
+                    );
+                    self.settle(&id, state);
+                    return;
+                }
             }
         }
     }

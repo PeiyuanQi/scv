@@ -106,6 +106,40 @@ fn voice_transcripts_quotes_and_files_come_through() {
 }
 
 #[test]
+fn the_send_time_comes_from_create_time_ms() {
+    let sent = |time: serde_json::Value| {
+        let mut message = serde_json::json!({"message_id":"m", "message_type":1,
+            "from_user_id":"u", "context_token":"c",
+            "item_list":[{"type":1,"text_item":{"text":"yes"}}]});
+        if !time.is_null() {
+            message["create_time_ms"] = time;
+        }
+        match inbound(&message) {
+            Some(Inbound::Text(message)) => message.sent_ms,
+            _ => panic!("expected a message"),
+        }
+    };
+    assert_eq!(
+        sent(serde_json::json!(1_790_221_416_232_u64)),
+        Some(1_790_221_416_232)
+    );
+    assert_eq!(
+        sent(serde_json::json!("1790221416232")),
+        Some(1_790_221_416_232)
+    );
+    // Without a usable time the message cannot answer a question.
+    for missing in [
+        serde_json::Value::Null,
+        serde_json::json!(0),
+        serde_json::json!(-5),
+        serde_json::json!("soon"),
+        serde_json::json!(1.5),
+    ] {
+        assert_eq!(sent(missing.clone()), None, "{missing}");
+    }
+}
+
+#[test]
 fn a_voice_message_is_answered_by_a_turn_only_with_its_transcript() {
     use crate::intake::{Intake, Verdict, classify};
     use base64::Engine as _;
@@ -125,7 +159,7 @@ fn a_voice_message_is_answered_by_a_turn_only_with_its_transcript() {
         owner: Some("u"),
         tool_owner: None,
         senders: crate::state::Senders::Owner,
-        question: false,
+        question: None,
     };
     let heard = voice(serde_json::json!("call me"));
     assert!(matches!(classify(&heard, &intake), Verdict::Turn { .. }));

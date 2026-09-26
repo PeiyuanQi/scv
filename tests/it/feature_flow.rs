@@ -1,7 +1,8 @@
 //! The feature-flow skill's `publish.sh`, run against a local git remote
 //! with fake `curl`, `scv`, and `cargo`, so nothing reaches crates.io, a
 //! daemon, or the network: an agent SCV delegated to asks the owner before
-//! its first `cargo publish` and stops unless the answer is yes.
+//! its first `cargo publish` and stops unless the answer is yes, explaining
+//! what to do when the installed `scv` is too old to ask.
 
 use std::{
     os::unix::fs::PermissionsExt as _,
@@ -22,6 +23,12 @@ impl Checkout {
     /// unpublished, `scv` records its arguments and exits with `answer`,
     /// and `cargo` records each call.
     fn new(answer: i32) -> Self {
+        Self::with_scv(answer, true)
+    }
+
+    /// [`Checkout::new`], with an `scv` that has `confirm` only when
+    /// `confirms`; one without it is 0.2.1, which refuses the subcommand.
+    fn with_scv(answer: i32, confirms: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let checkout = Self { root };
         let bin = checkout.path("bin");
@@ -33,7 +40,14 @@ impl Checkout {
             (
                 "scv",
                 format!(
-                    "printf '%s\\n' \"$@\" > '{}/scv'\nexit {answer}\n",
+                    "if [ \"$1\" = --version ]; then echo 'scv 0.2.1'; exit 0; fi\n\
+                     if [ \"$1\" = confirm ] && [ \"$2\" = --help ]; then {}; fi\n\
+                     printf '%s\\n' \"$@\" > '{}/scv'\nexit {answer}\n",
+                    if confirms {
+                        "exit 0"
+                    } else {
+                        "echo \"error: unrecognized subcommand 'confirm'\" >&2; exit 2"
+                    },
                     log.display()
                 ),
             ),
@@ -141,7 +155,11 @@ fn a_delegated_publish_asks_the_owner_first_and_publishes_on_yes() {
 
 #[test]
 fn a_delegated_publish_stops_unless_the_owner_says_yes() {
-    for (answer, why) in [(1, "did not say yes"), (2, "could not ask the owner")] {
+    for (answer, why) in [
+        (1, "did not say yes"),
+        (2, "could not ask the owner"),
+        (2, "If the running daemon is too old to ask"),
+    ] {
         let checkout = Checkout::new(answer);
         let output = checkout.publish(&[], Some(PARENT));
         assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -164,4 +182,22 @@ fn a_terminal_publish_and_a_check_never_ask() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(checkout.logged("scv"), None);
     assert_eq!(checkout.logged("cargo").unwrap().lines().count(), 9);
+}
+
+#[test]
+fn a_delegated_publish_with_an_scv_too_old_to_ask_says_to_publish_from_a_terminal() {
+    let checkout = Checkout::with_scv(0, false);
+    let output = checkout.publish(&[], Some(PARENT));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for why in [
+        "the installed scv 0.2.1 cannot ask the owner in chat",
+        "nothing was published",
+        "(0.3.0) must be published from a terminal",
+        "Later releases can be published from",
+    ] {
+        assert!(stderr.contains(why), "{why:?} in {stderr}");
+    }
+    assert_eq!(checkout.logged("scv"), None, "no question was asked");
+    assert_eq!(checkout.logged("cargo"), None, "nothing was published");
 }
