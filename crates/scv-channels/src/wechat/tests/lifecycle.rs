@@ -246,7 +246,7 @@ async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
         assert_eq!(body["msg"]["client_id"], pending.client_ids[0]);
         assert_eq!(
             body["msg"]["item_list"][0]["text_item"]["text"],
-            FAILURE_REPLY
+            system(FAILURE_REPLY)
         );
         respond(&mut stream, "200 OK", r#"{"ret":0}"#, "").await;
         let (mut stream, route, _) = request(&listener).await;
@@ -906,6 +906,11 @@ fn sent_text(body: &Value) -> &str {
         .unwrap()
 }
 
+/// `text`, which SCV wrote itself, as WeChat shows it.
+fn system(text: &str) -> String {
+    format!("system msg: {text}")
+}
+
 /// Accept one ClawBot session on the fake daemon and complete its handshake,
 /// returning the daemon side and the `session.start` frame.
 async fn accept_session(daemon: &UnixListener) -> (BufReader<tokio::net::UnixStream>, Value) {
@@ -1184,7 +1189,7 @@ async fn a_full_conversation_queue_gets_a_busy_reply_without_a_turn() {
         let overflow = format!("m{MAX_QUEUED_PER_CONVERSATION}");
         let body = ilink.sent().await;
         assert_eq!(body["msg"]["context_token"], format!("ctx-{overflow}"));
-        assert_eq!(sent_text(&body), BUSY_REPLY);
+        assert_eq!(sent_text(&body), system(BUSY_REPLY));
         wait_until(|| {
             let saved = store.load_state("default").unwrap();
             saved.in_flight.len() == MAX_QUEUED_PER_CONVERSATION
@@ -1231,7 +1236,7 @@ async fn recovery_answers_every_claim_once_and_never_replays_it() {
         for id in ["a", "b"] {
             let body = ilink.sent().await;
             assert_eq!(body["msg"]["context_token"], format!("ctx-{id}"));
-            assert_eq!(sent_text(&body), FAILURE_REPLY);
+            assert_eq!(sent_text(&body), system(FAILURE_REPLY));
         }
         // The same messages polled again start no turn; a new one does.
         ilink.push(vec![
@@ -1438,7 +1443,7 @@ async fn a_failed_turn_replies_with_the_generic_failure_message() {
         send_frame(&mut side, json!({"type":"turn.failed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"code":"provider_error","message":"provider stream error: Our servers are currently overloaded (gave up after 3 attempts)"})).await;
         let body = ilink.sent().await;
         assert_eq!(body["msg"]["context_token"], "ctx-m1");
-        assert_eq!(sent_text(&body), FAILURE_REPLY);
+        assert_eq!(sent_text(&body), system(FAILURE_REPLY));
         wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
         cancel.cancel();
     };
@@ -1712,7 +1717,7 @@ async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background
             (Some("turn.cancel"), Some("slow"))
         );
         let failure = ilink.sent().await;
-        assert_eq!(sent_text(&failure), FAILURE_REPLY);
+        assert_eq!(sent_text(&failure), system(FAILURE_REPLY));
         // The late end of the abandoned turn is ignored, and the same session
         // still delivers the job's report: no new session was opened.
         send_frame(&mut side, json!({"type":"turn.cancelled","request_id":request,"session_id":"s","turn_id":"slow","seq":31})).await;
@@ -1800,7 +1805,7 @@ async fn the_hub_sees_owner_work_until_its_report_is_stored_and_can_queue_notice
             .await
             .unwrap();
         let notice = ilink.sent().await;
-        assert_eq!(sent_text(&notice), "SCV updated.");
+        assert_eq!(sent_text(&notice), system("SCV updated."));
         assert!(notice["msg"].get("context_token").is_none(), "{notice}");
         cancel.cancel();
     };
@@ -1922,12 +1927,17 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
     let peer = async {
         let answer = ilink.sent().await;
         assert_eq!(answer["msg"]["context_token"], "ctx-m1");
-        assert_eq!(sent_text(&answer), crate::restarted_reply(&restart));
+        assert_eq!(
+            sent_text(&answer),
+            system(&crate::restarted_reply(&restart))
+        );
         let jobs = ilink.sent().await;
         assert_eq!(
             sent_text(&jobs),
-            "SCV restarted to update to v0.1.37, which stopped background work that was \
-             still running:\n- job-2 (claude): Review the PR\nAsk again if you still need it."
+            system(
+                "SCV restarted to update to v0.1.37, which stopped background work that was \
+                 still running:\n- job-2 (claude): Review the PR\nAsk again if you still need it."
+            )
         );
         assert!(jobs["msg"].get("context_token").is_none());
         wait_until(|| {
@@ -2039,7 +2049,7 @@ async fn files_from_other_senders_are_not_downloaded_and_failures_are_explained(
         assert_eq!(body["msg"]["context_token"], "ctx-x1");
         assert_eq!(
             sent_text(&body),
-            "SCV can read text and pictures from you here, but not a file."
+            system("SCV can read text and pictures from you here, but not a file.")
         );
         // Their voice message is not downloaded, but its transcript is enough
         // for a turn.
@@ -2228,7 +2238,7 @@ async fn an_untranscribed_voice_message_gets_the_voice_reply_without_a_download(
         ilink.push(vec![voice("v1", None)]);
         let body = ilink.sent().await;
         assert_eq!(body["msg"]["context_token"], "ctx-v1");
-        assert_eq!(sent_text(&body), crate::VOICE_REPLY);
+        assert_eq!(sent_text(&body), system(crate::VOICE_REPLY));
         assert!(ilink.downloads.lock().unwrap().is_empty());
         // With a transcript it works as before: downloaded for the owner and
         // attached to a turn with what it says.
@@ -2250,4 +2260,167 @@ async fn an_untranscribed_voice_message_gets_the_voice_reply_without_a_download(
         cancel.cancel();
     };
     bridge.run(&cancel, Duration::from_secs(10), peer).await;
+}
+
+#[tokio::test]
+async fn scvs_own_messages_start_with_the_system_prefix_and_the_models_answers_do_not() {
+    use crate::hub::{Hub, Link};
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let hub = Hub::new(None);
+    let link = Link::new(Arc::clone(&hub), "wechat:default", Some("sender".into()));
+    let base = ilink.base.clone();
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store)
+        .owner(&owner)
+        .link(&link);
+    let delivered = || store.load_state("default").unwrap().pending.is_empty();
+    let peer = async {
+        wait_until(|| hub.owner("wechat:default").is_some()).await;
+        // A notice the daemon queues.
+        hub.notify(
+            "wechat:default",
+            "sender",
+            "SCV updated: now running v0.3.1 (abc1234).",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sent_text(&ilink.sent().await),
+            "system msg: SCV updated: now running v0.3.1 (abc1234)."
+        );
+        // The model's answer, long enough to continue unprompted, goes out
+        // as written in every part.
+        let content = "é".repeat(MAX_REPLY_BYTES / 2 + 100);
+        ilink.push(vec![text_message("m1", "sender", "write a lot")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        assert_eq!(next_turn(&mut side).await, "write a lot");
+        finish_turn(&mut side, &content).await;
+        let first = ilink.sent().await;
+        let rest = ilink.sent().await;
+        assert_eq!(first["msg"]["context_token"], "ctx-m1");
+        assert!(rest["msg"].get("context_token").is_none(), "{rest}");
+        assert_eq!(
+            format!("{}{}", sent_text(&first), sent_text(&rest)),
+            content
+        );
+        // A fixed reply: the turn fails.
+        ilink.push(vec![text_message("m2", "sender", "and now?")]);
+        assert_eq!(next_turn(&mut side).await, "and now?");
+        send_frame(&mut side, json!({"type":"turn.failed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"code":"provider_error","message":"overloaded"})).await;
+        let failure = ilink.sent().await;
+        assert_eq!(failure["msg"]["context_token"], "ctx-m2");
+        assert_eq!(
+            sent_text(&failure),
+            "system msg: SCV could not complete that request."
+        );
+        wait_until(delivered).await;
+        // A question to the owner and the acknowledgement of the answer.
+        let answered = hub.ask("q1", "wechat:default", "sender").unwrap();
+        hub.send_question(
+            "q1",
+            "wechat:default",
+            "sender",
+            "Publish v0.3.1?\n\nReply yes or no.",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sent_text(&ilink.sent().await),
+            "system msg: Publish v0.3.1?\n\nReply yes or no."
+        );
+        wait_until(delivered).await;
+        // The owner's answer is read from their own message, as before.
+        let mut yes = text_message("m3", "sender", "是");
+        yes["create_time_ms"] = json!(crate::hub::unix_ms());
+        ilink.push(vec![yes]);
+        let acknowledged = ilink.sent().await;
+        assert_eq!(acknowledged["msg"]["context_token"], "ctx-m3");
+        assert_eq!(sent_text(&acknowledged), "system msg: OK, going ahead.");
+        assert_eq!(answered.await, Ok(true));
+        // And the model's next answer is plain again.
+        ilink.push(vec![text_message("m4", "sender", "thanks")]);
+        assert_eq!(next_turn(&mut side).await, "thanks");
+        finish_turn(&mut side, "You're welcome.").await;
+        assert_eq!(sent_text(&ilink.sent().await), "You're welcome.");
+        cancel.cancel();
+    };
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
+}
+
+#[tokio::test]
+async fn a_retried_or_held_system_message_keeps_exactly_one_prefix() {
+    use crate::hub::{Hub, Link};
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let hub = Hub::new(None);
+    let link = Link::new(Arc::clone(&hub), "wechat:default", Some("sender".into()));
+    let base = ilink.base.clone();
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store)
+        .owner(&owner)
+        .link(&link);
+    let prefixes = |text: &str| text.matches("system msg: ").count();
+    let peer = async {
+        wait_until(|| hub.owner("wechat:default").is_some()).await;
+        // A notice that fills a message by itself, in three-byte characters,
+        // so the prefix pushes its end into a second part. iLink fails the
+        // first try, and the retry sends the same part.
+        ilink
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(("503 Service Unavailable", ""));
+        let long = "中".repeat(MAX_REPLY_BYTES / 3);
+        hub.notify("wechat:default", "sender", &long).await.unwrap();
+        let failed = ilink.sent().await;
+        let retried = ilink.sent().await;
+        let rest = ilink.sent().await;
+        assert_eq!(failed["msg"]["client_id"], retried["msg"]["client_id"]);
+        assert_eq!(sent_text(&failed), sent_text(&retried));
+        let (first, rest) = (sent_text(&retried), sent_text(&rest));
+        assert!(first.starts_with("system msg: 中"));
+        assert_eq!((prefixes(first), prefixes(rest)), (1, 0));
+        // Both parts stay within one message, cut between characters.
+        assert!(first.len() <= MAX_REPLY_BYTES && rest.len() <= MAX_REPLY_BYTES);
+        assert_eq!(format!("{first}{rest}"), system(&long));
+        wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
+        // A notice iLink refuses is held as it was sent, prefix included,
+        // and rides ahead of the model's next reply with that one prefix.
+        ilink
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(("400 Bad Request", ""));
+        let failed_update = "The update to v0.3.1 failed: it did not come up.";
+        hub.notify("wechat:default", "sender", failed_update)
+            .await
+            .unwrap();
+        assert_eq!(sent_text(&ilink.sent().await), system(failed_update));
+        wait_until(|| store.load_state("default").unwrap().held.len() == 1).await;
+        assert_eq!(
+            store.load_state("default").unwrap().held[0].reply,
+            system(failed_update)
+        );
+        ilink.push(vec![text_message("m1", "sender", "what happened?")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        assert_eq!(next_turn(&mut side).await, "what happened?");
+        finish_turn(&mut side, "It rolled back.").await;
+        let carried = ilink.sent().await;
+        assert_eq!(carried["msg"]["context_token"], "ctx-m1");
+        assert_eq!(
+            sent_text(&carried),
+            format!("{HELD_HEADER}system msg: {failed_update}\n\n{LATEST_HEADER}It rolled back.")
+        );
+        cancel.cancel();
+    };
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
 }

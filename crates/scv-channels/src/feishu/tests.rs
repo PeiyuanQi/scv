@@ -911,6 +911,69 @@ async fn full_bridge_never_takes_a_caught_up_yes_from_before_the_question_as_its
 }
 
 #[tokio::test]
+async fn full_bridge_sends_scvs_notices_without_a_prefix() {
+    let mut fake = Fake::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = credentials::Store::new(
+        &scv_client::Layout::new(directory.path()),
+        crate::feishu::CHANNEL,
+    );
+    store.save_account("default", &account()).unwrap();
+    let transport = fake.transport();
+    let socket = directory.path().join("missing.sock");
+    let media = crate::MediaOptions::new(
+        &scv_client::Layout::new(directory.path()),
+        "feishu",
+        "default",
+        crate::media::MediaSettings::default(),
+    );
+    let hub = crate::hub::Hub::new(None);
+    let link = crate::hub::Link::new(Arc::clone(&hub), "feishu:default", Some("ou_owner".into()));
+    let run = crate::serve(
+        &transport,
+        crate::BridgeRun {
+            account: "default",
+            workspace: directory.path(),
+            socket: &socket,
+            owner: Some("ou_owner"),
+            tool_owner: None,
+            senders: crate::state::Senders::Owner,
+            media,
+            link: &link,
+            report: &|_| {},
+        },
+        &store,
+        |credentials| Ok(credentials == &account()),
+    );
+    let peer = async {
+        tokio::time::timeout(WAIT, async {
+            while hub.owner("feishu:default").is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The notice WeChat marks with `system msg: ` goes out as written:
+        // Feishu keeps SCV's words unchanged.
+        let text = "SCV updated: now running v0.3.1 (abc1234).";
+        hub.notify("feishu:default", "ou_owner", text)
+            .await
+            .unwrap();
+        let notice = fake
+            .request("/open-apis/im/v1/messages?receive_id_type=open_id")
+            .await;
+        assert_eq!(notice.body["receive_id"], "ou_owner");
+        let content: Value =
+            serde_json::from_str(notice.body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["text"], text);
+    };
+    tokio::select! {
+        result = run => panic!("the bridge stopped: {result:?}"),
+        () = peer => {}
+    }
+}
+
+#[tokio::test]
 async fn registration_waits_for_the_scan_and_follows_a_lark_tenant() {
     let mut fake = Fake::start().await;
     let endpoints = Endpoints::local(&fake.origin);

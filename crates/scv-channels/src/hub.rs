@@ -48,7 +48,9 @@ pub struct LastOwner {
     pub(crate) unix_seconds: u64,
 }
 
-/// A message for one account's outbox, sent like a background report.
+/// A message for one account's outbox, sent like a background report. Its
+/// text is SCV's own, never the model's, so a channel that marks SCV's words
+/// (WeChat's `system msg: `) marks it when the bridge stores it.
 pub struct Notice {
     pub to: String,
     pub text: String,

@@ -184,7 +184,9 @@ workspace, the daemon socket, the hub link, and a health callback; the
 supervisor cancels the run by dropping it. Each channel module (`wechat`,
 `feishu`) implements `Channel`, which signs in and runs an account, and the
 crate-internal `Transport`, which receives a batch of messages after a
-checkpoint and sends one part of a message. A push transport such as Feishu's
+checkpoint and sends one part of a message. A transport may also name a prefix
+for the messages SCV writes itself, as WeChat's does (`system msg: `); the
+bridge adds it when it queues such a message. A push transport such as Feishu's
 acknowledges a batch when the bridge asks for the next one, which it does only
 after the batch's claims and checkpoint are durable. The shared bridge does
 the rest for every channel. It speaks the versioned protocol over the daemon

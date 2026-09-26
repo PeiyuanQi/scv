@@ -233,6 +233,41 @@ context token. A turn's answer is kept to 64 KiB, and a longer one is cut with
 a `[reply truncated]` note instead of failing the turn. Typing indicators are
 not sent.
 
+### SCV's own messages
+
+WeChat shows every message from the bot the same way, so on WeChat each
+message SCV writes itself, rather than the model, starts with `system msg: `
+(one space after the colon):
+
+- the busy notice, the voice reply, and the short reply to a message with
+  nothing SCV can read (see [Media](#media));
+- the failure reply for a failed or timed-out turn, "SCV could not report a
+  finished background job." for a failed report turn, and "SCV completed
+  without a text response." for an empty answer;
+- the reply to work a planned restart interrupted, the notice of stopped
+  background jobs, and every notice and update announcement the daemon sends
+  (see [Restarts and notices](#restarts-and-notices));
+- a question to the owner and each of its outcomes (see
+  [Questions to the owner](#questions-to-the-owner)).
+
+The model's answers go out as written: turn replies and background reports,
+every continuation part of a long one, the held-reply headers, the
+`[reply truncated]` and `[N attached files could not be sent]` notes inside
+them, and files sent with `chat_attach`. Feishu shows SCV's words unchanged.
+
+The bridge adds the prefix once, when it queues the message, and stores the
+result as the message's text. The prefix therefore counts toward the first
+part's 16 KiB, a retry resends the same bytes with the same client ID, and a
+refused message that is held keeps its prefix, exactly once, when a later
+reply carries it. When SCV's own reply to a message, such as the failure
+reply, carries held replies, its own part, after
+`[Reply to your latest message]`, starts with the prefix, and the carried
+answers do not. Delivery state has no new field, so a release without the
+prefix sends stored text as it is. The owner's answers to a question are read
+from the owner's own messages, so the prefix changes nothing there. It is a
+label, not proof: a model answer can begin with the same words (see
+[security](security.md)).
+
 ## Feishu contract
 
 Checked live with the owner on 2026-09-24:
@@ -381,17 +416,20 @@ for the model, such as `[file a.zip: not opened for this sender]`,
 the 50 MB limit]`. A voice message with the platform's transcript keeps it,
 in the attachment or in the note. A message with no text, no downloaded file,
 and no voice transcript gets a short reply instead of a turn, such as `SCV can
-read text and pictures from you here, but not a file.`
+read text and pictures from you here, but not a file.` (on WeChat, like the
+voice reply below, after `system msg: `; see
+[SCV's own messages](#scvs-own-messages)).
 
 The model cannot listen to audio, so a voice message that carries no
 transcript and no text is answered as soon as it arrives with "SCV cannot
-listen to voice messages yet. Please type your message instead.": no
-download, no daemon session, and no model turn. That is every Feishu voice
-message, which comes without a transcript, and a WeChat one whose iLink
-transcript is missing. Like the busy notice, the reply is queued as a durable
-pending delivery on the message's own reply handle, retried with the same
-client ID, and never held if the platform refuses it; the message is then
-marked seen like any answered one. It goes to whoever the account answers
+listen to voice messages yet. Please type your message instead." (on WeChat,
+"system msg: SCV cannot listen…"): no download, no daemon session, and no
+model turn. That is every Feishu voice message, which comes without a
+transcript, and a WeChat one whose iLink transcript is missing. Like the
+busy notice, the reply is queued as a durable pending delivery on the
+message's own reply handle, retried with the same client ID, and never held
+if the platform refuses it; the message is then marked seen like any
+answered one. It goes to whoever the account answers
 (see [Sessions and safety](#sessions-and-safety)), and needs no turn slot.
 
 Files and copies of sent files are removed after `keep_days` (7), checked
@@ -540,6 +578,10 @@ owner message is being answered, or after ten minutes at the latest (see
   chat does not connect within two minutes, the announcement goes to the
   `[notify]` accounts, saying which chat asked.
 
+On WeChat each of these messages, like the notices below, starts with
+`system msg: ` (see [SCV's own messages](#scvs-own-messages)), as in
+"system msg: SCV updated: now running v0.3.1 (abc1234).".
+
 Checked live with the owner on 2026-09-26: asked from WeChat, a delegated
 agent installed 0.3.0 over a 0.2.1 daemon and scheduled the restart; the
 0.2.1 watchdog saw 0.3.0 up with both accounts connected 20 seconds after
@@ -550,7 +592,8 @@ the daemon stopped unexpectedly, an enabled account disconnected for ten
 minutes, which may mean its sign-in expired) go to the owner of the first
 connected account in `[notify].owner`, or else to the chat the owner last
 wrote from, and never through the account the notice is about. Each is queued
-in that account's outbox like a background report. The daemon waits up to 30
+in that account's outbox like a background report, after `system msg: ` on
+WeChat. The daemon waits up to 30
 seconds for the account to store a notice and otherwise counts it as not sent,
 possibly trying another account; the account then drops it rather than sending
 it late. See
@@ -577,6 +620,11 @@ unprompted message:
 
 Reply yes or no. No answer in <N> minutes counts as no.
 ```
+
+On WeChat that message, and each reply below ("OK, going ahead.", "OK,
+stopped.", "No answer, so stopped.", "The question was withdrawn, so
+stopped."), starts with `system msg: ` (see
+[SCV's own messages](#scvs-own-messages)).
 
 The question opens only once the platform has accepted that message. Until
 then it waits in the outbox behind anything queued before it, such as a reply

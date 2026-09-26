@@ -23,13 +23,14 @@ pub(crate) struct Reply {
     pub(crate) files: Vec<ReplyAttachment>,
 }
 
-impl Reply {
-    pub(crate) fn text(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            files: Vec::new(),
-        }
-    }
+/// What a chat is sent for a turn, by who wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Response {
+    /// The model's answer, sent as written.
+    Model(Reply),
+    /// SCV's own words in place of an answer, such as the failure reply,
+    /// which the chat shows after the transport's system prefix.
+    System(String),
 }
 
 /// Largest frame the daemon may send a channel session, counting its line
@@ -55,7 +56,7 @@ pub(crate) struct Session {
     /// This client's abandoned turns, whose late events are ignored.
     stale: HashSet<String>,
     /// Finished server-started turns' answers, waiting to be sent.
-    reports: VecDeque<Reply>,
+    reports: VecDeque<Response>,
     /// Files the model attached during this client's current turn.
     files: Vec<ReplyAttachment>,
     /// Background jobs this session started whose results the model has not
@@ -212,13 +213,13 @@ impl Session {
     }
 
     /// Answers of background reports that finished during `turn`.
-    pub(crate) fn take_reports(&mut self) -> Vec<Reply> {
+    pub(crate) fn take_reports(&mut self) -> Vec<Response> {
         self.reports.drain(..).collect()
     }
 
     /// Wait for the next background report while no turn of ours runs.
     /// Cancel-safe.
-    pub(crate) async fn next_report(&mut self) -> Result<Reply> {
+    pub(crate) async fn next_report(&mut self) -> Result<Response> {
         loop {
             if let Some(report) = self.reports.pop_front() {
                 return Ok(report);
@@ -334,13 +335,14 @@ impl Session {
                 if let Some(answer) = self.server_turns.remove(&request)
                     && (!answer.text.trim().is_empty() || !answer.files.is_empty())
                 {
-                    self.reports.push_back(answer);
+                    self.reports.push_back(Response::Model(answer));
                 }
             }
             ServerEvent::TurnFailed { .. } => {
                 self.stale.remove(&request);
                 if self.server_turns.remove(&request).is_some() {
-                    self.reports.push_back(Reply::text(REPORT_FAILURE));
+                    self.reports
+                        .push_back(Response::System(REPORT_FAILURE.to_owned()));
                 }
             }
             ServerEvent::TurnCancelled { .. } => {

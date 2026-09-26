@@ -276,9 +276,63 @@ fn after_a_planned_restart_claims_are_told_why() {
     let restart = hub::Restart {
         to_version: "0.1.37".into(),
     };
-    recover_interrupted_after(&store, "default", &mut saved, Some(&restart)).unwrap();
+    recover_interrupted_after(&store, "default", &mut saved, Some(&restart), "").unwrap();
     assert_eq!(
         store.load_state("default").unwrap().pending[0].reply,
         "SCV restarted to update to v0.1.37 before finishing this; ask again if you still need it."
+    );
+}
+
+#[test]
+fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = test_store(directory.path());
+    let now = unix_now();
+    let mut saved = state::BridgeState {
+        in_flight: vec![state::InFlight {
+            message_id: "incoming".into(),
+            to_user_id: "alice".into(),
+            context_token: "context".into(),
+            key: "alice".into(),
+        }],
+        // The model's answer that was refused earlier, still waiting.
+        held: vec![state::HeldReply {
+            key: "alice".into(),
+            to_user_id: "alice".into(),
+            reply: "the model's earlier answer".into(),
+            held_at: now,
+        }],
+        jobs: vec![state::RunningJob {
+            to_user_id: "alice".into(),
+            job: "job-1".into(),
+            tool: "agent_codex".into(),
+            task: String::new(),
+            started_at: 1,
+        }],
+        ..Default::default()
+    };
+    recover_interrupted_after(&store, "default", &mut saved, None, "PREFIX: ").unwrap();
+    let restarted = store.load_state("default").unwrap();
+    let replies: Vec<_> = restarted
+        .pending
+        .iter()
+        .map(|pending| pending.reply.as_str())
+        .collect();
+    // The failure reply carries the held answer: the prefix marks SCV's own
+    // part, never the model's answer ahead of it.
+    assert_eq!(
+        replies,
+        [
+            format!(
+                "{HELD_HEADER}the model's earlier answer\n\n{LATEST_HEADER}PREFIX: {FAILURE_REPLY}"
+            ),
+            "PREFIX: An unexpected interruption stopped background work that was still \
+             running:\n- job-1 (codex)\nAsk again if you still need it."
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        restarted.pending[0].own.as_deref(),
+        Some(format!("PREFIX: {FAILURE_REPLY}").as_str())
     );
 }
