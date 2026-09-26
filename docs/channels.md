@@ -174,8 +174,10 @@ exact string for durable deduplication. Ignored messages are durably marked.
 A message's `create_time_ms` (Unix milliseconds, a number or numeric string)
 is kept as when it was sent, which only
 [questions to the owner](#questions-to-the-owner) use. The field comes from
-the message type in Tencent's iLink client and ports of it; it has not been
-checked live, and a message without it never answers a question.
+the message type in Tencent's iLink client and ports of it, and a message
+without it never answers a question. Checked live with the owner on
+2026-09-26: a WeChat `是` sent after the question arrived carried it and
+answered the question.
 Before queueing accepted work, the bridge persists an in-flight claim with the
 message ID, recipient, context token, and conversation, and it saves the
 batch's cursor only after every claim in the batch is durable. Recovery never
@@ -344,6 +346,12 @@ administrators must approve apps.
 
 Chat users can send pictures, voice messages, videos, and files, quote
 earlier messages, and forward bundles; the owner's agent can send files back.
+
+Checked live with the owner on 2026-09-26 (0.3.0), in WeChat and in Feishu:
+a photo, a file, and a video each reached the owner's model, which described
+or read them; a WeChat voice message was answered from iLink's transcript; a
+Feishu voice message got the fixed voice reply; and a file the agent sent back
+with `chat_attach` arrived in the chat.
 
 **Receiving.** The transport turns each message into text, with a marker for
 content that has no file (such as `[sticker]` or `[location: Office (31.2,
@@ -531,6 +539,11 @@ being answered, or after ten minutes at the latest (see
   chat does not connect within two minutes, the announcement goes to the
   `[notify]` accounts, saying which chat asked.
 
+Checked live with the owner on 2026-09-26: asked from WeChat, a delegated
+agent installed 0.3.0 over a 0.2.1 daemon and scheduled the restart; the
+0.2.1 watchdog saw 0.3.0 up with both accounts connected 20 seconds after
+restarting the unit, and the announcement reached the WeChat chat that asked.
+
 Notices nobody asked for (an update started from a terminal, a restart after
 the daemon stopped unexpectedly, an enabled account disconnected for ten
 minutes, which may mean its sign-in expired) go to the owner of the first
@@ -606,6 +619,12 @@ not learned: no daemon, a daemon too old for the command, no owner chat to
 ask in, a question already waiting there, the question refused by the platform
 or still undelivered at its deadline, or the daemon restarting while it
 waited. A delegated agent may run it; it manages nothing.
+
+Checked live with the owner on 2026-09-26: a question from a terminal went to
+the first `[notify]` account (Feishu); `yes` made `scv confirm` exit 0 and
+`不` exit 1, each answered within seconds with no turn. A question that an
+agent delegated from WeChat asked came back to that WeChat chat, and `是`
+answered it.
 
 ## Sessions and safety
 
