@@ -801,7 +801,7 @@ async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() 
         .unwrap();
     let reports = jobs.take_unreported();
     assert_eq!(reports.len(), 1, "a report turn follows");
-    assert_eq!(reports[0].status, "failed");
+    assert_eq!(reports[0].status, scv_protocol::JobStatus::Failed);
     assert!(reports[0].reply.contains("exited"), "{}", reports[0].reply);
     until(|| registry.list(true).is_empty()).await;
     assert!(!zombie(agent));

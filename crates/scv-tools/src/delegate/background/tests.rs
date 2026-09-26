@@ -89,18 +89,44 @@ fn context() -> ToolContext {
     ToolContext::new(std::env::temp_dir(), CancellationToken::new())
 }
 
+/// The context of the model's call `call_id`.
+fn call(call_id: &str) -> ToolContext {
+    ToolContext {
+        call_id: call_id.into(),
+        ..context()
+    }
+}
+
 async fn start(tool: &BackgroundCapable) -> Value {
+    start_as(tool, "").await
+}
+
+/// Start a job as the model's call `call_id`.
+async fn start_as(tool: &BackgroundCapable, call_id: &str) -> Value {
     let output = tool
-        .execute(json!({"prompt":"work","background":true}), context())
+        .execute(
+            json!({"prompt":"work\nthen report","background":true}),
+            call(call_id),
+        )
         .await
         .unwrap();
     serde_json::from_str(&output.content).unwrap()
 }
 
+/// `job-1` of the fake agent, as a change with `status`.
+fn job_1(status: JobStatus) -> JobChange {
+    JobChange {
+        job: "job-1".into(),
+        tool: "agent_fake".into(),
+        status,
+        task: "work".into(),
+    }
+}
+
 #[tokio::test]
 async fn background_calls_return_a_job_that_wait_and_status_observe() {
     let mut fixture = fixture(2);
-    let started = start(&fixture.tool).await;
+    let started = start_as(&fixture.tool, "call-1").await;
     assert_eq!(
         started,
         json!({
@@ -108,14 +134,16 @@ async fn background_calls_return_a_job_that_wait_and_status_observe() {
             "note":started["note"]
         })
     );
+    // The starting call reports the job to the session's clients, once.
     assert_eq!(
-        scv_protocol::background_job_update(&started.to_string()).started,
-        vec!["job-1".to_owned()]
+        fixture.jobs.take_changes("call-1"),
+        [job_1(JobStatus::Running)]
     );
+    assert!(fixture.jobs.take_changes("call-1").is_empty());
     // Running, with the job's latest progress.
     let status = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let status = fixture.jobs.describe(Some("job-1")).unwrap();
+            let status = fixture.jobs.describe(Some("job-1"), "call-2").unwrap();
             if status.get("progress").is_some() {
                 break status;
             }
@@ -133,29 +161,62 @@ async fn background_calls_return_a_job_that_wait_and_status_observe() {
             "job-1",
             Duration::from_millis(50),
             &CancellationToken::new(),
+            "call-3",
         )
         .await
         .unwrap();
     assert_eq!(waited["status"], "running");
+    // Seeing it run changes nothing for the clients.
+    assert!(fixture.jobs.take_changes("call-2").is_empty());
+    assert!(fixture.jobs.take_changes("call-3").is_empty());
 
     fixture.release.notify_one();
     let waited = fixture
         .jobs
-        .wait("job-1", Duration::from_secs(5), &CancellationToken::new())
+        .wait(
+            "job-1",
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+            "call-4",
+        )
         .await
         .unwrap();
     assert_eq!(waited["status"], "completed");
     assert_eq!(waited["result"]["reply"], "all done");
     assert_eq!(waited["result"]["session"], "fake-1");
+    // The call that showed the model the result settles the job.
     assert_eq!(
-        scv_protocol::background_job_update(&waited.to_string()).settled,
-        vec!["job-1".to_owned()]
+        fixture.jobs.take_changes("call-4"),
+        [job_1(JobStatus::Completed)]
     );
     // The session was woken, but the model already saw the result.
     fixture.finished.recv().await.unwrap();
     assert!(fixture.jobs.take_unreported().is_empty());
-    let all = fixture.jobs.describe(None).unwrap();
+    let all = fixture.jobs.describe(None, "call-5").unwrap();
     assert_eq!(all["jobs"][0]["job"], "job-1");
+    // A result seen before is not settled again.
+    assert!(fixture.jobs.take_changes("call-5").is_empty());
+}
+
+#[tokio::test]
+async fn listing_jobs_settles_only_the_finished_ones_the_model_had_not_seen() {
+    let mut fixture = fixture(2);
+    start_as(&fixture.tool, "call-1").await;
+    fixture.release.notify_one();
+    fixture.finished.recv().await.unwrap();
+    start_as(&fixture.tool, "call-2").await;
+    let listed = fixture.jobs.describe(None, "call-3").unwrap();
+    assert_eq!(listed["jobs"][0]["status"], "completed");
+    assert_eq!(listed["jobs"][1]["status"], "running");
+    assert_eq!(
+        fixture.jobs.take_changes("call-3"),
+        [job_1(JobStatus::Completed)]
+    );
+    // The listing replaced the report turn.
+    assert!(fixture.jobs.take_unreported().is_empty());
+    // Changes stay with the call that made them.
+    assert_eq!(fixture.jobs.take_changes("call-2").len(), 1);
+    assert_eq!(fixture.jobs.take_changes("call-1").len(), 1);
 }
 
 #[tokio::test]
@@ -271,7 +332,7 @@ async fn foreground_calls_pass_through_and_the_schema_offers_background() {
         .unwrap();
     assert!(output.content.contains("all done"));
     assert_eq!(fixture.jobs.running(), 0);
-    assert!(fixture.jobs.describe(Some("job-1")).is_err());
+    assert!(fixture.jobs.describe(Some("job-1"), "").is_err());
 }
 
 #[tokio::test]
@@ -287,22 +348,23 @@ async fn agent_cancel_stops_a_running_job_without_a_report() {
     );
     assert!(cancel.risk(&json!({})).is_err());
     let output = cancel
-        .execute(json!({"job":"job-1"}), context())
+        .execute(json!({"job":"job-1"}), call("call-9"))
         .await
         .unwrap();
     let stopped: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(stopped["status"], "cancelled");
     assert!(fixture.cancelled.load(Ordering::SeqCst), "the agent saw it");
+    // No report follows, so the stop settles it.
     assert_eq!(
-        scv_protocol::background_job_update(&output.content).settled,
-        vec!["job-1".to_owned()]
+        fixture.jobs.take_changes("call-9"),
+        [job_1(JobStatus::Cancelled)]
     );
     // The session is woken, but the model asked for the stop.
     fixture.finished.recv().await.unwrap();
     assert!(fixture.jobs.take_unreported().is_empty());
     assert_eq!(fixture.jobs.running(), 0);
     let again = cancel
-        .execute(json!({"job":"job-1"}), context())
+        .execute(json!({"job":"job-1"}), call("call-10"))
         .await
         .unwrap();
     assert!(
@@ -310,6 +372,7 @@ async fn agent_cancel_stops_a_running_job_without_a_report() {
         "{}",
         again.content
     );
+    assert!(fixture.jobs.take_changes("call-10").is_empty());
     let unknown = cancel
         .execute(json!({"job":"job-9"}), context())
         .await
@@ -462,4 +525,14 @@ async fn wait_and_status_tools_validate_and_are_read_only() {
     assert_eq!(status.risk(&json!({})).unwrap(), ToolRisk::ReadOnly);
     let empty = status.execute(json!({}), context()).await.unwrap();
     assert_eq!(empty.content, json!({"jobs":[]}).to_string());
+}
+
+#[test]
+fn a_task_is_the_first_line_of_the_prompt_shortened() {
+    assert_eq!(task_line("\n  Fix the build\nthen test"), "Fix the build");
+    let long = "x".repeat(200);
+    let task = task_line(&long);
+    assert_eq!(task.chars().count(), TASK_CHARS + 1);
+    assert!(task.ends_with('…'));
+    assert_eq!(task_line(""), "");
 }

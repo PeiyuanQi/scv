@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{DaemonStatus, ErrorCode, PeerInfo, QueueEntry, ToolErrorKind, TurnOrigin, Usage};
+use crate::{
+    DaemonStatus, ErrorCode, JobChange, PeerInfo, QueueEntry, ToolErrorKind, TurnOrigin, Usage,
+};
 
 /// A message from server to client. Serialized as one JSON object per line,
 /// tagged by `type` (such as `turn.completed`). Turn events carry the
@@ -297,6 +299,10 @@ pub enum ServerEvent {
         /// before 0.3.0.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<ToolErrorKind>,
+        /// Background jobs this call started, or whose results it showed the
+        /// model; absent when none, and from servers before 0.3.0.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        jobs: Vec<JobChange>,
     },
     /// Older history was summarized to fit the model's context window.
     #[serde(rename = "context.compacted")]

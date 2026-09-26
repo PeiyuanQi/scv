@@ -18,9 +18,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use scv_core::{Tool, ToolContext, ToolError, ToolFailure, ToolOutput, ToolRisk, ToolSpec};
+use scv_protocol::JobStatus;
 use serde_json::Value;
 
-use crate::delegate::{adapters, output};
+use crate::delegate::{
+    adapters,
+    output::{self, AgentReply},
+};
 
 /// Lowercase fragments of an error an agent reported that another agent
 /// could avoid: the agent is missing or died, is signed out, or its provider
@@ -125,12 +129,9 @@ impl ChosenAgent {
 /// Whether a failed agent result shows the agent was unavailable, judged by
 /// its `status` and structured `error` only. A declined request, or a result
 /// without a reported error, never qualifies.
-fn unavailable_result(content: &serde_json::Map<String, Value>) -> bool {
-    content.get("status").and_then(Value::as_str) == Some("failed")
-        && content
-            .get("error")
-            .and_then(Value::as_str)
-            .is_some_and(reports_unavailable)
+fn unavailable_result(reply: &AgentReply) -> bool {
+    reply.status == Some(JobStatus::Failed)
+        && reply.error.as_deref().is_some_and(reports_unavailable)
 }
 
 /// `agent_codex` → the Codex descriptor, when it is a known adapter.
@@ -173,18 +174,17 @@ impl Tool for ChosenAgent {
     ) -> Result<ToolOutput, ToolError> {
         match self.inner.execute(arguments, context).await {
             Ok(mut result) if result.is_error() => {
-                if let Ok(Value::Object(mut content)) =
-                    serde_json::from_str::<Value>(&result.content)
+                if let Ok(value) = serde_json::from_str::<Value>(&result.content)
+                    && let Some(reply) = AgentReply::read(&value)
+                    && let Value::Object(mut content) = value
                 {
-                    if unavailable_result(&content) {
+                    if unavailable_result(&reply) {
                         result.failure = Some(ToolFailure::Unavailable);
                         if let Some(fallback) = self.fallback() {
                             content.insert("fallback".into(), fallback.into());
                             result.content = Value::Object(content).to_string();
                         }
-                    } else if content.get("status").and_then(Value::as_str) == Some("declined")
-                        && self.offers_grok()
-                    {
+                    } else if reply.status == Some(JobStatus::Declined) && self.offers_grok() {
                         content.insert("note".into(), output::DECLINED_NOTE_TRY_GROK.into());
                         result.content = Value::Object(content).to_string();
                     }

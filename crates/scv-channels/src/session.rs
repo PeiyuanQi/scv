@@ -58,11 +58,9 @@ pub struct Session {
     reports: VecDeque<Reply>,
     /// Files the model attached during this client's current turn.
     files: Vec<ReplyAttachment>,
-    /// Background jobs this session started that have not been reported.
+    /// Background jobs this session started whose results the model has not
+    /// seen yet.
     background: HashMap<String, JobInfo>,
-    /// What this turn's agent calls were asked to do, by call ID, until they
-    /// return.
-    tasks: HashMap<String, String>,
     /// A read or write failed, so the session cannot be reused.
     broken: bool,
 }
@@ -99,7 +97,6 @@ impl Session {
             reports: VecDeque::new(),
             files: Vec::new(),
             background: HashMap::new(),
-            tasks: HashMap::new(),
             broken: false,
         };
         session
@@ -232,44 +229,31 @@ impl Session {
         }
     }
 
-    /// Track background jobs and server-started turns in any event.
+    /// Track background jobs and server-started turns in any event. A job
+    /// runs from the call that started it until the model has seen its
+    /// result: through a later call, or the report turn that names it.
     fn observe(&mut self, event: &ServerEvent) {
         match event {
-            ServerEvent::ToolProposed {
-                call_id,
-                name,
-                arguments,
-                ..
-            } if name.starts_with("agent_") => {
-                let prompt = arguments
-                    .get("prompt")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                if self.tasks.len() < MAX_TRACKED_CALLS {
-                    self.tasks.insert(call_id.clone(), task_line(prompt));
-                }
-            }
             ServerEvent::ToolCompleted {
                 request_id,
-                call_id,
                 name,
                 success,
                 output,
+                jobs,
                 ..
             } => {
-                let task = self.tasks.remove(call_id).unwrap_or_default();
-                let update = scv_protocol::background_job_update(output);
-                for job in update.started {
-                    self.background.insert(
-                        job,
-                        JobInfo {
-                            tool: name.clone(),
-                            task: task.clone(),
-                        },
-                    );
-                }
-                for job in update.settled {
-                    self.background.remove(&job);
+                for change in jobs {
+                    if change.started() {
+                        self.background.insert(
+                            change.job.clone(),
+                            JobInfo {
+                                tool: change.tool.clone(),
+                                task: change.task.clone(),
+                            },
+                        );
+                    } else {
+                        self.background.remove(&change.job);
+                    }
                 }
                 if let Some(file) = scv_protocol::reply_attachment(name, *success, output) {
                     // Like its text, a file belongs to a server-started turn,
@@ -435,7 +419,6 @@ impl Session {
                 }
                 ServerEvent::TurnCompleted { .. } => {
                     self.current = None;
-                    self.tasks.clear();
                     // Idle expiry counts from the end of long turns too.
                     self.last_used = Instant::now();
                     return Ok(Reply {
@@ -480,29 +463,6 @@ pub struct JobInfo {
     pub tool: String,
     /// The first line of the delegated prompt, shortened.
     pub task: String,
-}
-
-/// Agent calls of one turn whose task line is kept until they return.
-const MAX_TRACKED_CALLS: usize = 64;
-/// Characters of a delegated prompt's first line kept as its task.
-const TASK_CHARS: usize = 80;
-
-/// The first non-empty line of `prompt`, at most [`TASK_CHARS`] characters.
-fn task_line(prompt: &str) -> String {
-    let line = prompt
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default();
-    let mut task: String = line
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(TASK_CHARS)
-        .collect();
-    if line.chars().count() > TASK_CHARS {
-        task.push('…');
-    }
-    task
 }
 
 /// Answers from a background report turn, like any reply, are bounded.

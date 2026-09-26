@@ -2,6 +2,10 @@
 //! job handle at once while the agent keeps working; `agent_status` and
 //! `agent_wait` observe the job, `agent_cancel` stops it, and the session is
 //! told when it finishes so the server can report it in a turn of its own.
+//!
+//! Each call that starts a job, or shows the model a job's result, leaves a
+//! [`JobChange`] under its call ID, which the server hands to the session's
+//! clients with the call's `tool.completed` ([`BackgroundJobs::take_changes`]).
 
 use std::{
     path::PathBuf,
@@ -14,6 +18,7 @@ use scv_core::{
     ApprovalGate, ProgressSink, Tool, ToolApprovals, ToolContext, ToolError, ToolOutput, ToolRisk,
     ToolSpec,
 };
+use scv_protocol::{JobChange, JobStatus};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
@@ -21,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     args::{Timeouts, bounded, parse_args, timeout_schema},
+    delegate::output::AgentReply,
     sync::lock,
 };
 
@@ -32,6 +38,11 @@ const REPORT_REPLY_CHARS: usize = 6000;
 const REPORT_MAX_JOBS: usize = 4;
 /// How long `agent_cancel` waits for a stopped job to settle.
 const CANCEL_SETTLE: Duration = Duration::from_secs(10);
+/// Job changes kept for calls whose `tool.completed` has not taken them,
+/// such as a call whose turn was aborted; the oldest go first.
+const MAX_PENDING_CHANGES: usize = 64;
+/// Characters of a delegated prompt's first line kept as its job's task.
+const TASK_CHARS: usize = 80;
 
 /// One session's background jobs. Dropping the store (with the session's
 /// tools) cancels every job still running.
@@ -59,11 +70,29 @@ impl std::fmt::Debug for BackgroundJobs {
 struct JobsState {
     next: u64,
     jobs: Vec<Job>,
+    /// Changes by the ID of the call that made them, oldest first.
+    changes: Vec<(String, JobChange)>,
+}
+
+impl JobsState {
+    /// Keep `change` for the call `call_id`, which a client learns of with
+    /// that call's `tool.completed`. A call without an ID has no event.
+    fn record(&mut self, call_id: &str, change: JobChange) {
+        if call_id.is_empty() {
+            return;
+        }
+        if self.changes.len() >= MAX_PENDING_CHANGES {
+            self.changes.remove(0);
+        }
+        self.changes.push((call_id.to_owned(), change));
+    }
 }
 
 struct Job {
     id: String,
     tool: String,
+    /// The first line of the delegated prompt, shortened.
+    task: String,
     started: Instant,
     progress: ProgressSink,
     last_progress: Option<String>,
@@ -73,7 +102,8 @@ struct Job {
     cancelled: bool,
     outcome: Option<Outcome>,
     /// The model has seen the result (through `agent_wait`, `agent_status`,
-    /// or a report turn), so it needs no report turn.
+    /// or a report turn), or asked for the stop with `agent_cancel`, so it
+    /// needs no report turn.
     reported: bool,
     done: watch::Receiver<bool>,
 }
@@ -88,7 +118,7 @@ struct Outcome {
 pub struct JobReport {
     pub job: String,
     pub tool: String,
-    pub status: String,
+    pub status: JobStatus,
     pub session: Option<String>,
     pub reply: String,
 }
@@ -127,7 +157,8 @@ impl BackgroundJobs {
         lock(&self.state)
     }
 
-    /// Start `tool` with `arguments` in the background and return its job's
+    /// Start `tool` with `arguments` in the background for the call
+    /// `call_id` and return its job's
     /// `{"job","status":"running","background":true}` description.
     fn start(
         self: &Arc<Self>,
@@ -135,7 +166,14 @@ impl BackgroundJobs {
         name: &str,
         arguments: Value,
         workspace: PathBuf,
+        call_id: &str,
     ) -> Result<Value, ToolError> {
+        let task = task_line(
+            arguments
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
         let (id, progress, done_tx, cancellation) = {
             let mut state = self.state();
             let running = state
@@ -155,9 +193,19 @@ impl BackgroundJobs {
             let progress = ProgressSink::buffered();
             let (done_tx, done) = watch::channel(false);
             let cancel = self.cancellation.child_token();
+            state.record(
+                call_id,
+                JobChange {
+                    job: id.clone(),
+                    tool: name.to_owned(),
+                    status: JobStatus::Running,
+                    task: task.clone(),
+                },
+            );
             state.jobs.push(Job {
                 id: id.clone(),
                 tool: name.to_owned(),
+                task,
                 started: Instant::now(),
                 progress: progress.clone(),
                 last_progress: None,
@@ -199,36 +247,48 @@ impl BackgroundJobs {
         }))
     }
 
-    /// Stop `job` and wait briefly for it to settle, then describe it. A
-    /// stopped job needs no report turn: the model asked for the stop.
-    async fn cancel(&self, job: &str) -> Result<Value, ToolError> {
+    /// Stop `job` for the call `call_id` and wait briefly for it to settle,
+    /// then describe it. A stopped job needs no report turn: the model asked
+    /// for the stop.
+    async fn cancel(&self, job: &str, call_id: &str) -> Result<Value, ToolError> {
         let mut done = {
             let mut state = self.state();
-            let entry = state
+            let index = state
                 .jobs
-                .iter_mut()
-                .find(|candidate| candidate.id == job)
+                .iter()
+                .position(|candidate| candidate.id == job)
                 .ok_or_else(|| unknown_job(job))?;
+            let entry = &mut state.jobs[index];
             if entry.outcome.is_some() {
-                let mut value = entry.describe();
+                let (mut value, change) = entry.describe();
                 value["note"] = "The job had already finished.".into();
+                if let Some(change) = change {
+                    state.record(call_id, change);
+                }
                 return Ok(value);
             }
             entry.cancelled = true;
             entry.cancel.cancel();
-            entry.done.clone()
+            let done = entry.done.clone();
+            if !entry.reported {
+                entry.reported = true;
+                let change = entry.change(JobStatus::Cancelled);
+                state.record(call_id, change);
+            }
+            done
         };
         let _ = tokio::time::timeout(CANCEL_SETTLE, done.wait_for(|finished| *finished)).await;
-        self.describe(Some(job))
+        self.describe(Some(job), call_id)
     }
 
-    /// Wait up to `limit` for `job` and describe it; a finished job is then
-    /// marked seen.
+    /// Wait up to `limit` for `job` and describe it for the call `call_id`;
+    /// a finished job is then marked seen.
     async fn wait(
         &self,
         job: &str,
         limit: Duration,
         cancellation: &CancellationToken,
+        call_id: &str,
     ) -> Result<Value, ToolError> {
         let mut done = self
             .state()
@@ -241,23 +301,55 @@ impl BackgroundJobs {
             () = cancellation.cancelled() => return Err(ToolError::cancelled("wait cancelled")),
             _ = tokio::time::timeout(limit, done.wait_for(|finished| *finished)) => {}
         }
-        self.describe(Some(job))
+        self.describe(Some(job), call_id)
     }
 
-    /// Describe one job, or every job this session remembers; finished jobs
-    /// described are marked seen.
-    fn describe(&self, job: Option<&str>) -> Result<Value, ToolError> {
+    /// Describe one job, or every job this session remembers, for the call
+    /// `call_id`; finished jobs described are marked seen.
+    fn describe(&self, job: Option<&str>, call_id: &str) -> Result<Value, ToolError> {
         let mut state = self.state();
-        if let Some(job) = job {
+        let mut changes = Vec::new();
+        let value = if let Some(job) = job {
             let entry = state
                 .jobs
                 .iter_mut()
                 .find(|candidate| candidate.id == job)
                 .ok_or_else(|| unknown_job(job))?;
-            return Ok(entry.describe());
+            let (value, change) = entry.describe();
+            changes.extend(change);
+            value
+        } else {
+            let jobs: Vec<Value> = state
+                .jobs
+                .iter_mut()
+                .map(|entry| {
+                    let (value, change) = entry.describe();
+                    changes.extend(change);
+                    value
+                })
+                .collect();
+            json!({ "jobs": jobs })
+        };
+        for change in changes {
+            state.record(call_id, change);
         }
-        let jobs: Vec<Value> = state.jobs.iter_mut().map(Job::describe).collect();
-        Ok(json!({ "jobs": jobs }))
+        Ok(value)
+    }
+
+    /// The jobs the call `call_id` started or showed the model the result of,
+    /// for its `tool.completed`.
+    pub fn take_changes(&self, call_id: &str) -> Vec<JobChange> {
+        let mut state = self.state();
+        let mut taken = Vec::new();
+        state.changes.retain(|(call, change)| {
+            if call == call_id {
+                taken.push(change.clone());
+                false
+            } else {
+                true
+            }
+        });
+        taken
     }
 
     /// Finished jobs the model has not seen yet, marked seen, for a report
@@ -272,19 +364,16 @@ impl BackgroundJobs {
             .map(|job| {
                 job.reported = true;
                 let outcome = job.outcome.as_ref().expect("filtered on outcome");
-                let result = result_value(&outcome.output);
+                let reply = AgentReply::read(&result_value(&outcome.output)).unwrap_or_default();
                 JobReport {
                     job: job.id.clone(),
                     tool: job.tool.clone(),
-                    status: job_status(&outcome.output, &result),
-                    session: result
-                        .get("session")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
+                    status: job_status(&outcome.output, &reply),
+                    session: reply.session,
                     reply: bounded(
-                        result
-                            .get("reply")
-                            .and_then(Value::as_str)
+                        reply
+                            .reply
+                            .as_deref()
                             .unwrap_or(outcome.output.content.as_str()),
                         REPORT_REPLY_CHARS,
                     ),
@@ -338,10 +427,23 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
 }
 
 impl Job {
-    fn describe(&mut self) -> Value {
+    /// This job with `status`, as its clients learn of it.
+    fn change(&self, status: JobStatus) -> JobChange {
+        JobChange {
+            job: self.id.clone(),
+            tool: self.tool.clone(),
+            status,
+            task: self.task.clone(),
+        }
+    }
+
+    /// The job as the model reads it, and its change when this is the first
+    /// time the model sees its result.
+    fn describe(&mut self) -> (Value, Option<JobChange>) {
         if let Some(line) = self.progress.take() {
             self.last_progress = Some(line);
         }
+        let mut change = None;
         let mut value = Map::new();
         value.insert("job".into(), self.id.clone().into());
         value.insert("tool".into(), self.tool.clone().into());
@@ -357,19 +459,25 @@ impl Job {
                 }
             }
             Some(outcome) => {
-                self.reported = true;
                 let result = result_value(&outcome.output);
                 let status = if self.cancelled {
-                    "cancelled".to_owned()
+                    JobStatus::Cancelled
                 } else {
-                    job_status(&outcome.output, &result)
+                    job_status(
+                        &outcome.output,
+                        &AgentReply::read(&result).unwrap_or_default(),
+                    )
                 };
-                value.insert("status".into(), status.into());
+                value.insert("status".into(), status.as_str().into());
                 value.insert("elapsed_seconds".into(), outcome.elapsed.as_secs().into());
                 value.insert("result".into(), result);
+                if !self.reported {
+                    self.reported = true;
+                    change = Some(self.change(status));
+                }
             }
         }
-        Value::Object(value)
+        (Value::Object(value), change)
     }
 }
 
@@ -381,17 +489,33 @@ fn result_value(output: &ToolOutput) -> Value {
     }
 }
 
-fn job_status(output: &ToolOutput, result: &Value) -> String {
-    result.get("status").and_then(Value::as_str).map_or_else(
-        || {
-            if output.is_error() {
-                "failed".into()
-            } else {
-                "completed".into()
-            }
-        },
-        str::to_owned,
-    )
+/// How a finished job ended: its agent's reported status, else whether its
+/// call failed.
+fn job_status(output: &ToolOutput, reply: &AgentReply) -> JobStatus {
+    reply.status.unwrap_or(if output.is_error() {
+        JobStatus::Failed
+    } else {
+        JobStatus::Completed
+    })
+}
+
+/// The first non-empty line of `prompt`, at most [`TASK_CHARS`] characters,
+/// which names a job to people.
+fn task_line(prompt: &str) -> String {
+    let line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut task: String = line
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(TASK_CHARS)
+        .collect();
+    if line.chars().count() > TASK_CHARS {
+        task.push('…');
+    }
+    task
 }
 
 fn unknown_job(job: &str) -> ToolError {
@@ -500,9 +624,13 @@ impl Tool for BackgroundCapable {
         // Validate before returning a job handle, so a bad call fails now.
         self.inner.risk(&arguments)?;
         let name = self.inner.spec().name;
-        let started =
-            self.jobs
-                .start(Arc::clone(&self.inner), &name, arguments, context.workspace)?;
+        let started = self.jobs.start(
+            Arc::clone(&self.inner),
+            &name,
+            arguments,
+            context.workspace,
+            &context.call_id,
+        )?;
         Ok(ToolOutput::success(started.to_string()))
     }
 }
@@ -575,7 +703,7 @@ impl Tool for WaitTool {
         let limit = self.timeouts.resolve(args.timeout_seconds)?;
         let value = self
             .jobs
-            .wait(&args.job, limit, &context.cancellation)
+            .wait(&args.job, limit, &context.cancellation, &context.call_id)
             .await?;
         Ok(ToolOutput::success(value.to_string()))
     }
@@ -618,10 +746,10 @@ impl Tool for StatusTool {
     async fn execute(
         &self,
         arguments: Value,
-        _context: ToolContext,
+        context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: StatusArgs = parse_args(&arguments)?;
-        let value = self.jobs.describe(args.job.as_deref())?;
+        let value = self.jobs.describe(args.job.as_deref(), &context.call_id)?;
         Ok(ToolOutput::success(value.to_string()))
     }
 }
@@ -669,10 +797,10 @@ impl Tool for CancelTool {
     async fn execute(
         &self,
         arguments: Value,
-        _context: ToolContext,
+        context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: CancelArgs = parse_args(&arguments)?;
-        let value = self.jobs.cancel(&args.job).await?;
+        let value = self.jobs.cancel(&args.job, &context.call_id).await?;
         Ok(ToolOutput::success(value.to_string()))
     }
 }

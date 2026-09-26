@@ -240,6 +240,7 @@ impl AgentRuntime {
                     let execution = tool.execute(
                         call.arguments.clone(),
                         ToolContext {
+                            call_id: call.id.clone(),
                             workspace: self.workspace.clone(),
                             cancellation: cancellation.child_token(),
                             progress: progress.clone(),

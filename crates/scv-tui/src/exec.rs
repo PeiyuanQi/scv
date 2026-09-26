@@ -75,12 +75,15 @@ pub async fn run_exec(
                     name,
                     success,
                     output,
+                    jobs,
                     ..
                 } => {
-                    let update = scv_protocol::background_job_update(&output);
-                    background.extend(update.started);
-                    for job in update.settled {
-                        background.remove(&job);
+                    for change in jobs {
+                        if change.started() {
+                            background.insert(change.job);
+                        } else {
+                            background.remove(&change.job);
+                        }
                     }
                     if !success {
                         eprintln!("\n{name} failed: {output}");

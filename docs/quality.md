@@ -125,6 +125,11 @@ Daemon and component changes require focused coverage for:
   `scv server --stdio` reaped by the next reconcile, the depth limit and
   nested daemon-command refusal, and agent status never printing an email or
   key;
+- background jobs: each call's `tool.completed.jobs` naming the jobs it
+  started and those whose results it first showed the model (a job settles
+  once seen or stopped, never merely finished, and never twice), report turns
+  naming theirs in `origin.jobs`, and the channel bridge and `scv exec`
+  keeping a session open from those events alone;
 - TUI reconnect creating a fresh session without history restoration or
   automatic replay of submitted work.
 

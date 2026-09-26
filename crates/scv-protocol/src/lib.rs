@@ -21,7 +21,7 @@ mod server;
 use serde::{Deserialize, Serialize};
 
 pub use attachment::{Attachment, ReplyAttachment, reply_attachment};
-pub use background::{BackgroundJobUpdate, ORIGIN_BACKGROUND, TurnOrigin, background_job_update};
+pub use background::{JobChange, JobStatus, OriginKind, TurnOrigin};
 pub use client::ClientMessage;
 pub use daemon::{
     ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, DelegationInfo,
