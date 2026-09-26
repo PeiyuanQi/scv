@@ -130,7 +130,10 @@ the daemon to restart into the release already installed at its own path: the
 daemon decides when, refuses a binary that does not answer `scv build-info`,
 and keeps the previous binary for a rollback. It gives a delegated agent
 nothing it could not already do as the user (such as `systemctl --user
-restart`); it exists so a chat-driven release restarts after its report. Conversation handles belong to one SCV session and are checked
+restart`); it exists so a chat-driven release restarts after its report.
+`scv confirm`, which only asks the owner a question in chat and manages
+nothing, is allowed at any depth too (see
+[Supervised remote bridge](#supervised-remote-bridge)). Conversation handles belong to one SCV session and are checked
 against it, so the model cannot reach another session's conversation or pass a
 CLI session ID of its choosing; a continued conversation keeps its original
 `cwd`. `scv agents gc` removes only regular transcript files below each
@@ -354,6 +357,21 @@ accounts' owners, or the chat the owner last wrote from. Their text is
 composed by SCV, not the model, and names versions, commits, job handles, and
 the first line of each stopped job's delegated prompt; the restart plan and
 the owner's last chat are private files under `$SCV_HOME/state`.
+
+A question to the owner (`scv confirm`, asked by the feature flow before it
+publishes to crates.io) likewise goes only to an account owner's direct chat:
+the one that started the asking delegation, or the notify target. Its text is
+the asker's, any local process of the user through the trusted socket,
+including a delegated agent whose words may repeat untrusted content, so it is
+bounded to 4 KiB and followed by SCV's own "Reply yes or no" line. Only the
+owner's own direct message answers, and only an exact yes or no word; other
+senders, group messages (the owner's included), messages with files, and any
+other words never answer, and a question gets at most one answer. The answer
+starts no turn and reaches no model: it only lets the asker go ahead or stop,
+granting nothing else, and no answer, a withdrawn question, a daemon restart,
+or an answer lost in storing all mean the asker does not go ahead. The
+question is a safeguard the asker chooses to use, not a boundary: a delegated
+agent running as the user could still publish without asking.
 
 Feishu text turns `<at user_id=…>` into mentions, including `@all`, so SCV
 breaks every `<at` in outgoing text with a zero-width space: model output, which

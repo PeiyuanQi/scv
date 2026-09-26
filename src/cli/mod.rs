@@ -6,6 +6,7 @@ pub(crate) mod args;
 pub(crate) mod channels;
 pub(crate) mod common;
 pub(crate) mod config;
+pub(crate) mod confirm;
 pub(crate) mod daemon;
 pub(crate) mod prompt;
 pub(crate) mod service;
@@ -107,6 +108,9 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf, layout: Layout) -> Result<()> {
             control(&layout, DaemonCommand::Reload).await?;
             println!("Component configuration reloaded.");
             Ok(())
+        }
+        Command::Confirm { timeout, question } => {
+            confirm::confirm(&layout, question, timeout).await
         }
         Command::Update { index_url } => update::update_cli(&layout, &overrides, &cwd, index_url),
         Command::Channels { command } => channels::channels(&layout, command).await,

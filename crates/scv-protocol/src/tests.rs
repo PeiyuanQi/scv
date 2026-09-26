@@ -165,6 +165,67 @@ fn restart_requests_and_scheduled_restarts_round_trip() {
 }
 
 #[test]
+fn owner_questions_and_their_state_round_trip() {
+    let ask = DaemonCommand::ConfirmAsk {
+        question: "Publish SCV 0.3.0?".into(),
+        parent: Some("0a1b2c3d/session/codex-3f9a2c".into()),
+        timeout_seconds: Some(600),
+    };
+    let wire = serde_json::to_string(&ask).unwrap();
+    assert!(wire.contains(r#""action":"confirm_ask""#), "{wire}");
+    assert_eq!(serde_json::from_str::<DaemonCommand>(&wire).unwrap(), ask);
+    assert_eq!(
+        serde_json::from_str::<DaemonCommand>(r#"{"action":"confirm_ask","question":"q"}"#)
+            .unwrap(),
+        DaemonCommand::ConfirmAsk {
+            question: "q".into(),
+            parent: None,
+            timeout_seconds: None,
+        }
+    );
+    let poll = DaemonCommand::ConfirmStatus { id: "a1b2".into() };
+    assert_eq!(
+        serde_json::to_string(&poll).unwrap(),
+        r#"{"action":"confirm_status","id":"a1b2"}"#
+    );
+    let status: DaemonStatus = serde_json::from_str(
+        r#"{"version":"0.3.0","pid":1,"components":[],"confirm":{"id":"a1b2","state":"expired","chat":"wechat:default","deadline_unix_seconds":5}}"#,
+    )
+    .unwrap();
+    let confirm = status.confirm.clone().unwrap();
+    assert_eq!(
+        (confirm.state, confirm.chat.as_str()),
+        (ConfirmState::Expired, "wechat:default")
+    );
+    assert_eq!(
+        serde_json::from_str::<DaemonStatus>(&serde_json::to_string(&status).unwrap()).unwrap(),
+        status
+    );
+    for (state, wire) in [
+        (ConfirmState::Pending, "pending"),
+        (ConfirmState::Yes, "yes"),
+        (ConfirmState::No, "no"),
+        (ConfirmState::Expired, "expired"),
+        (ConfirmState::Withdrawn, "withdrawn"),
+        (ConfirmState::Failed, "failed"),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&state).unwrap(),
+            format!("\"{wire}\"")
+        );
+    }
+    // A newer daemon's state parses, and a status without a question omits it.
+    assert_eq!(
+        serde_json::from_str::<ConfirmState>(r#""deferred""#).unwrap(),
+        ConfirmState::Unknown
+    );
+    let plain: DaemonStatus =
+        serde_json::from_str(r#"{"version":"0.2.2","pid":1,"components":[]}"#).unwrap();
+    assert!(plain.confirm.is_none());
+    assert!(!serde_json::to_string(&plain).unwrap().contains("confirm"));
+}
+
+#[test]
 fn additive_fields_are_ignored() {
     let json = r#"{"type":"session.clear","request_id":"1","session_id":"s","future":true}"#;
     assert!(matches!(
@@ -443,6 +504,7 @@ fn error_codes_keep_their_wire_names_and_unknown_ones_parse() {
         ErrorCode::ComponentError,
         ErrorCode::DelegationError,
         ErrorCode::RestartError,
+        ErrorCode::ConfirmError,
         ErrorCode::ProviderError,
         ErrorCode::ContextLimit,
         ErrorCode::StepLimit,

@@ -59,6 +59,64 @@ fn chains_match_only_their_own_handle() {
 }
 
 #[test]
+fn a_chain_names_the_run_this_process_started() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = DelegationRegistry::new(&Layout::new(home.path()));
+    let mut agent = std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let record = |handle: &str, owner: ProcessIdentity| DelegationRecord {
+        handle: handle.into(),
+        agent: "codex".into(),
+        instance: registry.instance().into(),
+        session: "s".into(),
+        owner,
+        process: ProcessIdentity::of(agent.id()).unwrap(),
+        pgid: agent.id(),
+        cwd: "/work".into(),
+        started_unix: 1,
+        depth: 1,
+        conversation: None,
+        turn: None,
+    };
+    write_record(
+        registry.record_dir(),
+        &record("codex-a1b2c3", ProcessIdentity::current().unwrap()),
+    )
+    .unwrap();
+    // A run another live process owns is not this process's.
+    write_record(
+        registry.record_dir(),
+        &record("codex-d4e5f6", ProcessIdentity::of(agent.id()).unwrap()),
+    )
+    .unwrap();
+    let own = format!("{}/s/codex-a1b2c3", registry.instance());
+    let expected = Some(ChainRun {
+        handle: "codex-a1b2c3".into(),
+        session: "s".into(),
+    });
+    assert_eq!(registry.own_run(&own), expected);
+    // Nested SCVs add entries of their own instances around it.
+    assert_eq!(
+        registry.own_run(&format!(
+            "elsewhere/x/codex-000000;{own};nested/y/claude-111111"
+        )),
+        expected
+    );
+    assert_eq!(registry.own_run("elsewhere/s/codex-a1b2c3"), None);
+    assert_eq!(
+        registry.own_run(&format!("{}/s/codex-d4e5f6", registry.instance())),
+        None
+    );
+    assert_eq!(registry.own_run("codex-a1b2c3"), None);
+    assert_eq!(registry.own_run(""), None);
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+}
+
+#[test]
 fn a_declared_client_depth_raises_the_recorded_depth() {
     let home = tempfile::tempdir().unwrap();
     let registry = DelegationRegistry::new(&Layout::new(home.path()));

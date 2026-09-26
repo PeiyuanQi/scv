@@ -14,6 +14,7 @@ mod approval;
 mod attachments;
 mod components;
 pub mod config;
+mod confirm;
 mod connection;
 mod control;
 mod daemon;

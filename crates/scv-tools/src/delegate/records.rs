@@ -107,6 +107,16 @@ pub struct DelegationEntry {
     pub processes: usize,
 }
 
+/// A delegation named in an `SCV_PARENT` chain, and the session that
+/// started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainRun {
+    /// The delegation's handle, such as `codex-3f9a2c`.
+    pub handle: String,
+    /// The SCV session that started it.
+    pub session: String,
+}
+
 /// What a reconciliation pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
@@ -313,6 +323,29 @@ impl DelegationRegistry {
                 .then_with(|| a.record.handle.cmp(&b.record.handle))
         });
         entries
+    }
+
+    /// The running delegation this process started that an `SCV_PARENT`
+    /// `chain` names: the one a caller runs inside, whatever nested SCVs lie
+    /// between. Entries of other instances, runs other processes own, and
+    /// malformed entries are skipped.
+    pub fn own_run(&self, chain: &str) -> Option<ChainRun> {
+        let own = std::process::id();
+        let entries = self.list(true);
+        chain.split(';').find_map(|entry| {
+            let mut parts = entry.splitn(3, '/');
+            let (instance, session, handle) = (parts.next()?, parts.next()?, parts.next()?);
+            if instance != self.instance {
+                return None;
+            }
+            entries
+                .iter()
+                .find(|running| running.record.handle == handle && running.record.owner.pid == own)
+                .map(|_| ChainRun {
+                    handle: handle.to_owned(),
+                    session: session.to_owned(),
+                })
+        })
     }
 
     /// Stop one delegation of this instance, whichever process owns it.

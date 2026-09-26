@@ -9,8 +9,10 @@
 )]
 
 mod config;
+mod confirm;
 mod daemon;
 mod delegation;
+mod feature_flow;
 mod guard;
 mod restart;
 mod server;

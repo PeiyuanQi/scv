@@ -96,6 +96,51 @@ pub struct DaemonStatus {
     /// A restart the daemon has scheduled, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<RestartInfo>,
+    /// The question a `confirm_ask` or `confirm_status` request is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<ConfirmInfo>,
+}
+
+/// How long a question to the owner waits for an answer unless the asker
+/// says otherwise.
+pub const DEFAULT_CONFIRM_SECONDS: u64 = 30 * 60;
+/// The longest a question to the owner may wait: the default ceiling of a
+/// delegated agent's own tool call (`tools.max_timeout_seconds`), which is
+/// how a delegated agent asks.
+pub const MAX_CONFIRM_SECONDS: u64 = 4 * 60 * 60;
+
+/// A yes/no question to the owner in chat (`scv confirm`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfirmInfo {
+    /// The question's ID, for `confirm_status`.
+    pub id: String,
+    /// Where it stands.
+    pub state: ConfirmState,
+    /// The account whose owner was asked, as `<channel>:<account>`.
+    pub chat: String,
+    /// When no answer counts as no.
+    pub deadline_unix_seconds: u64,
+}
+
+/// Where a question to the owner stands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmState {
+    /// Sent, or being stored for sending, and waiting for an answer.
+    Pending,
+    /// The owner answered yes.
+    Yes,
+    /// The owner answered no.
+    No,
+    /// No answer came before the deadline, which counts as no.
+    Expired,
+    /// The asker stopped asking about it before an answer came.
+    Withdrawn,
+    /// The question could not be handed to the chat, or its answer was lost.
+    Failed,
+    /// A state this client does not know, from a newer daemon.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A restart into a newly installed release, waiting for owner work to end.
@@ -228,5 +273,26 @@ pub enum DaemonCommand {
         /// Longest wait before restarting anyway.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_wait_seconds: Option<u64>,
+    },
+    /// Ask the owner a yes/no question in chat: in the chat that started the
+    /// work `parent` names, or else the notify target. The reply's `confirm`
+    /// names the question; `confirm_status` then follows it.
+    ConfirmAsk {
+        /// The question, as the owner reads it.
+        question: String,
+        /// The caller's `SCV_PARENT` chain, naming the delegation whose chat
+        /// is asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        /// How long no answer waits before it counts as no
+        /// ([`DEFAULT_CONFIRM_SECONDS`], at most [`MAX_CONFIRM_SECONDS`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+    },
+    /// Report where the question `id` stands. Asking also keeps it alive: a
+    /// question nobody asks about for a minute is withdrawn.
+    ConfirmStatus {
+        /// The ID `confirm_ask` returned.
+        id: String,
     },
 }

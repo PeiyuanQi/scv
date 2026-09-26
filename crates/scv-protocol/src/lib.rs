@@ -24,8 +24,9 @@ pub use attachment::{Attachment, ReplyAttachment, reply_attachment};
 pub use background::{JobChange, JobStatus, OriginKind, TurnOrigin};
 pub use client::ClientMessage;
 pub use daemon::{
-    ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, DelegationInfo,
-    DelegationSummary, RemoteTools, RestartInfo, Senders,
+    ComponentHealth, ComponentState, ConfirmInfo, ConfirmState, DEFAULT_CONFIRM_SECONDS,
+    DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary, MAX_CONFIRM_SECONDS,
+    RemoteTools, RestartInfo, Senders,
 };
 pub use error::{ErrorCode, ToolErrorKind};
 pub use frame::{Frame, FrameDecoder, Overflow, Step, encode_frame, trim_line};

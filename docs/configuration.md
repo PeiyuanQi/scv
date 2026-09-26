@@ -556,8 +556,11 @@ that is connected, and only there; an account still connecting keeps its place
 for two minutes. A notice about an account never goes through that account.
 Without a list, notices go to the chat the owner last wrote from, and with no
 such chat only to the log. Updates asked for from a chat are answered in that
-chat, falling back to this list when it does not connect in time. Project
-configuration cannot set `[notify]`.
+chat, falling back to this list when it does not connect in time. A question
+to the owner (`scv confirm`) asked by work that did not start in a chat goes
+to the same owner chat, on the first listed account connected right then (see
+[channels](channels.md#questions-to-the-owner)). Project configuration cannot
+set `[notify]`.
 
 Project configuration may make policy stricter but not weaker than user
 configuration. A command-line flag may weaken policy because it is an explicit

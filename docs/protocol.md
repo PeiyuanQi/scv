@@ -58,6 +58,8 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 {"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.0 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
+{"type":"daemon.control","request_id":"d11","command":{"action":"confirm_status","id":"5f0c9a1e2b3d"}}
 ```
 
 `status` reads live daemon health. `reload` reconciles saved accounts and
@@ -98,6 +100,21 @@ answered. At `max_wait_seconds` (default 600, at most 3600) it restarts
 anyway. A second request for the same version returns the scheduled restart.
 The restart itself runs in a watchdog unit outside the daemon; see
 [architecture.md](architecture.md#planned-restarts).
+
+`confirm_ask` asks the owner a yes/no `question` (at most 4 KiB) in chat, as
+`scv confirm` does: in the chat that started the delegation `parent` names,
+or else the owner chat notices go to (see
+[channels](channels.md#questions-to-the-owner)). `timeout_seconds` (default
+1800, at most 14400) is how long no answer waits before it counts as no. The
+daemon refuses with a `confirm_error` when no owner's direct chat is
+reachable or a question already waits there; otherwise it replies at once
+with `daemon.status`, whose `confirm` names the question, and sends it in the
+background. `confirm_status` reports where question `id` stands in the same
+`confirm` field, and a `confirm_error` for an ID the daemon does not know,
+such as after a restart: questions live in memory only. Following a question
+keeps it alive; one nobody asks about for a minute is withdrawn. A client
+asks and then follows the question, because a single request cannot outlast
+the control helper's time limit.
 
 Component management is unsupported on stdio. The client helper bounds its
 exchange and never automatically retries a mutation after an ambiguous failure;
@@ -239,6 +256,7 @@ clears its transcript only after that event.
 ```json
 {"type":"daemon.status","request_id":"d1","status":{"version":"0.2.2","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
 {"type":"daemon.status","request_id":"d6","status":{"version":"0.2.2","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.2.2","pid":1234,"components":[],"delegations":{"active":1,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -253,7 +271,13 @@ carry the request ID but no session or sequence number.
 `status` contains `version`, `pid`, `components`, and `delegations`, and
 `restart` while a planned restart is scheduled: `to_version`, `waiting_for`
 (omitted once it restarts), `requester`, `origin` (`<channel>:<account>` of
-the chat that asked), and `deadline_unix_seconds`. A status from a daemon older
+the chat that asked), and `deadline_unix_seconds`. Replies to `confirm_ask`
+and `confirm_status` also carry `confirm`: the question's `id`, its `state`
+(`scv_protocol::ConfirmState`: `pending`, `yes`, `no`, `expired` when no
+answer came in time, `withdrawn` when its asker stopped following it, or
+`failed` when it could not be sent or its answer was lost; a state a client
+does not know parses as `unknown`), the `chat` asked (`<channel>:<account>`),
+and `deadline_unix_seconds`. A status from a daemon older
 than 0.1.26 has no `delegations` and parses as zero.
 `delegations.active` counts running delegated runs of the instance and
 `reaped` the orphans this daemon has stopped since it started; `entries` and
@@ -402,7 +426,8 @@ in snake_case; that enum is the list of codes and says what each means. An
 (`invalid_json`, also for a message type or `daemon.control` action it does not
 know), one before `initialize` (`not_initialized`), a different protocol
 version (`version_mismatch`, fatal), or a request it declines, such as
-`invalid_request`, `session_not_found`, `queue_limit`, or `component_error`.
+`invalid_request`, `session_not_found`, `queue_limit`, `component_error`, or
+`confirm_error`.
 `turn.failed` carries `provider_error`, one of the `*_limit` codes, or
 `internal_error`. Component failures use sanitized messages without credential
 or raw transport details. An error after `turn.started`, including a provider

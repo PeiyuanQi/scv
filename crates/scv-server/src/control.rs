@@ -1,5 +1,6 @@
-//! `daemon.control`: status, component and delegation management, and
-//! scheduling a restart into a new release.
+//! `daemon.control`: status, component and delegation management,
+//! scheduling a restart into a new release, and asking the owner a yes/no
+//! question in chat.
 
 use std::sync::Arc;
 
@@ -15,6 +16,9 @@ pub(crate) enum ControlFailure {
     Delegation(String),
     /// A restart the daemon refused; the message is safe to show.
     Restart(String),
+    /// A question the daemon could not ask, or does not know; the message is
+    /// safe to show.
+    Confirm(String),
     Component,
 }
 
@@ -25,7 +29,10 @@ pub(crate) async fn daemon_control(
     command: DaemonCommand,
 ) -> std::result::Result<DaemonStatus, ControlFailure> {
     let mut killed = Vec::new();
-    let restarter = components.lock().await.restarter();
+    let (restarter, confirmer) = {
+        let components = components.lock().await;
+        (components.restarter(), components.confirmer())
+    };
     if let DaemonCommand::RestartWhenIdle { .. } = &command {
         let restarter = restarter.as_ref().ok_or_else(|| {
             ControlFailure::Restart("only the SCV daemon can schedule its restart".into())
@@ -35,6 +42,28 @@ pub(crate) async fn daemon_control(
             .await
             .map_err(ControlFailure::Restart)?;
     }
+    let confirm = match &command {
+        DaemonCommand::ConfirmAsk {
+            question,
+            parent,
+            timeout_seconds,
+        } => Some(
+            confirmer
+                .as_ref()
+                .ok_or_else(|| ControlFailure::Confirm(ONLY_THE_DAEMON_ASKS.into()))?
+                .ask(question, parent.as_deref(), *timeout_seconds)
+                .await
+                .map_err(ControlFailure::Confirm)?,
+        ),
+        DaemonCommand::ConfirmStatus { id } => Some(
+            confirmer
+                .as_ref()
+                .ok_or_else(|| ControlFailure::Confirm(ONLY_THE_DAEMON_ASKS.into()))?
+                .status(id)
+                .map_err(ControlFailure::Confirm)?,
+        ),
+        _ => None,
+    };
     let listing = match &command {
         DaemonCommand::Delegations { all } => Some(*all),
         DaemonCommand::DelegationKill { handle, orphans } => {
@@ -92,8 +121,11 @@ pub(crate) async fn daemon_control(
         killed,
     };
     status.restart = restarter.and_then(|restarter| restarter.info());
+    status.confirm = confirm;
     Ok(status)
 }
+
+const ONLY_THE_DAEMON_ASKS: &str = "only the SCV daemon can ask the owner";
 
 #[cfg(test)]
 mod tests;

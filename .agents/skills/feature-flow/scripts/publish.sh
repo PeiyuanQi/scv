@@ -2,6 +2,11 @@
 # Publish every SCV crate at the workspace version, in AGENTS.md dependency
 # order. Crates already on crates.io are skipped, so an interrupted run can be
 # repeated. `--check` only reports which crates still need publishing.
+#
+# Publishing cannot be undone. Run by an agent SCV delegated to (SCV_PARENT is
+# set), it first asks the owner yes or no in chat (`scv confirm`, in the chat
+# that started the work) and publishes only on yes. SCV_CONFIRM_TIMEOUT sets
+# how many seconds no answer waits before it counts as no (default 1800).
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -63,6 +68,31 @@ fi
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
   echo "publish.sh: HEAD is not origin/main; land first, then run: git switch --detach origin/main" >&2
   exit 1
+fi
+
+# An agent SCV delegated to publishes only on the owner's yes in chat.
+if [ -n "${SCV_PARENT:-}" ]; then
+  confirm_timeout=${SCV_CONFIRM_TIMEOUT:-1800}
+  names=$(printf '%s, ' "${pending[@]}")
+  question="Publish SCV $version to crates.io from origin/main $(git log -1 --format='%h %s' HEAD)?
+Crates: ${names%, }.
+Publishing cannot be undone."
+  echo "Asking the owner in chat before publishing; no answer in ${confirm_timeout}s counts as no."
+  set +e
+  "$here/host.sh" scv confirm --timeout "$confirm_timeout" -- "$question"
+  answer=$?
+  set -e
+  case $answer in
+    0) ;;
+    1)
+      echo "publish.sh: the owner did not say yes; nothing was published" >&2
+      exit 1
+      ;;
+    *)
+      echo "publish.sh: could not ask the owner (scv confirm exited $answer); nothing was published" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 for crate in "${pending[@]}"; do

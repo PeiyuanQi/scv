@@ -25,6 +25,9 @@ pub(crate) fn refuse_nested_daemon_control(command: &Command) -> Result<()> {
         Command::Restart {
             when_idle: true, ..
         } => None,
+        // Asking the owner a question is how a delegated agent gets their
+        // yes before an irreversible step; it manages nothing.
+        Command::Confirm { .. } => None,
         Command::Restart { .. } => Some("restart"),
         Command::RestartWatchdog { .. } => Some("restart-watchdog"),
         Command::Update { .. } => Some("update"),

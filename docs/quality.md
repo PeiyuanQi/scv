@@ -133,6 +133,19 @@ Daemon and component changes require focused coverage for:
   (parsed and through the full bridge), and for a WeChat voice message whose
   transcript is missing, while one with a transcript is still downloaded for
   the owner and attached with it;
+- questions to the owner (`scv confirm`): answers recognized after
+  normalizing and nothing else taken for one; only the owner's direct chat
+  answering, never another sender, a group, or a message with files; one
+  question per chat, taken at most once; a question delivered through a fake
+  transport to the chat that started the work (or the notify target), and a
+  yes or no reply acknowledged without a turn while other messages run as
+  turns; the daemon's `confirm_ask` and `confirm_status`, a deadline telling
+  the chat no answer counts as no, an unfollowed question withdrawn, and
+  unreachable chats and repeat questions refused; `scv confirm` exiting 0,
+  1, or 2 against a scripted daemon, a daemon too old for it, no daemon, and
+  an isolated daemon with no owner chat; and `publish.sh` asking before its
+  first `cargo publish` only when delegated, publishing only on yes, and
+  never asking for `--check`;
 - refused replies held per conversation within count, byte, total, and age
   limits, delivered ahead of the next reply only as far as one message allows,
   restored when the carrying reply is refused, busy and voice notices never held, and

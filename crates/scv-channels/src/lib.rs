@@ -111,6 +111,10 @@ pub const BUSY_REPLY: &str =
 /// The reply to a voice message that has no transcript and nothing else.
 pub const VOICE_REPLY: &str =
     "SCV cannot listen to voice messages yet. Please type your message instead.";
+/// The reply to an owner who answered a question yes.
+pub const ANSWERED_YES: &str = "OK, going ahead.";
+/// The reply to an owner who answered a question no.
+pub const ANSWERED_NO: &str = "OK, stopped.";
 pub const HELD_HEADER: &str = "[Earlier reply that could not be delivered at the time]\n";
 pub const LATEST_HEADER: &str = "[Reply to your latest message]\n";
 /// Refused replies are delivered with the conversation's next reply for a week.
@@ -617,42 +621,56 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     ) -> Result<()> {
         let id = inbound.id();
         let mut state = self.state.lock().await;
-        let verdict = intake::classify(
-            inbound,
-            &intake::Intake {
-                state: &state,
-                conversations,
-                owner: self.owner,
-                tool_owner,
-                senders: self.senders,
-            },
-        );
-        let (sender, turn) = match verdict {
-            Verdict::Ignore => {
-                mark_seen(&mut state, id);
-                return self.save(&state).await;
+        // Only the owner's direct chat can hold a question.
+        let mut question = self
+            .owner
+            .is_some_and(|owner| self.registration.asking(owner));
+        let (sender, turn) = loop {
+            let verdict = intake::classify(
+                inbound,
+                &intake::Intake {
+                    state: &state,
+                    conversations,
+                    owner: self.owner,
+                    tool_owner,
+                    senders: self.senders,
+                    question,
+                },
+            );
+            match verdict {
+                Verdict::Ignore => {
+                    mark_seen(&mut state, id);
+                    return self.save(&state).await;
+                }
+                Verdict::Stranger => {
+                    // Neither who sent it nor what it says reaches the log.
+                    tracing::info!("ignored a message from someone other than the account owner");
+                    mark_seen(&mut state, id);
+                    return self.save(&state).await;
+                }
+                Verdict::Claimed => return Ok(()),
+                Verdict::Answer { sender, yes } => {
+                    match self.registration.take_question(&sender.message.sender) {
+                        Some(answer) => return self.acknowledge(state, sender, yes, answer).await,
+                        // The question ran out meanwhile: an ordinary message.
+                        None => question = false,
+                    }
+                }
+                Verdict::Busy(sender) => {
+                    tracing::warn!("at the work limit; asking a sender to retry later");
+                    break (sender, Err(BUSY_REPLY));
+                }
+                Verdict::Unheard(sender) => {
+                    tracing::info!("asking a sender to type instead of sending a voice message");
+                    break (sender, Err(VOICE_REPLY));
+                }
+                Verdict::Turn {
+                    sender,
+                    owner,
+                    limit,
+                    evict,
+                } => break (sender, Ok((owner, limit, evict))),
             }
-            Verdict::Stranger => {
-                // Neither who sent it nor what it says reaches the log.
-                tracing::info!("ignored a message from someone other than the account owner");
-                mark_seen(&mut state, id);
-                return self.save(&state).await;
-            }
-            Verdict::Claimed => return Ok(()),
-            Verdict::Busy(sender) => {
-                tracing::warn!("at the work limit; asking a sender to retry later");
-                (sender, Err(BUSY_REPLY))
-            }
-            Verdict::Unheard(sender) => {
-                tracing::info!("asking a sender to type instead of sending a voice message");
-                (sender, Err(VOICE_REPLY))
-            }
-            Verdict::Turn {
-                sender,
-                owner,
-                limit,
-                evict,
-            } => (sender, Ok((owner, limit, evict))),
         };
         let message = sender.message;
         if sender.owner_chat {
@@ -733,6 +751,37 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 );
             }
         }
+    }
+
+    /// Answer the owner's question with `sender`'s message and queue the
+    /// acknowledgement as its reply, without a turn. The asker hears the
+    /// answer only once that reply is durable; if saving fails, the dropped
+    /// `answer` tells it the answer was lost.
+    async fn acknowledge(
+        &self,
+        mut state: tokio::sync::MutexGuard<'_, state::BridgeState>,
+        sender: intake::Sender<'_>,
+        yes: bool,
+        answer: hub::Answer,
+    ) -> Result<()> {
+        let message = sender.message;
+        self.registration.owner_wrote(&message.sender);
+        let text = if yes { ANSWERED_YES } else { ANSWERED_NO };
+        let mut reply = new_pending(
+            &message.id,
+            &message.sender,
+            &message.reply_to,
+            text,
+            MAX_REPLY_BYTES,
+        );
+        reply.key = sender.key;
+        reply.transient = true;
+        state.pending.push(reply);
+        self.save(&state).await?;
+        drop(state);
+        answer.give(yes);
+        self.replies.notify_one();
+        Ok(())
     }
 
     /// Run one conversation's turns in order on its own SCV session. A turn

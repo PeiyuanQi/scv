@@ -1,7 +1,7 @@
 //! The `scv` command line: every subcommand, flag, and value type clap parses.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use scv_protocol::{RemoteTools, Senders};
+use scv_protocol::{DEFAULT_CONFIRM_SECONDS, MAX_CONFIRM_SECONDS, RemoteTools, Senders};
 use std::path::PathBuf;
 
 use super::common::ApprovalArg;
@@ -82,6 +82,27 @@ pub(crate) enum Command {
     Status,
     /// Re-read component settings and saved accounts without restarting sessions.
     Reload,
+    /// Ask the owner a yes/no question in chat and wait for the answer.
+    ///
+    /// The question goes to the chat that started the work this runs in
+    /// (named by `SCV_PARENT`), or else to the owner chat of the `[notify]`
+    /// accounts. Only the owner's direct chat can answer. Exit status: 0 yes;
+    /// 1 no, or no answer in time; 2 the question could not be asked or its
+    /// answer not learned (no daemon, a daemon too old for it, no owner chat
+    /// to ask in, a question already waiting there, or the daemon restarted
+    /// while waiting).
+    Confirm {
+        /// Seconds before no answer counts as no, at most 14400 (4 hours).
+        #[arg(
+            long,
+            value_name = "SECS",
+            default_value_t = DEFAULT_CONFIRM_SECONDS,
+            value_parser = clap::value_parser!(u64).range(1..=MAX_CONFIRM_SECONDS)
+        )]
+        timeout: u64,
+        /// The question, as the owner reads it.
+        question: String,
+    },
     /// Run the authoritative server.
     Server {
         /// Newline-delimited JSON over stdin/stdout is the only mode; the

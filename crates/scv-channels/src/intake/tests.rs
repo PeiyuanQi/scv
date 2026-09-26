@@ -46,6 +46,7 @@ fn quiet<'a>(
         owner: None,
         tool_owner: None,
         senders: Senders::Anyone,
+        question: false,
     }
 }
 
@@ -431,4 +432,166 @@ fn the_voice_reply_needs_no_turn_slot() {
         ),
         Verdict::Unheard(_)
     ));
+}
+
+#[test]
+fn explicit_answers_are_recognized_after_normalizing() {
+    for yes in [
+        "yes",
+        "Y",
+        " OK ",
+        "okay.",
+        "Yes!",
+        "yes!!",
+        "是",
+        "是的",
+        "好",
+        "好的。",
+        "确认！",
+        "可以",
+        "同意",
+        "YES .",
+    ] {
+        assert_eq!(answer(yes), Some(true), "{yes:?}");
+    }
+    for no in [
+        "no",
+        "N",
+        "No.",
+        "否",
+        "不",
+        "不要",
+        "取消",
+        "算了。",
+        "Stop!",
+        " stop ",
+    ] {
+        assert_eq!(answer(no), Some(false), "{no:?}");
+    }
+    for other in [
+        "",
+        "yes please",
+        "no way",
+        "maybe",
+        "yes?",
+        "not yet",
+        "好的，发布吧",
+        "[sticker]",
+        "ok\nbut wait",
+        "?",
+        "!",
+    ] {
+        assert_eq!(answer(other), None, "{other:?}");
+    }
+}
+
+#[test]
+fn only_the_owner_answers_a_question_in_their_direct_chat() {
+    let state = state::BridgeState::default();
+    let conversations = HashMap::new();
+    let asking = Intake {
+        owner: Some("owner"),
+        question: true,
+        ..quiet(&state, &conversations)
+    };
+    let said = |id: &str, sender: &str, text: &str, group: Option<&str>| {
+        Inbound::Text(Message::text(id, sender, text, "context", group))
+    };
+    let owner_yes = said("m1", "owner", "Yes!", None);
+    let Verdict::Answer { sender, yes } = classify(&owner_yes, &asking) else {
+        panic!("the owner's yes answers");
+    };
+    assert!(yes && sender.owner_chat);
+    assert_eq!(sender.key, "owner");
+    assert!(matches!(
+        classify(&said("m2", "owner", "不要", None), &asking),
+        Verdict::Answer { yes: false, .. }
+    ));
+    // Other senders, the owner's group messages, and other words run turns.
+    for inbound in [
+        said("m3", "other", "yes", None),
+        said("m4", "owner", "yes", Some("group")),
+        said("m5", "owner", "what is the question?", None),
+    ] {
+        assert!(
+            matches!(classify(&inbound, &asking), Verdict::Turn { .. }),
+            "{:?}",
+            classify(&inbound, &asking)
+        );
+    }
+    // A file with a yes caption is not a plain answer.
+    let mut captioned = Message::text("m6", "owner", "ok", "context", None);
+    captioned.media.push(crate::Media {
+        kind: crate::MediaKind::Image,
+        name: String::new(),
+        size: None,
+        mime: None,
+        transcript: None,
+        source: "img".into(),
+    });
+    assert!(matches!(
+        classify(&Inbound::Text(captioned), &asking),
+        Verdict::Turn { .. }
+    ));
+    // Without a question waiting, a yes is an ordinary message.
+    let idle = Intake {
+        question: false,
+        ..asking
+    };
+    assert!(matches!(classify(&owner_yes, &idle), Verdict::Turn { .. }));
+    // An owner-only account answers its owner's yes and drops a stranger's.
+    let owner_only = Intake {
+        question: true,
+        ..owned(&state, &conversations, Some("owner"))
+    };
+    assert!(matches!(
+        classify(&owner_yes, &owner_only),
+        Verdict::Answer { yes: true, .. }
+    ));
+    assert_eq!(
+        classify(&said("m7", "other", "yes", None), &owner_only),
+        Verdict::Stranger
+    );
+}
+
+#[test]
+fn an_answer_needs_no_room_but_is_never_taken_twice() {
+    let full = state::BridgeState {
+        in_flight: (0..MAX_CLAIMS)
+            .map(|index| claim(&index.to_string(), &format!("sender-{index}")))
+            .collect(),
+        ..Default::default()
+    };
+    let conversations = HashMap::new();
+    let asking = Intake {
+        owner: Some("owner"),
+        question: true,
+        ..quiet(&full, &conversations)
+    };
+    let answer = Inbound::Text(Message::text("m1", "owner", "ok", "context", None));
+    assert!(matches!(
+        classify(&answer, &asking),
+        Verdict::Answer { yes: true, .. }
+    ));
+    // A repeated delivery of an answer already acknowledged is dropped.
+    let acknowledged = state::BridgeState {
+        pending: vec![crate::new_pending(
+            "m1",
+            "owner",
+            "context",
+            crate::ANSWERED_YES,
+            64,
+        )],
+        ..Default::default()
+    };
+    assert_eq!(
+        classify(
+            &answer,
+            &Intake {
+                state: &acknowledged,
+                ..asking
+            }
+        ),
+        Verdict::Claimed
+    );
 }

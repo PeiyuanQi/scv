@@ -59,6 +59,8 @@ SCV provides:
 - interactive approval for tools with filesystem, shell, subprocess, or
   network side effects;
 - planned restarts into a newly installed release, with a binary rollback;
+- yes/no questions to the owner in chat before irreversible steps, such as
+  publishing SCV to crates.io (`scv confirm`);
 - Linux and macOS source builds and release archives.
 
 The current release does not include dynamic library loading, OS-level
@@ -79,7 +81,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
-| `scv-channels` | The chat channels. The bridge they share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, restart context). Behind Cargo features, both on by default: `wechat` (iLink authentication, polling, and sending, and its credentials) and `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark). |
+| `scv-channels` | The chat channels. The bridge they share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, questions to the owner, restart context). Behind Cargo features, both on by default: `wechat` (iLink authentication, polling, and sending, and its credentials) and `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark). |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in and importing their setups (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
 The integration dependency chain is
@@ -130,14 +132,15 @@ What lives where in the largest crates:
 | `scv-server` | `lib.rs` | Module list, the public API (`run_socket`, `run_stdio`, `config`, build info, the restart watchdog), and the service unit name |
 | | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs |
 | | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
-| | `control.rs` | `daemon.control`: status, components, delegations, and scheduled restarts |
+| | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, and questions to the owner |
 | | `outbound.rs` | The byte- and frame-bounded outbound queue and event encoding |
 | | `session/` | A session (`mod.rs`), building one (`build.rs`), its turn queue (`queue.rs`), and running a turn (`turn.rs`) |
 | | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`) |
 | | `approval.rs`, `events.rs` | Approval gates, and `CoreEvent` to `ServerEvent` |
 | | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
 | | `components.rs` | `Component`, `HealthReporter`, `Supervisor`, and the channel accounts they run |
-| | `restart.rs` | [Planned restarts](#planned-restarts) and the watchdog |
+| | `restart.rs` | [Planned restarts](#planned-restarts), the watchdog, and the notifier that finds the owner's chat |
+| | `confirm.rs` | [Questions to the owner](#questions-to-the-owner) (`scv confirm`) |
 | | `attachments.rs` | Files attached to a turn, such as chat media |
 | `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, the tools' settings, and the argument helpers every tool shares |
 | | `builtin/` | Tools that run inside SCV: `fs.rs` (`read`, `write`), `skill.rs` (`read_skill`), `shell.rs` (`bash`), `web.rs` (`web_fetch`, `web_search`), `chat_attach.rs` |
@@ -149,7 +152,7 @@ What lives where in the largest crates:
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
-| | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`), and a conversation's daemon session |
+| | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs` | Durable account state, what the daemon shares with running bridges, and chat media |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
 | | `wechat/` | WeChat login, polling `getupdates`, and sending (`mod.rs`); iLink requests (`ilink.rs`); credentials (`credentials.rs`); CDN files, AES-encrypted both ways (`cdn.rs`) |
@@ -169,8 +172,9 @@ What lives where in the largest crates:
 | | `client.rs`, `exec.rs` | The server connection, and headless `scv exec` |
 
 Black-box tests of the binaries are one test program, `tests/it/`, with a
-module per area (`server`, `daemon`, `config`, `delegation`, `restart`,
-`update`) and shared helpers in `tests/it/support.rs`.
+module per area (`server`, `daemon`, `config`, `confirm`, `delegation`,
+`restart`, `update`, and `feature_flow` for the landing skill's scripts) and
+shared helpers in `tests/it/support.rs`.
 
 Each channel account is a component hosted by the daemon's supervisor, which
 hands it to `scv_channels::run` with an `AccountRun`: the instance layout,
@@ -277,7 +281,41 @@ last wrote from (`$SCV_HOME/state/last-owner.json`), and otherwise only to the
 log. `scv_channels::hub::Hub` carries what the daemon and its bridges share:
 each running account's owner and outbox, which daemon session each direct chat
 runs on and its unreported background work, claimed owner messages, the
-owner's last chat, and whether this start is a planned restart.
+owner's last chat, questions waiting for the owner's answer, and whether this
+start is a planned restart. `scv_tools::delegation::DelegationRegistry::own_run`
+reads an `SCV_PARENT` chain for both planned restarts and questions: which of
+the daemon's own delegations the caller runs inside, and its session.
+
+## Questions to the owner
+
+`scv-server::confirm` asks the owner yes or no before a step that cannot be
+undone; the feature-flow `publish.sh` asks before publishing SCV to crates.io
+when SCV delegated the flow.
+
+1. `scv confirm [--timeout SECS] QUESTION` sends `confirm_ask` with the
+   caller's `SCV_PARENT` chain. The daemon finds the chat as a planned restart
+   does (delegation, then its session, then through the hub the direct chat
+   that session answers), or else asks the owner chat unprompted notices go
+   to (`Notifier::owner_chat`: the first connected `[notify].owner` account,
+   or the owner's last chat). It must be an account owner's direct chat;
+   otherwise nothing is asked.
+2. The daemon holds the question in the hub under that chat (one per chat),
+   replies with its ID at once, and queues the question in the account's
+   durable outbox like a notice; only then may an answer count
+   (`Hub::open`). The CLI follows it with `confirm_status` every two
+   seconds, since one control request is capped at 20 seconds; a question
+   nobody follows for a minute is withdrawn.
+3. The bridge's `classify` returns `Verdict::Answer` for the owner's explicit
+   yes or no in that direct chat while the hub holds a question there. The
+   bridge takes the question from the hub, stores its acknowledgement as the
+   message's reply, and only then hands the answer over; no turn starts.
+4. The daemon records the answer, or at the deadline withdraws the question
+   and tells the chat that no answer counts as no. `scv confirm` exits 0 on
+   yes, 1 on no or no answer, and 2 when nothing could be asked or the answer
+   was not learned.
+
+Questions live in memory only: a restart drops them, and the waiting CLI,
+finding the question unknown or the daemon gone, exits 2.
 
 ## Component lifecycle
 

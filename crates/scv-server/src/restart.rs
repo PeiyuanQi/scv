@@ -438,6 +438,25 @@ impl Notifier {
         }
     }
 
+    /// A notifier that sees `states` and the notify `list`, for other
+    /// modules' tests.
+    #[cfg(test)]
+    pub(crate) fn fixed(
+        hub: &Arc<Hub>,
+        list: Vec<String>,
+        states: HashMap<String, ComponentState>,
+    ) -> Self {
+        Self {
+            hub: Arc::clone(hub),
+            states: States::Fixed(Arc::new(SyncMutex::new(states))),
+            grace: Duration::from_millis(200),
+            give_up: Duration::from_secs(5),
+            poll: Duration::from_millis(20),
+            instance: crate::test_support::test_instance("/unused"),
+            list: Some(list),
+        }
+    }
+
     fn notify_list(&self) -> Vec<String> {
         #[cfg(test)]
         if let Some(list) = &self.list {
@@ -452,6 +471,18 @@ impl Notifier {
             },
             |config| config.notify.owner,
         )
+    }
+
+    /// The owner chat a notice would go to right now, without waiting for
+    /// an account to connect: the first connected notify target, or else
+    /// the chat the owner last wrote from.
+    pub(crate) async fn owner_chat(&self) -> Option<Origin> {
+        let states = self.states.get().await;
+        let owner = |component: &str| self.hub.owner(component);
+        match pick(&self.candidates(), &states, &owner, None, true) {
+            Pick::Send { component, peer } => Some(Origin { component, peer }),
+            Pick::Wait | Pick::Nothing => None,
+        }
     }
 
     /// The notify list, or else the chat the owner last wrote from.
@@ -710,21 +741,9 @@ impl Restarter {
 
     /// The delegation of this daemon named in a `SCV_PARENT` chain.
     fn requester(&self, chain: &str) -> Option<Requester> {
-        let own = std::process::id();
-        let entries = self.registry.list(true);
-        chain.split(';').find_map(|entry| {
-            let mut parts = entry.splitn(3, '/');
-            let (instance, session, handle) = (parts.next()?, parts.next()?, parts.next()?);
-            if instance != self.registry.instance() {
-                return None;
-            }
-            entries
-                .iter()
-                .find(|running| running.record.handle == handle && running.record.owner.pid == own)
-                .map(|_| Requester {
-                    handle: handle.to_owned(),
-                    session: session.to_owned(),
-                })
+        self.registry.own_run(chain).map(|run| Requester {
+            handle: run.handle,
+            session: run.session,
         })
     }
 
