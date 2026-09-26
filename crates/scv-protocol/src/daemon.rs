@@ -166,7 +166,12 @@ pub struct RestartInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DelegationSummary {
     /// Running delegations, whichever SCV process of the instance started them.
+    /// Live agents waiting between turns count too.
     pub active: u64,
+    /// How many of `active` are live agents (a nested SCV or an ACP agent)
+    /// waiting between turns; `None` from a daemon that does not tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<u64>,
     /// Orphaned delegations the daemon has stopped since it started.
     pub reaped: u64,
     /// Listed delegations, for `delegations` and `delegation_kill`.

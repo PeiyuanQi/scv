@@ -423,6 +423,33 @@ fn an_idle_live_delegation_is_additive() {
 }
 
 #[test]
+fn the_idle_delegation_count_is_additive() {
+    // As 0.3.0 sums up delegations: no idle count, and none written back.
+    let older = r#"{"active":2,"reaped":1}"#;
+    let summary: DelegationSummary = serde_json::from_str(older).unwrap();
+    assert_eq!(summary.idle, None);
+    assert_eq!(serde_json::to_string(&summary).unwrap(), older);
+    let counted = DelegationSummary {
+        idle: Some(1),
+        ..summary
+    };
+    let encoded = serde_json::to_string(&counted).unwrap();
+    assert_eq!(encoded, r#"{"active":2,"idle":1,"reaped":1}"#);
+    assert_eq!(
+        serde_json::from_str::<DelegationSummary>(&encoded).unwrap(),
+        counted
+    );
+    // A 0.3.0 client ignores the count and still reads every live run.
+    #[derive(serde::Deserialize)]
+    struct OlderSummary {
+        active: u64,
+        reaped: u64,
+    }
+    let read: OlderSummary = serde_json::from_str(&encoded).unwrap();
+    assert_eq!((read.active, read.reaped), (2, 1));
+}
+
+#[test]
 fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
     let started = ServerEvent::TurnStarted {
         request_id: "background:1".into(),
