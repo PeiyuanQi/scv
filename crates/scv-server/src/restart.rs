@@ -5,7 +5,8 @@
 //! `cargo install`) asks the daemon to restart into the binary now at its own
 //! path. The daemon checks that binary runs, then waits until the delegation
 //! that asked has finished (for a live child that serves a whole
-//! conversation, until its turn has ended) and its report is stored, and no
+//! conversation, until its turn has ended and, for a nested SCV, its own
+//! background jobs have been reported to it) and its report is stored, and no
 //! owner message is being answered, or until the request's deadline. It then
 //! records a plan, keeps a copy of its own binary for rollback, and starts a
 //! watchdog outside its own cgroup (`systemd-run`). The watchdog restarts the
@@ -753,14 +754,20 @@ impl Restarter {
         if let Some(requester) = &plan.requester {
             // A per-turn run works while its processes live; a live child
             // (nested SCV, ACP agent) keeps its process for the whole
-            // conversation, so it works only while a turn runs.
+            // conversation, so it works only while a turn runs on it or,
+            // for a nested SCV, background jobs of its own still run or wait
+            // to be reported to it.
             let working = self
                 .registry
                 .list(true)
                 .into_iter()
-                .any(|entry| entry.record.handle == requester.handle && entry.working());
-            if working {
-                return Some(format!("{} to finish", requester.handle));
+                .find(|entry| entry.record.handle == requester.handle && entry.working());
+            if let Some(entry) = working {
+                return Some(if entry.record.idle_since_unix.is_some() {
+                    format!("{}'s background jobs", requester.handle)
+                } else {
+                    format!("{} to finish", requester.handle)
+                });
             }
             if session_busy(&requester.session) || self.hub.session_work(&requester.session) > 0 {
                 return Some(format!("{}'s report", requester.handle));

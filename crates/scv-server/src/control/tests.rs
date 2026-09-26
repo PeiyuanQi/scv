@@ -40,6 +40,7 @@ async fn daemon_control_lists_and_stops_delegations() {
         conversation: Some("codex-2".into()),
         turn: Some(3),
         idle_since_unix: None,
+        background_jobs: None,
     };
     std::fs::create_dir_all(registry.record_dir()).unwrap();
     let save = |record: &delegations::DelegationRecord| {
@@ -67,6 +68,22 @@ async fn daemon_control_lists_and_stops_delegations() {
     };
     assert_eq!(status.delegations.active, 1);
     assert_eq!(status.delegations.idle, Some(1));
+    // A nested SCV between turns whose own background job still runs is at
+    // work, not idle, and its listing says why.
+    save(&delegations::DelegationRecord {
+        idle_since_unix: Some(2),
+        background_jobs: Some(1),
+        ..record.clone()
+    });
+    let Ok(status) = control(DaemonCommand::Status).await else {
+        panic!("status failed");
+    };
+    assert_eq!(status.delegations.active, 1);
+    assert_eq!(status.delegations.idle, Some(0));
+    let Ok(status) = control(DaemonCommand::Delegations { all: false }).await else {
+        panic!("listing failed");
+    };
+    assert_eq!(status.delegations.entries[0].background_jobs, Some(1));
     save(&record);
     let Ok(status) = control(DaemonCommand::Delegations { all: false }).await else {
         panic!("listing failed");

@@ -33,6 +33,18 @@ fn fake_scv(dir: &Path, mode: &str) -> PathBuf {
             "@TURNS@",
             &dir.join(format!("{mode}.turns")).display().to_string(),
         )
+        .replace(
+            "@FINISH@",
+            &dir.join(format!("{mode}.finish")).display().to_string(),
+        )
+        .replace(
+            "@SETTLE@",
+            &dir.join(format!("{mode}.settle")).display().to_string(),
+        )
+        .replace(
+            "@ANSWERS@",
+            &dir.join(format!("{mode}.answers")).display().to_string(),
+        )
         .replace("@VERSION@", &PROTOCOL_VERSION.to_string())
         .replace("@MODE@", mode);
     std::fs::write(&path, script).unwrap();
@@ -172,6 +184,11 @@ async fn conversations_continue_on_one_child_with_progress_and_records() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].record.agent, "scv");
     assert_eq!(entries[0].record.conversation.as_deref(), Some("scv-1"));
+    // No background job of its own: idle between turns, which does not hold
+    // a planned restart.
+    assert!(entries[0].record.idle_since_unix.is_some());
+    assert_eq!(entries[0].record.background_jobs, None);
+    assert!(!entries[0].working());
     let progress = context.progress.take().unwrap_or_default();
     assert!(progress.contains("thinking"), "{progress}");
     assert!(progress.contains("bash done"), "{progress}");
@@ -201,6 +218,147 @@ async fn conversations_continue_on_one_child_with_progress_and_records() {
     assert!(
         registry.list(true).is_empty(),
         "the record outlived the child"
+    );
+}
+
+/// Wait until `condition` holds, under a generous ceiling.
+async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{what} never happened");
+}
+
+#[tokio::test]
+async fn a_childs_own_background_job_keeps_it_at_work_until_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let script = fake_scv(dir.path(), "background");
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let delegation = DelegationContext {
+        registry: Arc::clone(&registry),
+        session: "parent-session".into(),
+        depth: 0,
+    };
+    let tool = tool(&script, store(Duration::from_secs(3600)), Some(delegation));
+    let gate = Arc::new(Gate {
+        answer: true,
+        requests: StdMutex::new(Vec::new()),
+    });
+    let output = tool
+        .execute(
+            json!({"prompt":"land it"}),
+            context(dir.path(), Some(Arc::clone(&gate))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&output)["reply"], "started job-1");
+    let run = || {
+        let mut entries = registry.list(false);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        entries.remove(0)
+    };
+    // The call's turn ended, but the job it started runs on inside the
+    // child: at work, so a planned restart waits.
+    let between = run();
+    assert!(between.record.idle_since_unix.is_some(), "{between:?}");
+    assert_eq!(between.record.background_jobs, Some(1));
+    assert!(between.working());
+
+    // The job finishes and the child starts a turn to report it. No call is
+    // there to carry its approval request to a person, so it is denied, not
+    // relayed.
+    std::fs::write(dir.path().join("background.finish"), "").unwrap();
+    let answers = dir.path().join("background.answers");
+    eventually("the report's approval answer", || answers.exists()).await;
+    assert_eq!(std::fs::read_to_string(&answers).unwrap().trim(), "denied");
+    assert!(gate.requests.lock().unwrap().is_empty());
+    // Reported, but the turn reporting it still runs: still at work.
+    assert_eq!(run().record.background_jobs, Some(1));
+    assert!(run().working());
+
+    // The report turn streams more than a pipe holds, then ends; the job is
+    // settled and the child idle.
+    std::fs::write(dir.path().join("background.settle"), "").unwrap();
+    eventually("the report turn's end", || !run().working()).await;
+    assert_eq!(run().record.background_jobs, None);
+    assert!(run().record.idle_since_unix.is_some());
+
+    // The next call finds the conversation in step.
+    let next = tool
+        .execute(
+            json!({"prompt":"warm up","session":"scv-1"}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&next)["reply"], "warm", "{}", next.content);
+    assert_eq!(json(&next)["turn"], 2);
+}
+
+#[test]
+fn background_work_follows_jobs_until_their_report_turn_ends() {
+    let event = |value: Value| serde_json::from_value::<ServerEvent>(value).unwrap();
+    let tool_completed = |jobs: Value| {
+        event(
+            json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,
+            "call_id":"c","name":"agent_codex","success":true,"output":"{}","truncated":false,"jobs":jobs}),
+        )
+    };
+    let turn = |kind: &str, request: &str, origin: Value| {
+        let mut value = json!({"type":kind,"request_id":request,"session_id":"s","turn_id":"t","seq":2,
+            "steps":1,"usage":{},"code":"internal","message":"x"});
+        if !origin.is_null() {
+            value["origin"] = origin;
+        }
+        event(value)
+    };
+    let mut work = BackgroundWork::default();
+    // Two jobs start; one is seen through agent_wait.
+    assert_eq!(
+        work.observe(&tool_completed(json!([
+            {"job":"job-1","tool":"agent_codex","status":"running"},
+            {"job":"job-2","tool":"agent_codex","status":"running"}
+        ]))),
+        Some(2)
+    );
+    assert_eq!(
+        work.observe(&tool_completed(
+            json!([{"job":"job-2","tool":"agent_codex","status":"completed"}])
+        )),
+        Some(1)
+    );
+    // A client's own turn changes nothing.
+    assert_eq!(
+        work.observe(&turn("turn.completed", "r", Value::Null)),
+        None
+    );
+    // The other is reported in a turn of the server's own, and counts until
+    // that turn ends, however it ends.
+    let origin = json!({"kind":"background","jobs":["job-1"]});
+    assert_eq!(
+        work.observe(&turn("turn.started", "background:1", origin.clone())),
+        None
+    );
+    assert_eq!(work.count(), 1);
+    assert_eq!(
+        work.observe(&turn("turn.failed", "background:1", origin.clone())),
+        Some(0)
+    );
+    // A server-started turn of a kind this client does not know counts too.
+    let unknown = json!({"kind":"something-new"});
+    assert_eq!(
+        work.observe(&turn("turn.started", "later:1", unknown.clone())),
+        Some(1)
+    );
+    assert_eq!(
+        work.observe(&turn("turn.cancelled", "later:1", unknown)),
+        Some(0)
     );
 }
 

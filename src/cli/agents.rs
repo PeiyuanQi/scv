@@ -349,7 +349,7 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     println!(
-        "{:<16} {:<7} {:<13} {:<9} {:>8} {:>5} {:>7} {:>5}  CWD",
+        "{:<16} {:<7} {:<13} {:<10} {:>8} {:>5} {:>7} {:>5}  CWD",
         "HANDLE", "AGENT", "CONVERSATION", "STATE", "PID", "PROCS", "AGE", "DEPTH"
     );
     for entry in entries {
@@ -361,7 +361,7 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
         };
         // Debug formatting escapes control characters in the untrusted path.
         println!(
-            "{:<16} {:<7} {:<13} {:<9} {:>8} {:>5} {:>7} {:>5}  {:?}",
+            "{:<16} {:<7} {:<13} {:<10} {:>8} {:>5} {:>7} {:>5}  {:?}",
             entry.handle,
             entry.agent,
             conversation,
@@ -375,14 +375,17 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
     }
 }
 
-/// A run's STATE in `scv agents ps`: a live agent between turns is idle.
+/// A run's STATE in `scv agents ps`: a live agent between turns is idle,
+/// unless background jobs of its own still run or wait to be reported.
 fn delegation_state(entry: &scv_protocol::DelegationInfo) -> &'static str {
     if entry.orphaned {
         "orphaned"
-    } else if entry.idle_since_unix_seconds.is_some() {
-        "idle"
-    } else {
+    } else if entry.idle_since_unix_seconds.is_none() {
         "running"
+    } else if entry.background_jobs.is_some_and(|jobs| jobs > 0) {
+        "background"
+    } else {
+        "idle"
     }
 }
 

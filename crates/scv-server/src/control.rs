@@ -94,10 +94,14 @@ pub(crate) async fn daemon_control(
         .await
         .map_err(|_| ControlFailure::Component)?;
     let running = registry.list(false);
-    // Idle as `scv agents ps` shows it: a live agent between turns.
+    // Idle as `scv agents ps` shows it: a live agent between turns, unless
+    // a nested SCV's own background jobs keep it at work.
     let idle = running
         .iter()
-        .filter(|entry| entry.record.idle_since_unix.is_some())
+        .filter(|entry| {
+            entry.record.idle_since_unix.is_some()
+                && entry.record.background_jobs.is_none_or(|jobs| jobs == 0)
+        })
         .count();
     status.delegations = DelegationSummary {
         active: running.len() as u64,
@@ -123,6 +127,7 @@ pub(crate) async fn daemon_control(
             conversation: entry.record.conversation,
             turn: entry.record.turn,
             idle_since_unix_seconds: entry.record.idle_since_unix,
+            background_jobs: entry.record.background_jobs,
         })
         .collect(),
         killed,

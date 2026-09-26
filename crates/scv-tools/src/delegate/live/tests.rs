@@ -98,6 +98,14 @@ async fn a_child_is_recorded_idle_between_turns_and_at_work_during_one() {
     assert!(idle.record.idle_since_unix.is_some());
     assert!(idle.processes > 0);
     assert!(!idle.working());
+    // Its own background jobs keep it at work between turns, until they
+    // settle.
+    child.set_background_jobs(2);
+    assert_eq!(entry().record.background_jobs, Some(2));
+    assert!(entry().working());
+    child.set_background_jobs(0);
+    assert_eq!(entry().record.background_jobs, None);
+    assert!(!entry().working());
     let turn = child.begin_turn(3);
     assert_eq!(entry().record.idle_since_unix, None);
     assert!(entry().working());

@@ -8,8 +8,9 @@
 //! group kill. A protocol client such as the SCV one in `scv_agent` (or an
 //! ACP JSON-RPC client) runs on top of it.
 //!
-//! A conversation keeps its child between turns, when no turn is reading
-//! from it, and its delegation record says so ([`LiveChild::begin_turn`]).
+//! A conversation keeps its child between turns, and its delegation record
+//! says so ([`LiveChild::begin_turn`]); the protocol client decides whether
+//! anything reads from the child then.
 //! A reaper task owns the process and waits for it from the start: whenever
 //! the child exits, whether it ends by itself or `scv agents kill` stops it,
 //! the reaper collects it at once, stops what is left of its group, and
@@ -48,8 +49,8 @@ use crate::{
 
 /// Last bytes of a live child's stderr kept for failure reports.
 const STDERR_TAIL_BYTES: usize = 4096;
-/// Lines read ahead of the protocol client. The child is idle between turns,
-/// so this only buffers a burst of events within one turn.
+/// Lines read ahead of the protocol client, a burst of events within one
+/// turn. A child that speaks between turns needs a client reading then.
 const LINE_QUEUE: usize = 256;
 
 /// How to start a live child.
@@ -199,6 +200,14 @@ impl LiveChild {
             guard.set_turn(turn);
         }
         LiveTurn(self)
+    }
+
+    /// Record how many of the child's own background jobs still run or wait
+    /// to be reported to it. Between turns, a planned restart waits for them.
+    pub(crate) fn set_background_jobs(&self, jobs: usize) {
+        if let Some(guard) = lock(&self.guard).as_ref() {
+            guard.set_background_jobs(jobs);
+        }
     }
 
     /// Shut the child down and wait for it: close its input, give it

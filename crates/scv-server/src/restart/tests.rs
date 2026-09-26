@@ -476,6 +476,7 @@ async fn a_restart_waits_for_the_requesting_job_its_report_and_owner_messages() 
         conversation: None,
         turn: None,
         idle_since_unix: None,
+        background_jobs: None,
     };
     std::fs::create_dir_all(registry.record_dir()).unwrap();
     std::fs::write(
@@ -573,7 +574,8 @@ async fn a_restart_goes_ahead_at_its_deadline_and_says_so() {
 }
 
 /// A nested SCV this daemon started for conversation `scv-1`, whose process
-/// keeps running between turns, recorded mid-turn or `idle_since_unix`.
+/// keeps running between turns, recorded mid-turn or `idle_since_unix`,
+/// without background jobs of its own.
 fn live_agent(
     registry: &DelegationRegistry,
     idle_since_unix: Option<u64>,
@@ -599,6 +601,7 @@ fn live_agent(
         conversation: Some("scv-1".into()),
         turn: Some(1),
         idle_since_unix,
+        background_jobs: None,
     };
     write_record(registry, &record);
     (agent, record)
@@ -671,6 +674,68 @@ async fn a_live_agent_mid_turn_holds_a_restart_until_its_turn_ends() {
     write_record(&registry, &record);
     eventually(|| launched.lock().unwrap().len() == 1).await;
     assert!(!launched.lock().unwrap()[0].waited_out);
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_live_agent_between_turns_holds_a_restart_while_its_own_jobs_run() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    // The nested SCV's turn has ended, but a background job it started runs
+    // on inside it (or has finished and is not yet reported to it).
+    let (mut agent, mut record) = live_agent(&registry, Some(unix_now()));
+    record.background_jobs = Some(1);
+    write_record(&registry, &record);
+    let info = arm_for(&restarter, &registry, &record.handle);
+    let waiting = Some("scv-92f0c3's background jobs");
+    assert_eq!(info.waiting_for.as_deref(), waiting);
+    // More checks than a restart needs clear pass while the job runs.
+    tokio::time::sleep(Duration::from_millis(u64::from(CLEAR_CHECKS + 1) * 1000)).await;
+    assert!(launched.lock().unwrap().is_empty());
+    assert_eq!(
+        restarter
+            .info()
+            .and_then(|info| info.waiting_for)
+            .as_deref(),
+        waiting
+    );
+    // The job is reported and the turn reporting it ends.
+    record.background_jobs = None;
+    write_record(&registry, &record);
+    eventually(|| launched.lock().unwrap().len() == 1).await;
+    assert!(!launched.lock().unwrap()[0].waited_out);
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_live_agents_own_jobs_hold_a_restart_no_longer_than_its_deadline() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    let (mut agent, mut record) = live_agent(&registry, Some(unix_now()));
+    record.background_jobs = Some(1);
+    write_record(&registry, &record);
+    let mut waiting = plan(PlanState::Waiting);
+    waiting.requester =
+        restarter.requester(&format!("{}/s/{}", registry.instance(), record.handle));
+    waiting.requested_unix = unix_now();
+    waiting.deadline_unix = unix_now();
+    let info = restarter.arm(waiting).unwrap();
+    assert_eq!(
+        info.waiting_for.as_deref(),
+        Some("scv-92f0c3's background jobs")
+    );
+    eventually(|| launched.lock().unwrap().len() == 1).await;
+    assert!(launched.lock().unwrap()[0].waited_out);
     agent.kill().unwrap();
     agent.wait().unwrap();
 }
