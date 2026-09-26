@@ -1,4 +1,4 @@
-//! Unit tests for `src/imports.rs`.
+//! Unit tests for `src/cli/agents/imports.rs`.
 
 use super::*;
 

@@ -1,4 +1,4 @@
-//! Unit tests for `src/agents.rs`.
+//! Unit tests for `src/delegate/stores.rs`.
 
 use super::*;
 

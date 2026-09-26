@@ -51,7 +51,7 @@ impl Config {
         }
         Ok(path)
     }
-    pub fn active_provider(&self) -> Result<ProviderConfig> {
+    pub(crate) fn active_provider(&self) -> Result<ProviderConfig> {
         if let Some(name) = self
             .provider_active
             .as_deref()
@@ -299,6 +299,8 @@ fn user_config_path() -> Option<PathBuf> {
     user_home_path().map(|path| Layout::new(path).config())
 }
 
+/// The selected instance home (`SCV_HOME`, or `~/.scv`), canonicalized when
+/// it exists. The service unit name and delegation records hash this path.
 pub fn user_home_path() -> Option<PathBuf> {
     let path = Layout::from_env().ok()?.home().to_owned();
     if path.exists() {
@@ -320,7 +322,9 @@ pub(super) fn ensure_private_dir(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn read_layer(path: &std::path::Path) -> Result<toml::Value> {
+/// Read one configuration file as TOML, refusing files over 1 MiB. Parse
+/// errors name the line but never quote it, since it may hold a key.
+pub fn read_layer(path: &std::path::Path) -> Result<toml::Value> {
     let size = std::fs::metadata(path)
         .with_context(|| format!("stat configuration {}", path.display()))?
         .len();

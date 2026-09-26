@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use scv_server::ApprovalPolicy;
+use scv_server::config::ApprovalPolicy;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, ValueEnum)]

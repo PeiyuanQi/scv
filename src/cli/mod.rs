@@ -7,6 +7,7 @@ pub(crate) mod channels;
 pub(crate) mod common;
 pub(crate) mod config;
 pub(crate) mod daemon;
+pub(crate) mod prompt;
 pub(crate) mod service;
 pub(crate) mod status;
 pub(crate) mod update;
@@ -14,7 +15,7 @@ pub(crate) mod update;
 use anyhow::Result;
 use clap::ValueEnum as _;
 use scv_protocol::{DaemonCommand, DaemonStatus};
-use scv_server::ConfigOverrides;
+use scv_server::config::ConfigOverrides;
 use scv_tui::LaunchOptions;
 use std::path::PathBuf;
 

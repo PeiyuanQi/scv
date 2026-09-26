@@ -13,6 +13,8 @@ use std::{
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::{Config, ConfigOverrides};
+
 const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How long an operator command waits out a bridge's state commit.
 const BUSY_RETRY: Duration = Duration::from_secs(5);
@@ -622,7 +624,7 @@ impl Components {
 /// The longest tool call an owner session in `workspace` may make, from the
 /// configuration its sessions load. Read at each (re)start of the component.
 fn max_tool_timeout(workspace: &std::path::Path) -> std::time::Duration {
-    let seconds = crate::Config::load(workspace, crate::ConfigOverrides::default()).map_or_else(
+    let seconds = Config::load(workspace, ConfigOverrides::default()).map_or_else(
         |error| {
             tracing::warn!("Channel owner turns use the default tool timeout ceiling: {error:#}");
             crate::config::ToolConfig::default().max_timeout_seconds

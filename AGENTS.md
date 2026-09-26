@@ -50,9 +50,11 @@
   warnings denied.
 - Keep protocol types and framing in `scv-protocol`, default socket discovery
   and daemon control helpers in `scv-client`, loop and extension traits
-  in `scv-core`, provider transport in provider crates, tool implementations in
-  `scv-tools`, policy and session authority in `scv-server`, and terminal
-  presentation in `scv-tui`. Keep the shared chat-channel bridge in
+  in `scv-core`, provider transport in provider crates, tool implementations
+  and the delegated agents' credential-file formats in `scv-tools`, policy and
+  session authority in `scv-server`, terminal presentation in `scv-tui`, and
+  administration only the command line does (agent sign-ins and imports,
+  `scv config show`, the systemd unit) in the root package's `src/cli/`. Keep the shared chat-channel bridge in
   `scv-channels` and each platform's transport in its own crate (WeChat in
   `scv-clawbot`, Feishu/Lark in `scv-feishu`). Preserve
   `server -> clawbot|feishu -> channels -> client -> protocol`;

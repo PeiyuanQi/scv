@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 /// Where an import copied from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Source {
+pub(crate) enum Source {
     /// Files from a directory, such as `config.toml` from `~/.grok`.
     Files { dir: PathBuf, files: Vec<String> },
     /// SCV's own active provider.
@@ -34,14 +34,14 @@ struct Record {
 
 /// An import compared with its source now.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportStatus {
-    pub source: Source,
-    pub imported_unix_seconds: u64,
-    pub freshness: Freshness,
+pub(crate) struct ImportStatus {
+    pub(crate) source: Source,
+    pub(crate) imported_unix_seconds: u64,
+    pub(crate) freshness: Freshness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Freshness {
+pub(crate) enum Freshness {
     /// The source still matches the copy.
     Current,
     /// The source changed after the import.
@@ -52,7 +52,7 @@ pub enum Freshness {
 
 impl ImportStatus {
     /// One display line, without secrets.
-    pub fn describe(&self, agent: &str, now_unix_seconds: u64) -> String {
+    pub(crate) fn describe(&self, agent: &str, now_unix_seconds: u64) -> String {
         let source = match &self.source {
             Source::Files { dir, files } => {
                 format!("{} from {}", files.join(" and "), dir.display())
@@ -83,7 +83,7 @@ fn age(seconds: u64) -> String {
 }
 
 /// Digest of `files` in `dir`, in order; a missing file counts as absent.
-pub fn digest_files(dir: &Path, files: &[String]) -> Result<String> {
+pub(crate) fn digest_files(dir: &Path, files: &[String]) -> Result<String> {
     let mut hasher = Sha256::new();
     for file in files {
         hasher.update(file.as_bytes());
@@ -103,7 +103,7 @@ pub fn digest_files(dir: &Path, files: &[String]) -> Result<String> {
 }
 
 /// Digest of a value SCV copied, such as its own provider settings and key.
-pub fn digest_value(value: &impl Serialize) -> Result<String> {
+pub(crate) fn digest_value(value: &impl Serialize) -> Result<String> {
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(value).context("encode import digest")?)
@@ -115,20 +115,37 @@ fn path(layout: &Layout, agent: &str) -> PathBuf {
 }
 
 /// Record that `agent`'s copy now matches `source` with `digest`.
-pub fn record(layout: &Layout, agent: &str, source: Source, digest: String) -> Result<()> {
+pub(crate) fn record(layout: &Layout, agent: &str, source: Source, digest: String) -> Result<()> {
     let record = Record {
         source,
         digest,
         imported_unix_seconds: now(),
     };
-    let dir = layout.imports();
-    scv_channels::state::private_directory(layout.home(), &dir)?;
-    scv_channels::state::atomic_write(&path(layout, agent), &serde_json::to_string(&record)?)
+    private_directory(layout.home(), &layout.imports())?;
+    scv_client::fs::replace_private(
+        &path(layout, agent),
+        serde_json::to_string(&record)?.as_bytes(),
+    )
+    .map_err(|error| anyhow!("atomic state replace failed: {error}"))
+}
+
+/// Create `directory` and make it and its parents up to `home` private
+/// (mode 0700), so the records never sit in a directory others can list.
+fn private_directory(home: &Path, directory: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(directory)?;
+    for path in directory.ancestors() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        if path == home || !path.starts_with(home) {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Compare `agent`'s last import with its source now. `current` digests a
 /// [`Source::ScvProvider`] import, returning `None` when it cannot be read.
-pub fn check(
+pub(crate) fn check(
     layout: &Layout,
     agent: &str,
     current: impl FnOnce() -> Option<String>,
@@ -156,7 +173,7 @@ pub fn check(
     }))
 }
 
-pub fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
