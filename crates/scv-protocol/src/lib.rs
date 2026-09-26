@@ -2,9 +2,10 @@
 //!
 //! [`ClientMessage`] is everything a client sends and [`ServerEvent`]
 //! everything the server answers, one JSON object per line ([`FrameDecoder`]
-//! bounds each line). Additive fields
-//! keep [`PROTOCOL_VERSION`]; a breaking change bumps it. This crate holds no
-//! runtime policy and does no I/O.
+//! bounds each line). Additive fields, and new values of the enums that
+//! parse unknown values as `Unknown` ([`ErrorCode`], [`ToolErrorKind`],
+//! [`ServerEvent`]), keep [`PROTOCOL_VERSION`]; a breaking change bumps it.
+//! This crate holds no runtime policy and does no I/O.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -13,6 +14,7 @@ mod attachment;
 mod background;
 mod client;
 mod daemon;
+mod error;
 mod frame;
 mod server;
 
@@ -25,6 +27,7 @@ pub use daemon::{
     ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, DelegationInfo,
     DelegationSummary, RemoteTools, RestartInfo,
 };
+pub use error::{ErrorCode, ToolErrorKind};
 pub use frame::{Frame, FrameDecoder, Overflow, Step, encode_frame, trim_line};
 pub use server::ServerEvent;
 

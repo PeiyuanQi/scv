@@ -123,7 +123,8 @@ fn descriptions_name_task_defaults_for_matching_work() {
 }
 
 fn failed(error: &str) -> ToolOutput {
-    ToolOutput::failure(
+    ToolOutput::failed(
+        ToolFailure::Failed,
         json!({"agent":"grok","status":"failed","reply":"","error":error}).to_string(),
     )
 }
@@ -142,6 +143,7 @@ async fn availability_failures_name_the_other_agents() {
             &["agent_claude", "agent_codex"],
         );
         let output = run(&agent).await.unwrap();
+        assert_eq!(output.failure, Some(ToolFailure::Unavailable), "{error}");
         let content: Value = serde_json::from_str(&output.content).unwrap();
         assert_eq!(
             content["fallback"],
@@ -153,17 +155,34 @@ async fn availability_failures_name_the_other_agents() {
     // A launch error carries it too.
     let missing = chosen(
         "agent_grok",
-        Err(ToolError(
-            "launch \"grok\": No such file or directory".into(),
+        Err(ToolError::unavailable(
+            "launch \"grok\": No such file or directory",
         )),
         &["agent_codex"],
     );
     let error = run(&missing).await.unwrap_err();
-    assert!(error.0.ends_with("available: agent_codex."), "{error}");
+    assert_eq!(error.kind, ToolFailure::Unavailable);
+    assert!(
+        error.message.ends_with("available: agent_codex."),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn scv_errors_name_other_agents_only_when_scv_found_the_agent_unavailable() {
+    // A bad `cwd` is the caller's mistake, however its error reads.
+    for error in [
+        ToolError::invalid_arguments("cwd \"docs\": No such file or directory (os error 2)"),
+        ToolError::failed("write to child: 403 forbidden"),
+    ] {
+        let agent = chosen("agent_codex", Err(error.clone()), &["agent_claude"]);
+        assert_eq!(run(&agent).await.unwrap_err(), error);
+    }
 }
 
 fn declined_output(agent: &str, note: &str) -> ToolOutput {
-    ToolOutput::failure(
+    ToolOutput::failed(
+        ToolFailure::Failed,
         json!({
             "agent": agent,
             "status": "declined",
@@ -210,7 +229,8 @@ async fn a_declined_request_without_grok_does_not_name_another_agent() {
 async fn only_the_reported_error_decides_a_fallback() {
     // An unavailable-sounding reply with no reported error, as when a
     // task genuinely failed while discussing a 403.
-    let reply_only = ToolOutput::failure(
+    let reply_only = ToolOutput::failed(
+        ToolFailure::Failed,
         json!({"status":"failed","reply":"authentication returns 403; 3 tests failed"}).to_string(),
     );
     let agent = chosen("agent_codex", Ok(reply_only.clone()), &["agent_claude"]);
@@ -219,11 +239,12 @@ async fn only_the_reported_error_decides_a_fallback() {
     let agent = chosen("agent_codex", Ok(tests_failed.clone()), &["agent_claude"]);
     assert_eq!(run(&agent).await.unwrap().content, tests_failed.content);
     // Unstructured output is never judged.
-    let plain = ToolOutput::failure("not signed in");
+    let plain = ToolOutput::failed(ToolFailure::Failed, "not signed in");
     let agent = chosen("agent_codex", Ok(plain.clone()), &["agent_claude"]);
     assert_eq!(run(&agent).await.unwrap().content, plain.content);
     // A timeout is not an availability failure.
-    let timeout = ToolOutput::failure(
+    let timeout = ToolOutput::failed(
+        ToolFailure::Limit,
         json!({"status":"timeout","reply":"","error":"503 upstream"}).to_string(),
     );
     let agent = chosen("agent_codex", Ok(timeout.clone()), &["agent_claude"]);

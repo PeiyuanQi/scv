@@ -499,6 +499,16 @@ async fn a_daemon_outside_its_unit_refuses_to_restart_itself_and_marks_clean_sto
     .await
     .unwrap_err();
     assert!(
+        matches!(
+            refused,
+            scv_client::ControlError::Server {
+                code: scv_protocol::ErrorCode::RestartError,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    assert!(
         format!("{refused:#}").contains("cannot restart itself"),
         "{refused:#}"
     );
@@ -514,6 +524,57 @@ async fn a_daemon_outside_its_unit_refuses_to_restart_itself_and_marks_clean_sto
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot restart itself"));
     terminate(&mut child).await;
     assert!(!marker.exists(), "a clean stop is not reported as a crash");
+}
+
+/// Answer one management connection like a daemon from before
+/// `restart_when_idle`: it initializes, then cannot parse the request.
+async fn serve_as_old_daemon(listener: tokio::net::UnixListener) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut stream = BufReader::new(stream);
+    let mut line = String::new();
+    stream.read_line(&mut line).await.unwrap();
+    stream
+        .get_mut()
+        .write_all(
+            b"{\"type\":\"initialized\",\"request_id\":\"init\",\"protocol_version\":3,\"server\":{\"name\":\"scv-server\",\"version\":\"0.1.36\"}}\n",
+        )
+        .await
+        .unwrap();
+    line.clear();
+    stream.read_line(&mut line).await.unwrap();
+    assert!(line.contains("restart_when_idle"), "{line}");
+    stream
+        .get_mut()
+        .write_all(
+            b"{\"type\":\"error\",\"code\":\"invalid_json\",\"message\":\"invalid protocol JSON: unknown variant `restart_when_idle`, expected one of `status`, `reload`\",\"fatal\":false}\n",
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn restart_when_idle_hands_back_to_the_caller_without_a_daemon_that_can_do_it() {
+    let home = tempfile::tempdir().unwrap();
+    let restart = || {
+        Command::new(env!("CARGO_BIN_EXE_scv"))
+            .isolated(home.path())
+            .args(["restart", "--when-idle"])
+            .output()
+    };
+    // No daemon at all.
+    let output = restart().await.unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    // A daemon too old to know the request.
+    std::fs::create_dir_all(home.path().join("state")).unwrap();
+    let listener = tokio::net::UnixListener::bind(home.path().join("state/server.sock")).unwrap();
+    let old = tokio::spawn(serve_as_old_daemon(listener));
+    let output = restart().await.unwrap();
+    old.await.unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("restart its unit instead"),
+        "{output:?}"
+    );
 }
 
 #[tokio::test]

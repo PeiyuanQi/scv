@@ -4,7 +4,8 @@
 //! inherits, framed reading and writing ([`Connection`], [`read_frame`]),
 //! private instance files ([`fs::replace_private`]), [`Secret`] values
 //! that never print, byte-bounded text
-//! ([`text::utf8_prefix`]), and [`control`] for daemon management requests.
+//! ([`text::utf8_prefix`]), and [`control`] for daemon management requests,
+//! which fail with a typed [`ControlError`].
 
 #![forbid(unsafe_code)]
 
@@ -17,12 +18,13 @@ pub use connection::{Connection, read_frame, write_message};
 pub use layout::Layout;
 pub use secret::Secret;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use scv_protocol::{
-    ClientMessage, DaemonCommand, DaemonStatus, Frame, FrameDecoder, Overflow, PROTOCOL_VERSION,
-    ServerEvent,
+    ClientMessage, DaemonCommand, DaemonStatus, ErrorCode, Frame, FrameDecoder, Overflow,
+    PROTOCOL_VERSION, ServerEvent,
 };
 use std::{
+    fmt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -53,12 +55,58 @@ pub fn default_socket_path() -> Result<PathBuf> {
     Ok(Layout::from_env()?.socket())
 }
 
+/// Why a [`control`] request failed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ControlError {
+    /// No daemon accepted the connection: it is not running, or the socket
+    /// is stale. Nothing was sent.
+    Unavailable(std::io::Error),
+    /// The daemon refused the request. A daemon that predates a command
+    /// refuses it with [`ErrorCode::InvalidJson`], as a frame it cannot parse.
+    Server {
+        /// Why, as the daemon's stable code.
+        code: ErrorCode,
+        /// What went wrong, for people.
+        message: String,
+    },
+    /// No answer within the helper's time limit. The daemon may still carry
+    /// out a mutation; query status before retrying.
+    TimedOut,
+    /// The exchange broke off, or the daemon answered something this client
+    /// does not understand. A mutation's outcome is unknown.
+    Protocol(String),
+}
+
+impl fmt::Display for ControlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable(_) => formatter
+                .write_str("SCV daemon unavailable; start it with `scv start` or `scv run`"),
+            Self::Server { message, .. } => formatter.write_str(message),
+            Self::TimedOut => formatter
+                .write_str("SCV management request timed out; query status before retrying"),
+            Self::Protocol(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ControlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unavailable(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// A bounded management exchange. Never retries mutations on ambiguous failure.
-pub async fn control(path: &Path, command: DaemonCommand) -> Result<DaemonStatus> {
+pub async fn control(path: &Path, command: DaemonCommand) -> Result<DaemonStatus, ControlError> {
+    let broken = |error: std::io::Error| ControlError::Protocol(format!("{error}"));
     tokio::time::timeout(Duration::from_secs(20), async {
         let stream = UnixStream::connect(path)
             .await
-            .context("SCV daemon unavailable; start it with `scv start` or `scv run`")?;
+            .map_err(ControlError::Unavailable)?;
         let (reader, writer) = stream.into_split();
         let mut connection = Connection::new(
             BufReader::new(reader),
@@ -72,28 +120,42 @@ pub async fn control(path: &Path, command: DaemonCommand) -> Result<DaemonStatus
                 command,
             },
         ] {
-            connection.send(&message).await?;
-            let bytes = match connection.read().await? {
+            connection.send(&message).await.map_err(broken)?;
+            let bytes = match connection.read().await.map_err(broken)? {
                 Frame::Line(bytes) => bytes,
-                Frame::TooLarge => bail!("SCV status exceeds frame limit"),
+                Frame::TooLarge => {
+                    return Err(ControlError::Protocol(
+                        "SCV status exceeds frame limit".into(),
+                    ));
+                }
                 Frame::End | Frame::Truncated(_) => {
-                    bail!("SCV daemon closed the management connection")
+                    return Err(ControlError::Protocol(
+                        "SCV daemon closed the management connection".into(),
+                    ));
                 }
             };
-            match serde_json::from_slice::<ServerEvent>(&bytes)? {
+            let event = serde_json::from_slice::<ServerEvent>(&bytes)
+                .map_err(|error| ControlError::Protocol(format!("{error}")))?;
+            match event {
                 ServerEvent::Initialized {
                     protocol_version: PROTOCOL_VERSION,
                     ..
                 } if matches!(message, ClientMessage::Initialize { .. }) => {}
                 ServerEvent::DaemonStatus { status, .. } => return Ok(status),
-                ServerEvent::Error { message, .. } => bail!("{message}"),
-                _ => bail!("unexpected SCV management response; upgrade/restart the daemon"),
+                ServerEvent::Error { code, message, .. } => {
+                    return Err(ControlError::Server { code, message });
+                }
+                _ => {
+                    return Err(ControlError::Protocol(
+                        "unexpected SCV management response; upgrade/restart the daemon".into(),
+                    ));
+                }
             }
         }
-        bail!("SCV daemon omitted status")
+        Err(ControlError::Protocol("SCV daemon omitted status".into()))
     })
     .await
-    .context("SCV management request timed out; query status before retrying")?
+    .unwrap_or(Err(ControlError::TimedOut))
 }
 
 #[cfg(test)]

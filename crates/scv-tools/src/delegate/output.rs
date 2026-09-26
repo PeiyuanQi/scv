@@ -5,7 +5,7 @@
 //! reaches the parent model. Unknown events and fields are ignored, and a
 //! stream with no parsable event falls back to its text.
 
-use scv_core::{ProgressSink, ToolOutput};
+use scv_core::{ProgressSink, ToolFailure, ToolOutput};
 use serde_json::{Value, json};
 
 use crate::{
@@ -51,6 +51,17 @@ pub(crate) enum RunStatus {
 }
 
 impl RunStatus {
+    /// How a run that ended this way failed, as the calling session's
+    /// clients see it; `None` for a completed run.
+    pub(crate) fn failure(self) -> Option<ToolFailure> {
+        match self {
+            Self::Completed => None,
+            Self::Failed | Self::Declined => Some(ToolFailure::Failed),
+            Self::Timeout => Some(ToolFailure::Limit),
+            Self::Cancelled => Some(ToolFailure::Cancelled),
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",

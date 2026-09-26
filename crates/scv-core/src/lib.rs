@@ -36,5 +36,6 @@ pub use provider::{
 };
 pub use runtime::{AgentConfig, AgentError, AgentRuntime, TurnOutcome};
 pub use tool::{
-    Tool, ToolApprovals, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRisk, ToolSpec,
+    Tool, ToolApprovals, ToolContext, ToolError, ToolFailure, ToolOutput, ToolRegistry, ToolRisk,
+    ToolSpec,
 };

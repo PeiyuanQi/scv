@@ -225,11 +225,13 @@ provider returned an HTTP 401, 403, 404, 429, or 5xx, a quota error, or an
 unknown model), the result gains a `fallback` field naming the other agents
 this session offers, such as `"This agent could not run: it is missing, signed
 out, or its provider returned an error. Other agents are available:
-agent_claude, agent_codex."`; SCV's own error message (such as a missing
-executable) gets the same sentence. The decision reads only the result's
-`status` (`failed`) and its structured `error`, never the agent's reply, so
-nothing the agent writes can trigger it. Other failures, such as failing
-tests, are returned unchanged.
+agent_claude, agent_codex."`. SCV's own error gets the same sentence when SCV
+found the agent unavailable: its executable missing or failing to start, or
+its live conversation's process gone. The decision reads only the result's
+`status` (`failed`) and its structured `error`, or the kind of SCV's own
+error, never the agent's reply, so nothing the agent writes can trigger it.
+Other failures, such as failing tests or an invalid `cwd`, are returned
+unchanged.
 
 A `declined` result, where the agent's model refused the request, never gets a
 `fallback` (that field is only for availability failures). When the session

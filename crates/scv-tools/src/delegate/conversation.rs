@@ -160,7 +160,7 @@ impl ConversationStore {
             return self.start(&mut inner, agent, cwd, assign_id, now);
         };
         if !is_handle(handle) {
-            return Err(ToolError(format!(
+            return Err(ToolError::invalid_arguments(format!(
                 "session {:?} is not a conversation handle; pass the `session` value an \
                  earlier {agent} call returned, or omit it to start a new conversation",
                 crate::args::bounded(handle, 80)
@@ -175,30 +175,30 @@ impl ConversationStore {
             } else {
                 "is unknown in this session".to_owned()
             };
-            return Err(ToolError(format!(
+            return Err(ToolError::invalid_arguments(format!(
                 "conversation {handle} {reason}; omit session to start a new conversation"
             )));
         };
         if conversation.agent != agent {
-            return Err(ToolError(format!(
+            return Err(ToolError::invalid_arguments(format!(
                 "conversation {handle} belongs to agent_{}, not agent_{agent}",
                 conversation.agent
             )));
         }
         if conversation.busy {
-            return Err(ToolError(format!(
+            return Err(ToolError::failed(format!(
                 "session busy: conversation {handle} is still running a turn"
             )));
         }
         if conversation.cwd != cwd {
-            return Err(ToolError(format!(
+            return Err(ToolError::invalid_arguments(format!(
                 "conversation {handle} runs in {:?}; continue it there or omit session to \
                  start a new conversation in {:?}",
                 conversation.cwd, cwd
             )));
         }
         let Some(vendor) = conversation.vendor.clone() else {
-            return Err(ToolError(format!(
+            return Err(ToolError::failed(format!(
                 "conversation {handle} cannot be continued: the agent reported no session"
             )));
         };
@@ -230,7 +230,7 @@ impl ConversationStore {
                 .min_by_key(|(_, conversation)| conversation.last_used)
                 .map(|(handle, _)| handle.clone())
             else {
-                return Err(ToolError(format!(
+                return Err(ToolError::limit(format!(
                     "all {} conversations of this session are running a turn",
                     inner.conversations.len()
                 )));

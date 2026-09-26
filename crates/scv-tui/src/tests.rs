@@ -13,7 +13,9 @@ use std::{
 use anyhow::anyhow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent};
+use scv_protocol::{
+    ClientMessage, PROTOCOL_VERSION, PeerInfo, QueueEntry, ServerEvent, ToolErrorKind,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -576,6 +578,7 @@ fn running_tools_show_their_latest_progress_line() {
         success: true,
         output: "{}".into(),
         truncated: false,
+        error: None,
     });
     let finished = screen(&app);
     assert!(!finished.contains("cargo test"), "{finished}");
@@ -590,6 +593,135 @@ fn running_tools_show_their_latest_progress_line() {
         text: "late line".into(),
     });
     assert!(!screen(&app).contains("late line"));
+}
+
+#[test]
+fn tool_status_comes_from_the_error_kind_never_the_output_text() {
+    let mut app = App::new(SessionInfo {
+        id: "s".into(),
+        cwd: "/tmp".into(),
+        model: "test".into(),
+        context_max_tokens: 100,
+        max_server_frame_bytes: DEFAULT_SERVER_FRAME_LIMIT,
+        max_transcript_bytes: 64 * 1024,
+        max_transcript_items: 100,
+        max_prompt_history_bytes: 1024,
+        max_prompt_history_items: 10,
+    });
+    let cases = [
+        ("c1", true, None, "done", ToolStatus::Success),
+        (
+            "c2",
+            false,
+            Some(ToolErrorKind::Denied),
+            "tool call denied by policy or user",
+            ToolStatus::Denied,
+        ),
+        (
+            "c3",
+            false,
+            Some(ToolErrorKind::Cancelled),
+            "process cancelled",
+            ToolStatus::Cancelled,
+        ),
+        // Output that mentions a cancellation or a denial is just text.
+        (
+            "c4",
+            false,
+            Some(ToolErrorKind::Failed),
+            "the build was cancelled; access denied by policy or user",
+            ToolStatus::Failed,
+        ),
+        // A daemon before 0.3.0 sends no kind, and a newer one may send a
+        // kind this client does not know.
+        (
+            "c5",
+            false,
+            None,
+            "tool call denied by policy or user",
+            ToolStatus::Failed,
+        ),
+        (
+            "c6",
+            false,
+            Some(ToolErrorKind::Unknown),
+            "?",
+            ToolStatus::Failed,
+        ),
+    ];
+    let mut seq = 0;
+    for (call_id, success, error, output, _) in &cases {
+        seq += 1;
+        app.handle_server_event(ServerEvent::ToolProposed {
+            request_id: "r".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            seq,
+            call_id: (*call_id).into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+        });
+        seq += 1;
+        app.handle_server_event(ServerEvent::ToolCompleted {
+            request_id: "r".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            seq,
+            call_id: (*call_id).into(),
+            name: "bash".into(),
+            success: *success,
+            output: (*output).into(),
+            truncated: false,
+            error: *error,
+        });
+    }
+    for (call_id, .., expected) in cases {
+        let status = app.items.iter().find_map(|item| match item {
+            TranscriptItem::Tool {
+                call_id: id,
+                status,
+                ..
+            } if id == call_id => Some(*status),
+            _ => None,
+        });
+        assert_eq!(status, Some(expected), "{call_id}");
+    }
+}
+
+#[test]
+fn events_of_unknown_types_are_skipped_without_a_sequence_warning() {
+    let mut app = App::new(SessionInfo {
+        id: "s".into(),
+        cwd: "/tmp".into(),
+        model: "test".into(),
+        context_max_tokens: 100,
+        max_server_frame_bytes: DEFAULT_SERVER_FRAME_LIMIT,
+        max_transcript_bytes: 64 * 1024,
+        max_transcript_items: 100,
+        max_prompt_history_bytes: 1024,
+        max_prompt_history_items: 10,
+    });
+    let paused = |seq| ServerEvent::SessionPaused {
+        request_id: "r".into(),
+        session_id: "s".into(),
+        seq,
+        paused: false,
+    };
+    let warnings = |app: &App| {
+        app.items
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Error(text) if text.contains("sequence")))
+            .count()
+    };
+    app.handle_server_event(paused(1));
+    // A newer server's event may have used the next sequence number.
+    app.handle_server_event(ServerEvent::Unknown);
+    app.handle_server_event(paused(3));
+    assert_eq!(warnings(&app), 0);
+    assert_eq!(app.last_seq, 3);
+    // Without one, a gap is still reported.
+    app.handle_server_event(paused(5));
+    assert_eq!(warnings(&app), 1);
 }
 
 #[tokio::test]

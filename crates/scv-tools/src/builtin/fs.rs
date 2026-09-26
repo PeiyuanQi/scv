@@ -87,23 +87,24 @@ impl Tool for ReadTool {
                 .map_err(|error| map_cap_error("read", &display_path, error))?;
             let total_bytes = file
                 .metadata()
-                .map_err(|error| ToolError(format!("stat {display_path}: {error}")))?
+                .map_err(|error| ToolError::failed(format!("stat {display_path}: {error}")))?
                 .len();
             let start = offset.min(total_bytes);
             std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start))
-                .map_err(|error| ToolError(format!("seek {display_path}: {error}")))?;
+                .map_err(|error| ToolError::failed(format!("seek {display_path}: {error}")))?;
             let mut bytes = Vec::with_capacity(requested.min(8192));
             std::io::Read::take(&mut file, u64::try_from(requested).unwrap_or(u64::MAX))
                 .read_to_end(&mut bytes)
-                .map_err(|error| ToolError(format!("read {display_path}: {error}")))?;
+                .map_err(|error| ToolError::failed(format!("read {display_path}: {error}")))?;
             Ok::<_, ToolError>((bytes, total_bytes, start))
         });
         let (bytes, total_bytes, start) = tokio::select! {
-            result = read => result.map_err(|error| ToolError(format!("read task failed: {error}")))??,
-            () = context.cancellation.cancelled() => return Err(ToolError("read cancelled".into())),
+            result = read => result.map_err(|error| ToolError::failed(format!("read task failed: {error}")))??,
+            () = context.cancellation.cancelled() => return Err(ToolError::cancelled("read cancelled")),
         };
-        let content = std::str::from_utf8(&bytes)
-            .map_err(|_| ToolError(format!("selected range of {} is not UTF-8", args.path)))?;
+        let content = std::str::from_utf8(&bytes).map_err(|_| {
+            ToolError::failed(format!("selected range of {} is not UTF-8", args.path))
+        })?;
         let end = start.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         let truncated = start > 0 || end < total_bytes;
         Ok(ToolOutput {
@@ -115,7 +116,7 @@ impl Tool for ReadTool {
                 "truncated": truncated
             })
             .to_string(),
-            is_error: false,
+            failure: None,
             truncated,
         })
     }
@@ -186,7 +187,7 @@ impl Tool for WriteTool {
     ) -> Result<ToolOutput, ToolError> {
         let args: WriteArgs = parse_args(&arguments)?;
         if args.content.len() > self.max_bytes {
-            return Err(ToolError(format!(
+            return Err(ToolError::limit(format!(
                 "write exceeds {} byte limit",
                 self.max_bytes
             )));
@@ -195,7 +196,7 @@ impl Tool for WriteTool {
         let cancellation = context.cancellation.clone();
         tokio::task::spawn_blocking(move || {
             if cancellation.is_cancelled() {
-                return Err(ToolError("write cancelled".into()));
+                return Err(ToolError::cancelled("write cancelled"));
             }
             let path = PathBuf::from(&args.path);
             validate_relative(&path)?;
@@ -207,10 +208,10 @@ impl Tool for WriteTool {
             };
             match args.mode {
                 WriteMode::Create if exists => {
-                    return Err(ToolError(format!("{} already exists", args.path)));
+                    return Err(ToolError::failed(format!("{} already exists", args.path)));
                 }
                 WriteMode::Replace if !exists => {
-                    return Err(ToolError(format!("{} does not exist", args.path)));
+                    return Err(ToolError::failed(format!("{} does not exist", args.path)));
                 }
                 _ => {}
             }
@@ -221,10 +222,10 @@ impl Tool for WriteTool {
                 let mut current = Vec::new();
                 current_file
                     .read_to_end(&mut current)
-                    .map_err(|error| ToolError(format!("hash {}: {error}", args.path)))?;
+                    .map_err(|error| ToolError::failed(format!("hash {}: {error}", args.path)))?;
                 let actual = format!("{:x}", Sha256::digest(current));
                 if actual != expected.to_ascii_lowercase() {
-                    return Err(ToolError(format!(
+                    return Err(ToolError::failed(format!(
                         "{} changed: expected sha256 {}, found {}",
                         args.path, expected, actual
                     )));
@@ -243,9 +244,9 @@ impl Tool for WriteTool {
                 temporary
                     .write_all(args.content.as_bytes())
                     .and_then(|()| temporary.sync_all())
-                    .map_err(|error| ToolError(format!("write {}: {error}", args.path)))?;
+                    .map_err(|error| ToolError::failed(format!("write {}: {error}", args.path)))?;
                 if cancellation.is_cancelled() {
-                    return Err(ToolError("write cancelled".into()));
+                    return Err(ToolError::cancelled("write cancelled"));
                 }
                 match args.mode {
                     WriteMode::Create => root
@@ -270,28 +271,30 @@ impl Tool for WriteTool {
             ))
         })
         .await
-        .map_err(|error| ToolError(format!("write task failed: {error}")))?
+        .map_err(|error| ToolError::failed(format!("write task failed: {error}")))?
     }
 }
 
 fn validate_read_args(args: &ReadArgs) -> Result<(), ToolError> {
     if args.limit == Some(0) {
-        return Err(ToolError("read limit must be positive".into()));
+        return Err(ToolError::invalid_arguments("read limit must be positive"));
     }
     Ok(())
 }
 
 fn validate_relative(path: &Path) -> Result<(), ToolError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err(ToolError("path must be non-empty and relative".into()));
+        return Err(ToolError::invalid_arguments(
+            "path must be non-empty and relative",
+        ));
     }
     for component in path.components() {
         if matches!(
             component,
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         ) {
-            return Err(ToolError(
-                "parent traversal and absolute paths are not allowed".into(),
+            return Err(ToolError::invalid_arguments(
+                "parent traversal and absolute paths are not allowed",
             ));
         }
     }
@@ -302,7 +305,7 @@ static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn open_workspace(workspace: &Path) -> Result<Dir, ToolError> {
     Dir::open_ambient_dir(workspace, ambient_authority())
-        .map_err(|error| ToolError(format!("open workspace capability: {error}")))
+        .map_err(|error| ToolError::failed(format!("open workspace capability: {error}")))
 }
 
 fn unique_temporary_path(parent: &Path) -> PathBuf {
@@ -311,7 +314,7 @@ fn unique_temporary_path(parent: &Path) -> PathBuf {
 }
 
 fn map_cap_error(action: &str, path: &str, error: std::io::Error) -> ToolError {
-    ToolError(format!(
+    ToolError::failed(format!(
         "{action} {path}: {error}; path must remain within workspace"
     ))
 }

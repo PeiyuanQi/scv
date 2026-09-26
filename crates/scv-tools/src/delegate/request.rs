@@ -34,7 +34,7 @@ pub(crate) const MAX_AGENT_CWD_BYTES: usize = 4096;
 
 pub(crate) fn validate_agent_cwd(cwd: &str) -> Result<(), ToolError> {
     if cwd.trim().is_empty() || cwd.len() > MAX_AGENT_CWD_BYTES || cwd.contains('\0') {
-        return Err(ToolError(format!(
+        return Err(ToolError::invalid_arguments(format!(
             "cwd must be a non-empty directory path of at most {MAX_AGENT_CWD_BYTES} bytes"
         )));
     }
@@ -46,18 +46,22 @@ pub(crate) fn validate_agent_cwd(cwd: &str) -> Result<(), ToolError> {
 /// rather than trusted by name.
 pub(crate) fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<PathBuf, ToolError> {
     let root = std::fs::canonicalize(workspace)
-        .map_err(|error| ToolError(format!("resolve workspace: {error}")))?;
+        .map_err(|error| ToolError::failed(format!("resolve workspace: {error}")))?;
     let Some(cwd) = cwd else {
         return Ok(root);
     };
     validate_agent_cwd(cwd)?;
     let resolved = std::fs::canonicalize(root.join(cwd))
-        .map_err(|error| ToolError(format!("cwd {cwd:?}: {error}")))?;
+        .map_err(|error| ToolError::invalid_arguments(format!("cwd {cwd:?}: {error}")))?;
     if !resolved.starts_with(&root) {
-        return Err(ToolError(format!("cwd {cwd:?} is outside the workspace")));
+        return Err(ToolError::invalid_arguments(format!(
+            "cwd {cwd:?} is outside the workspace"
+        )));
     }
     if !resolved.is_dir() {
-        return Err(ToolError(format!("cwd {cwd:?} is not a directory")));
+        return Err(ToolError::invalid_arguments(format!(
+            "cwd {cwd:?} is not a directory"
+        )));
     }
     Ok(resolved)
 }

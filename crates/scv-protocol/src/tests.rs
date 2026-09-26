@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod compat;
+
 #[test]
 fn client_message_round_trip() {
     let message = ClientMessage::TurnStart {
@@ -348,4 +350,86 @@ fn background_job_updates_come_from_start_wait_and_status_outputs() {
     ] {
         assert_eq!(background_job_update(other), BackgroundJobUpdate::default());
     }
+}
+
+#[test]
+fn error_codes_keep_their_wire_names_and_unknown_ones_parse() {
+    for code in [
+        ErrorCode::InvalidJson,
+        ErrorCode::NotInitialized,
+        ErrorCode::VersionMismatch,
+        ErrorCode::InvalidRequest,
+        ErrorCode::Unsupported,
+        ErrorCode::SessionNotFound,
+        ErrorCode::TurnActive,
+        ErrorCode::TurnNotFound,
+        ErrorCode::ApprovalNotFound,
+        ErrorCode::QueueLimit,
+        ErrorCode::QueueNotFound,
+        ErrorCode::QueueConflict,
+        ErrorCode::ComponentError,
+        ErrorCode::DelegationError,
+        ErrorCode::RestartError,
+        ErrorCode::ProviderError,
+        ErrorCode::ContextLimit,
+        ErrorCode::StepLimit,
+        ErrorCode::HistoryLimit,
+        ErrorCode::ResponseLimit,
+        ErrorCode::ToolLimit,
+        ErrorCode::InternalError,
+    ] {
+        let wire = serde_json::to_string(&code).unwrap();
+        assert_eq!(wire, format!("\"{code}\""));
+        assert_eq!(serde_json::from_str::<ErrorCode>(&wire).unwrap(), code);
+    }
+    assert_eq!(ErrorCode::QueueLimit.to_string(), "queue_limit");
+    // A newer server's code does not fail the event it arrives in.
+    let error: ServerEvent = serde_json::from_str(
+        r#"{"type":"error","request_id":"1","code":"rate_limited","message":"slow down","fatal":false}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        error,
+        ServerEvent::Error {
+            code: ErrorCode::Unknown,
+            ref message,
+            ..
+        } if message == "slow down"
+    ));
+}
+
+#[test]
+fn tool_error_kinds_keep_their_wire_names_and_unknown_ones_parse() {
+    for (kind, wire) in [
+        (ToolErrorKind::Denied, "denied"),
+        (ToolErrorKind::Cancelled, "cancelled"),
+        (ToolErrorKind::InvalidArguments, "invalid_arguments"),
+        (ToolErrorKind::Unavailable, "unavailable"),
+        (ToolErrorKind::Limit, "limit"),
+        (ToolErrorKind::Failed, "failed"),
+        (ToolErrorKind::UnknownTool, "unknown_tool"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), wire);
+        assert_eq!(kind.to_string(), wire);
+        assert_eq!(
+            serde_json::from_value::<ToolErrorKind>(wire.into()).unwrap(),
+            kind
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<ToolErrorKind>(r#""sandboxed""#).unwrap(),
+        ToolErrorKind::Unknown
+    );
+}
+
+#[test]
+fn unknown_event_types_parse_as_unknown() {
+    let event: ServerEvent = serde_json::from_str(
+        r#"{"type":"session.renamed","request_id":"r","session_id":"s","seq":3,"name":{"x":1}}"#,
+    )
+    .unwrap();
+    assert_eq!(event, ServerEvent::Unknown);
+    assert_eq!(event.turn_request_id(), None);
+    // A known type with a malformed body is still an error.
+    assert!(serde_json::from_str::<ServerEvent>(r#"{"type":"turn.started"}"#).is_err());
 }

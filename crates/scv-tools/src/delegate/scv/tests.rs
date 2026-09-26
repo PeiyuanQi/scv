@@ -262,7 +262,7 @@ async fn a_child_ignoring_turn_cancel_is_killed_at_the_timeout() {
         .unwrap();
     let value = json(&output);
     assert_eq!(value["status"], "timeout");
-    assert!(output.is_error);
+    assert!(output.is_error());
     assert!(value["reply"].as_str().unwrap().contains("shut down"));
     assert!(
         dir.path().join("hang.cancels").exists(),
@@ -317,7 +317,7 @@ async fn cancelling_the_call_cancels_the_nested_turn() {
         .execute(json!({"prompt":"slow"}), context)
         .await
         .unwrap_err();
-    assert!(error.0.contains("cancelled"), "{error}");
+    assert!(error.message.contains("cancelled"), "{error}");
     assert!(dir.path().join("cancellable.cancels").exists());
 }
 
@@ -349,7 +349,7 @@ async fn a_child_dying_mid_turn_fails_the_call_and_ends_the_conversation() {
         )
         .await
         .unwrap_err();
-    assert!(error.0.contains("unknown"), "{error}");
+    assert!(error.message.contains("unknown"), "{error}");
 }
 
 #[tokio::test]
@@ -388,7 +388,7 @@ fn arguments_are_checked_before_approval() {
         (json!({"prompt":"x","timeout_seconds":999999}), "exceeds"),
     ] {
         let error = tool.risk(&arguments).unwrap_err();
-        assert!(error.0.contains(message), "{arguments}: {error}");
+        assert!(error.message.contains(message), "{arguments}: {error}");
     }
     let summary = tool
         .approval_summary(&json!({"prompt":"do it","cwd":"scv"}))

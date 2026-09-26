@@ -24,6 +24,7 @@ use crate::{
     DelegationContext,
     args::{Timeouts, bounded, parse_args, timeout_schema, validate_process_args},
     delegate::{
+        choice,
         conversation::{Attachment, ConversationStore, TurnGuard},
         live::{LiveChild, LiveLine, LiveSpec},
         output::{AgentResult, AgentUsage, RunStatus, truncate_utf8},
@@ -77,7 +78,7 @@ impl ScvAgentTool {
         if let Some(session) = &args.session
             && !crate::delegate::conversation::is_handle(session)
         {
-            return Err(ToolError(format!(
+            return Err(ToolError::invalid_arguments(format!(
                 "session {:?} is not a conversation handle; pass the `session` value an \
                  earlier {} call returned, or omit it to start a new conversation",
                 bounded(session, 80),
@@ -85,19 +86,21 @@ impl ScvAgentTool {
             )));
         }
         if args.effort.is_some() {
-            return Err(ToolError(format!(
+            return Err(ToolError::invalid_arguments(format!(
                 "{} does not support selecting an effort",
                 self.name
             )));
         }
         if let Some(model) = &args.model {
             if args.session.is_some() {
-                return Err(ToolError(
-                    "model applies to a new conversation only; omit it when continuing".into(),
+                return Err(ToolError::invalid_arguments(
+                    "model applies to a new conversation only; omit it when continuing",
                 ));
             }
             if !valid_model_name(model) {
-                return Err(ToolError(format!("invalid model {model:?}")));
+                return Err(ToolError::invalid_arguments(format!(
+                    "invalid model {model:?}"
+                )));
             }
         }
         Ok(())
@@ -119,7 +122,7 @@ impl ScvAgentTool {
         cancellation: &CancellationToken,
     ) -> Result<ScvChild, ToolError> {
         let executable = self.resolved.as_ref().ok_or_else(|| {
-            ToolError(format!(
+            ToolError::unavailable(format!(
                 "{} executable {:?} was not found on PATH or in the user's install directories",
                 self.name, self.command
             ))
@@ -166,13 +169,13 @@ impl ScvAgentTool {
                     Ok(ServerEvent::Initialized {
                         protocol_version, ..
                     }) => {
-                        return Err(ToolError(format!(
+                        return Err(ToolError::failed(format!(
                             "the nested SCV speaks protocol {protocol_version}, not {PROTOCOL_VERSION}; \
                              install the same SCV version"
                         )));
                     }
                     Ok(ServerEvent::Error { message, .. }) => {
-                        return Err(ToolError(format!(
+                        return Err(reported_error(format!(
                             "the nested SCV refused the handshake: {message}"
                         )));
                     }
@@ -196,7 +199,7 @@ impl ScvAgentTool {
                 match next_event(&live, deadline, cancellation).await {
                     Ok(ServerEvent::SessionStarted { session_id, .. }) => return Ok(session_id),
                     Ok(ServerEvent::Error { message, .. }) => {
-                        return Err(ToolError(format!(
+                        return Err(reported_error(format!(
                             "the nested SCV could not start a session: {message}"
                         )));
                     }
@@ -238,7 +241,7 @@ impl ScvAgentTool {
             })
             .await
         {
-            return TurnEnd::Lost(error.0);
+            return TurnEnd::Lost(error.message);
         }
         let label = format!("[{handle} depth {}]", child.depth);
         let mut turn_id: Option<String> = None;
@@ -328,7 +331,7 @@ impl ScvAgentTool {
                         })
                         .await
                     {
-                        return TurnEnd::Lost(error.0);
+                        return TurnEnd::Lost(error.message);
                     }
                 }
                 ServerEvent::TurnCompleted { usage, .. } => {
@@ -468,8 +471,8 @@ async fn next_event(
 
 async fn interrupt_error(live: &LiveChild, interrupt: Interrupt) -> ToolError {
     match interrupt {
-        Interrupt::TimedOut => ToolError("the nested SCV did not start in time".into()),
-        Interrupt::Cancelled => ToolError("nested SCV start cancelled".into()),
+        Interrupt::TimedOut => ToolError::limit("the nested SCV did not start in time"),
+        Interrupt::Cancelled => ToolError::cancelled("nested SCV start cancelled"),
         Interrupt::Lost(reason) => {
             let tail = live.stderr_tail().await;
             let detail = if tail.is_empty() {
@@ -477,7 +480,7 @@ async fn interrupt_error(live: &LiveChild, interrupt: Interrupt) -> ToolError {
             } else {
                 format!("{reason}: {}", bounded(&tail, 1000))
             };
-            ToolError(format!(
+            reported_error(format!(
                 "{detail}. If the nested SCV has no provider configured, the host owner can \
                  copy SCV's own with: scv agents import scv"
             ))
@@ -643,12 +646,12 @@ impl Tool for ScvAgentTool {
         let child: Arc<ScvChild> = if let Some(Attachment(attachment)) = turn.attachment() {
             let Ok(child) = Arc::clone(attachment).downcast::<ScvChild>() else {
                 turn.forget();
-                return Err(ToolError("conversation has no nested SCV".into()));
+                return Err(ToolError::failed("conversation has no nested SCV"));
             };
             if !child.live.is_running() {
                 let handle = turn.handle.clone();
                 turn.forget();
-                return Err(ToolError(format!(
+                return Err(ToolError::unavailable(format!(
                     "conversation {handle} ended: its nested SCV exited; omit session to \
                      start a new one"
                 )));
@@ -710,7 +713,7 @@ impl Tool for ScvAgentTool {
                     child.live.close().await;
                     turn.forget();
                 }
-                return Err(ToolError("nested SCV turn cancelled".into()));
+                return Err(ToolError::cancelled("nested SCV turn cancelled"));
             }
             TurnEnd::Lost(reason) => {
                 let tail = child.live.stderr_tail().await;
@@ -777,8 +780,19 @@ fn result(
     let (content, truncated) = result.to_json(AGENT, conversation, None, "", limit);
     ToolOutput {
         content,
-        is_error: status != RunStatus::Completed,
+        failure: status.failure(),
         truncated,
+    }
+}
+
+/// An error the nested SCV reported before its session started: unavailable
+/// when it reads like a missing or signed-out provider, as an agent's own
+/// reported error would.
+fn reported_error(message: String) -> ToolError {
+    if choice::reports_unavailable(&message) {
+        ToolError::unavailable(message)
+    } else {
+        ToolError::failed(message)
     }
 }
 

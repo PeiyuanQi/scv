@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent, ToolErrorKind};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -281,7 +281,7 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
             _ => {}
         }
     };
-    assert_eq!(code, "provider_error");
+    assert_eq!(code, scv_protocol::ErrorCode::ProviderError);
     assert!(message.contains("model is not available"), "{message}");
 
     input.shutdown().await.unwrap();
@@ -602,8 +602,9 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
                 call_id,
                 success,
                 output,
+                error,
                 ..
-            } => completed.push((call_id, success, output)),
+            } => completed.push((call_id, success, output, error)),
             ServerEvent::TurnCompleted { .. } => break,
             ServerEvent::TurnFailed { code, message, .. } => {
                 panic!("turn failed with {code}: {message}")
@@ -628,8 +629,12 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
     assert_eq!(completed[0].0, "call_1");
     assert!(!completed[0].1);
     assert!(completed[0].2.contains("non-public"), "{}", completed[0].2);
+    // Refused while connecting, after the name resolved.
+    assert_eq!(completed[0].3, Some(ToolErrorKind::Failed));
     assert_eq!(completed[1].0, "call_2");
-    assert!(completed[1].2.contains("denied"), "{}", completed[1].2);
+    // The model reads the same denial as before the kind was typed.
+    assert_eq!(completed[1].2, "tool call denied by policy or user");
+    assert_eq!(completed[1].3, Some(ToolErrorKind::Denied));
 
     let tools = bodies[0]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|tool| tool["name"] == "web_fetch"));

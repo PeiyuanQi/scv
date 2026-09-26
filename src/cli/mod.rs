@@ -112,7 +112,8 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf) -> Result<()> {
     }
 }
 
-/// Send one control command to this instance's running daemon.
+/// Send one control command to this instance's running daemon. A failed
+/// request carries a [`scv_client::ControlError`].
 pub(crate) async fn control(command: DaemonCommand) -> Result<DaemonStatus> {
-    scv_client::control(&scv_client::default_socket_path()?, command).await
+    Ok(scv_client::control(&scv_client::default_socket_path()?, command).await?)
 }

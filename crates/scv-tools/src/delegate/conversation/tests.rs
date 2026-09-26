@@ -57,19 +57,19 @@ fn continuing_pins_agent_and_cwd_and_counts_turns() {
     let busy = store
         .begin("codex", Some("codex-1"), cwd, false)
         .unwrap_err();
-    assert!(busy.0.starts_with("session busy"), "{}", busy.0);
+    assert!(busy.message.starts_with("session busy"), "{}", busy.message);
     next.finish(Some("thread-a".into()), true);
     let moved = store
         .begin("codex", Some("codex-1"), Path::new("/w/other"), false)
         .unwrap_err();
-    assert!(moved.0.contains("runs in"), "{}", moved.0);
+    assert!(moved.message.contains("runs in"), "{}", moved.message);
     let other_agent = store
         .begin("claude", Some("codex-1"), cwd, false)
         .unwrap_err();
     assert!(
-        other_agent.0.contains("belongs to agent_codex"),
+        other_agent.message.contains("belongs to agent_codex"),
         "{}",
-        other_agent.0
+        other_agent.message
     );
     let third = store.begin("codex", Some("codex-1"), cwd, false).unwrap();
     assert_eq!(third.turn, 3);
@@ -87,17 +87,17 @@ fn vendor_ids_and_unknown_handles_are_rejected() {
         .begin("codex", Some("01a0cd5a-7195-7b31"), cwd, false)
         .unwrap_err();
     assert!(
-        vendor.0.contains("not a conversation handle"),
+        vendor.message.contains("not a conversation handle"),
         "{}",
-        vendor.0
+        vendor.message
     );
     let unknown = store
         .begin("codex", Some("codex-9"), cwd, false)
         .unwrap_err();
     assert!(
-        unknown.0.contains("unknown in this session"),
+        unknown.message.contains("unknown in this session"),
         "{}",
-        unknown.0
+        unknown.message
     );
     // Another session's store knows nothing of this one's handles.
     let other = super::tests::store(8, DAY, None);
@@ -165,9 +165,9 @@ fn limits_forget_the_least_recently_used_and_idle_conversations() {
         .finish(None, true);
     let expired = idle.begin("pi", Some("pi-1"), cwd, true).unwrap_err();
     assert!(
-        expired.0.contains("forgotten after 0 seconds idle"),
+        expired.message.contains("forgotten after 0 seconds idle"),
         "{}",
-        expired.0
+        expired.message
     );
 }
 

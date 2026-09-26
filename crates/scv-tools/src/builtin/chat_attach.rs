@@ -112,21 +112,26 @@ impl ChatAttachConfig {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&attached.path)
-            .map_err(|error| ToolError(format!("cannot attach {path}: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("cannot attach {path}: {error}")))?;
         let metadata = source
             .metadata()
-            .map_err(|error| ToolError(format!("cannot attach {path}: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("cannot attach {path}: {error}")))?;
         if !metadata.is_file() || metadata.len() > self.max_bytes {
-            return Err(ToolError(format!("cannot attach {path}: the file changed")));
+            return Err(ToolError::failed(format!(
+                "cannot attach {path}: the file changed"
+            )));
         }
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&self.outbox)
-            .map_err(|error| ToolError(format!("cannot prepare the chat outbox: {error}")))?;
+            .map_err(|error| {
+                ToolError::failed(format!("cannot prepare the chat outbox: {error}"))
+            })?;
         let _ = std::fs::set_permissions(&self.outbox, std::fs::Permissions::from_mode(0o700));
-        let outbox = std::fs::canonicalize(&self.outbox)
-            .map_err(|error| ToolError(format!("cannot prepare the chat outbox: {error}")))?;
+        let outbox = std::fs::canonicalize(&self.outbox).map_err(|error| {
+            ToolError::failed(format!("cannot prepare the chat outbox: {error}"))
+        })?;
         let copy = outbox.join(format!(
             "{}-{}",
             &uuid::Uuid::new_v4().simple().to_string()[..12],
@@ -138,12 +143,14 @@ impl ChatAttachConfig {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&copy)
-            .map_err(|error| ToolError(format!("cannot copy {path}: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("cannot copy {path}: {error}")))?;
         let copied = std::io::copy(&mut (&mut source).take(self.max_bytes + 1), &mut target)
-            .map_err(|error| ToolError(format!("cannot copy {path}: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("cannot copy {path}: {error}")))?;
         if copied > self.max_bytes {
             let _ = std::fs::remove_file(&copy);
-            return Err(ToolError(format!("cannot attach {path}: the file changed")));
+            return Err(ToolError::failed(format!(
+                "cannot attach {path}: the file changed"
+            )));
         }
         attached.path = copy.display().to_string();
         attached.size = copied;
@@ -160,26 +167,26 @@ impl ChatAttachConfig {
             workspace.join(requested)
         };
         let resolved = std::fs::canonicalize(&joined)
-            .map_err(|error| ToolError(format!("cannot attach {path}: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("cannot attach {path}: {error}")))?;
         if self.is_denied(&resolved) || has_secret_name(&resolved) {
-            return Err(ToolError(format!(
+            return Err(ToolError::failed(format!(
                 "cannot attach {path}: it is in a location that holds credentials or keys"
             )));
         }
         let metadata = std::fs::metadata(&resolved)
-            .map_err(|error| ToolError(format!("cannot attach {path}: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("cannot attach {path}: {error}")))?;
         if !metadata.is_file() {
-            return Err(ToolError(format!(
+            return Err(ToolError::failed(format!(
                 "cannot attach {path}: not a regular file"
             )));
         }
         if metadata.len() == 0 {
-            return Err(ToolError(format!(
+            return Err(ToolError::failed(format!(
                 "cannot attach {path}: the file is empty"
             )));
         }
         if metadata.len() > self.max_bytes {
-            return Err(ToolError(format!(
+            return Err(ToolError::limit(format!(
                 "cannot attach {path}: {} bytes is over the {} byte limit",
                 metadata.len(),
                 self.max_bytes
@@ -242,17 +249,18 @@ struct Args {
 }
 
 fn parse(arguments: &Value) -> Result<Args, ToolError> {
-    let args: Args = serde_json::from_value(arguments.clone())
-        .map_err(|error| ToolError(format!("invalid chat_attach arguments: {error}")))?;
+    let args: Args = serde_json::from_value(arguments.clone()).map_err(|error| {
+        ToolError::invalid_arguments(format!("invalid chat_attach arguments: {error}"))
+    })?;
     if args.path.trim().is_empty() {
-        return Err(ToolError("path must not be empty".into()));
+        return Err(ToolError::invalid_arguments("path must not be empty"));
     }
     if args
         .caption
         .as_ref()
         .is_some_and(|caption| caption.len() > MAX_CAPTION_BYTES)
     {
-        return Err(ToolError(format!(
+        return Err(ToolError::invalid_arguments(format!(
             "caption is longer than {MAX_CAPTION_BYTES} bytes"
         )));
     }
@@ -306,7 +314,7 @@ impl Tool for ChatAttachTool {
         let path = args.path.clone();
         let mut attached = tokio::task::spawn_blocking(move || config.attach(&workspace, &path))
             .await
-            .map_err(|error| ToolError(format!("chat_attach failed: {error}")))??;
+            .map_err(|error| ToolError::failed(format!("chat_attach failed: {error}")))??;
         attached.caption = args.caption.unwrap_or_default().trim().to_owned();
         Ok(ToolOutput::success(
             json!({

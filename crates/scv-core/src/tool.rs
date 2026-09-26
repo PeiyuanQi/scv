@@ -144,12 +144,34 @@ impl ToolApprovals {
     }
 }
 
+/// Why a tool call failed. The model reads the call's output either way;
+/// this tells the session's clients what happened without reading the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolFailure {
+    /// The approval policy or the user refused the call.
+    Denied,
+    /// The call was cancelled while it ran.
+    Cancelled,
+    /// The call's arguments were refused, so nothing ran.
+    InvalidArguments,
+    /// The tool, or the agent it runs, could not be used: missing, signed
+    /// out, or its provider unreachable. Another agent might succeed.
+    Unavailable,
+    /// A configured size, count, depth, or time limit stopped the call.
+    Limit,
+    /// The call ran and failed.
+    Failed,
+    /// The model named a tool the session does not have.
+    UnknownTool,
+}
+
 /// A tool's result as the model sees it. A failure is still a result: the
 /// model reads it and can react.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
     pub content: String,
-    pub is_error: bool,
+    /// Why the call failed; `None` when it succeeded.
+    pub failure: Option<ToolFailure>,
     pub truncated: bool,
 }
 
@@ -157,25 +179,81 @@ impl ToolOutput {
     pub fn success(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            is_error: false,
+            failure: None,
             truncated: false,
         }
     }
 
-    pub fn failure(content: impl Into<String>) -> Self {
+    /// A failed result whose `content` tells the model why.
+    pub fn failed(failure: ToolFailure, content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            is_error: true,
+            failure: Some(failure),
             truncated: false,
         }
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.failure.is_some()
+    }
+}
+
+impl From<ToolError> for ToolOutput {
+    /// The failed result the model sees for a call that could not run.
+    fn from(error: ToolError) -> Self {
+        Self::failed(error.kind, error.message)
     }
 }
 
 /// A tool call that could not run, such as invalid arguments. The runtime
-/// turns it into a failed [`ToolOutput`] for the model.
-#[derive(Debug, Error)]
-#[error("{0}")]
-pub struct ToolError(pub String);
+/// turns it into a failed [`ToolOutput`] whose content is `message`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct ToolError {
+    pub kind: ToolFailure,
+    pub message: String,
+}
+
+impl ToolError {
+    pub fn new(kind: ToolFailure, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// The arguments were refused; the model can correct them.
+    pub fn invalid_arguments(message: impl Into<String>) -> Self {
+        Self::new(ToolFailure::InvalidArguments, message)
+    }
+
+    /// The tool or its agent could not be used.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(ToolFailure::Unavailable, message)
+    }
+
+    /// A configured limit stopped the call.
+    pub fn limit(message: impl Into<String>) -> Self {
+        Self::new(ToolFailure::Limit, message)
+    }
+
+    /// The call was cancelled.
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::new(ToolFailure::Cancelled, message)
+    }
+
+    /// The call ran and failed.
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::new(ToolFailure::Failed, message)
+    }
+}
+
+impl From<String> for ToolError {
+    /// A [`ToolFailure::Failed`] error.
+    fn from(message: String) -> Self {
+        Self::failed(message)
+    }
+}
 
 /// Something the model can call. The runtime asks for the call's [`risk`] and
 /// [`approval_summary`] first, so both must validate the arguments without
@@ -211,7 +289,7 @@ pub struct ToolError(pub String);
 ///     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
 ///         arguments["value"]
 ///             .as_str()
-///             .ok_or_else(|| ToolError("value must be a string".into()))?;
+///             .ok_or_else(|| ToolError::invalid_arguments("value must be a string"))?;
 ///         Ok(ToolRisk::ReadOnly)
 ///     }
 ///
@@ -260,7 +338,7 @@ impl ToolRegistry {
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
         let name = tool.spec().name;
         if self.tools.contains_key(&name) {
-            return Err(ToolError(format!("duplicate tool name: {name}")));
+            return Err(ToolError::failed(format!("duplicate tool name: {name}")));
         }
         self.tools.insert(name, tool);
         Ok(())

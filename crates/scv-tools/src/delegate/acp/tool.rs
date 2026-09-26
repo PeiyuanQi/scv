@@ -73,7 +73,7 @@ impl AcpAgentTool {
         if let Some(session) = &args.session
             && !crate::delegate::conversation::is_handle(session)
         {
-            return Err(ToolError(format!(
+            return Err(ToolError::invalid_arguments(format!(
                 "session {:?} is not a conversation handle; pass the `session` value an \
                  earlier {} call returned, or omit it to start a new conversation",
                 bounded(session, 80),
@@ -83,7 +83,9 @@ impl AcpAgentTool {
         if let Some(model) = &args.model
             && !valid_model_name(model)
         {
-            return Err(ToolError(format!("invalid model {model:?}")));
+            return Err(ToolError::invalid_arguments(format!(
+                "invalid model {model:?}"
+            )));
         }
         if let Some(effort) = &args.effort
             && (effort.is_empty()
@@ -92,7 +94,9 @@ impl AcpAgentTool {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
         {
-            return Err(ToolError(format!("invalid effort {effort:?}")));
+            return Err(ToolError::invalid_arguments(format!(
+                "invalid effort {effort:?}"
+            )));
         }
         Ok(())
     }
@@ -220,12 +224,12 @@ impl Tool for AcpAgentTool {
             Some(Attachment(attachment)) => {
                 let Ok(child) = Arc::clone(attachment).downcast::<AcpChild>() else {
                     turn.forget();
-                    return Err(ToolError("conversation has no ACP session".into()));
+                    return Err(ToolError::failed("conversation has no ACP session"));
                 };
                 if !child.rpc.live.is_running() {
                     let handle = turn.handle.clone();
                     turn.forget();
-                    return Err(ToolError(format!(
+                    return Err(ToolError::unavailable(format!(
                         "conversation {handle} ended: its ACP server exited; omit session to \
                          start a new one"
                     )));
@@ -246,7 +250,10 @@ impl Tool for AcpAgentTool {
                 Err(error) => {
                     turn.forget();
                     if context.cancellation.is_cancelled() {
-                        return Err(ToolError(format!("{} start cancelled", self.name)));
+                        return Err(ToolError::cancelled(format!(
+                            "{} start cancelled",
+                            self.name
+                        )));
                     }
                     return Ok(self.result(
                         RunStatus::Failed,
@@ -289,7 +296,10 @@ impl Tool for AcpAgentTool {
                 "end_turn" => (RunStatus::Completed, reply, usage, None),
                 "cancelled" => {
                     drop(turn.finish(Some(child.session_id.clone()), false));
-                    return Err(ToolError(format!("{} turn cancelled", self.name)));
+                    return Err(ToolError::cancelled(format!(
+                        "{} turn cancelled",
+                        self.name
+                    )));
                 }
                 "refusal" => (RunStatus::Declined, reply, usage, None),
                 other => (
@@ -330,7 +340,10 @@ impl Tool for AcpAgentTool {
                     child.rpc.live.close().await;
                     turn.forget();
                 }
-                return Err(ToolError(format!("{} turn cancelled", self.name)));
+                return Err(ToolError::cancelled(format!(
+                    "{} turn cancelled",
+                    self.name
+                )));
             }
             TurnEnd::Lost(reason) => {
                 let tail = child.rpc.live.stderr_tail().await;

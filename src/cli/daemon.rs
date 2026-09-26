@@ -2,7 +2,8 @@
 //! a delegated release, and the rule that delegated runs never manage it.
 
 use anyhow::{Context, Result, bail};
-use scv_protocol::DaemonCommand;
+use scv_client::ControlError;
+use scv_protocol::{DaemonCommand, ErrorCode};
 use scv_server::config::ConfigOverrides;
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -63,9 +64,18 @@ pub(crate) async fn restart_when_idle(
     {
         Ok(status) => status,
         Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("unknown variant") || message.contains("SCV daemon unavailable") {
-                eprintln!("{message}");
+            // A daemon that predates the request cannot parse it.
+            if matches!(
+                error.downcast_ref::<ControlError>(),
+                Some(
+                    ControlError::Unavailable(_)
+                        | ControlError::Server {
+                            code: ErrorCode::InvalidJson,
+                            ..
+                        }
+                )
+            ) {
+                eprintln!("{error:#}");
                 eprintln!(
                     "The daemon is not running or cannot schedule its own restart; restart its unit instead."
                 );

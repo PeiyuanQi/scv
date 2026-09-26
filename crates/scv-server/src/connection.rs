@@ -7,8 +7,8 @@ use std::sync::{Arc, atomic::Ordering};
 use anyhow::{Context, Result, anyhow};
 use scv_core::AgentError;
 use scv_protocol::{
-    Attachment, ClientMessage, DaemonCommand, Frame, FrameDecoder, Overflow, PROTOCOL_VERSION,
-    PeerInfo, ServerEvent, Usage, trim_line,
+    Attachment, ClientMessage, DaemonCommand, ErrorCode, Frame, FrameDecoder, Overflow,
+    PROTOCOL_VERSION, PeerInfo, ServerEvent, Usage, trim_line,
 };
 use scv_tools::delegation::DelegationRegistry;
 use tokio::{
@@ -25,6 +25,7 @@ use crate::{
     config::{Config, ConfigOverrides},
     control::{ControlFailure, daemon_control},
     daemon::AbortGuard,
+    events::error_code,
     outbound::{
         OutboundSender, SHUTDOWN_GRACE, outbound_channel, output_queue_bytes, send_error,
         send_event,
@@ -209,7 +210,7 @@ impl Connection {
     }
 
     /// Answer `request_id` with a non-fatal protocol error.
-    async fn reject(&self, request_id: &str, code: &str, message: &str) -> Result<()> {
+    async fn reject(&self, request_id: &str, code: ErrorCode, message: &str) -> Result<()> {
         send_error(
             &self.output,
             request_id,
@@ -229,13 +230,21 @@ impl Connection {
     ) -> Result<Option<&Session>> {
         match &self.session {
             None => {
-                self.reject(request_id, "session_not_found", "start a session first")
-                    .await?;
+                self.reject(
+                    request_id,
+                    ErrorCode::SessionNotFound,
+                    "start a session first",
+                )
+                .await?;
                 Ok(None)
             }
             Some(current) if current.id != session_id => {
-                self.reject(request_id, "session_not_found", "session id does not match")
-                    .await?;
+                self.reject(
+                    request_id,
+                    ErrorCode::SessionNotFound,
+                    "session id does not match",
+                )
+                .await?;
                 Ok(None)
             }
             Some(current) => Ok(Some(current)),
@@ -253,7 +262,7 @@ impl Connection {
             FrameRead::TooLarge => {
                 self.reject(
                     "",
-                    "invalid_request",
+                    ErrorCode::InvalidRequest,
                     "client frame exceeds configured limit",
                 )
                 .await?;
@@ -262,7 +271,7 @@ impl Connection {
             FrameRead::Frame(frame) => frame,
         };
         if frame.is_empty() {
-            self.reject("", "invalid_json", "protocol frame is empty")
+            self.reject("", ErrorCode::InvalidJson, "protocol frame is empty")
                 .await?;
             return Ok(Flow::Continue);
         }
@@ -271,7 +280,7 @@ impl Connection {
             Err(error) => {
                 self.reject(
                     "",
-                    "invalid_json",
+                    ErrorCode::InvalidJson,
                     &format!("invalid protocol JSON: {error}"),
                 )
                 .await?;
@@ -290,7 +299,7 @@ impl Connection {
             other if !self.initialized => {
                 self.reject(
                     other.request_id(),
-                    "not_initialized",
+                    ErrorCode::NotInitialized,
                     "initialize must be the first message",
                 )
                 .await?;
@@ -325,7 +334,7 @@ impl Connection {
             ClientMessage::SessionAttach { request_id, .. } => {
                 self.reject(
                     &request_id,
-                    "unsupported",
+                    ErrorCode::Unsupported,
                     "session attach requires the shared socket server",
                 )
                 .await?;
@@ -399,7 +408,7 @@ impl Connection {
         if self.initialized {
             self.reject(
                 &request_id,
-                "invalid_request",
+                ErrorCode::InvalidRequest,
                 "connection is already initialized",
             )
             .await?;
@@ -409,7 +418,7 @@ impl Connection {
             send_error(
                 &self.output,
                 &request_id,
-                "version_mismatch",
+                ErrorCode::VersionMismatch,
                 &format!("server supports protocol {PROTOCOL_VERSION}"),
                 true,
                 self.server_frame_limit(),
@@ -439,7 +448,7 @@ impl Connection {
         let Some(components) = &self.components else {
             self.reject(
                 &request_id,
-                "unsupported",
+                ErrorCode::Unsupported,
                 "Component management requires the daemon socket",
             )
             .await?;
@@ -460,16 +469,17 @@ impl Connection {
                 .await?;
             }
             Err(ControlFailure::Delegation(message)) => {
-                self.reject(&request_id, "delegation_error", &message)
+                self.reject(&request_id, ErrorCode::DelegationError, &message)
                     .await?;
             }
             Err(ControlFailure::Restart(message)) => {
-                self.reject(&request_id, "restart_error", &message).await?;
+                self.reject(&request_id, ErrorCode::RestartError, &message)
+                    .await?;
             }
             Err(ControlFailure::Component) => {
                 self.reject(
                     &request_id,
-                    "component_error",
+                    ErrorCode::ComponentError,
                     "Component operation failed; check account credentials, private file \
                      permissions and absolute workspace",
                 )
@@ -487,7 +497,7 @@ impl Connection {
         if self.session.is_some() {
             self.reject(
                 &request_id,
-                "invalid_request",
+                ErrorCode::InvalidRequest,
                 "this connection already has a session",
             )
             .await?;
@@ -500,7 +510,7 @@ impl Connection {
         {
             self.reject(
                 &request_id,
-                "invalid_request",
+                ErrorCode::InvalidRequest,
                 "channel must be a short name without control characters",
             )
             .await?;
@@ -529,7 +539,7 @@ impl Connection {
             Ok(built) => built,
             Err(error) => {
                 return self
-                    .reject(&request_id, "invalid_request", &error.to_string())
+                    .reject(&request_id, ErrorCode::InvalidRequest, &error.to_string())
                     .await;
             }
         };
@@ -581,14 +591,14 @@ impl Connection {
         {
             self.reject(
                 &request_id,
-                "invalid_request",
+                ErrorCode::InvalidRequest,
                 "prompt must be non-empty and no larger than 256 KiB",
             )
             .await?;
             return Ok(());
         }
         if let Err(message) = attachments::validate(&attachments) {
-            self.reject(&request_id, "invalid_request", &message)
+            self.reject(&request_id, ErrorCode::InvalidRequest, &message)
                 .await?;
             return Ok(());
         }
@@ -643,7 +653,7 @@ impl Connection {
             return self
                 .reject(
                     &request_id,
-                    "invalid_request",
+                    ErrorCode::InvalidRequest,
                     "prompt must be non-empty and no larger than 256 KiB",
                 )
                 .await;
@@ -684,7 +694,11 @@ impl Connection {
     ) -> Result<()> {
         let Some(current) = self.session.as_ref() else {
             return self
-                .reject(&request_id, "session_not_found", "start a session first")
+                .reject(
+                    &request_id,
+                    ErrorCode::SessionNotFound,
+                    "start a session first",
+                )
                 .await;
         };
         match current
@@ -727,7 +741,11 @@ impl Connection {
     ) -> Result<()> {
         let Some(current) = self.session.as_ref() else {
             return self
-                .reject(&request_id, "session_not_found", "start a session first")
+                .reject(
+                    &request_id,
+                    ErrorCode::SessionNotFound,
+                    "start a session first",
+                )
                 .await;
         };
         match current.remove_queue(&session_id, &queue_id, revision).await {
@@ -795,8 +813,12 @@ impl Connection {
                 Ok(())
             }
             _ => {
-                self.reject(&request_id, "turn_not_found", "active turn was not found")
-                    .await
+                self.reject(
+                    &request_id,
+                    ErrorCode::TurnNotFound,
+                    "active turn was not found",
+                )
+                .await
             }
         }
     }
@@ -815,14 +837,14 @@ impl Connection {
         {
             self.reject(
                 &request_id,
-                "session_not_found",
+                ErrorCode::SessionNotFound,
                 "session id does not match",
             )
             .await
         } else if !self.turns.approvals.resolve(&approval_id, approved).await {
             self.reject(
                 &request_id,
-                "approval_not_found",
+                ErrorCode::ApprovalNotFound,
                 "approval was not found or already resolved",
             )
             .await
@@ -834,14 +856,18 @@ impl Connection {
     async fn session_clear(&self, request_id: String, session_id: String) -> Result<()> {
         let Some(current) = self.session.as_ref() else {
             return self
-                .reject(&request_id, "session_not_found", "session was not found")
+                .reject(
+                    &request_id,
+                    ErrorCode::SessionNotFound,
+                    "session was not found",
+                )
                 .await;
         };
         if current.id != session_id {
             return self
                 .reject(
                     &request_id,
-                    "session_not_found",
+                    ErrorCode::SessionNotFound,
                     "session id does not match",
                 )
                 .await;
@@ -850,7 +876,7 @@ impl Connection {
             return self
                 .reject(
                     &request_id,
-                    "turn_active",
+                    ErrorCode::TurnActive,
                     "cancel the active turn before clearing",
                 )
                 .await;
@@ -923,7 +949,7 @@ impl Connection {
                     session_id: done.session_id,
                     turn_id: done.turn_id,
                     seq,
-                    code: error.code().into(),
+                    code: error_code(&error),
                     message: error.to_string(),
                     origin: done.origin,
                 },

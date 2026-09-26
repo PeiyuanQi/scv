@@ -56,35 +56,35 @@ impl Tool for ReadSkillTool {
         let configured = self
             .skills
             .get(&args.name)
-            .ok_or_else(|| ToolError(format!("unknown skill: {}", args.name)))?;
+            .ok_or_else(|| ToolError::invalid_arguments(format!("unknown skill: {}", args.name)))?;
         let path = std::fs::canonicalize(configured)
-            .map_err(|error| ToolError(format!("load skill {}: {error}", args.name)))?;
+            .map_err(|error| ToolError::failed(format!("load skill {}: {error}", args.name)))?;
         if !self.roots.iter().any(|root| path.starts_with(root)) {
-            return Err(ToolError("skill path escaped its configured root".into()));
+            return Err(ToolError::failed("skill path escaped its configured root"));
         }
         let max_bytes = self.max_bytes;
         let skill_name = args.name.clone();
         let bytes = tokio::select! {
             result = tokio::task::spawn_blocking(move || {
                 let mut file = std::fs::File::open(&path)
-                    .map_err(|error| ToolError(format!("load skill {skill_name}: {error}")))?;
+                    .map_err(|error| ToolError::failed(format!("load skill {skill_name}: {error}")))?;
                 let mut bytes = Vec::with_capacity(max_bytes.min(8192));
                 std::io::Read::take(
                     &mut file,
                     u64::try_from(max_bytes).unwrap_or(u64::MAX).saturating_add(1),
                 )
                 .read_to_end(&mut bytes)
-                .map_err(|error| ToolError(format!("load skill {skill_name}: {error}")))?;
+                .map_err(|error| ToolError::failed(format!("load skill {skill_name}: {error}")))?;
                 Ok::<_, ToolError>(bytes)
-            }) => result.map_err(|error| ToolError(format!("skill read task failed: {error}")))??,
-            () = context.cancellation.cancelled() => return Err(ToolError("skill read cancelled".into())),
+            }) => result.map_err(|error| ToolError::failed(format!("skill read task failed: {error}")))??,
+            () = context.cancellation.cancelled() => return Err(ToolError::cancelled("skill read cancelled")),
         };
         let end = bytes.len().min(self.max_bytes);
         let content = std::str::from_utf8(&bytes[..end])
-            .map_err(|_| ToolError("skill is not UTF-8".into()))?;
+            .map_err(|_| ToolError::failed("skill is not UTF-8"))?;
         Ok(ToolOutput {
             content: content.to_owned(),
-            is_error: false,
+            failure: None,
             truncated: end < bytes.len(),
         })
     }

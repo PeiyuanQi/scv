@@ -81,7 +81,7 @@ The repository is one Cargo workspace with these packages:
 | Package | Responsibility |
 | --- | --- |
 | `scv-protocol` | Wire messages, the protocol version, and the bounded line framing (`FrameDecoder`) every connection uses. It contains no runtime policy and does no I/O. |
-| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`), the default socket path, framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper; depends on protocol, not server. |
+| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`), the default socket path, framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
@@ -177,6 +177,7 @@ What lives where in the largest crates:
 | | `runtime.rs` | `AgentRuntime` and its turn loop |
 | `scv-protocol` | `client.rs`, `server.rs` | `ClientMessage` and `ServerEvent` |
 | | `daemon.rs`, `attachment.rs`, `background.rs` | Daemon control and status, attached files, and background-job reporting |
+| | `error.rs` | `ErrorCode` (why a request or turn failed) and `ToolErrorKind` (why a tool call did) |
 | `scv-provider-openai` | `request.rs` | `OpenAiProvider`: requests, retries, and error reporting |
 | | `stream.rs`, `wire.rs`, `encode.rs` | Assembling a response from its event stream, the wire shapes, and replaying history as input |
 | `scv-tui` | `app.rs`, `transcript.rs` | What the UI shows and how server events change it; bounded transcript and prompt history |
@@ -424,7 +425,14 @@ Rust traits are the stable internal extension seam:
 
 - `Provider` converts a model request into one assistant message and usage;
 - `Tool` publishes a JSON schema, an approval risk, and asynchronous execution,
-  and may report status lines through the `ProgressSink` in its context;
+  and may report status lines through the `ProgressSink` in its context. A
+  call that cannot run returns a `ToolError` and a result that failed carries
+  its `ToolOutput::failure`, both typed by `ToolFailure` (denied, cancelled,
+  invalid arguments, unavailable, limit, failed, unknown tool); the model
+  reads only the text, and the server reports the kind to clients as
+  `tool.completed.error`. scv-core names no wire codes: the server maps
+  `ToolFailure` and `AgentError` to the protocol's `ToolErrorKind` and
+  `ErrorCode` in `events.rs`;
 - `ContextPolicy` selects or compacts model-visible history;
 - `ApprovalGate` resolves side-effecting work;
 - `EventSink` receives typed lifecycle events.

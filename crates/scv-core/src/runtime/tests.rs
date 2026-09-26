@@ -106,7 +106,7 @@ impl Tool for EchoTool {
         arguments
             .get("value")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolError("value must be a string".into()))?;
+            .ok_or_else(|| ToolError::invalid_arguments("value must be a string"))?;
         Ok(ToolRisk::ReadOnly)
     }
 
@@ -472,11 +472,12 @@ async fn denial_is_recorded_as_a_model_visible_tool_failure() {
         PathBuf::from("/tmp"),
     );
     let mut history = Vec::new();
+    let sink = Arc::new(CollectSink(Mutex::new(Vec::new())));
     runtime
         .run_turn(
             &mut history,
             "start",
-            Arc::new(CollectSink(Mutex::new(Vec::new()))),
+            Arc::clone(&sink) as Arc<dyn EventSink>,
             Arc::new(Deny),
             CancellationToken::new(),
         )
@@ -488,8 +489,85 @@ async fn denial_is_recorded_as_a_model_visible_tool_failure() {
             content,
             is_error: true,
             ..
-        }) if content.contains("denied")
+        }) if content == "tool call denied by policy or user"
     ));
+    assert_eq!(
+        completed_outputs(&sink),
+        [ToolOutput::failed(
+            ToolFailure::Denied,
+            "tool call denied by policy or user"
+        )]
+    );
+}
+
+/// The outputs of every `ToolCompleted` event `sink` collected.
+fn completed_outputs(sink: &CollectSink) -> Vec<ToolOutput> {
+    sink.0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            CoreEvent::ToolCompleted { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn calls_that_cannot_run_say_why() {
+    let call = |id: &str, name: &str, arguments: Value| ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments,
+    };
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(VecDeque::from([
+            AssistantResponse {
+                content: String::new(),
+                tool_calls: vec![
+                    call("call-1", "missing", serde_json::json!({})),
+                    call("call-2", "echo", serde_json::json!({"value": 7})),
+                ],
+                usage: Usage::default(),
+            },
+            AssistantResponse {
+                content: "handled".into(),
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+            },
+        ])),
+    });
+    let mut registry = ToolRegistry::default();
+    registry.register(Arc::new(EchoTool)).unwrap();
+    let runtime = AgentRuntime::new(
+        provider,
+        Arc::new(registry),
+        Arc::new(BudgetContextPolicy::new(ContextConfig::default()).unwrap()),
+        AgentConfig {
+            system_prompt: "test".into(),
+            max_steps: 3,
+            history_limits: HistoryLimits::default(),
+        },
+        PathBuf::from("/tmp"),
+    );
+    let sink = Arc::new(CollectSink(Mutex::new(Vec::new())));
+    runtime
+        .run_turn(
+            &mut Vec::new(),
+            "start",
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            Arc::new(Allow),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        completed_outputs(&sink),
+        [
+            ToolOutput::failed(ToolFailure::UnknownTool, "unknown tool: missing"),
+            ToolOutput::failed(ToolFailure::InvalidArguments, "value must be a string"),
+        ]
+    );
 }
 
 #[tokio::test]

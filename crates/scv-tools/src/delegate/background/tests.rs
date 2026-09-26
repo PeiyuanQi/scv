@@ -28,7 +28,7 @@ impl Tool for FakeAgent {
 
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
         if arguments.get("prompt").and_then(Value::as_str).is_none() {
-            return Err(ToolError("prompt is required".into()));
+            return Err(ToolError::failed("prompt is required"));
         }
         Ok(ToolRisk::Delegate)
     }
@@ -50,7 +50,7 @@ impl Tool for FakeAgent {
             )),
             () = context.cancellation.cancelled() => {
                 self.cancelled.store(true, Ordering::SeqCst);
-                Err(ToolError("cancelled".into()))
+                Err(ToolError::cancelled("cancelled"))
             }
         }
     }
@@ -204,7 +204,10 @@ async fn at_most_the_limit_runs_at_once() {
         .execute(json!({"prompt":"more","background":true}), context())
         .await
         .unwrap_err();
-    assert!(refused.0.contains("agent.max_background"), "{refused}");
+    assert!(
+        refused.message.contains("agent.max_background"),
+        "{refused}"
+    );
     fixture.release.notify_one();
     fixture.finished.recv().await.unwrap();
     assert_eq!(start(&fixture.tool).await["job"], "job-2");
@@ -311,7 +314,10 @@ async fn agent_cancel_stops_a_running_job_without_a_report() {
         .execute(json!({"job":"job-9"}), context())
         .await
         .unwrap_err();
-    assert!(unknown.0.contains("unknown background job"), "{unknown}");
+    assert!(
+        unknown.message.contains("unknown background job"),
+        "{unknown}"
+    );
     // The freed slot takes a new job.
     assert_eq!(start(&fixture.tool).await["job"], "job-2");
 }
@@ -353,7 +359,7 @@ impl Tool for AskingAgent {
                 context.cancellation.clone(),
             )
             .await
-            .map_err(|error| ToolError(error.to_string()))?;
+            .map_err(|error| ToolError::failed(error.to_string()))?;
         Ok(ToolOutput::success(
             json!({"status":"completed","reply":if approved {"approved"} else {"denied"}})
                 .to_string(),
@@ -446,7 +452,10 @@ async fn wait_and_status_tools_validate_and_are_read_only() {
         .execute(json!({"job":"job-9"}), context())
         .await
         .unwrap_err();
-    assert!(unknown.0.contains("unknown background job"), "{unknown}");
+    assert!(
+        unknown.message.contains("unknown background job"),
+        "{unknown}"
+    );
     let status = StatusTool {
         jobs: Arc::clone(&fixture.jobs),
     };

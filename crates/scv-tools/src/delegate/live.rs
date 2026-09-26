@@ -121,12 +121,12 @@ impl LiveChild {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         command.as_std_mut().process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|error| ToolError(format!("launch {:?}: {error}", spec.executable)))?;
+        let mut child = command.spawn().map_err(|error| {
+            ToolError::unavailable(format!("launch {:?}: {error}", spec.executable))
+        })?;
         let pid = child
             .id()
-            .ok_or_else(|| ToolError("child process has no pid".into()))?;
+            .ok_or_else(|| ToolError::failed("child process has no pid"))?;
         records::track_spawned(pid);
         let guard = Arc::new(StdMutex::new(
             registration.and_then(|(registry, pending)| registry.register(pending, pid).ok()),
@@ -157,20 +157,20 @@ impl LiveChild {
     /// Write `message` as one JSON line.
     pub(crate) async fn send(&self, message: &impl Serialize) -> Result<(), ToolError> {
         let mut bytes = serde_json::to_vec(message)
-            .map_err(|error| ToolError(format!("encode message: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("encode message: {error}")))?;
         bytes.push(b'\n');
         let mut stdin = self.stdin.lock().await;
         let writer = stdin
             .as_mut()
-            .ok_or_else(|| ToolError("the child's input is closed".into()))?;
+            .ok_or_else(|| ToolError::failed("the child's input is closed"))?;
         writer
             .write_all(&bytes)
             .await
-            .map_err(|error| ToolError(format!("write to child: {error}")))?;
+            .map_err(|error| ToolError::failed(format!("write to child: {error}")))?;
         writer
             .flush()
             .await
-            .map_err(|error| ToolError(format!("write to child: {error}")))
+            .map_err(|error| ToolError::failed(format!("write to child: {error}")))
     }
 
     /// The next stdout line, or `None` once the child closed its output.

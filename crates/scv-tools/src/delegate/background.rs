@@ -144,7 +144,7 @@ impl BackgroundJobs {
                 .filter(|job| job.outcome.is_none())
                 .count();
             if running >= self.limit {
-                return Err(ToolError(format!(
+                return Err(ToolError::limit(format!(
                     "{running} background jobs are already running, the limit \
                      (agent.max_background). Start this one after a job finishes, or \
                      stop one with agent_cancel if the user no longer needs it."
@@ -184,7 +184,7 @@ impl BackgroundJobs {
             let output = tool
                 .execute(arguments, context)
                 .await
-                .unwrap_or_else(|error| ToolOutput::failure(error.to_string()));
+                .unwrap_or_else(ToolOutput::from);
             finish(&jobs, &job, output, started.elapsed());
             let _ = done_tx.send(true);
         });
@@ -238,7 +238,7 @@ impl BackgroundJobs {
             .map(|candidate| candidate.done.clone())
             .ok_or_else(|| unknown_job(job))?;
         tokio::select! {
-            () = cancellation.cancelled() => return Err(ToolError("wait cancelled".into())),
+            () = cancellation.cancelled() => return Err(ToolError::cancelled("wait cancelled")),
             _ = tokio::time::timeout(limit, done.wait_for(|finished| *finished)) => {}
         }
         self.describe(Some(job))
@@ -377,14 +377,14 @@ impl Job {
 fn result_value(output: &ToolOutput) -> Value {
     match serde_json::from_str::<Value>(&output.content) {
         Ok(value @ Value::Object(_)) => value,
-        _ => json!({ "reply": output.content, "is_error": output.is_error }),
+        _ => json!({ "reply": output.content, "is_error": output.is_error() }),
     }
 }
 
 fn job_status(output: &ToolOutput, result: &Value) -> String {
     result.get("status").and_then(Value::as_str).map_or_else(
         || {
-            if output.is_error {
+            if output.is_error() {
                 "failed".into()
             } else {
                 "completed".into()
@@ -395,7 +395,7 @@ fn job_status(output: &ToolOutput, result: &Value) -> String {
 }
 
 fn unknown_job(job: &str) -> ToolError {
-    ToolError(format!(
+    ToolError::invalid_arguments(format!(
         "unknown background job {:?}; agent_status lists this session's jobs",
         bounded(job, 64)
     ))

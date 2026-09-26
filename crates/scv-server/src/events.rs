@@ -1,8 +1,8 @@
 //! Turning a turn's `CoreEvent`s into protocol `ServerEvent`s.
 
 use async_trait::async_trait;
-use scv_core::{AgentError, CoreEvent, EventSink};
-use scv_protocol::ServerEvent;
+use scv_core::{AgentError, CoreEvent, EventSink, ToolFailure};
+use scv_protocol::{ErrorCode, ServerEvent, ToolErrorKind};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -16,6 +16,33 @@ pub(crate) fn bounded_progress(mut text: String) -> String {
     let end = scv_client::text::utf8_prefix(&text, limit).len();
     text.truncate(end);
     text
+}
+
+/// The `turn.failed` code of a turn that ended with `error`.
+pub(crate) fn error_code(error: &AgentError) -> ErrorCode {
+    match error {
+        AgentError::Provider(_) => ErrorCode::ProviderError,
+        AgentError::ContextLimit(_) => ErrorCode::ContextLimit,
+        AgentError::StepLimit => ErrorCode::StepLimit,
+        AgentError::HistoryLimit(_) => ErrorCode::HistoryLimit,
+        AgentError::ResponseLimit(_) => ErrorCode::ResponseLimit,
+        AgentError::ToolLimit(_) => ErrorCode::ToolLimit,
+        // A cancelled turn ends with `turn.cancelled`, never `turn.failed`.
+        AgentError::Cancelled | AgentError::Internal(_) => ErrorCode::InternalError,
+    }
+}
+
+/// How a failed tool call is shown in `tool.completed.error`.
+pub(crate) fn tool_error_kind(failure: ToolFailure) -> ToolErrorKind {
+    match failure {
+        ToolFailure::Denied => ToolErrorKind::Denied,
+        ToolFailure::Cancelled => ToolErrorKind::Cancelled,
+        ToolFailure::InvalidArguments => ToolErrorKind::InvalidArguments,
+        ToolFailure::Unavailable => ToolErrorKind::Unavailable,
+        ToolFailure::Limit => ToolErrorKind::Limit,
+        ToolFailure::Failed => ToolErrorKind::Failed,
+        ToolFailure::UnknownTool => ToolErrorKind::UnknownTool,
+    }
 }
 
 pub(crate) struct ProtocolSink {
@@ -85,9 +112,10 @@ impl EventSink for ProtocolSink {
                 seq,
                 call_id,
                 name,
-                success: !output.is_error,
+                success: !output.is_error(),
                 output: output.content,
                 truncated: output.truncated,
+                error: output.failure.map(tool_error_kind),
             },
             CoreEvent::ContextCompacted {
                 before_tokens,
