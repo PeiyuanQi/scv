@@ -94,8 +94,14 @@ pub(crate) async fn daemon_control(
         .await
         .map_err(|_| ControlFailure::Component)?;
     let running = registry.list(false);
+    // Idle as `scv agents ps` shows it: a live agent between turns.
+    let idle = running
+        .iter()
+        .filter(|entry| entry.record.idle_since_unix.is_some())
+        .count();
     status.delegations = DelegationSummary {
         active: running.len() as u64,
+        idle: Some(idle as u64),
         reaped: registry.reaped_total(),
         entries: match listing {
             Some(true) => registry.list(true),

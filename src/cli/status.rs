@@ -1,9 +1,9 @@
-//! `scv status` and `scv channels status`: the daemon's version, running
-//! delegations, a scheduled restart, and each channel account's health.
+//! `scv status` and `scv channels status`: the daemon's version, running and
+//! idle delegations, a scheduled restart, and each channel account's health.
 
 use anyhow::Result;
 use scv_client::Layout;
-use scv_protocol::DaemonCommand;
+use scv_protocol::{DaemonCommand, DelegationSummary};
 
 use super::channels::{answers_nobody, nobody_note};
 use super::control;
@@ -25,10 +25,7 @@ pub(crate) async fn show_status(
         "Daemon: running, version {}, pid {}",
         status.version, status.pid
     );
-    println!(
-        "Delegations: {} running, {} orphaned runs stopped since the daemon started",
-        status.delegations.active, status.delegations.reaped
-    );
+    println!("{}", describe_delegations(&status.delegations));
     if let Some(restart) = &status.restart {
         println!("{}", describe_restart(restart));
     }
@@ -56,3 +53,23 @@ pub(crate) async fn show_status(
     }
     Ok(())
 }
+
+/// The `Delegations:` line. Runs at work count as running and live agents
+/// between turns as idle, as `scv agents ps` lists them; a daemon that does
+/// not report idle agents gets no idle part.
+fn describe_delegations(delegations: &DelegationSummary) -> String {
+    let orphans = format!(
+        "{} orphaned runs stopped since the daemon started",
+        delegations.reaped
+    );
+    match delegations.idle {
+        Some(idle) => format!(
+            "Delegations: {} running, {idle} idle, {orphans}",
+            delegations.active.saturating_sub(idle)
+        ),
+        None => format!("Delegations: {} running, {orphans}", delegations.active),
+    }
+}
+
+#[cfg(test)]
+mod tests;

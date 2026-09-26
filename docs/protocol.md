@@ -255,9 +255,9 @@ clears its transcript only after that event.
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.0","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.0","pid":1234,"components":[],"delegations":{"active":1,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
-{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.0","pid":1234,"components":[],"delegations":{"active":1,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.0","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.0","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.0","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -281,8 +281,10 @@ delivered it by its deadline, or its answer was lost; a state a client
 does not know parses as `unknown`), the `chat` asked (`<channel>:<account>`),
 and `deadline_unix_seconds`. A status from a daemon older
 than 0.1.26 has no `delegations` and parses as zero.
-`delegations.active` counts running delegated runs of the instance and
-`reaped` the orphans this daemon has stopped since it started; `entries` and
+`delegations.active` counts running delegated runs of the instance, live
+agents waiting between turns included; `idle` says how many of them are such
+agents (omitted by older daemons), and `reaped` counts the orphans this daemon
+has stopped since it started. `entries` and
 `killed` appear only in `delegations` and `delegation_kill` responses. An
 entry that is a turn of a delegated conversation also carries `conversation`
 (the handle, such as `codex-2`) and `turn`; both are omitted otherwise. A

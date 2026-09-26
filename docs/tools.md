@@ -545,11 +545,12 @@ scv agents kill codex-3f9a2c
 scv agents kill --orphans
 ```
 
-`scv status` shows the running count and how many orphans the daemon has
-stopped. Agent tools are offered only while the session's own depth is below
-`agent.max_delegation_depth` (default 2), and a delegated run may not start,
-stop, restart, update, or run a daemon, or manage channels. This is cooperative:
-see [Delegated runs](security.md#delegated-runs).
+`scv status` counts the runs at work as `running` and the live agents waiting
+between turns as `idle`, as `scv agents ps` lists them, and shows how many
+orphans the daemon has stopped. Agent tools are offered only while the
+session's own depth is below `agent.max_delegation_depth` (default 2), and a
+delegated run may not start, stop, restart, update, or run a daemon, or manage
+channels. This is cooperative: see [Delegated runs](security.md#delegated-runs).
 
 By default SCV adds nothing to an agent's own permission settings, and in
 print mode Claude Code, for example, refuses Bash, Edit, and Write without a

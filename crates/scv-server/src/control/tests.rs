@@ -42,17 +42,32 @@ async fn daemon_control_lists_and_stops_delegations() {
         idle_since_unix: None,
     };
     std::fs::create_dir_all(registry.record_dir()).unwrap();
-    std::fs::write(
-        registry.record_dir().join("codex-a1b2c3.json"),
-        serde_json::to_vec(&record).unwrap(),
-    )
-    .unwrap();
+    let save = |record: &delegations::DelegationRecord| {
+        std::fs::write(
+            registry.record_dir().join("codex-a1b2c3.json"),
+            serde_json::to_vec(record).unwrap(),
+        )
+        .unwrap();
+    };
+    save(&record);
     let control = |command| daemon_control(&components, &registry, command);
     let Ok(status) = control(DaemonCommand::Status).await else {
         panic!("status failed");
     };
     assert_eq!(status.delegations.active, 1);
+    assert_eq!(status.delegations.idle, Some(0));
     assert!(status.delegations.entries.is_empty());
+    // Between turns it still counts as live, and as idle.
+    save(&delegations::DelegationRecord {
+        idle_since_unix: Some(2),
+        ..record.clone()
+    });
+    let Ok(status) = control(DaemonCommand::Status).await else {
+        panic!("status failed");
+    };
+    assert_eq!(status.delegations.active, 1);
+    assert_eq!(status.delegations.idle, Some(1));
+    save(&record);
     let Ok(status) = control(DaemonCommand::Delegations { all: false }).await else {
         panic!("listing failed");
     };
@@ -100,6 +115,16 @@ async fn daemon_control_lists_and_stops_delegations() {
     };
     assert!(status.delegations.entries[0].orphaned);
     assert_eq!(status.delegations.active, 0);
+    // An orphan between turns is neither live nor idle.
+    save(&delegations::DelegationRecord {
+        idle_since_unix: Some(2),
+        ..record
+    });
+    let Ok(status) = control(DaemonCommand::Status).await else {
+        panic!("status failed");
+    };
+    assert_eq!(status.delegations.active, 0);
+    assert_eq!(status.delegations.idle, Some(0));
     let Ok(_) = control(DaemonCommand::DelegationKill {
         handle: None,
         orphans: true,
