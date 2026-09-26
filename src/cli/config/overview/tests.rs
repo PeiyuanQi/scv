@@ -1,4 +1,4 @@
-//! Unit tests for `src/overview.rs`.
+//! Unit tests for `src/cli/config/overview.rs`.
 
 use super::*;
 

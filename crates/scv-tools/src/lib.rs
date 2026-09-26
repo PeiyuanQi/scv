@@ -15,7 +15,8 @@
 //!   CLI process per turn (`native`), a long-lived Agent Client Protocol
 //!   server (`acp`), or a nested SCV (`scv`); the [`adapters`] table,
 //!   [`background`] jobs, [`conversation`] handles, run records
-//!   ([`delegation`]), and how a run's output and progress are read.
+//!   ([`delegation`]), the agents' own credential files ([`stores`]), and
+//!   how a run's output and progress are read.
 //! - `process`: spawning a child in its own process group and always
 //!   finishing the whole group.
 //! - `registry`, `config`, and `args`: assembling a session's tools, their
@@ -32,7 +33,7 @@ mod sync;
 pub use builtin::{chat_attach, web};
 pub use config::{AcpAgentLaunch, AgentAdapterConfig, DelegationContext, SkillMap, ToolsConfig};
 pub use delegate::{
-    adapters, background, choice as agent_choice, conversation, records as delegation,
+    adapters, background, choice as agent_choice, conversation, records as delegation, stores,
 };
 pub use process::apply_agent_environment;
 pub use registry::builtin_registry;

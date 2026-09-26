@@ -25,7 +25,7 @@ pub(crate) fn daemon_control(
         let workspace = std::fs::canonicalize(workspace).context("resolve daemon workspace")?;
         let service = scv_server::service_name()?;
         stop_legacy_instance(&service)?;
-        let path = scv_server::service_unit_path()?;
+        let path = service_unit_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -88,6 +88,14 @@ pub(crate) fn daemon_control(
         bail!("systemctl {action} {} failed", scv_server::service_name()?);
     }
     Ok(())
+}
+
+/// Where `scv start` writes this instance's systemd user unit.
+pub(crate) fn service_unit_path() -> Result<PathBuf> {
+    let config = dirs::config_dir().context("cannot determine XDG config directory")?;
+    Ok(config
+        .join("systemd/user")
+        .join(scv_server::service_name()?))
 }
 
 fn sudo_available() -> bool {

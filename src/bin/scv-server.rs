@@ -6,7 +6,7 @@ mod common;
 
 use anyhow::Result;
 use clap::Parser;
-use scv_server::ConfigOverrides;
+use scv_server::config::ConfigOverrides;
 use std::path::PathBuf;
 
 use common::ApprovalArg;

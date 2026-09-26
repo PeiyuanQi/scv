@@ -277,7 +277,7 @@ pub(crate) enum AgentsCommand {
         agent: Option<String>,
         /// Remove transcripts last written at least this long ago: 30d, 12h,
         /// 90m, or seconds. Never less than an hour.
-        #[arg(long, default_value = "30d", value_parser = scv_server::conversation_age)]
+        #[arg(long, default_value = "30d", value_parser = scv_tools::conversation::parse_age)]
         older_than: std::time::Duration,
         /// Show what would be removed without removing anything.
         #[arg(long)]
@@ -312,7 +312,7 @@ pub(crate) enum AgentsCommand {
 
 fn agent_names() -> clap::builder::PossibleValuesParser {
     clap::builder::PossibleValuesParser::new(
-        scv_server::adapters::ADAPTERS
+        scv_tools::adapters::ADAPTERS
             .iter()
             .map(|adapter| adapter.name),
     )
@@ -324,7 +324,7 @@ pub(crate) enum WireApiArg {
     Chat,
 }
 
-impl From<WireApiArg> for scv_server::WireApi {
+impl From<WireApiArg> for scv_tools::stores::WireApi {
     fn from(value: WireApiArg) -> Self {
         match value {
             WireApiArg::Responses => Self::Responses,

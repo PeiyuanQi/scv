@@ -348,7 +348,8 @@ SCV is a Cargo workspace with deliberately narrow packages:
 - `scv-protocol`: versioned wire types with no runtime policy;
 - `scv-client`: shared default socket path and daemon control helper;
 - `scv-provider-openai`: streaming provider transport;
-- `scv-tools`: filesystem, process, skill, and nested-agent tools;
+- `scv-tools`: filesystem, process, skill, and nested-agent tools, and the
+  credential files of the agent CLIs SCV delegates to;
 - `scv-channels`: the chat-channel bridge every channel shares: durable
   claims, delivery state, and remote sessions;
 - `scv-clawbot`: the WeChat channel's iLink login, polling, and sending;

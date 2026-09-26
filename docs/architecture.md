@@ -18,15 +18,17 @@ flowchart LR
     cli --> tui["scv-tui"]
     cli --> clawbot["scv-clawbot"]
     cli --> feishu["scv-feishu"]
+    cli --> channels["scv-channels"]
+    cli --> tools["scv-tools"]
     cli --> client["scv-client"]
     cli --> protocol["scv-protocol"]
     server --> clawbot
     server --> feishu
-    server --> channels["scv-channels"]
+    server --> channels
     server --> client
     server --> protocol
     server --> core["scv-core"]
-    server --> tools["scv-tools"]
+    server --> tools
     server --> provider["scv-provider-openai"]
     clawbot --> channels
     clawbot --> client
@@ -82,13 +84,13 @@ The repository is one Cargo workspace with these packages:
 | `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`), the default socket path, framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
-| `scv-tools` | Workspace-scoped file tools, shell execution, and native-agent delegation. |
+| `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-channels` | The bridge every chat channel shares: the `Transport` trait, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, restart context). |
 | `scv-clawbot` | The WeChat channel: iLink authentication, polling, and sending behind `Transport`, and its credentials. |
 | `scv-feishu` | The Feishu/Lark channel: app registration by QR scan, the event long connection with catch-up from chat history, and sending behind `Transport`, and its credentials. |
-| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`. |
+| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in and importing their setups (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
 The integration dependency chain is
 `server -> clawbot|feishu -> channels -> client -> protocol`.
@@ -139,7 +141,7 @@ What lives where in the largest crates:
 
 | Crate | Module | Contents |
 | --- | --- | --- |
-| `scv-server` | `lib.rs` | Module list, public re-exports, and helpers the CLI calls for `scv agents` |
+| `scv-server` | `lib.rs` | Module list, the public API (`run_socket`, `run_stdio`, `config`, build info, the restart watchdog), and the service unit name |
 | | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs |
 | | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
 | | `control.rs` | `daemon.control`: status, components, delegations, and scheduled restarts |
@@ -151,7 +153,6 @@ What lives where in the largest crates:
 | | `components.rs` | `Component`, `HealthReporter`, `Supervisor`, and the channel accounts they run |
 | | `restart.rs` | [Planned restarts](#planned-restarts) and the watchdog |
 | | `attachments.rs` | Files attached to a turn, such as chat media |
-| | `agents.rs`, `imports.rs`, `overview.rs` | Agent sign-ins, `scv agents import`, and `scv config show` |
 | `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, the tools' settings, and the argument helpers every tool shares |
 | | `builtin/` | Tools that run inside SCV: `fs.rs` (`read`, `write`), `skill.rs` (`read_skill`), `shell.rs` (`bash`), `web.rs` (`web_fetch`, `web_search`), `chat_attach.rs` |
 | | `process.rs` | Spawning a child in its own process group, draining its output, and `ProcessGroup`, the only way SCV signals a group |
@@ -160,6 +161,7 @@ What lives where in the largest crates:
 | | `delegate/adapters.rs`, `delegate/choice.rs` | One descriptor per delegated agent CLI, and how agent tools are described and chosen |
 | | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
+| | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
 | `scv-channels` | `lib.rs`, `session.rs` | The bridge and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs` | Durable account state, what the daemon shares with running bridges, and chat media |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |

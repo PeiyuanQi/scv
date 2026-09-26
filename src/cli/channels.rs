@@ -7,6 +7,7 @@ use std::path::Path;
 
 use super::args::{ChannelArg, ChannelsCommand};
 use super::control;
+use super::prompt::read_secret;
 use super::status::show_status;
 
 pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
@@ -37,7 +38,7 @@ pub(crate) async fn channels(command: ChannelsCommand) -> Result<()> {
                     };
                     match app_id {
                         Some(app_id) => {
-                            let secret = scv_server::read_secret(&format!(
+                            let secret = read_secret(&format!(
                                 "{} app secret (input hidden)",
                                 brand.title()
                             ))?;

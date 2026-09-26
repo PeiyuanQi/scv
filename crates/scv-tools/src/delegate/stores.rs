@@ -2,11 +2,12 @@
 //! private agent homes: importing a user's own Codex or Grok setup, and the
 //! API-key and endpoint stores SCV writes in an agent CLI's native format.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use scv_tools::adapters::KeyStore;
+
+use super::adapters::KeyStore;
 
 const MAX_IMPORT_BYTES: u64 = 1024 * 1024;
 
@@ -151,7 +152,7 @@ fn config_notes(table: &toml::Table) -> Vec<String> {
             continue;
         };
         notes.push(
-            if scv_tools::adapters::is_removed_agent_variable(std::ffi::OsStr::new(variable)) {
+            if super::adapters::is_removed_agent_variable(std::ffi::OsStr::new(variable)) {
                 format!(
                     "Warning: provider {name:?} reads its key from ${variable}, which SCV \
                      removes from delegated agents; keep the key in auth.json \
@@ -334,7 +335,7 @@ fn grok_default_key(table: &toml::Table) -> GrokKey {
 /// removes from delegated agents.
 fn usable_grok_variable(variables: &[String]) -> Option<&String> {
     variables.iter().find(|variable| {
-        !scv_tools::adapters::is_removed_agent_variable(std::ffi::OsStr::new(variable.as_str()))
+        !super::adapters::is_removed_agent_variable(std::ffi::OsStr::new(variable.as_str()))
             && std::env::var_os(variable).is_some_and(|value| !value.is_empty())
     })
 }
@@ -416,7 +417,7 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
 }
 
 /// Longest API key or endpoint field SCV accepts.
-const MAX_FIELD_BYTES: usize = 4096;
+pub const MAX_FIELD_BYTES: usize = 4096;
 
 /// The pi provider id SCV writes for an OpenAI-compatible endpoint.
 pub const PI_PROVIDER: &str = "scv";
@@ -445,61 +446,9 @@ pub struct Endpoint {
     pub model: String,
 }
 
-/// Read a secret from the terminal without echo, or from piped stdin.
-pub fn read_secret(prompt: &str) -> Result<String> {
-    use std::io::{BufRead as _, IsTerminal as _};
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    if stdin.is_terminal() {
-        eprint!("{prompt}: ");
-        std::io::stderr().flush().ok();
-        let _echo = EchoOff::new()?;
-        stdin.lock().read_line(&mut line)?;
-        eprintln!();
-    } else {
-        stdin
-            .lock()
-            .take(MAX_FIELD_BYTES as u64 + 2)
-            .read_line(&mut line)?;
-    }
-    let secret = line.trim().to_owned();
-    validate_secret(&secret)?;
-    Ok(secret)
-}
-
-/// Terminal echo disabled for the guard's lifetime.
-struct EchoOff(libc::termios);
-
-impl EchoOff {
-    fn new() -> Result<Self> {
-        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: tcgetattr fills the termios struct for a valid descriptor.
-        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, termios.as_mut_ptr()) } != 0 {
-            bail!(
-                "read terminal settings: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-        // SAFETY: tcgetattr succeeded, so the struct is initialized.
-        let original = unsafe { termios.assume_init() };
-        let mut silent = original;
-        silent.c_lflag &= !libc::ECHO;
-        // SAFETY: a valid descriptor and a termios derived from its own settings.
-        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const silent) } != 0 {
-            bail!("disable terminal echo: {}", std::io::Error::last_os_error());
-        }
-        Ok(Self(original))
-    }
-}
-
-impl Drop for EchoOff {
-    fn drop(&mut self) {
-        // SAFETY: restores the settings read from the same descriptor.
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const self.0) };
-    }
-}
-
-fn validate_secret(secret: &str) -> Result<()> {
+/// Check a key or secret SCV is about to store: one line of at most
+/// [`MAX_FIELD_BYTES`] printable characters, without quotes or backslashes.
+pub fn validate_secret(secret: &str) -> Result<()> {
     if secret.is_empty() {
         bail!("no key entered");
     }

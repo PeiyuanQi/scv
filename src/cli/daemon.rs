@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use scv_protocol::DaemonCommand;
-use scv_server::ConfigOverrides;
+use scv_server::config::ConfigOverrides;
 use std::io::{self, IsTerminal};
 use std::path::Path;
 
@@ -14,7 +14,7 @@ use super::control;
 /// reconfigure daemons: that is the host's decision, and an SCV run from
 /// inside a delegation would otherwise manage its parent.
 pub(crate) fn refuse_nested_daemon_control(command: &Command) -> Result<()> {
-    let depth = scv_server::delegation::current_depth();
+    let depth = scv_tools::delegation::current_depth();
     let lifecycle = match command {
         Command::Run { .. } => Some("run"),
         Command::Start { .. } => Some("start"),
@@ -50,7 +50,7 @@ pub(crate) async fn restart_when_idle(
     commit: Option<String>,
     max_wait: Option<u64>,
 ) -> Result<()> {
-    let parent = std::env::var(scv_server::delegation::PARENT_VARIABLE)
+    let parent = std::env::var(scv_tools::delegation::PARENT_VARIABLE)
         .ok()
         .filter(|chain| !chain.trim().is_empty());
     let status = match control(DaemonCommand::RestartWhenIdle {
@@ -107,7 +107,7 @@ pub(crate) fn describe_restart(info: &scv_protocol::RestartInfo) -> String {
 }
 
 pub(crate) async fn run_daemon(workspace: &Path, overrides: ConfigOverrides) -> Result<()> {
-    let socket = scv_server::default_socket_path()?;
+    let socket = scv_client::default_socket_path()?;
     std::env::set_current_dir(workspace)
         .with_context(|| format!("change to daemon workspace {}", workspace.display()))?;
     scv_server::run_socket(&socket, overrides).await

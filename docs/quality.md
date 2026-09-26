@@ -143,7 +143,8 @@ finds both by path and the source file holds only the implementation:
 
 - `src/foo.rs` ends with `#[cfg(test)] mod tests;`, and its tests live in
   `src/foo/tests.rs`. The tests of `src/lib.rs`, `src/main.rs`, or a
-  `mod.rs` live in `tests.rs` beside it.
+  `mod.rs` live in `tests.rs` beside it. This holds for the `scv` binary
+  too: the command line's own logic is tested under `src/cli/**/tests.rs`.
 - A large suite may split by topic into `src/foo/tests/<topic>.rs`, declared
   with `mod <topic>;` in `src/foo/tests.rs`.
 - A test file starts with a `//!` line naming the source file it tests, then
@@ -160,9 +161,10 @@ finds both by path and the source file holds only the implementation:
 `#[tokio::test]` in any other source file fails it, and so does a test file
 that its parent module never declares (such a file would never run).
 
-Run one crate's unit tests with `cargo test -p <crate> [<name filter>]`, and
-the black-box tests of one area with `cargo test -p scv-cli --test it <module>::`
-(such as `daemon::`).
+Run one crate's unit tests with `cargo test -p <crate> [<name filter>]`, the
+`scv` binary's with `cargo test -p scv-cli --bin scv`, and the black-box tests
+of one area with `cargo test -p scv-cli --test it <module>::` (such as
+`daemon::`).
 
 ## Lints and formatting
 

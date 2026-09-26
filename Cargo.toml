@@ -118,12 +118,16 @@ scv-tui = { version = "=0.2.2", path = "crates/scv-tui" }
 anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
+libc.workspace = true
 scv-server.workspace = true
+scv-channels.workspace = true
 scv-client.workspace = true
 scv-protocol.workspace = true
 scv-clawbot.workspace = true
 scv-feishu.workspace = true
+scv-tools.workspace = true
 scv-tui.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
@@ -136,7 +140,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 base64.workspace = true
 criterion.workspace = true
-libc.workspace = true
 scv-core.workspace = true
 scv-protocol.workspace = true
 serde_json.workspace = true
@@ -149,12 +152,11 @@ harness = false
 [[bin]]
 name = "scv"
 path = "src/main.rs"
-# The binaries have no unit tests; tests/it drives them from outside.
-test = false
 
 [[bin]]
 name = "scv-server"
 path = "src/bin/scv-server.rs"
+# Only `main` lives here; `src/cli/common.rs` is tested with the `scv` binary.
 test = false
 
 [profile.release]

@@ -451,7 +451,7 @@ impl Notifier {
         if let Some(list) = &self.list {
             return list.clone();
         }
-        crate::Config::load_user(crate::ConfigOverrides::default()).map_or_else(
+        crate::config::Config::load_user(crate::config::ConfigOverrides::default()).map_or_else(
             |error| {
                 tracing::warn!(
                     "Notices use the owner's last chat; configuration failed: {error:#}"

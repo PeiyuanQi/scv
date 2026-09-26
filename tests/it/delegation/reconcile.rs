@@ -10,7 +10,7 @@ use std::{
 };
 
 use scv_protocol::{ClientMessage, PROTOCOL_VERSION, PeerInfo, ServerEvent};
-use scv_server::delegation::{DelegationRegistry, ProcessIdentity};
+use scv_tools::delegation::{DelegationRegistry, ProcessIdentity};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,

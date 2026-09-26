@@ -2,15 +2,22 @@
 //! agent homes, import setups into them, and list, collect, or stop their
 //! runs.
 
+mod imports;
+pub(crate) mod setup;
+
 use anyhow::{Context, Result, bail};
 use scv_protocol::DaemonCommand;
+use scv_server::config::{Config, ConfigOverrides};
+use scv_tools::adapters::{self, AdapterDescriptor};
+use scv_tools::stores::{Endpoint, StoredStatus, WireApi};
 use std::path::PathBuf;
 
 use super::args::AgentsCommand;
 use super::control;
+use super::prompt::{prompt_line, read_secret};
 
 pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
-    use scv_server::adapters::{Login, Logout, Status};
+    use adapters::{Login, Logout, Status};
     match command {
         AgentsCommand::Login {
             agent,
@@ -28,7 +35,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                         "--openai-compatible configures pi; {name} signs in with `scv agents login {name}`"
                     );
                 }
-                let endpoint = scv_server::Endpoint {
+                let endpoint = Endpoint {
                     base_url: match base_url {
                         Some(url) => url,
                         None => prompt_line("Base URL (e.g. https://host/v1)")?,
@@ -38,8 +45,8 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                         None => match prompt_line("Wire API [responses/chat] (default responses)")?
                             .as_str()
                         {
-                            "" | "responses" => scv_server::WireApi::Responses,
-                            "chat" => scv_server::WireApi::ChatCompletions,
+                            "" | "responses" => WireApi::Responses,
+                            "chat" => WireApi::ChatCompletions,
                             other => bail!("unknown wire API {other:?}; use responses or chat"),
                         },
                     },
@@ -48,8 +55,8 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                         None => prompt_line("Default model id")?,
                     },
                 };
-                let key = scv_server::read_secret("API key (input hidden)")?;
-                for line in scv_server::configure_pi_endpoint(&endpoint, &key)? {
+                let key = read_secret("API key (input hidden)")?;
+                for line in setup::configure_pi_endpoint(&user_config()?, &endpoint, &key)? {
                     println!("{line}");
                 }
                 println!("Check with `scv agents status pi`.");
@@ -75,11 +82,8 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                     if !extra.is_empty() {
                         bail!("{name} takes its API key from a prompt or stdin, not arguments");
                     }
-                    let key = scv_server::read_secret(&format!(
-                        "{} API key (input hidden)",
-                        adapter.product
-                    ))?;
-                    for line in scv_server::store_agent_key(name, store, &key)? {
+                    let key = read_secret(&format!("{} API key (input hidden)", adapter.product))?;
+                    for line in setup::store_agent_key(&user_config()?, name, store, &key)? {
                         println!("{line}");
                     }
                 }
@@ -92,12 +96,13 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
         AgentsCommand::Status { agent } => {
             let selected: Vec<_> = match agent {
                 Some(name) => vec![agent_descriptor(&name)?],
-                None => scv_server::adapters::ADAPTERS.iter().collect(),
+                None => adapters::ADAPTERS.iter().collect(),
             };
             for adapter in selected {
                 let name = adapter.name;
                 println!("{name}:");
-                let installed = scv_server::agent_executable(name)?;
+                let config = user_config()?;
+                let installed = setup::agent_executable(&config, name)?;
                 if installed.is_none() {
                     println!(
                         "  not installed ({:?} is not on PATH or in ~/.local/bin)",
@@ -109,7 +114,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                     // part of a key, so only a summary is printed; its own
                     // advice would also sign in the wrong home.
                     Status::Command(args) if installed.is_some() => {
-                        match scv_server::agent_command(name)?
+                        match setup::agent_command(&config, name)?
                             .args(args)
                             .stdin(std::process::Stdio::null())
                             .output()
@@ -119,7 +124,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                                 let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
                                 text.push('\n');
                                 text.push_str(&String::from_utf8_lossy(&output.stderr));
-                                let summary = scv_server::adapters::summarize_status(
+                                let summary = adapters::summarize_status(
                                     adapter.status_summary,
                                     output.status.success(),
                                     &text,
@@ -134,8 +139,8 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                     }
                     Status::Command(_) => {}
                     Status::Stored(store) => {
-                        let scv_server::StoredStatus { ready, lines } =
-                            scv_server::agent_stored_status(name, store)?;
+                        let StoredStatus { ready, lines } =
+                            setup::agent_stored_status(&config, name, store)?;
                         for line in lines {
                             println!("  {line}");
                         }
@@ -144,7 +149,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                         }
                     }
                 }
-                if let Some(line) = scv_server::agent_import_status(name)? {
+                if let Some(line) = setup::agent_import_status(&config, name)? {
                     println!("  {line}");
                 }
             }
@@ -160,7 +165,12 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
             older_than,
             dry_run,
         } => {
-            let reports = scv_server::collect_agent_garbage(agent.as_deref(), older_than, dry_run)?;
+            let reports = setup::collect_agent_garbage(
+                &user_config()?,
+                agent.as_deref(),
+                older_than,
+                dry_run,
+            )?;
             if reports.is_empty() {
                 println!("No agent keeps conversation transcripts yet.");
             }
@@ -205,7 +215,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                     })
                     .context("cannot determine your Codex home; pass --from")?;
                 println!("Importing Codex setup from {}", source.display());
-                for line in scv_server::import_codex(&source)? {
+                for line in setup::import_codex(&user_config()?, &source)? {
                     println!("  {line}");
                 }
                 println!(
@@ -224,7 +234,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                     })
                     .context("cannot determine your Grok home; pass --from")?;
                 println!("Importing Grok setup from {}", source.display());
-                for line in scv_server::import_grok(&source)? {
+                for line in setup::import_grok(&user_config()?, &source)? {
                     println!("  {line}");
                 }
                 println!(
@@ -245,7 +255,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                     );
                 }
                 println!("Pointing SCV's pi at SCV's own provider");
-                for line in scv_server::import_pi_from_scv_provider()? {
+                for line in setup::import_pi_from_scv_provider(&user_config()?)? {
                     println!("  {line}");
                 }
                 println!(
@@ -262,7 +272,9 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
             match adapter.logout {
                 Logout::Command(args) => run_agent(adapter.name, args, &[], "sign-out"),
                 Logout::Stored(store) => {
-                    for line in scv_server::remove_agent_credentials(adapter.name, store)? {
+                    for line in
+                        setup::remove_agent_credentials(&user_config()?, adapter.name, store)?
+                    {
                         println!("{line}");
                     }
                     Ok(())
@@ -275,7 +287,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
 /// Give the nested SCV behind `agent_scv` a copy of SCV's own provider.
 fn import_scv_child() -> Result<()> {
     println!("Giving SCV's nested SCV (agent_scv) a copy of SCV's own provider");
-    for line in scv_server::import_scv_from_scv_provider()? {
+    for line in setup::import_scv_from_scv_provider(&user_config()?)? {
         println!("  {line}");
     }
     println!(
@@ -284,13 +296,19 @@ fn import_scv_child() -> Result<()> {
     Ok(())
 }
 
-fn agent_descriptor(name: &str) -> Result<&'static scv_server::adapters::AdapterDescriptor> {
-    scv_server::adapters::adapter(name).with_context(|| format!("unknown agent {name}"))
+fn agent_descriptor(name: &str) -> Result<&'static AdapterDescriptor> {
+    adapters::adapter(name).with_context(|| format!("unknown agent {name}"))
+}
+
+/// The user configuration, which is all `scv agents` reads: project
+/// configuration cannot set `[agents]`.
+fn user_config() -> Result<Config> {
+    Config::load_user(ConfigOverrides::default())
 }
 
 /// Run an agent's own command inside its SCV agent home.
 fn run_agent(name: &str, args: &[&str], extra: &[String], action: &str) -> Result<()> {
-    let status = scv_server::agent_command(name)?
+    let status = setup::agent_command(&user_config()?, name)?
         .args(args)
         .args(extra)
         .status()
@@ -299,18 +317,6 @@ fn run_agent(name: &str, args: &[&str], extra: &[String], action: &str) -> Resul
         bail!("{name} {action} did not complete");
     }
     Ok(())
-}
-
-/// Read one non-secret line, from the terminal or piped stdin.
-fn prompt_line(prompt: &str) -> Result<String> {
-    use std::io::{BufRead as _, IsTerminal as _, Write as _};
-    if std::io::stdin().is_terminal() {
-        eprint!("{prompt}: ");
-        std::io::stderr().flush().ok();
-    }
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim().to_owned())
 }
 
 fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {

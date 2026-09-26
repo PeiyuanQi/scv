@@ -11,14 +11,14 @@ use anyhow::{Context, Result, anyhow};
 use scv_core::{AgentRuntime, ApprovalGate, BudgetContextPolicy, ToolRegistry};
 use scv_provider_openai::OpenAiProvider;
 use scv_tools::{
-    DelegationContext, background::BackgroundJobs, builtin_registry, delegation::DelegationRegistry,
+    DelegationContext, background::BackgroundJobs, builtin_registry,
+    delegation::DelegationRegistry, stores,
 };
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 use super::{Session, SessionClient};
 use crate::{
-    agents,
     approval::UnattendedGate,
     config::{self, Config, ConfigOverrides},
     prompt::{PromptContext, SkillListings, build_system_prompt, skills::discover_skills},
@@ -38,8 +38,8 @@ pub(crate) fn offered_adapters(config: &Config) -> HashMap<String, scv_tools::Ag
             &adapter.home,
         ) {
             (Some(scv_tools::adapters::Status::Stored(store)), Some(home)) => !matches!(
-                agents::stored_status(store, home),
-                Ok(agents::StoredStatus { ready: false, .. })
+                stores::stored_status(store, home),
+                Ok(stores::StoredStatus { ready: false, .. })
             ),
             _ => true,
         }

@@ -2,11 +2,14 @@
 //! running daemon into it.
 
 use anyhow::{Context, Result, bail};
+use scv_server::config::{Config, ConfigOverrides};
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 
 pub(crate) fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<()> {
-    let configured = scv_server::update_index_url(workspace)?;
+    let configured = Config::load(workspace, ConfigOverrides::default())?
+        .update
+        .index_url;
     let index_url = index_url
         .or_else(|| std::env::var("SCV_CARGO_INDEX_URL").ok())
         .or(configured);

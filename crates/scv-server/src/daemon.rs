@@ -2,11 +2,7 @@
 //! and delegated runs, and shutdown. [`run_stdio`] serves one connection
 //! without a daemon.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use scv_tools::delegation::{self as delegations, DelegationRegistry};
@@ -44,11 +40,6 @@ pub async fn run_stdio(overrides: ConfigOverrides) -> Result<()> {
     tasks.close();
     tasks.wait().await;
     result
-}
-
-/// Return the local Unix socket used by the SCV daemon and TUI.
-pub fn default_socket_path() -> Result<PathBuf> {
-    scv_client::default_socket_path()
 }
 
 /// Run the authoritative server on the local Unix socket.

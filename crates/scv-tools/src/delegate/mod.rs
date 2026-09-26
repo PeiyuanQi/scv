@@ -11,6 +11,8 @@
 //! - [`conversation`]: handles that continue an agent's conversation.
 //! - [`records`]: the on-disk record of every delegated process, for
 //!   listing, stopping, and cleanup.
+//! - [`stores`]: the credential files each agent CLI reads, in its own
+//!   format, inside SCV's private agent homes.
 //! - [`live`]: a long-lived child process read line by line.
 //! - [`output`] and [`progress`]: reading a run's output into one bounded
 //!   result, and its progress into short lines.
@@ -27,3 +29,4 @@ pub(crate) mod progress;
 pub mod records;
 pub(crate) mod request;
 pub(crate) mod scv;
+pub mod stores;

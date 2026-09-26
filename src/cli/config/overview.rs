@@ -8,14 +8,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use scv_client::Layout;
+use scv_server::config::{Config, ConfigOverrides};
 
-use crate::config::{Config, ConfigOverrides};
+use crate::cli::{agents::setup, service};
 
 /// Render the overview for a session started in `workspace`. With `all`,
 /// settings left at their defaults are listed too.
-pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Result<String> {
+pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Result<String> {
     let layout = Layout::from_env()?;
-    let home = crate::config::user_home_path()
+    let home = scv_server::config::user_home_path()
         .map_or_else(|| layout.home().to_owned(), |home| home.clone());
     let layout = Layout::new(home);
     let mut out = String::new();
@@ -57,7 +58,7 @@ pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Resul
         "no daemon is listening"
     };
     row(&mut out, &tilde(&socket), daemon)?;
-    if let Ok(unit) = crate::service_unit_path() {
+    if let Ok(unit) = service::service_unit_path() {
         let state = if unit.exists() { "present" } else { "missing" };
         row(
             &mut out,
@@ -128,7 +129,7 @@ pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Resul
     let mut any = false;
     // The raw file shows which media limits an account sets; the rest are
     // defaults SCV leaves out of it.
-    let raw = crate::config::read_layer(&layout.config()).ok();
+    let raw = scv_server::config::read_layer(&layout.config()).ok();
     let listing = Listing {
         home: layout.home(),
         raw: raw.as_ref(),
@@ -147,6 +148,9 @@ pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Resul
         "\nAgents ([agents.<name>] in config.toml; homes under {})",
         tilde(&layout.agents())
     )?;
+    // Imports compare against the user configuration, which project
+    // configuration and flags never change; read it once, when needed.
+    let mut user_config = None;
     for adapter in scv_tools::adapters::ADAPTERS {
         let home = layout.agent_home(adapter.name);
         if !home.is_dir() {
@@ -159,7 +163,13 @@ pub fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Resul
             .map(|file| format!("{file} {}", describe(&home.join(file))))
             .collect();
         row(&mut out, adapter.name, &credentials.join(", "))?;
-        match crate::agent_import_status(adapter.name) {
+        let user_config =
+            user_config.get_or_insert_with(|| Config::load_user(ConfigOverrides::default()));
+        let status = match user_config {
+            Ok(config) => setup::agent_import_status(config, adapter.name),
+            Err(error) => Err(anyhow::anyhow!("{error}")),
+        };
+        match status {
             Ok(Some(line)) => writeln!(out, "  {:<32} {line}", "")?,
             Ok(None) => {}
             Err(error) => writeln!(

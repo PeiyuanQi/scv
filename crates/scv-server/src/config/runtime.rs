@@ -15,7 +15,7 @@ use scv_tools::{
 use super::{AgentPermissions, AgentTransport, Config, WebSearchMode, load::ensure_private_dir};
 
 impl Config {
-    pub fn core_agent(&self, system_prompt: String) -> CoreAgentConfig {
+    pub(crate) fn core_agent(&self, system_prompt: String) -> CoreAgentConfig {
         CoreAgentConfig {
             system_prompt,
             max_steps: self.agent.max_steps,
@@ -27,7 +27,7 @@ impl Config {
         }
     }
 
-    pub fn tools(&self) -> ToolsConfig {
+    pub(crate) fn tools(&self) -> ToolsConfig {
         ToolsConfig {
             command_timeout: Duration::from_secs(self.tools.command_timeout_seconds),
             agent_timeout: Duration::from_secs(self.tools.agent_timeout_seconds),
@@ -49,7 +49,7 @@ impl Config {
 
     /// Web tool settings for a tool-enabled session, or `None` when disabled.
     /// A Brave backend without a key is left out rather than failing the session.
-    pub fn web_tools(&self) -> Option<WebToolsConfig> {
+    pub(crate) fn web_tools(&self) -> Option<WebToolsConfig> {
         if !self.web.enabled {
             return None;
         }
@@ -101,7 +101,7 @@ impl Config {
         self.web.enabled && self.web.search == WebSearchMode::Provider
     }
 
-    pub fn provider_limits(&self) -> ProviderLimits {
+    pub(crate) fn provider_limits(&self) -> ProviderLimits {
         ProviderLimits {
             max_sse_event_bytes: self.provider_limits.max_sse_event_bytes,
             max_response_bytes: self.provider_limits.max_response_bytes,
