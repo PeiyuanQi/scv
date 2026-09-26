@@ -22,7 +22,7 @@ uses `scv-client` and `scv-protocol` and never depends on the server crate.
 scv channels login wechat [--account NAME] [--login-url URL]
 scv channels login feishu|lark [--account NAME]
 scv channels login feishu|lark --app-id CLI_ID [--owner-open-id OPEN_ID] [--account NAME]
-scv channels run <channel> --workspace PATH [--account NAME] [--remote-tools none|owner]
+scv channels run <channel> --workspace PATH [--account NAME] [--remote-tools none|owner] [--senders owner|anyone]
 scv channels stop <channel> [--account NAME]
 scv channels status [<channel>] [--account NAME]
 scv channels logout <channel> [--account NAME]
@@ -48,8 +48,9 @@ the daemon is reachable; otherwise enabled accounts start on its next startup.
 
 `run` validates the account and workspace, persists enablement through the
 live daemon, and returns. `--remote-tools` persists the account's remote tool
-authority (see [Sessions and safety](#sessions-and-safety)); omitting it keeps
-the saved value. `stop` persistently disables the account and joins
+authority and `--senders` whose messages it answers (see
+[Sessions and safety](#sessions-and-safety)); omitting either keeps the saved
+value. `stop` persistently disables the account and joins
 its component while retaining credentials. `logout` requires a live daemon:
 it persists disablement, cancels and joins the component, then removes local
 credentials, delivery state, and the account's `[channels]` table. The API has no documented remote
@@ -58,10 +59,12 @@ token-revocation operation.
 `status` queries the running daemon, showing its PID/version, a
 `Channels: <connected> of <enabled> enabled accounts connected` line, and each
 selected account as an indented JSON object: its identity, enabled setting,
-effective `remote_tools` authority, health state, restart count, sanitized
-error, and last successful contact: an
+effective `remote_tools` authority, `senders` setting, health state, restart
+count, sanitized error, and last successful contact: an
 authenticated, validated WeChat `getupdates`, or for Feishu a connected long
-connection that finished its catch-up or its last wait without error. `scv
+connection that finished its catch-up or its last wait without error. An
+account that answers only its owner but has no owner ID on record gets a note
+that it answers nobody. `scv
 status` prints the same for every account.
 Saved credentials are not proof of a connection. If the daemon is unavailable,
 connectivity is unknown.
@@ -83,9 +86,13 @@ Each account's settings are a table in the instance's `config.toml`
 enabled = true
 workspace = "/absolute/path/to/workspace"
 remote_tools = "none"
+# senders = "anyone"        # answer every sender; omitted, only the owner
 ```
 
-A missing table or key defaults to enabled and tool-free. An omitted workspace
+A missing table or key defaults to enabled, tool-free, and answering only the
+account's owner (`senders = "owner"`). SCV writes `senders` only when it is
+`"anyone"`, so a table it edits stays readable by releases before the setting,
+which reject it as unknown. An omitted workspace
 uses the daemon workspace. `run --account NAME --workspace PATH` persists an
 explicit workspace. To opt out offline, set `enabled = false` in the table
 before starting the daemon. Login honors this opt-out. `scv channels run`,
@@ -265,7 +272,7 @@ such as one a company administrator approved. The secret is read from a
 hidden prompt or stdin, never an argument, and checked against
 `/open-apis/auth/v3/tenant_access_token/internal` before anything is written.
 `--owner-open-id` names the owner; without it the account grants tools to
-nobody.
+nobody and, unless it answers anyone, answers nobody. Login says so.
 
 **Receiving.** Each connection starts with
 `POST {open}/callback/ws/endpoint` (`AppID`, `AppSecret`), which returns a
@@ -297,8 +304,9 @@ it runs again. Deduplication by message ID drops anything already claimed or
 answered, including a late socket redelivery. Messages from chats SCV has not
 yet seen are not caught up.
 
-**Messages.** Every kind of user message is answered except `system`
-messages, which are only marked seen; see [Feishu media](#feishu-media) for
+**Messages.** Every kind of user message is answered, from whoever the
+account answers (see [Sessions and safety](#sessions-and-safety)), except
+`system` messages, which are only marked seen; see [Feishu media](#feishu-media) for
 files, quotes, and forwarded messages. Rich text (`post`) becomes plain text,
 one paragraph per line. In a group (any `chat_type` other than `p2p`) the bot answers
 only messages that mention it, identified by its own `open_id` from
@@ -334,8 +342,9 @@ limit and turn slot, the bridge fetches what the message refers to (a quoted
 message, or a forwarded bundle's messages, shown before the text) and
 downloads at most 16 files. Each download is bounded by the account's
 [media settings](configuration.md#daemon-and-component-settings): the owner's
-files up to `owner_max_mib` (50 MiB), other senders' images up to
-`others_image_max_mib` (5 MiB), and never other senders' other files. The
+files up to `owner_max_mib` (50 MiB), and, on an account that answers anyone,
+other senders' images up to `others_image_max_mib` (5 MiB) and never their
+other files. The
 platform's announced size is checked before downloading and the bytes while
 downloading. A file is saved under
 `$SCV_HOME/state/media/<channel>/<account>/<conversation>/` as
@@ -505,6 +514,22 @@ in that account's outbox like a background report. See
 
 ## Sessions and safety
 
+Whose messages an account answers is a per-account setting, `senders`, that
+only local CLI or daemon control (or an edit of `config.toml`) can change:
+
+- `owner` (default): only the account's authenticated owner, the iLink
+  `user_id` recorded at QR login or the Feishu `open_id` recorded at sign-in,
+  is answered, in direct chats and, when a message mentions the bot, in
+  groups. Anyone else's message is dropped silently: no reply or busy notice,
+  no download, no daemon session, and no model turn. It is still marked seen
+  and checkpointed like any handled message, so it is never replayed, and the
+  log records only that the account ignored a message from someone other
+  than its owner, never who sent it or what it said. An account with no known
+  owner ID answers nobody; `scv channels status`, `scv config show`, and login
+  say so.
+- `anyone`: every sender who can reach the bot is answered, tool-free unless
+  it is the owner holding remote tools (below).
+
 Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A
 group message (a non-empty WeChat `group_id`, or a Feishu chat other than
 `p2p`) uses a separate session per group and sender, so group members never see the sender's direct-chat history. Sessions
@@ -558,7 +583,9 @@ CLI or daemon control can change:
 
 `scv channels run <channel> --remote-tools owner` reports whether the daemon
 actually applied the grant; a login without an owner ID leaves it inactive with
-a warning. Delegated `agent_claude` and `agent_codex` calls need
+a warning. `--senders` likewise reports what the daemon applied, and warns when
+an owner-only account has no owner ID and so answers nobody. Logout resets
+`senders` to `owner` along with the tool grant. Delegated `agent_claude` and `agent_codex` calls need
 their CLIs signed in for SCV first; see `scv agents login` in the
 [tools reference](tools.md#signing-in-delegated-agents).
 

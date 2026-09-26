@@ -661,6 +661,7 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
             socket: &socket,
             owner: None,
             tool_owner: None,
+            senders: crate::state::Senders::Anyone,
             media,
             link: &detached,
             report: &report,

@@ -1,7 +1,7 @@
 //! The `scv` command line: every subcommand, flag, and value type clap parses.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use scv_protocol::RemoteTools;
+use scv_protocol::{RemoteTools, Senders};
 use std::path::PathBuf;
 
 use super::common::ApprovalArg;
@@ -175,6 +175,12 @@ pub(crate) enum ChannelsCommand {
         /// Omitted keeps the saved setting.
         #[arg(long, value_enum)]
         remote_tools: Option<RemoteToolsArg>,
+        /// Whose messages the account answers: `owner` (the default) answers
+        /// only the account's own owner and silently drops everyone else's;
+        /// `anyone` answers every sender, tool-free unless the owner. Omitted
+        /// keeps the saved setting.
+        #[arg(long, value_enum)]
+        senders: Option<SendersArg>,
     },
     /// Persistently disable a supervised account (credentials are retained).
     Stop {
@@ -344,6 +350,21 @@ impl From<RemoteToolsArg> for RemoteTools {
         match value {
             RemoteToolsArg::None => Self::None,
             RemoteToolsArg::Owner => Self::Owner,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum SendersArg {
+    Owner,
+    Anyone,
+}
+
+impl From<SendersArg> for Senders {
+    fn from(value: SendersArg) -> Self {
+        match value {
+            SendersArg::Owner => Self::Owner,
+            SendersArg::Anyone => Self::Anyone,
         }
     }
 }

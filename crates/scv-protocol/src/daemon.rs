@@ -52,6 +52,10 @@ pub struct ComponentHealth {
     /// Effective remote tool authority; `owner` only when the owner ID is known.
     #[serde(default)]
     pub remote_tools: RemoteTools,
+    /// Who the account answers, as set; `owner` with no known owner ID
+    /// answers nobody. `None` from daemons before 0.3.0, which answer anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub senders: Option<Senders>,
 }
 
 /// Who may use tools through a remote bridge account.
@@ -63,6 +67,18 @@ pub enum RemoteTools {
     None,
     /// The account's authenticated owner gets full, auto-approved tools.
     Owner,
+}
+
+/// Whose messages a remote bridge account answers.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Senders {
+    /// Only the account's authenticated owner (the default); everyone else's
+    /// messages are dropped unanswered. Without a known owner ID, nobody.
+    #[default]
+    Owner,
+    /// Anyone who can reach the bot; everyone but the owner stays tool-free.
+    Anyone,
 }
 
 /// What `scv status` shows: the daemon, its components, and its delegations.
@@ -156,7 +172,7 @@ pub enum DaemonCommand {
     /// Reread channel settings and reconcile the components now.
     Reload,
     /// Enable or disable one channel account, optionally changing its
-    /// workspace and remote tool grant.
+    /// workspace, remote tool grant, and whose messages it answers.
     ChannelSet {
         /// The chat channel, such as `wechat` or `feishu`.
         channel: String,
@@ -169,6 +185,10 @@ pub enum DaemonCommand {
         /// Omitted keeps the saved setting.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remote_tools: Option<RemoteTools>,
+        /// Whose messages the account answers; omitted keeps the saved
+        /// setting.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        senders: Option<Senders>,
     },
     /// Stop one channel account and remove its credentials and state.
     ChannelLogout {

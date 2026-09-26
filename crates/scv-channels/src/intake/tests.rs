@@ -34,7 +34,8 @@ fn tool_owner(user_id: &str) -> ToolOwner {
     }
 }
 
-/// What the bridge knows with no claims, no conversations, and no owner.
+/// What the bridge knows with no claims, no conversations, and no owner, on
+/// an account that answers anyone.
 fn quiet<'a>(
     state: &'a state::BridgeState,
     conversations: &'a HashMap<String, Conversation>,
@@ -44,6 +45,20 @@ fn quiet<'a>(
         conversations,
         owner: None,
         tool_owner: None,
+        senders: Senders::Anyone,
+    }
+}
+
+/// What an owner-only account owned by `owner` knows.
+fn owned<'a>(
+    state: &'a state::BridgeState,
+    conversations: &'a HashMap<String, Conversation>,
+    owner: Option<&'a str>,
+) -> Intake<'a> {
+    Intake {
+        owner,
+        senders: Senders::Owner,
+        ..quiet(state, conversations)
     }
 }
 
@@ -252,4 +267,93 @@ fn a_full_session_table_never_closes_a_conversation_with_background_work() {
         conversation.watching.store(true, Ordering::Release);
     }
     assert_eq!(evictable(&conversations, waiting), None);
+}
+
+#[test]
+fn an_owner_only_account_answers_its_owner_and_drops_everyone_else() {
+    let state = state::BridgeState::default();
+    let conversations = HashMap::new();
+    let intake = owned(&state, &conversations, Some("owner"));
+    let direct = text("m1", "owner", None);
+    let Verdict::Turn { sender, owner, .. } = classify(&direct, &intake) else {
+        panic!("the owner is answered");
+    };
+    assert!(sender.owner_chat && !owner);
+    // In a group the owner is still answered, tool-free, on the group's
+    // conversation.
+    let grouped = text("m2", "owner", Some("group"));
+    let Verdict::Turn { sender, owner, .. } = classify(&grouped, &intake) else {
+        panic!("the owner's group message is answered");
+    };
+    assert_eq!(sender.key, "group\0owner");
+    assert!(!sender.owner_chat && !owner);
+    // Anyone else, alone or in the owner's group, is only marked seen.
+    for inbound in [
+        text("m3", "other", None),
+        text("m4", "other", Some("group")),
+    ] {
+        assert_eq!(classify(&inbound, &intake), Verdict::Stranger);
+    }
+}
+
+#[test]
+fn an_owner_only_account_with_no_known_owner_answers_nobody() {
+    let state = state::BridgeState::default();
+    let conversations = HashMap::new();
+    let intake = owned(&state, &conversations, None);
+    for inbound in [
+        text("m1", "owner", None),
+        text("m2", "other", Some("group")),
+    ] {
+        assert_eq!(classify(&inbound, &intake), Verdict::Stranger);
+    }
+}
+
+#[test]
+fn an_account_that_answers_anyone_keeps_owner_authority_for_the_owner_alone() {
+    let state = state::BridgeState::default();
+    let conversations = HashMap::new();
+    let granted = tool_owner("owner");
+    let intake = Intake {
+        owner: Some("owner"),
+        tool_owner: Some(&granted),
+        ..quiet(&state, &conversations)
+    };
+    let turn = |inbound: &Inbound| match classify(inbound, &intake) {
+        Verdict::Turn { sender, owner, .. } => (sender.owner_chat, owner),
+        other => panic!("expected a turn, got {other:?}"),
+    };
+    assert_eq!(turn(&text("m1", "owner", None)), (true, true));
+    assert_eq!(turn(&text("m2", "other", None)), (false, false));
+    assert_eq!(turn(&text("m3", "other", Some("group"))), (false, false));
+}
+
+#[test]
+fn a_dropped_sender_never_gets_the_busy_reply_and_seen_ids_stay_ignored() {
+    let conversations = HashMap::new();
+    let full = state::BridgeState {
+        seen: vec!["old".into()],
+        in_flight: (0..MAX_CLAIMS)
+            .map(|index| claim(&index.to_string(), &format!("sender-{index}")))
+            .collect(),
+        ..Default::default()
+    };
+    let intake = owned(&full, &conversations, Some("owner"));
+    assert_eq!(
+        classify(&text("new", "other", None), &intake),
+        Verdict::Stranger
+    );
+    assert!(matches!(
+        classify(&text("mine", "owner", None), &intake),
+        Verdict::Busy(_)
+    ));
+    // Seen and claimed messages keep their own verdicts.
+    assert_eq!(
+        classify(&text("old", "other", None), &intake),
+        Verdict::Ignore
+    );
+    assert_eq!(
+        classify(&text("0", "other", None), &intake),
+        Verdict::Claimed
+    );
 }

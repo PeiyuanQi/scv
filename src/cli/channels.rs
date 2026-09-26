@@ -6,7 +6,7 @@ use scv_channels::Channel as _;
 use scv_channels::feishu::{self, Feishu};
 use scv_channels::wechat::{self, WeChat};
 use scv_client::Layout;
-use scv_protocol::{DaemonCommand, RemoteTools};
+use scv_protocol::{ComponentHealth, DaemonCommand, RemoteTools, Senders};
 use std::path::Path;
 
 use super::args::{ChannelArg, ChannelsCommand};
@@ -65,6 +65,7 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
             account,
             workspace,
             remote_tools,
+            senders,
         } => {
             channel_run(
                 layout,
@@ -72,6 +73,7 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
                 &account,
                 &workspace,
                 remote_tools.map(Into::into),
+                senders.map(Into::into),
             )
             .await
         }
@@ -84,6 +86,7 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
                     enabled: false,
                     workspace: None,
                     remote_tools: None,
+                    senders: None,
                 },
             )
             .await?;
@@ -117,6 +120,7 @@ async fn channel_run(
     account: &str,
     workspace: &Path,
     remote_tools: Option<RemoteTools>,
+    senders: Option<Senders>,
 ) -> Result<()> {
     let workspace = std::fs::canonicalize(workspace).context("resolve channel workspace")?;
     let status = control(
@@ -127,6 +131,7 @@ async fn channel_run(
             enabled: true,
             workspace: Some(workspace.display().to_string()),
             remote_tools,
+            senders,
         },
     )
     .await?;
@@ -135,14 +140,14 @@ async fn channel_run(
         channel.title(),
         channel.name()
     );
+    let health = status
+        .components
+        .iter()
+        .find(|health| health.channel == channel.name() && health.account == account);
     if remote_tools == Some(RemoteTools::Owner) {
         // Report what the daemon applied: credentials without an owner ID
         // grant tools to nobody.
-        let effective = status.components.iter().any(|health| {
-            health.channel == channel.name()
-                && health.account == account
-                && health.remote_tools == RemoteTools::Owner
-        });
+        let effective = health.is_some_and(|health| health.remote_tools == RemoteTools::Owner);
         if effective {
             println!(
                 "Remote tools: the account's own {} owner now runs every SCV tool without approval prompts.",
@@ -154,7 +159,41 @@ async fn channel_run(
             );
         }
     }
+    // Report whose messages the daemon answers now.
+    let applied = health.and_then(|health| health.senders);
+    if let Some(health) = health.filter(|health| answers_nobody(health)) {
+        println!("Warning: {}", nobody_note(health));
+    } else {
+        match (senders, applied) {
+            (Some(_), None) => println!(
+                "Warning: the running daemon predates --senders and did not save it; restart it into this release and run this again."
+            ),
+            (Some(Senders::Owner), Some(Senders::Owner)) => println!(
+                "Senders: only the account's own {} owner is answered; everyone else's messages are dropped unanswered.",
+                channel.title()
+            ),
+            (Some(Senders::Anyone), Some(Senders::Anyone)) => println!(
+                "Senders: anyone who can reach the bot is answered; everyone but the owner stays tool-free."
+            ),
+            _ => {}
+        }
+    }
     Ok(())
+}
+
+/// Whether an account answers only its owner but has none recorded.
+pub(crate) fn answers_nobody(health: &ComponentHealth) -> bool {
+    health.senders == Some(Senders::Owner) && health.user_id.as_deref().is_none_or(str::is_empty)
+}
+
+/// Why [`answers_nobody`] holds, and what changes it.
+pub(crate) fn nobody_note(health: &ComponentHealth) -> String {
+    format!(
+        "{:?} answers nobody: it answers only its owner (senders = \"owner\"), and its sign-in records no owner ID. Sign in again naming the owner, or set senders = \"anyone\" in [channels.{}.{}] to answer every sender tool-free.",
+        health.id,
+        health.channel.escape_debug(),
+        health.account.escape_debug()
+    )
 }
 
 async fn reload_after_login(layout: &Layout) -> Result<()> {

@@ -5,6 +5,7 @@ use anyhow::Result;
 use scv_client::Layout;
 use scv_protocol::DaemonCommand;
 
+use super::channels::{answers_nobody, nobody_note};
 use super::control;
 use super::daemon::describe_restart;
 
@@ -46,6 +47,9 @@ pub(crate) async fn show_status(
     for health in &matching {
         // JSON escaping makes account identity and other untrusted strings terminal-safe.
         println!("{}", serde_json::to_string_pretty(health)?);
+        if answers_nobody(health) {
+            println!("Note: {}", nobody_note(health));
+        }
     }
     if matching.is_empty() {
         println!("No matching supervised components.");

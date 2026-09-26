@@ -259,8 +259,9 @@ its brand's Open Platform and accounts hosts (`open.feishu.cn` and
 redirects, and one WebSocket whose host must be on the brand's domain over TLS
 on port 443, checked before dialing. Responses are capped at 4 MiB and events
 at 8 MiB; the app secret, tenant token, and the socket URL's one-time keys
-never reach logs, errors, or status. Remote sessions are tool-free unless the account grants its owner
-tools; see [Supervised remote bridge](#supervised-remote-bridge). Remote
+never reach logs, errors, or status. An account answers only its owner unless
+set to answer anyone, and remote sessions are tool-free unless the account
+grants its owner tools; see [Supervised remote bridge](#supervised-remote-bridge). Remote
 messages cannot bypass server policy.
 
 Protocol lines, tool arguments, tool output, and provider responses are size
@@ -285,17 +286,28 @@ mode `0600` and atomic writes, in mode `0700` directories. Project
 configuration and `SCV_CONFIG` cannot choose bridge accounts, workspaces, or
 remote authority.
 
+By default an account answers only its authenticated owner (the iLink
+`user_id` from QR login, or the Feishu `open_id` of the app's creator, or the
+one named with `--owner-open-id`), and an account with no known owner answers
+nobody. Anyone else's message is dropped before anything acts on it: no
+reply, no download, no daemon session, and no model turn, so other senders
+can neither spend the owner's model quota nor put content in front of the
+model. It is only marked seen, and logged without its sender or content. The
+account's `senders = "anyone"` setting, changeable only through local CLI or
+daemon control or the instance's own `config.toml`, answers every sender who
+can reach the bot instead; they stay tool-free.
+
 By default, remote sessions request `no_tools: true`, enforced by the server,
 and the bridge denies any approval request, so remote messages do not authorize
 filesystem, shell, or delegated-agent tools. An account's `remote_tools =
 "owner"` setting, changeable only through local CLI or daemon control, grants
-the authenticated account owner (the iLink `user_id` from QR login, or the
-Feishu `open_id` of the app's creator, or the one named with
-`--owner-open-id`) full tools with every approval request auto-approved. That
+the authenticated account owner full tools with every approval request
+auto-approved. That
 makes the owner's chat account equivalent to local shell access as the daemon
 user: anyone who can
 send messages from it can read and change files, run commands, and launch
-delegated agents without confirmation. Other senders, the owner's messages in
+delegated agents without confirmation. Other senders (on an account that
+answers anyone), the owner's messages in
 group chats, and accounts without a known owner ID stay tool-free; group
 conversations never share the owner's direct-chat session. Logout clears the
 grant before deleting credentials. Owner replies are ordinary assistant output and may quote
@@ -309,7 +321,8 @@ Saved credentials alone do not establish connectivity.
 Files chat users send are untrusted input. The bridge downloads them only
 from the platform (HTTPS on the WeChat CDN's `qq.com` hosts, or the Feishu
 resource API on the brand's own host), within per-account size limits, and
-from senders other than the owner only images; it saves them with mode `0600`
+from senders other than the owner, whom only an account that answers anyone
+hears, only images; it saves them with mode `0600`
 under `$SCV_HOME/state/media` behind random prefixes and sanitized names,
 never executes them, and removes them after the retention period. A
 tool-free session's model never sees their paths. Images reach the model as

@@ -139,6 +139,7 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
     assert!(empty.enabled);
     assert!(empty.workspace.is_none());
     assert_eq!(empty.remote_tools, RemoteTools::None);
+    assert_eq!(empty.senders, Senders::Owner);
 
     let config = directory.path().join("config.toml");
     let original = "# my provider\n[provider]\nactive = \"openai\" # keep this\n";
@@ -147,6 +148,7 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
         enabled: false,
         workspace: Some(directory.path().join("workspace")),
         remote_tools: RemoteTools::Owner,
+        senders: Senders::Owner,
         media: MediaSettings::default(),
     };
     store.save_settings("default", &settings).unwrap();
@@ -199,6 +201,7 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
     for invalid in [
         "[channels.test.default]\nenabeld = false\n",
         "[channels.test.default]\nremote_tools = \"everyone\"\n",
+        "[channels.test.default]\nsenders = \"everyone\"\n",
         "[channels]\ntest = 1\n",
     ] {
         atomic_write(&config, invalid).unwrap();
@@ -221,6 +224,38 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(store.settings("default").is_err());
     }
+}
+
+#[test]
+fn senders_default_to_the_owner_and_only_anyone_is_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store(directory.path());
+    let config = directory.path().join("config.toml");
+    // Saving an account's settings never adds the key when it is the
+    // default, so releases before the setting still read the file.
+    store
+        .save_settings("default", &AccountSettings::default())
+        .unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(!text.contains("senders"), "{text}");
+    assert_eq!(store.settings("default").unwrap().senders, Senders::Owner);
+    let anyone = AccountSettings {
+        senders: Senders::Anyone,
+        ..AccountSettings::default()
+    };
+    store.save_settings("default", &anyone).unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("senders = \"anyone\"\n"), "{text}");
+    assert_eq!(store.settings("default").unwrap(), anyone);
+    // Back to the default: the key leaves the file again.
+    store
+        .save_settings("default", &AccountSettings::default())
+        .unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(!text.contains("senders"), "{text}");
+    // A person may still write the default out.
+    atomic_write(&config, "[channels.test.default]\nsenders = \"owner\"\n").unwrap();
+    assert_eq!(store.settings("default").unwrap().senders, Senders::Owner);
 }
 
 #[test]

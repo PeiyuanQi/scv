@@ -108,6 +108,20 @@ fn the_bridge_grants_tools_only_with_an_owner_and_a_turn_timeout() {
     let bridge = run.bridge(ChannelKind::Wechat).unwrap();
     assert_eq!(bridge.owner, Some("owner@im.wechat"));
     assert_eq!(bridge.tool_owner, None);
+    // Only the owner is answered unless the settings say anyone.
+    assert_eq!(bridge.senders, state::Senders::Owner);
+    let anyone = AccountSettings {
+        senders: state::Senders::Anyone,
+        ..AccountSettings::default()
+    };
+    let open = AccountRun {
+        settings: &anyone,
+        ..run
+    };
+    assert_eq!(
+        open.bridge(ChannelKind::Wechat).unwrap().senders,
+        state::Senders::Anyone
+    );
     assert_eq!(
         bridge.media.inbox,
         home.path().join("state/media/wechat/default")

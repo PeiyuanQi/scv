@@ -112,14 +112,16 @@ fn saved_store(directory: &Path, base_url: &str) -> credentials::Store {
 
 /// One bridge run against the test's fake iLink at `base` and fake daemon at
 /// `socket`, for the `default` account saved in `store`. Everything a test
-/// does not set takes the usual value: no tool owner, media
-/// under the test directory, no health reports, and no hub.
+/// does not set takes the usual value: no tool owner, answering anyone
+/// (`senders = "anyone"`), media under the test directory, no health
+/// reports, and no hub.
 struct Bridge<'a> {
     directory: &'a Path,
     base: &'a str,
     socket: &'a Path,
     store: &'a credentials::Store,
     owner: Option<&'a ToolOwner>,
+    senders: crate::state::Senders,
     media: Option<crate::MediaOptions>,
     report: &'a (dyn Fn(bool) + Send + Sync),
     link: Option<&'a crate::hub::Link>,
@@ -138,6 +140,7 @@ impl<'a> Bridge<'a> {
             socket,
             store,
             owner: None,
+            senders: crate::state::Senders::Anyone,
             media: None,
             report: &|_| {},
             link: None,
@@ -187,6 +190,7 @@ impl<'a> Bridge<'a> {
                     socket: self.socket,
                     owner: self.owner.map(|owner| owner.user_id.as_str()),
                     tool_owner: self.owner.cloned(),
+                    senders: self.senders,
                     media,
                     link: self.link.unwrap_or(&detached),
                     report: self.report,
@@ -564,6 +568,7 @@ async fn mismatched_credentials_never_contact_poll_or_send() {
             socket: &directory.path().join("missing.sock"),
             owner: None,
             tool_owner: None,
+            senders: crate::state::Senders::Owner,
             media: media(directory.path()),
             link: &detached,
             report: &|_| panic!("no contact"),

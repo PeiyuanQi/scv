@@ -29,7 +29,8 @@ pub trait Channel: Send + Sync + 'static {
     async fn login(layout: &Layout, account: &str, login: Self::Login) -> Result<()>;
 
     /// The account owner's sender ID, recorded at sign-in: shown in status,
-    /// and the only sender remote tools may reach.
+    /// the only sender an owner-only account answers, and the only one
+    /// remote tools may reach.
     fn owner(credentials: &Self::Credentials) -> Option<&str>;
 
     /// The bot's identity shown in status.
@@ -336,6 +337,7 @@ impl<'a> AccountRun<'a> {
                     user_id: user_id.to_owned(),
                     turn_timeout,
                 }),
+            senders: self.settings.senders,
             media: MediaOptions::new(
                 self.layout,
                 kind.name(),

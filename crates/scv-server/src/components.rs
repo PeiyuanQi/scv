@@ -4,7 +4,9 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use scv_channels::state::{self, AccountSettings};
 use scv_channels::{Accounts, ChannelCredentials, ChannelKind};
-use scv_protocol::{ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, RemoteTools};
+use scv_protocol::{
+    ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, RemoteTools, Senders,
+};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -390,6 +392,7 @@ impl Components {
             if tools {
                 health.remote_tools = RemoteTools::Owner;
             }
+            health.senders = Some(settings.senders);
             if settings.enabled {
                 let workspace = settings
                     .workspace
@@ -460,6 +463,7 @@ impl Components {
                 enabled,
                 workspace,
                 remote_tools,
+                senders,
             } => {
                 let channel = ChannelKind::parse(&channel)?;
                 state::validate_name(&account)?;
@@ -486,6 +490,9 @@ impl Components {
                     if let Some(mode) = remote_tools {
                         settings.remote_tools = mode;
                     }
+                    if let Some(senders) = senders {
+                        settings.senders = senders;
+                    }
                     accounts.save_settings(&account, &settings)
                 })
                 .await?;
@@ -493,13 +500,15 @@ impl Components {
             DaemonCommand::ChannelLogout { channel, account } => {
                 let channel = ChannelKind::parse(&channel)?;
                 state::validate_name(&account)?;
-                // Persist disabled and tool-free first, so failed deletion can
-                // neither resurrect a live account nor hand a later login the grant.
+                // Persist disabled, tool-free, and owner-only first, so failed
+                // deletion can neither resurrect a live account nor hand a
+                // later login the grant or other senders.
                 let accounts = self.accounts(channel);
                 retry_while_busy(|| {
                     let mut settings = accounts.settings(&account)?;
                     settings.enabled = false;
                     settings.remote_tools = RemoteTools::None;
+                    settings.senders = Senders::Owner;
                     accounts.save_settings(&account, &settings)
                 })
                 .await?;
@@ -584,6 +593,7 @@ fn initial_health(
         error: None,
         restarts: 0,
         remote_tools: RemoteTools::None,
+        senders: None,
     }
 }
 

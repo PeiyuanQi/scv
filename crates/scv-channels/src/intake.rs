@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use crate::state::Senders;
 use crate::{
     Inbound, Job, MAX_CLAIMS, MAX_QUEUED_PER_CONVERSATION, MAX_SESSIONS, Message, TURN_TIMEOUT,
     ToolOwner, conversation_key, state,
@@ -33,6 +34,8 @@ pub(crate) struct Intake<'a> {
     pub(crate) owner: Option<&'a str>,
     /// The owner, when the account grants it remote tools.
     pub(crate) tool_owner: Option<&'a ToolOwner>,
+    /// Whose messages the account answers.
+    pub(crate) senders: Senders,
 }
 
 /// A message to answer, who it comes from, and where it belongs.
@@ -55,6 +58,9 @@ pub(crate) enum Verdict<'m> {
     /// Already claimed, or answered and waiting for delivery: nothing to do,
     /// so it never runs a second turn.
     Claimed,
+    /// From someone the account does not answer (`senders = "owner"`, and
+    /// not the owner): record its ID as seen and nothing more.
+    Stranger,
     /// A message to answer while the bridge is at its work limits: answer
     /// with the busy notice instead of a turn.
     Busy(Sender<'m>),
@@ -78,6 +84,7 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         conversations,
         owner,
         tool_owner,
+        senders,
     } = *intake;
     let id = inbound.id();
     if state.seen.iter().any(|seen| seen == id) {
@@ -94,6 +101,10 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         return Verdict::Ignore;
     };
     let sender = message.sender.as_str();
+    // An owner-only account without a known owner answers nobody.
+    if senders == Senders::Owner && owner != Some(sender) {
+        return Verdict::Stranger;
+    }
     let direct = message.group.is_none();
     let key = message
         .group
