@@ -184,15 +184,16 @@ workspace, the daemon socket, the hub link, and a health callback; the
 supervisor cancels the run by dropping it. Each channel module (`wechat`,
 `feishu`) implements `Channel`, which signs in and runs an account, and the
 crate-internal `Transport`, which receives a batch of messages after a
-checkpoint and sends one part of a message. A transport may also name a prefix
+checkpoint and sends one part of a message. A transport may also name a label
 for the messages SCV writes itself, as WeChat's does (`system msg: `); the
-bridge adds it when it queues such a message. A push transport such as Feishu's
-acknowledges a batch when the bridge asks for the next one, which it does only
-after the batch's claims and checkpoint are durable. The shared bridge does
-the rest for every channel. It speaks the versioned protocol over the daemon
-socket, using one long-lived session per remote sender (and per group and
-sender in group chats). An account answers only its authenticated owner
-unless its `senders = "anyone"` setting opens it to every sender. Sessions
+bridge then puts such a message, label first, in a Markdown code block when
+it queues it, and never marks the model's answers. A push transport such as
+Feishu's acknowledges a batch when the bridge asks for the next one, which it
+does only after the batch's claims and checkpoint are durable. The shared
+bridge does the rest for every channel. It speaks the versioned protocol over
+the daemon socket, using one long-lived session per remote sender (and per
+group and sender in group chats). An account answers only its authenticated
+owner unless its `senders = "anyone"` setting opens it to every sender. Sessions
 are tool-free unless the account's `remote_tools = "owner"` setting grants the
 authenticated owner's direct chats full, auto-approved tools.
 Session policy, history, queueing, cancellation, and approvals remain

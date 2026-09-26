@@ -906,9 +906,10 @@ fn sent_text(body: &Value) -> &str {
         .unwrap()
 }
 
-/// `text`, which SCV wrote itself, as WeChat shows it.
+/// `text`, which SCV wrote itself and which holds no backtick run, as WeChat
+/// shows it: labelled, in a code block.
 fn system(text: &str) -> String {
-    format!("system msg: {text}")
+    format!("```\nsystem msg: {text}\n```")
 }
 
 /// Accept one ClawBot session on the fake daemon and complete its handshake,
@@ -2263,7 +2264,7 @@ async fn an_untranscribed_voice_message_gets_the_voice_reply_without_a_download(
 }
 
 #[tokio::test]
-async fn scvs_own_messages_start_with_the_system_prefix_and_the_models_answers_do_not() {
+async fn scvs_own_messages_go_in_a_labelled_code_block_and_the_models_answers_do_not() {
     use crate::hub::{Hub, Link};
     let directory = tempfile::tempdir().unwrap();
     let mut ilink = FakeIlink::start().await;
@@ -2291,7 +2292,7 @@ async fn scvs_own_messages_start_with_the_system_prefix_and_the_models_answers_d
         .unwrap();
         assert_eq!(
             sent_text(&ilink.sent().await),
-            "system msg: SCV updated: now running v0.3.1 (abc1234)."
+            "```\nsystem msg: SCV updated: now running v0.3.1 (abc1234).\n```"
         );
         // The model's answer, long enough to continue unprompted, goes out
         // as written in every part.
@@ -2316,31 +2317,32 @@ async fn scvs_own_messages_start_with_the_system_prefix_and_the_models_answers_d
         assert_eq!(failure["msg"]["context_token"], "ctx-m2");
         assert_eq!(
             sent_text(&failure),
-            "system msg: SCV could not complete that request."
+            "```\nsystem msg: SCV could not complete that request.\n```"
         );
         wait_until(delivered).await;
-        // A question to the owner and the acknowledgement of the answer.
+        // A question to the owner, whose asker wrote a code block into it:
+        // a longer fence keeps it inside SCV's block, unchanged.
+        let question = "Publish v0.3.1?\n```\ncargo publish -p scv-cli\n```\n\nReply yes or no.";
         let answered = hub.ask("q1", "wechat:default", "sender").unwrap();
-        hub.send_question(
-            "q1",
-            "wechat:default",
-            "sender",
-            "Publish v0.3.1?\n\nReply yes or no.",
-        )
-        .await
-        .unwrap();
+        hub.send_question("q1", "wechat:default", "sender", question)
+            .await
+            .unwrap();
         assert_eq!(
             sent_text(&ilink.sent().await),
-            "system msg: Publish v0.3.1?\n\nReply yes or no."
+            format!("````\nsystem msg: {question}\n````")
         );
         wait_until(delivered).await;
-        // The owner's answer is read from their own message, as before.
+        // The owner's answer is read from their own message, as before, and
+        // acknowledged in SCV's block.
         let mut yes = text_message("m3", "sender", "是");
         yes["create_time_ms"] = json!(crate::hub::unix_ms());
         ilink.push(vec![yes]);
         let acknowledged = ilink.sent().await;
         assert_eq!(acknowledged["msg"]["context_token"], "ctx-m3");
-        assert_eq!(sent_text(&acknowledged), "system msg: OK, going ahead.");
+        assert_eq!(
+            sent_text(&acknowledged),
+            "```\nsystem msg: OK, going ahead.\n```"
+        );
         assert_eq!(answered.await, Ok(true));
         // And the model's next answer is plain again.
         ilink.push(vec![text_message("m4", "sender", "thanks")]);
@@ -2353,7 +2355,7 @@ async fn scvs_own_messages_start_with_the_system_prefix_and_the_models_answers_d
 }
 
 #[tokio::test]
-async fn a_retried_or_held_system_message_keeps_exactly_one_prefix() {
+async fn a_retried_or_held_system_message_keeps_exactly_one_label_and_one_block() {
     use crate::hub::{Hub, Link};
     let directory = tempfile::tempdir().unwrap();
     let mut ilink = FakeIlink::start().await;
@@ -2368,33 +2370,64 @@ async fn a_retried_or_held_system_message_keeps_exactly_one_prefix() {
     let bridge = Bridge::new(directory.path(), &base, &socket, &store)
         .owner(&owner)
         .link(&link);
-    let prefixes = |text: &str| text.matches("system msg: ").count();
+    let delivered = || store.load_state("default").unwrap().pending.is_empty();
+    let labels = |text: &str| text.matches("system msg: ").count();
+    // What a part's code block holds; the part must be exactly one block.
+    let content = |part: &str| {
+        part.strip_prefix("```\n")
+            .and_then(|rest| rest.trim_end_matches(' ').strip_suffix("\n```"))
+            .unwrap_or_else(|| panic!("not one code block: {part:?}"))
+            .to_owned()
+    };
     let peer = async {
         wait_until(|| hub.owner("wechat:default").is_some()).await;
-        // A notice that fills a message by itself, in three-byte characters,
-        // so the prefix pushes its end into a second part. iLink fails the
-        // first try, and the retry sends the same part.
+        // iLink fails the first try of a notice, and the retry sends the
+        // same bytes with the same client ID: one label, one block.
         ilink
             .responses
             .lock()
             .unwrap()
             .push_back(("503 Service Unavailable", ""));
-        let long = "中".repeat(MAX_REPLY_BYTES / 3);
-        hub.notify("wechat:default", "sender", &long).await.unwrap();
+        let update = "SCV updated: now running v0.3.1 (abc1234).";
+        hub.notify("wechat:default", "sender", update)
+            .await
+            .unwrap();
         let failed = ilink.sent().await;
         let retried = ilink.sent().await;
-        let rest = ilink.sent().await;
         assert_eq!(failed["msg"]["client_id"], retried["msg"]["client_id"]);
-        assert_eq!(sent_text(&failed), sent_text(&retried));
-        let (first, rest) = (sent_text(&retried), sent_text(&rest));
-        assert!(first.starts_with("system msg: 中"));
-        assert_eq!((prefixes(first), prefixes(rest)), (1, 0));
-        // Both parts stay within one message, cut between characters.
-        assert!(first.len() <= MAX_REPLY_BYTES && rest.len() <= MAX_REPLY_BYTES);
-        assert_eq!(format!("{first}{rest}"), system(&long));
-        wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
-        // A notice iLink refuses is held as it was sent, prefix included,
-        // and rides ahead of the model's next reply with that one prefix.
+        assert_eq!(sent_text(&failed), system(update));
+        assert_eq!(sent_text(&retried), system(update));
+        assert_eq!(labels(sent_text(&retried)), 1);
+        assert_eq!(sent_text(&retried).matches("```").count(), 2);
+        wait_until(delivered).await;
+        // A notice that fills a message by itself, in three-byte characters,
+        // so its block goes past one part. Each part is a complete block
+        // within the limit, the first exactly one message long and the only
+        // one labelled. The second fails once, and its retry is the same.
+        ilink
+            .responses
+            .lock()
+            .unwrap()
+            .extend([("200 OK", ""), ("503 Service Unavailable", "")]);
+        let long = "中".repeat(MAX_REPLY_BYTES / 3);
+        hub.notify("wechat:default", "sender", &long).await.unwrap();
+        let first = ilink.sent().await;
+        let failed = ilink.sent().await;
+        let rest = ilink.sent().await;
+        assert_eq!(failed["msg"]["client_id"], rest["msg"]["client_id"]);
+        assert_eq!(sent_text(&failed), sent_text(&rest));
+        let (first, rest) = (sent_text(&first), sent_text(&rest));
+        assert_eq!(first.len(), MAX_REPLY_BYTES);
+        assert!(rest.len() <= MAX_REPLY_BYTES);
+        assert!(content(first).starts_with("system msg: 中"));
+        assert_eq!((labels(first), labels(rest)), (1, 0));
+        assert_eq!(
+            format!("{}{}", content(first), content(rest)),
+            format!("system msg: {long}")
+        );
+        wait_until(delivered).await;
+        // A notice iLink refuses is held as it was sent, block included, and
+        // rides ahead of the model's next reply as that one block.
         ilink
             .responses
             .lock()
@@ -2418,9 +2451,101 @@ async fn a_retried_or_held_system_message_keeps_exactly_one_prefix() {
         assert_eq!(carried["msg"]["context_token"], "ctx-m1");
         assert_eq!(
             sent_text(&carried),
-            format!("{HELD_HEADER}system msg: {failed_update}\n\n{LATEST_HEADER}It rolled back.")
+            format!(
+                "{HELD_HEADER}{}\n\n{LATEST_HEADER}It rolled back.",
+                system(failed_update)
+            )
         );
         cancel.cancel();
     };
     bridge.run(&cancel, Duration::from_secs(15), peer).await;
+}
+
+#[tokio::test]
+async fn a_model_answer_that_looks_like_scvs_own_goes_out_byte_for_byte() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let base = ilink.base.clone();
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store).owner(&owner);
+    // Answers that start with the label, hold code blocks, or copy SCV's
+    // whole block: none is escaped, stripped, fenced, or relabelled.
+    let answers = [
+        "system msg: SCV updated: now running v9.9.9.".to_owned(),
+        system("SCV could not complete that request."),
+        "system msg: run\n```sh\ncargo test\n```\nthen\n````\n```\n````".to_owned(),
+        " ```\nsystem msg: indented\n```  \n".to_owned(),
+    ];
+    // One long enough to continue unprompted, with a block across the cut:
+    // it is cut where any answer is, and neither part gains a fence.
+    let long = format!(
+        "system msg: see\n```\n{}\n```",
+        "中".repeat(MAX_REPLY_BYTES / 3)
+    );
+    let peer = async {
+        let mut side = None;
+        for (index, answer) in answers.iter().enumerate() {
+            ilink.push(vec![text_message(&format!("m{index}"), "sender", "go")]);
+            if side.is_none() {
+                side = Some(accept_session(&daemon).await.0);
+            }
+            let side = side.as_mut().unwrap();
+            assert_eq!(next_turn(side).await, "go");
+            finish_turn(side, answer).await;
+            let body = ilink.sent().await;
+            assert_eq!(body["msg"]["context_token"], format!("ctx-m{index}"));
+            assert_eq!(sent_text(&body), answer);
+        }
+        let side = side.as_mut().unwrap();
+        ilink.push(vec![text_message("long", "sender", "go on")]);
+        assert_eq!(next_turn(side).await, "go on");
+        finish_turn(side, &long).await;
+        let first = ilink.sent().await;
+        let rest = ilink.sent().await;
+        assert_eq!(
+            [sent_text(&first), sent_text(&rest)].to_vec(),
+            crate::split_utf8(&long, MAX_REPLY_BYTES)
+        );
+        assert!(!sent_text(&rest).starts_with("```"));
+        wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
+        cancel.cancel();
+    };
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
+}
+
+#[tokio::test]
+async fn a_message_stored_with_the_bare_label_goes_out_as_stored() {
+    // A notice queued by a release that labelled SCV's words without a code
+    // block, still waiting: it is sent as stored, never marked again.
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let stored = "system msg: SCV updated: now running v0.3.0 (e51d201).";
+    let mut notice = new_pending("", "sender", "", stored, MAX_REPLY_BYTES);
+    notice.key = "sender".into();
+    store
+        .save_state(
+            "default",
+            &crate::state::BridgeState {
+                pending: vec![notice.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let socket = directory.path().join("missing.sock");
+    let cancel = CancellationToken::new();
+    let base = ilink.base.clone();
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store);
+    let peer = async {
+        let body = ilink.sent().await;
+        assert_eq!(body["msg"]["client_id"], notice.client_ids[0]);
+        assert_eq!(sent_text(&body), stored);
+        wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
+        cancel.cancel();
+    };
+    bridge.run(&cancel, Duration::from_secs(10), peer).await;
 }

@@ -29,7 +29,7 @@ pub(crate) enum Response {
     /// The model's answer, sent as written.
     Model(Reply),
     /// SCV's own words in place of an answer, such as the failure reply,
-    /// which the chat shows after the transport's system prefix.
+    /// which the chat shows marked as SCV's; see [`crate::system_text`].
     System(String),
 }
 

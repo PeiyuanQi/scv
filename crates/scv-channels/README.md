@@ -37,8 +37,8 @@ crate-private.
 
 Inside the crate each channel supplies a `Transport` (receive a batch of
 messages after a checkpoint, send one part of a message, and optionally a
-prefix for the messages SCV writes itself, which WeChat sets to
-`system msg: `) and
+label for the messages SCV writes itself, which the bridge then sends in a
+Markdown code block; WeChat sets it to `system msg: `) and
 `state::Credentials` (how its saved credentials bind delivery state); the
 shared bridge does the rest on the daemon socket. `intake::classify` decides,
 without side effects, what the bridge does with each received message: ignore
