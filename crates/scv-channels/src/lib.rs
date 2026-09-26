@@ -195,10 +195,14 @@ pub(crate) struct Message {
     /// What the message refers to, such as a quoted message, for the
     /// transport to resolve before the turn; opaque to the bridge.
     pub(crate) reference: Option<String>,
+    /// When the sender sent it, in Unix milliseconds by the platform's
+    /// clock; `None` when the platform did not say. Only a message sent after
+    /// a question reached the chat can answer it.
+    pub(crate) sent_ms: Option<u64>,
 }
 
 impl Message {
-    /// A text message with no files or references.
+    /// A text message with no files, references, or send time.
     #[cfg(test)]
     pub(crate) fn text(
         id: &str,
@@ -215,6 +219,7 @@ impl Message {
             group: group.map(str::to_owned),
             media: Vec::new(),
             reference: None,
+            sent_ms: None,
         }
     }
 }
@@ -637,10 +642,9 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     ) -> Result<()> {
         let id = inbound.id();
         let mut state = self.state.lock().await;
-        // Only the owner's direct chat can hold a question.
-        let mut question = self
-            .owner
-            .is_some_and(|owner| self.registration.asking(owner));
+        // Only the owner's direct chat can hold a question, and only once
+        // its text has reached them.
+        let mut question = self.owner.and_then(|owner| self.registration.asking(owner));
         let (sender, turn) = loop {
             let verdict = intake::classify(
                 inbound,
@@ -666,10 +670,14 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 }
                 Verdict::Claimed => return Ok(()),
                 Verdict::Answer { sender, yes } => {
-                    match self.registration.take_question(&sender.message.sender) {
+                    let taken = sender.message.sent_ms.and_then(|sent_ms| {
+                        self.registration
+                            .take_question(&sender.message.sender, sent_ms)
+                    });
+                    match taken {
                         Some(answer) => return self.acknowledge(state, sender, yes, answer).await,
                         // The question ran out meanwhile: an ordinary message.
-                        None => question = false,
+                        None => question = None,
                     }
                 }
                 Verdict::Busy(sender) => {
@@ -1262,6 +1270,10 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         }
         let mut pending = new_pending("", &notice.to, "", &notice.text, MAX_REPLY_BYTES);
         pending.key.clone_from(&notice.to);
+        // A refused question is not held for a later reply to carry: by
+        // then it could no longer be answered.
+        pending.transient = notice.question.is_some();
+        pending.question.clone_from(&notice.question);
         state.pending.push(pending);
         self.save(&state).await?;
         drop(state);
@@ -1296,13 +1308,31 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
 
     /// Send the oldest pending reply: its text parts, then its files. Only
     /// this path edits or removes pending replies, so the first entry stays
-    /// the same one between state locks.
+    /// the same one between state locks. A question's text opens the
+    /// question once it is delivered and fails it when refused.
     async fn deliver_next(&self) -> Result<Step> {
         let mut pending = {
             let mut state = self.state.lock().await;
-            let Some(pending) = state.pending.first_mut() else {
+            let Some(first) = state.pending.first() else {
                 return Ok(Step::Idle);
             };
+            // Nobody waits for this question any more (it ran out, its asker
+            // left, or the daemon restarted): sent now, it could no longer
+            // be answered.
+            if first
+                .question
+                .as_deref()
+                .is_some_and(|id| !self.registration.question_waiting(id))
+            {
+                tracing::info!("dropped a question that no longer waits for an answer");
+                state.pending.remove(0);
+                self.save(&state).await?;
+                return Ok(Step::Progress);
+            }
+            let pending = state
+                .pending
+                .first_mut()
+                .expect("the first pending reply was just found");
             let chunks = text_chunks(pending).len();
             let mut changed = false;
             while pending.client_ids.len() < chunks {
@@ -1342,6 +1372,14 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             let mut state = self.state.lock().await;
             state.pending[0].next_chunk = pending.next_chunk;
             self.save(&state).await?;
+        }
+        if let Some(id) = &pending.question {
+            if refused {
+                tracing::warn!("the platform refused a question to the owner");
+                self.registration.question_undelivered(id);
+            } else {
+                self.registration.question_delivered(id);
+            }
         }
         // Files follow a delivered text; a refused text drops them.
         while !refused && pending.next_file < pending.files.len() {

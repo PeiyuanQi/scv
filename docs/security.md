@@ -364,9 +364,12 @@ the one that started the asking delegation, or the notify target. Its text is
 the asker's, any local process of the user through the trusted socket,
 including a delegated agent whose words may repeat untrusted content, so it is
 bounded to 4 KiB and followed by SCV's own "Reply yes or no" line. Only the
-owner's own direct message answers, and only an exact yes or no word; other
-senders, group messages (the owner's included), messages with files, and any
-other words never answer, and a question gets at most one answer. The answer
+owner's own direct message answers, and only an exact yes or no word sent
+after the question reached the chat, by the platform's own message time; a
+question still waiting in the outbox, an earlier message replayed late,
+casual replies such as `ok`, other senders, group messages (the owner's
+included), messages with files, and any other words never answer, and a
+question gets at most one answer. The answer
 starts no turn and reaches no model: it only lets the asker go ahead or stop,
 granting nothing else, and no answer, a withdrawn question, a daemon restart,
 or an answer lost in storing all mean the asker does not go ahead. The

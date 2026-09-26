@@ -5,9 +5,10 @@
 //! answers, whether owner work is still in flight (a planned restart waits
 //! for it), and which chat the owner last wrote from, and it can queue a
 //! notice into an account's durable outbox and hold a yes/no question for an
-//! owner's direct chat, which the owner's next explicit answer there resolves
-//! (`scv confirm`). Bridges learn why the daemon last restarted, so they
-//! describe work that a planned restart interrupted accurately.
+//! owner's direct chat (`scv confirm`). The question opens once the bridge
+//! has delivered its text, and the owner's next explicit answer there, sent
+//! after that, resolves it. Bridges learn why the daemon last restarted, so
+//! they describe work that a planned restart interrupted accurately.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -51,6 +52,9 @@ pub struct LastOwner {
 pub struct Notice {
     pub to: String,
     pub text: String,
+    /// The question whose text this is ([`Hub::send_question`]): it opens
+    /// only once the text reaches the chat, and is never held for later.
+    pub question: Option<String>,
     stored: oneshot::Sender<()>,
 }
 
@@ -87,6 +91,18 @@ impl std::fmt::Display for NotifyError {
 }
 
 impl std::error::Error for NotifyError {}
+
+/// Where a question stood when [`Hub::withdraw`] dropped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawal {
+    /// It no longer waited: it was answered, or its text could not be
+    /// delivered, which the asker's receiver tells.
+    Settled,
+    /// Its text had not reached the chat; the bridge drops it unsent.
+    Unsent,
+    /// Its text had reached the chat, which went unanswered.
+    Unanswered,
+}
 
 /// A question taken from the hub to be answered. Dropping it unanswered
 /// tells the asker the answer was lost.
@@ -125,8 +141,10 @@ struct Inner {
 struct Question {
     id: String,
     answer: oneshot::Sender<bool>,
-    /// The question is in the chat's outbox, so the owner may answer it.
-    open: bool,
+    /// When its text reached the chat, in Unix milliseconds by this host's
+    /// clock. Until then nothing answers it, and after that only a message
+    /// sent later.
+    delivered_ms: Option<u64>,
 }
 
 struct Bridge {
@@ -229,10 +247,35 @@ impl Hub {
     /// Once this returns an error, or its future is dropped, the bridge
     /// drops the notice instead of storing it late.
     pub async fn notify(&self, component: &str, to: &str, text: &str) -> Result<(), NotifyError> {
+        self.queue(component, to, text, None).await
+    }
+
+    /// Queue the text of question `id`, held with [`Hub::ask`], as
+    /// [`Hub::notify`] queues a notice. The bridge opens the question once
+    /// the text reaches the chat, fails it if the platform refuses it, and
+    /// drops the text unsent once the question no longer waits.
+    pub async fn send_question(
+        &self,
+        id: &str,
+        component: &str,
+        to: &str,
+        text: &str,
+    ) -> Result<(), NotifyError> {
+        self.queue(component, to, text, Some(id)).await
+    }
+
+    async fn queue(
+        &self,
+        component: &str,
+        to: &str,
+        text: &str,
+        question: Option<&str>,
+    ) -> Result<(), NotifyError> {
         let (stored, done) = oneshot::channel();
         let notice = Notice {
             to: to.to_owned(),
             text: text.to_owned(),
+            question: question.map(str::to_owned),
             stored,
         };
         {
@@ -254,9 +297,8 @@ impl Hub {
 
     /// Hold question `id` for the direct chat with `peer` on `component`.
     /// `None` when a question already waits in that chat. The caller sends
-    /// the question itself, such as with [`Hub::notify`], then calls
-    /// [`Hub::open`], after which the owner's next explicit yes or no there
-    /// answers it.
+    /// its text with [`Hub::send_question`]; once the bridge has delivered
+    /// it, the owner's next explicit yes or no there answers it.
     pub fn ask(&self, id: &str, component: &str, peer: &str) -> Option<oneshot::Receiver<bool>> {
         let mut inner = self.inner();
         let key = (component.to_owned(), peer.to_owned());
@@ -269,28 +311,27 @@ impl Hub {
             Question {
                 id: id.to_owned(),
                 answer,
-                open: false,
+                delivered_ms: None,
             },
         );
         Some(answered)
     }
 
-    /// Question `id` is on its way to the owner: let their answer count.
-    pub fn open(&self, id: &str) {
-        for question in self.inner().questions.values_mut() {
-            if question.id == id {
-                question.open = true;
-            }
-        }
-    }
-
-    /// Drop question `id` unless it was answered first; whether it was still
-    /// waiting.
-    pub fn withdraw(&self, id: &str) -> bool {
+    /// Drop question `id` unless it was settled first, saying where it
+    /// stood.
+    pub fn withdraw(&self, id: &str) -> Withdrawal {
         let mut inner = self.inner();
-        let before = inner.questions.len();
-        inner.questions.retain(|_, question| question.id != id);
-        inner.questions.len() < before
+        let Some(key) = question_key(&inner, None, id) else {
+            return Withdrawal::Settled;
+        };
+        match inner.questions.remove(&key) {
+            Some(Question {
+                delivered_ms: Some(_),
+                ..
+            }) => Withdrawal::Unanswered,
+            Some(_) => Withdrawal::Unsent,
+            None => Withdrawal::Settled,
+        }
     }
 
     fn record_owner(&self, component: &str, peer: &str) {
@@ -430,30 +471,60 @@ impl Registration {
         }
     }
 
-    /// Whether a question the owner can answer waits in the direct chat with
-    /// `peer`.
-    pub fn asking(&self, peer: &str) -> bool {
-        self.hub.as_ref().is_some_and(|hub| {
-            hub.inner()
-                .questions
-                .get(&(self.component.clone(), peer.to_owned()))
-                .is_some_and(|question| question.open)
-        })
+    /// When the question waiting in the direct chat with `peer` reached it,
+    /// in Unix milliseconds; `None` while no question there can be answered.
+    pub fn asking(&self, peer: &str) -> Option<u64> {
+        let hub = self.hub.as_ref()?;
+        hub.inner()
+            .questions
+            .get(&(self.component.clone(), peer.to_owned()))?
+            .delivered_ms
     }
 
-    /// Take the question the owner can answer in the direct chat with
-    /// `peer`, to answer it; no question can be taken twice.
-    pub fn take_question(&self, peer: &str) -> Option<Answer> {
+    /// Take the question in the direct chat with `peer` to answer it with a
+    /// message sent at `sent_ms`, which must not be earlier than the question
+    /// reached the chat; no question can be taken twice.
+    pub fn take_question(&self, peer: &str, sent_ms: u64) -> Option<Answer> {
         let hub = self.hub.as_ref()?;
         let key = (self.component.clone(), peer.to_owned());
         let mut inner = hub.inner();
-        if !inner.questions.get(&key)?.open {
+        if inner.questions.get(&key)?.delivered_ms? > sent_ms {
             return None;
         }
         inner
             .questions
             .remove(&key)
             .map(|question| Answer(question.answer))
+    }
+
+    /// Whether question `id` still waits on this account, so its text is
+    /// still worth sending.
+    pub(crate) fn question_waiting(&self, id: &str) -> bool {
+        self.hub
+            .as_ref()
+            .is_some_and(|hub| question_key(&hub.inner(), Some(&self.component), id).is_some())
+    }
+
+    /// Question `id`'s text reached the chat: from now on the owner's answer
+    /// counts.
+    pub fn question_delivered(&self, id: &str) {
+        let Some(hub) = &self.hub else { return };
+        let mut inner = hub.inner();
+        if let Some(key) = question_key(&inner, Some(&self.component), id)
+            && let Some(question) = inner.questions.get_mut(&key)
+        {
+            question.delivered_ms.get_or_insert_with(unix_ms);
+        }
+    }
+
+    /// Question `id`'s text could not be delivered: drop the question, which
+    /// tells its asker that no answer will come.
+    pub fn question_undelivered(&self, id: &str) {
+        let Some(hub) = &self.hub else { return };
+        let mut inner = hub.inner();
+        if let Some(key) = question_key(&inner, Some(&self.component), id) {
+            inner.questions.remove(&key);
+        }
     }
 
     /// Track the direct chat with `peer` while the tracker lives.
@@ -522,10 +593,30 @@ impl Drop for Tracker {
     }
 }
 
+/// The chat that holds question `id`, on `component` when one is given.
+fn question_key(inner: &Inner, component: Option<&str>, id: &str) -> Option<(String, String)> {
+    inner
+        .questions
+        .iter()
+        .find(|((holder, _), question)| {
+            question.id == id && component.is_none_or(|component| component == holder)
+        })
+        .map(|(key, _)| key.clone())
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Now, in Unix milliseconds.
+pub(crate) fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Write `value` as JSON readable only by the user, replacing the file whole.

@@ -27,6 +27,10 @@ struct FakeTransport {
     sent: UnboundedSender<Sent>,
     /// Files the bridge asked to download, all of which fail.
     downloads: StdMutex<u32>,
+    /// Texts the platform refuses.
+    refuse: StdMutex<Vec<String>>,
+    /// A recipient the platform cannot reach for now: sends to it fail.
+    unreachable: StdMutex<Option<String>>,
 }
 
 #[async_trait]
@@ -57,6 +61,18 @@ impl Transport for FakeTransport {
         message: &Outbound<'_>,
         _report: &(dyn Fn(bool) + Send + Sync),
     ) -> Result<SendOutcome> {
+        if self.unreachable.lock().unwrap().as_deref() == Some(message.to) {
+            bail!("the fake platform cannot reach this chat");
+        }
+        if self
+            .refuse
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|text| text == message.text)
+        {
+            return Ok(SendOutcome::Rejected);
+        }
         self.sent
             .send(Sent {
                 to: message.to.into(),
@@ -106,6 +122,8 @@ impl Bench {
             received: StdMutex::new(0),
             sent: sender,
             downloads: StdMutex::new(0),
+            refuse: StdMutex::new(Vec::new()),
+            unreachable: StdMutex::new(None),
         };
         let bench = Self {
             directory,
@@ -188,8 +206,16 @@ impl Peer {
     }
 }
 
+/// A direct message the platform says was sent now.
 fn message(id: &str, sender: &str, text: &str) -> Inbound {
-    Inbound::Text(Message::text(id, sender, text, &format!("re-{id}"), None))
+    sent_at(id, sender, text, hub::unix_ms())
+}
+
+/// A direct message the platform says was sent at `sent_ms`.
+fn sent_at(id: &str, sender: &str, text: &str, sent_ms: u64) -> Inbound {
+    let mut message = Message::text(id, sender, text, &format!("re-{id}"), None);
+    message.sent_ms = Some(sent_ms);
+    Inbound::Text(message)
 }
 
 async fn next_frame(side: &mut BufReader<UnixStream>) -> Value {
@@ -440,23 +466,43 @@ async fn a_voice_message_without_a_transcript_gets_the_voice_reply_and_nothing_e
     assert_eq!(*bench.transport.downloads.lock().unwrap(), 0);
 }
 
-#[tokio::test]
-async fn a_question_reaches_the_owners_chat_and_a_plain_answer_resolves_it_without_a_turn() {
-    // An account that answers anyone, so others' messages reach the check.
-    let (bench, mut peer) = Bench::new();
+/// An account that answers anyone and is owned by `owner`, linked to a hub,
+/// so others' messages reach the question check too.
+fn asked_bench() -> (Bench, Peer, Arc<hub::Hub>, hub::Link) {
+    let (bench, peer) = Bench::new();
     let bench = Bench {
         owner: Some("owner"),
         ..bench
     };
     let hub = hub::Hub::new(None);
     let link = hub::Link::new(Arc::clone(&hub), "fake:default", Some("owner".into()));
+    (bench, peer, hub, link)
+}
+
+/// Ask question `id` in the owner's chat and return its answer receiver
+/// once the question's text is stored.
+async fn ask(hub: &hub::Hub, id: &str, text: &str) -> tokio::sync::oneshot::Receiver<bool> {
+    eventually(|| hub.owner("fake:default").is_some()).await;
+    let answered = hub.ask(id, "fake:default", "owner").unwrap();
+    hub.send_question(id, "fake:default", "owner", text)
+        .await
+        .unwrap();
+    answered
+}
+
+/// Wait until everything queued is delivered, which for a question means
+/// it reached the chat and is open.
+async fn delivered(bench: &Bench) {
+    eventually(|| bench.state().pending.is_empty()).await;
+}
+
+#[tokio::test]
+async fn a_question_reaches_the_owners_chat_and_a_plain_answer_resolves_it_without_a_turn() {
+    let (bench, mut peer, hub, link) = asked_bench();
     let question = "Publish SCV 0.3.0?\n\nReply yes or no. No answer in 30 minutes counts as no.";
     bench
         .run_linked(&link, async {
-            eventually(|| hub.owner("fake:default").is_some()).await;
-            let mut answered = hub.ask("q1", "fake:default", "owner").unwrap();
-            hub.notify("fake:default", "owner", question).await.unwrap();
-            hub.open("q1");
+            let mut answered = ask(&hub, "q1", question).await;
             // The question goes to the owner's direct chat, answering nothing.
             assert_eq!(
                 peer.sent().await,
@@ -466,25 +512,29 @@ async fn a_question_reaches_the_owners_chat_and_a_plain_answer_resolves_it_witho
                     text: question.into(),
                 }
             );
-            // Other words from the owner run a turn; the question keeps waiting.
+            delivered(&bench).await;
+            // Other words from the owner run a turn, casual ones included;
+            // the question keeps waiting.
             peer.push(vec![message("m1", "owner", "what is this about?")]);
             let mut owner = accept_session(&peer.daemon).await;
             assert_eq!(next_turn(&mut owner).await, "what is this about?");
             finish_turn(&mut owner, "A release.").await;
             assert_eq!(peer.sent().await.text, "A release.");
+            peer.push(vec![message("m0", "owner", "ok")]);
+            assert_eq!(next_turn(&mut owner).await, "ok");
+            finish_turn(&mut owner, "Noted.").await;
+            assert_eq!(peer.sent().await.text, "Noted.");
             // Another sender, and the owner in a group, cannot answer.
             peer.push(vec![message("b1", "bob", "yes")]);
             let mut bob = accept_session(&peer.daemon).await;
             assert_eq!(next_turn(&mut bob).await, "yes");
             finish_turn(&mut bob, "to bob").await;
             assert_eq!(peer.sent().await.to, "bob");
-            peer.push(vec![Inbound::Text(Message::text(
-                "g1",
-                "owner",
-                "yes",
-                "re-g1",
-                Some("group"),
-            ))]);
+            let Inbound::Text(mut in_group) = message("g1", "owner", "yes") else {
+                unreachable!()
+            };
+            in_group.group = Some("group".into());
+            peer.push(vec![Inbound::Text(in_group)]);
             let mut group = accept_session(&peer.daemon).await;
             assert_eq!(next_turn(&mut group).await, "yes");
             finish_turn(&mut group, "in the group").await;
@@ -508,12 +558,9 @@ async fn a_question_reaches_the_owners_chat_and_a_plain_answer_resolves_it_witho
             assert_eq!(peer.sent().await.text, "welcome");
 
             // A later question, answered no.
-            let answered = hub.ask("q2", "fake:default", "owner").unwrap();
-            hub.notify("fake:default", "owner", "Deploy?")
-                .await
-                .unwrap();
-            hub.open("q2");
+            let answered = ask(&hub, "q2", "Deploy?").await;
             assert_eq!(peer.sent().await.text, "Deploy?");
+            delivered(&bench).await;
             peer.push(vec![message("m4", "owner", "不")]);
             let sent = peer.sent().await;
             assert_eq!(
@@ -535,6 +582,118 @@ async fn a_question_reaches_the_owners_chat_and_a_plain_answer_resolves_it_witho
                         .all(|id| saved.seen.iter().any(|seen| seen == id))
             })
             .await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_yes_sent_before_the_question_reached_the_chat_never_answers_it() {
+    let (bench, mut peer, hub, link) = asked_bench();
+    // The owner said yes to something else a minute ago; the platform hands
+    // it over only now, as Feishu's catch-up after a reconnect or a WeChat
+    // poll back from its backoff does.
+    let earlier = hub::unix_ms() - 60_000;
+    bench
+        .run_linked(&link, async {
+            let mut answered = ask(&hub, "q1", "Publish?").await;
+            assert_eq!(peer.sent().await.text, "Publish?");
+            delivered(&bench).await;
+            peer.push(vec![sent_at("m1", "owner", "yes", earlier)]);
+            let mut owner = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut owner).await, "yes");
+            finish_turn(&mut owner, "Yes to what?").await;
+            assert_eq!(peer.sent().await.text, "Yes to what?");
+            // A message whose platform gives no time cannot answer either.
+            peer.push(vec![Inbound::Text(Message::text(
+                "m2", "owner", "yes", "re-m2", None,
+            ))]);
+            assert_eq!(next_turn(&mut owner).await, "yes");
+            finish_turn(&mut owner, "Still unsure.").await;
+            assert_eq!(peer.sent().await.text, "Still unsure.");
+            assert!(answered.try_recv().is_err(), "still waiting");
+            // Written after the question reached the chat: the answer.
+            peer.push(vec![message("m3", "owner", "yes")]);
+            assert_eq!(peer.sent().await.text, ANSWERED_YES);
+            assert_eq!(answered.await, Ok(true));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_question_still_waiting_to_be_delivered_cannot_be_answered() {
+    let (bench, mut peer, hub, link) = asked_bench();
+    // The platform cannot reach the owner for now, so the question waits in
+    // the outbox, as it would behind a reply that keeps failing.
+    *bench.transport.unreachable.lock().unwrap() = Some("owner".into());
+    bench
+        .run_linked(&link, async {
+            let mut answered = ask(&hub, "q1", "Publish?").await;
+            // The owner cannot have seen it: their yes is about something
+            // else and runs a turn.
+            peer.push(vec![message("m1", "owner", "yes")]);
+            let mut owner = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut owner).await, "yes");
+            finish_turn(&mut owner, "Yes to what?").await;
+            eventually(|| bench.state().pending.len() == 2).await;
+            assert!(answered.try_recv().is_err(), "still waiting");
+            // Once the question is delivered, the owner's next yes answers.
+            *bench.transport.unreachable.lock().unwrap() = None;
+            assert_eq!(peer.sent().await.text, "Publish?");
+            assert_eq!(peer.sent().await.text, "Yes to what?");
+            delivered(&bench).await;
+            peer.push(vec![message("m2", "owner", "yes")]);
+            assert_eq!(peer.sent().await.text, ANSWERED_YES);
+            assert_eq!(answered.await, Ok(true));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_question_the_platform_refuses_fails_and_is_never_held() {
+    let (bench, mut peer, hub, link) = asked_bench();
+    bench
+        .transport
+        .refuse
+        .lock()
+        .unwrap()
+        .push("Publish?".into());
+    bench
+        .run_linked(&link, async {
+            let answered = ask(&hub, "q1", "Publish?").await;
+            // The asker learns at once that no answer will come.
+            assert!(answered.await.is_err());
+            delivered(&bench).await;
+            assert!(bench.state().held.is_empty(), "never held for later");
+            // So a yes afterwards is an ordinary message, and its reply
+            // carries no held question.
+            peer.push(vec![message("m1", "owner", "yes")]);
+            let mut owner = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut owner).await, "yes");
+            finish_turn(&mut owner, "Yes to what?").await;
+            assert_eq!(peer.sent().await.text, "Yes to what?");
+            // The chat is free for the next question.
+            assert!(hub.ask("q2", "fake:default", "owner").is_some());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_question_that_no_longer_waits_is_never_sent() {
+    let (bench, mut peer, hub, link) = asked_bench();
+    *bench.transport.unreachable.lock().unwrap() = Some("owner".into());
+    bench
+        .run_linked(&link, async {
+            let _answered = ask(&hub, "q1", "Publish?").await;
+            // It ran out, or its asker left, before the platform took it.
+            assert_eq!(hub.withdraw("q1"), hub::Withdrawal::Unsent);
+            *bench.transport.unreachable.lock().unwrap() = None;
+            hub.notify("fake:default", "owner", "Later news")
+                .await
+                .unwrap();
+            // Outbox order would send the question first.
+            assert_eq!(peer.sent().await.text, "Later news");
+            delivered(&bench).await;
+            assert!(peer.sent.try_recv().is_err(), "nothing else was sent");
         })
         .await;
 }

@@ -798,6 +798,119 @@ async fn full_bridge_answers_the_owners_voice_message_with_the_voice_reply() {
 }
 
 #[tokio::test]
+async fn full_bridge_never_takes_a_caught_up_yes_from_before_the_question_as_its_answer() {
+    let mut fake = Fake::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = credentials::Store::new(
+        &scv_client::Layout::new(directory.path()),
+        crate::feishu::CHANNEL,
+    );
+    store.save_account("default", &account()).unwrap();
+    // The owner said yes to something else while SCV was disconnected.
+    let written = crate::hub::unix_ms() - 30_000;
+    let mut saved = store.load_state("default").unwrap();
+    saved.cursor = Checkpoint {
+        chats: [(
+            "oc_dm".to_owned(),
+            inbound::ChatMark {
+                group: false,
+                last_ms: written - 60_000,
+            },
+        )]
+        .into(),
+    }
+    .to_json();
+    store.save_state("default", &saved).unwrap();
+    let transport = fake.transport();
+    // No daemon listens here: a turn fails with the failure reply.
+    let socket = directory.path().join("missing.sock");
+    let media = crate::MediaOptions::new(
+        &scv_client::Layout::new(directory.path()),
+        "feishu",
+        "default",
+        crate::media::MediaSettings::default(),
+    );
+    let hub = crate::hub::Hub::new(None);
+    let link = crate::hub::Link::new(Arc::clone(&hub), "feishu:default", Some("ou_owner".into()));
+    let run = crate::serve(
+        &transport,
+        crate::BridgeRun {
+            account: "default",
+            workspace: directory.path(),
+            socket: &socket,
+            owner: Some("ou_owner"),
+            tool_owner: None,
+            senders: crate::state::Senders::Owner,
+            media,
+            link: &link,
+            report: &|_| {},
+        },
+        &store,
+        |credentials| Ok(credentials == &account()),
+    );
+    let delivered = || async {
+        tokio::time::timeout(WAIT, async {
+            while !store.load_state("default").unwrap().pending.is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("everything queued is delivered");
+    };
+    let text_of = |request: &Request| -> Value {
+        serde_json::from_str::<Value>(request.body["content"].as_str().unwrap()).unwrap()["text"]
+            .clone()
+    };
+    let peer = async {
+        tokio::time::timeout(WAIT, async {
+            while hub.owner("feishu:default").is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let answered = hub.ask("q1", "feishu:default", "ou_owner").unwrap();
+        hub.send_question("q1", "feishu:default", "ou_owner", "Publish?")
+            .await
+            .unwrap();
+        let question = fake
+            .request("/open-apis/im/v1/messages?receive_id_type=open_id")
+            .await;
+        assert_eq!(text_of(&question), "Publish?");
+        delivered().await;
+        // The connection drops, and catch-up hands over the earlier yes.
+        fake.script(
+            "/open-apis/im/v1/messages?",
+            200,
+            json!({"code": 0, "data": {"has_more": false, "items": [
+                history_item("om_before", "yes", written),
+            ]}}),
+        );
+        fake.kick.send(()).unwrap();
+        // It runs a turn, as any other message would.
+        let reply = fake
+            .request("/open-apis/im/v1/messages/om_before/reply")
+            .await;
+        assert_eq!(text_of(&reply), crate::FAILURE_REPLY);
+        // The owner's yes sent now answers the question, without a turn.
+        fake.send_event(
+            "frame-1",
+            &message_event("om_after", "p2p", "yes", crate::hub::unix_ms()),
+            1,
+        );
+        let reply = fake
+            .request("/open-apis/im/v1/messages/om_after/reply")
+            .await;
+        assert_eq!(text_of(&reply), crate::ANSWERED_YES);
+        assert_eq!(answered.await, Ok(true));
+    };
+    tokio::select! {
+        result = run => panic!("the bridge stopped: {result:?}"),
+        () = peer => {}
+    }
+}
+
+#[tokio::test]
 async fn registration_waits_for_the_scan_and_follows_a_lark_tenant() {
     let mut fake = Fake::start().await;
     let endpoints = Endpoints::local(&fake.origin);

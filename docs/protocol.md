@@ -275,7 +275,8 @@ the chat that asked), and `deadline_unix_seconds`. Replies to `confirm_ask`
 and `confirm_status` also carry `confirm`: the question's `id`, its `state`
 (`scv_protocol::ConfirmState`: `pending`, `yes`, `no`, `expired` when no
 answer came in time, `withdrawn` when its asker stopped following it, or
-`failed` when it could not be sent or its answer was lost; a state a client
+`failed` when it could not be sent, the platform refused it or had not
+delivered it by its deadline, or its answer was lost; a state a client
 does not know parses as `unknown`), the `chat` asked (`<channel>:<account>`),
 and `deadline_unix_seconds`. A status from a daemon older
 than 0.1.26 has no `delegations` and parses as zero.

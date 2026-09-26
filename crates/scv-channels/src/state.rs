@@ -91,6 +91,12 @@ pub(crate) struct PendingDelivery {
     /// The first file not yet sent.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) next_file: usize,
+    /// The owner question whose text this is (`scv confirm`). It opens for
+    /// an answer once the text is delivered, fails if the platform refuses
+    /// it, and is dropped unsent once the question no longer waits. Older
+    /// releases ignore the field and send the text as a notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) question: Option<String>,
 }
 
 #[allow(

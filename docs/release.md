@@ -109,7 +109,8 @@ cover the steps that are easy to get wrong:
 
 - `publish.sh`: a resumable publish in dependency order; run by an agent SCV
   delegated to, it first asks the owner yes or no in chat (`scv confirm`)
-  and publishes only on yes;
+  and publishes only on yes. An installed `scv` older than 0.3.0 cannot ask,
+  so the release that introduces `scv confirm` is published from a terminal;
 - `deploy.sh`: keep the running binary as `<binary>.prev`, install, and ask
   the daemon to restart when idle (`scv restart --when-idle`), which checks
   and, on failure, rolls back the release; from a terminal it then waits for

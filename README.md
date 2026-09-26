@@ -110,7 +110,8 @@ binary if it does not come up; the new daemon announces the outcome in chat
 (see [configuration](docs/configuration.md#daemon-and-component-settings)).
 `scv confirm [--timeout SECS] QUESTION` asks the owner in the chat that started
 the work (or the `[notify]` owner chat) and waits; it exits 0 on yes, 1 on no
-or no answer in time (30 minutes by default), and 2 when it could not ask (see
+or no answer in time (30 minutes by default), and 2 when it could not ask or
+the question never reached the owner (see
 [channels](docs/channels.md#questions-to-the-owner)).
 
 Each SCV instance owns an explicit profile root. Use `--scv-home PATH` (or

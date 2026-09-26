@@ -14,11 +14,32 @@ use crate::control::{ControlFailure, daemon_control};
 /// Notices a bridge stand-in stored, as (to, text).
 type Stored = Arc<Mutex<Vec<(String, String)>>>;
 
+/// What the stand-in platform does with a question's text.
+#[derive(Clone, Copy)]
+enum Platform {
+    Delivers,
+    Refuses,
+    /// Keeps failing, so the text waits in the outbox.
+    Stalls,
+}
+
 /// Run a bridge stand-in for `component` that stores every notice it
-/// receives.
-fn bridge(hub: &Arc<Hub>, component: &str, owner: &str) -> (Registration, Stored) {
+/// receives and delivers questions at once.
+fn bridge(hub: &Arc<Hub>, component: &str, owner: &str) -> (Arc<Registration>, Stored) {
+    bridge_on(hub, component, owner, Platform::Delivers)
+}
+
+/// [`bridge`], reporting each question's delivery as `platform` has it.
+fn bridge_on(
+    hub: &Arc<Hub>,
+    component: &str,
+    owner: &str,
+    platform: Platform,
+) -> (Arc<Registration>, Stored) {
     let link = Link::new(Arc::clone(hub), component, Some(owner.into()));
     let (registration, mut notices) = link.register();
+    let registration = Arc::new(registration);
+    let delivery = Arc::clone(&registration);
     let stored = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&stored);
     tokio::spawn(async move {
@@ -26,7 +47,13 @@ fn bridge(hub: &Arc<Hub>, component: &str, owner: &str) -> (Registration, Stored
             sink.lock()
                 .unwrap()
                 .push((notice.to.clone(), notice.text.clone()));
+            let question = notice.question.clone();
             notice.stored();
+            match (question, platform) {
+                (Some(id), Platform::Delivers) => delivery.question_delivered(&id),
+                (Some(id), Platform::Refuses) => delivery.question_undelivered(&id),
+                _ => {}
+            }
         }
     });
     (registration, stored)
@@ -201,8 +228,11 @@ async fn a_question_goes_to_the_chat_that_started_the_work_and_the_answer_is_rea
         poll().await.unwrap().confirm.unwrap().state,
         ConfirmState::Pending
     );
-    eventually(|| wechat.asking("wx-owner")).await;
-    wechat.take_question("wx-owner").unwrap().give(true);
+    eventually(|| wechat.asking("wx-owner").is_some()).await;
+    wechat
+        .take_question("wx-owner", u64::MAX)
+        .unwrap()
+        .give(true);
     let mut state = ConfirmState::Pending;
     for _ in 0..200 {
         state = poll().await.unwrap().confirm.unwrap().state;
@@ -222,8 +252,11 @@ async fn a_question_goes_to_the_chat_that_started_the_work_and_the_answer_is_rea
         "a terminal asks the notify target"
     );
     eventually(|| notified.lock().unwrap().len() == 1).await;
-    eventually(|| feishu.asking("ou-owner")).await;
-    feishu.take_question("ou-owner").unwrap().give(false);
+    eventually(|| feishu.asking("ou-owner").is_some()).await;
+    feishu
+        .take_question("ou-owner", u64::MAX)
+        .unwrap()
+        .give(false);
     eventually(|| confirmer.status(&info.id).unwrap().state == ConfirmState::No).await;
 }
 
@@ -245,7 +278,44 @@ async fn no_answer_in_time_counts_as_no_and_the_chat_is_told() {
         ]
     );
     // A late answer finds nothing to answer.
-    assert!(feishu.take_question("ou-owner").is_none());
+    assert!(feishu.take_question("ou-owner", u64::MAX).is_none());
+}
+
+#[tokio::test]
+async fn a_question_the_platform_refuses_fails_without_an_answer() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&Layout::new(home.path())));
+    let hub = Hub::new(None);
+    let (_feishu, stored) = bridge_on(&hub, "feishu:default", "ou-owner", Platform::Refuses);
+    let (confirmer, _cancel) = confirmer(&hub, &registry, &["feishu:default"]);
+    let info = confirmer.ask("Publish?", None, Some(600)).await.unwrap();
+    // `scv confirm` exits 2: the owner was never asked.
+    eventually(|| confirmer.status(&info.id).unwrap().state == ConfirmState::Failed).await;
+    assert_eq!(stored.lock().unwrap().len(), 1, "only the question itself");
+    // The chat is free for the next question.
+    assert!(hub.ask("next", "feishu:default", "ou-owner").is_some());
+}
+
+#[tokio::test]
+async fn a_question_never_delivered_by_its_deadline_fails_quietly() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&Layout::new(home.path())));
+    let hub = Hub::new(None);
+    let (feishu, stored) = bridge_on(&hub, "feishu:default", "ou-owner", Platform::Stalls);
+    let (confirmer, _cancel) = confirmer(&hub, &registry, &["feishu:default"]);
+    let info = confirmer.ask("Publish?", None, Some(1)).await.unwrap();
+    // No yes could count meanwhile, since the owner never saw it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(feishu.asking("ou-owner"), None);
+    assert!(feishu.take_question("ou-owner", u64::MAX).is_none());
+    // Not "no": nothing was asked, so `scv confirm` exits 2. The chat is
+    // not told that no answer came to a question it never saw.
+    eventually(|| confirmer.status(&info.id).unwrap().state == ConfirmState::Failed).await;
+    assert_eq!(
+        texts(&stored),
+        ["Publish?\n\nReply yes or no. No answer in 1 minute counts as no."]
+    );
+    assert!(hub.ask("next", "feishu:default", "ou-owner").is_some());
 }
 
 #[tokio::test]
@@ -274,7 +344,7 @@ async fn a_question_nobody_follows_is_withdrawn() {
         confirmer.status(&info.id).unwrap().state,
         ConfirmState::Withdrawn
     );
-    assert!(wechat.take_question("owner").is_none());
+    assert!(wechat.take_question("owner", u64::MAX).is_none());
 }
 
 #[tokio::test]
@@ -340,7 +410,7 @@ async fn questions_that_cannot_be_asked_are_refused() {
         again.as_ref().unwrap_err().contains("already waiting"),
         "{again:?}"
     );
-    eventually(|| bridge_of_bob.asking("owner")).await;
+    eventually(|| bridge_of_bob.asking("owner").is_some()).await;
     cancel.cancel();
-    eventually(|| !bridge_of_bob.asking("owner")).await;
+    eventually(|| bridge_of_bob.asking("owner").is_none()).await;
 }

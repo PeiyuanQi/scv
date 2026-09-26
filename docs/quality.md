@@ -134,18 +134,26 @@ Daemon and component changes require focused coverage for:
   transcript is missing, while one with a transcript is still downloaded for
   the owner and attached with it;
 - questions to the owner (`scv confirm`): answers recognized after
-  normalizing and nothing else taken for one; only the owner's direct chat
+  normalizing and nothing else taken for one, casual words such as `ok` and
+  `好的` included, which run a normal turn; only the owner's direct chat
   answering, never another sender, a group, or a message with files; one
-  question per chat, taken at most once; a question delivered through a fake
-  transport to the chat that started the work (or the notify target), and a
-  yes or no reply acknowledged without a turn while other messages run as
-  turns; the daemon's `confirm_ask` and `confirm_status`, a deadline telling
-  the chat no answer counts as no, an unfollowed question withdrawn, and
-  unreachable chats and repeat questions refused; `scv confirm` exiting 0,
-  1, or 2 against a scripted daemon, a daemon too old for it, no daemon, and
-  an isolated daemon with no owner chat; and `publish.sh` asking before its
-  first `cargo publish` only when delegated, publishing only on yes, and
-  never asking for `--check`;
+  question per chat, taken at most once; a question opening only once a fake
+  transport delivered it, so a yes while it waits in the outbox runs a turn;
+  a refused question failing at once and never held, one no longer waiting
+  dropped unsent, and one undelivered at its deadline failing without a word
+  to the chat; a message sent before the question's delivery (by the
+  platform time each transport parses: iLink's `create_time_ms`, Feishu's
+  `create_time`) or without a time never answering, including a Feishu
+  catch-up replay through the full bridge; a yes or no reply acknowledged
+  without a turn while other messages run as turns; the daemon's
+  `confirm_ask` and `confirm_status`, a deadline telling the chat no answer
+  counts as no, an unfollowed question withdrawn, and unreachable chats and
+  repeat questions refused; `scv confirm` exiting 0, 1, or 2 against a
+  scripted daemon, a daemon too old for it, no daemon, and an isolated daemon
+  with no owner chat; and `publish.sh` asking before its first `cargo
+  publish` only when delegated, publishing only on yes, never asking for
+  `--check`, and stopping with an explanation when the installed `scv`
+  predates `scv confirm`;
 - notices stored while another state write waits out an account's busy
   transaction, with receiving and delivery going on, and a notice the daemon
   stopped waiting for never sent;

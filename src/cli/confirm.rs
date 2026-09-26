@@ -68,6 +68,11 @@ async fn ask(layout: &Layout, question: String, timeout: u64) -> i32 {
                 ConfirmState::Yes => println!("The owner said yes."),
                 ConfirmState::No => println!("The owner said no."),
                 ConfirmState::Expired => println!("No answer in time, which counts as no."),
+                ConfirmState::Failed => eprintln!(
+                    "scv confirm: the question never reached the owner on {}, or the answer was \
+                     lost; nothing was decided",
+                    info.chat
+                ),
                 _ => eprintln!(
                     "scv confirm: the question on {} ended without an answer ({:?})",
                     info.chat, info.state

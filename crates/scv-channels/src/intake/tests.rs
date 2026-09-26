@@ -46,7 +46,7 @@ fn quiet<'a>(
         owner: None,
         tool_owner: None,
         senders: Senders::Anyone,
-        question: false,
+        question: None,
     }
 }
 
@@ -439,18 +439,15 @@ fn explicit_answers_are_recognized_after_normalizing() {
     for yes in [
         "yes",
         "Y",
-        " OK ",
-        "okay.",
         "Yes!",
         "yes!!",
+        "YES .",
+        " y ",
         "是",
         "是的",
-        "好",
-        "好的。",
+        "是的。",
         "确认！",
-        "可以",
         "同意",
-        "YES .",
     ] {
         assert_eq!(answer(yes), Some(true), "{yes:?}");
     }
@@ -468,8 +465,16 @@ fn explicit_answers_are_recognized_after_normalizing() {
     ] {
         assert_eq!(answer(no), Some(false), "{no:?}");
     }
+    // Casual replies the owner may send about anything else are not answers.
     for other in [
         "",
+        "ok",
+        "OK",
+        "okay.",
+        "好",
+        "好的",
+        "好的。",
+        "可以",
         "yes please",
         "no way",
         "maybe",
@@ -477,12 +482,22 @@ fn explicit_answers_are_recognized_after_normalizing() {
         "not yet",
         "好的，发布吧",
         "[sticker]",
-        "ok\nbut wait",
+        "yes\nbut wait",
         "?",
         "!",
     ] {
         assert_eq!(answer(other), None, "{other:?}");
     }
+}
+
+/// When the question in the tests below reached the owner's chat.
+const ASKED_MS: u64 = 1_790_000_000_000;
+
+/// A direct or group text message the platform says was sent at `sent_ms`.
+fn sent(id: &str, sender: &str, text: &str, group: Option<&str>, sent_ms: Option<u64>) -> Inbound {
+    let mut message = Message::text(id, sender, text, "context", group);
+    message.sent_ms = sent_ms;
+    Inbound::Text(message)
 }
 
 #[test]
@@ -491,11 +506,12 @@ fn only_the_owner_answers_a_question_in_their_direct_chat() {
     let conversations = HashMap::new();
     let asking = Intake {
         owner: Some("owner"),
-        question: true,
+        question: Some(ASKED_MS),
         ..quiet(&state, &conversations)
     };
+    let later = Some(ASKED_MS + 5_000);
     let said = |id: &str, sender: &str, text: &str, group: Option<&str>| {
-        Inbound::Text(Message::text(id, sender, text, "context", group))
+        sent(id, sender, text, group, later)
     };
     let owner_yes = said("m1", "owner", "Yes!", None);
     let Verdict::Answer { sender, yes } = classify(&owner_yes, &asking) else {
@@ -507,11 +523,14 @@ fn only_the_owner_answers_a_question_in_their_direct_chat() {
         classify(&said("m2", "owner", "不要", None), &asking),
         Verdict::Answer { yes: false, .. }
     ));
-    // Other senders, the owner's group messages, and other words run turns.
+    // Other senders, the owner's group messages, and other words, casual
+    // ones included, run turns.
     for inbound in [
         said("m3", "other", "yes", None),
         said("m4", "owner", "yes", Some("group")),
         said("m5", "owner", "what is the question?", None),
+        said("m8", "owner", "ok", None),
+        said("m9", "owner", "好的", None),
     ] {
         assert!(
             matches!(classify(&inbound, &asking), Verdict::Turn { .. }),
@@ -520,7 +539,9 @@ fn only_the_owner_answers_a_question_in_their_direct_chat() {
         );
     }
     // A file with a yes caption is not a plain answer.
-    let mut captioned = Message::text("m6", "owner", "ok", "context", None);
+    let Inbound::Text(mut captioned) = said("m6", "owner", "yes", None) else {
+        unreachable!()
+    };
     captioned.media.push(crate::Media {
         kind: crate::MediaKind::Image,
         name: String::new(),
@@ -533,15 +554,15 @@ fn only_the_owner_answers_a_question_in_their_direct_chat() {
         classify(&Inbound::Text(captioned), &asking),
         Verdict::Turn { .. }
     ));
-    // Without a question waiting, a yes is an ordinary message.
+    // Without a question the owner has seen, a yes is an ordinary message.
     let idle = Intake {
-        question: false,
+        question: None,
         ..asking
     };
     assert!(matches!(classify(&owner_yes, &idle), Verdict::Turn { .. }));
     // An owner-only account answers its owner's yes and drops a stranger's.
     let owner_only = Intake {
-        question: true,
+        question: Some(ASKED_MS),
         ..owned(&state, &conversations, Some("owner"))
     };
     assert!(matches!(
@@ -555,6 +576,38 @@ fn only_the_owner_answers_a_question_in_their_direct_chat() {
 }
 
 #[test]
+fn only_a_message_sent_after_the_question_reached_the_chat_answers_it() {
+    let state = state::BridgeState::default();
+    let conversations = HashMap::new();
+    let asking = Intake {
+        owner: Some("owner"),
+        question: Some(ASKED_MS),
+        ..quiet(&state, &conversations)
+    };
+    // Sent before the question arrived, such as a catch-up replay or a
+    // message a poll in backoff picks up late: meant for something else.
+    // A message whose platform gives no time cannot answer either.
+    for sent_ms in [Some(ASKED_MS - 1), Some(ASKED_MS - 60_000), Some(0), None] {
+        assert!(
+            matches!(
+                classify(&sent("m1", "owner", "yes", None, sent_ms), &asking),
+                Verdict::Turn { .. }
+            ),
+            "{sent_ms:?}"
+        );
+    }
+    for sent_ms in [ASKED_MS, ASKED_MS + 1] {
+        assert!(
+            matches!(
+                classify(&sent("m1", "owner", "yes", None, Some(sent_ms)), &asking),
+                Verdict::Answer { yes: true, .. }
+            ),
+            "{sent_ms}"
+        );
+    }
+}
+
+#[test]
 fn an_answer_needs_no_room_but_is_never_taken_twice() {
     let full = state::BridgeState {
         in_flight: (0..MAX_CLAIMS)
@@ -565,10 +618,10 @@ fn an_answer_needs_no_room_but_is_never_taken_twice() {
     let conversations = HashMap::new();
     let asking = Intake {
         owner: Some("owner"),
-        question: true,
+        question: Some(ASKED_MS),
         ..quiet(&full, &conversations)
     };
-    let answer = Inbound::Text(Message::text("m1", "owner", "ok", "context", None));
+    let answer = sent("m1", "owner", "yes", None, Some(ASKED_MS + 1));
     assert!(matches!(
         classify(&answer, &asking),
         Verdict::Answer { yes: true, .. }

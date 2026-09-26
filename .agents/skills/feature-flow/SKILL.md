@@ -178,6 +178,11 @@ or an unasked question to the owner instead of retrying on your own, and never
 run `cargo publish` directly to get around it. `--check` never asks, and a
 run from a terminal without `SCV_PARENT` does not ask either.
 
+The first release that includes `scv confirm` (0.3.0) must be published from
+a terminal; later releases can be published from chat. Until that release is
+installed, the `scv` and daemon a chat-delegated agent runs cannot ask, so the
+script stops with nothing published and says so; there is no way around it.
+
 ## 7. Install and restart
 
 ```sh

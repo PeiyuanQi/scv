@@ -36,8 +36,10 @@ pub(crate) struct Intake<'a> {
     pub(crate) tool_owner: Option<&'a ToolOwner>,
     /// Whose messages the account answers.
     pub(crate) senders: Senders,
-    /// A yes/no question waits for the owner's answer in their direct chat.
-    pub(crate) question: bool,
+    /// When the yes/no question waiting for the owner's answer in their
+    /// direct chat reached it, in Unix milliseconds; `None` while none can
+    /// be answered.
+    pub(crate) question: Option<u64>,
 }
 
 /// A message to answer, who it comes from, and where it belongs.
@@ -70,8 +72,8 @@ pub(crate) enum Verdict<'m> {
     /// cannot hear: answer with the voice notice instead of a turn, without
     /// downloading it.
     Unheard(Sender<'m>),
-    /// The owner's explicit answer to the question waiting in their direct
-    /// chat: resolve it and acknowledge, without a turn.
+    /// The owner's explicit answer, sent after the question reached their
+    /// direct chat: resolve it and acknowledge, without a turn.
     Answer { sender: Sender<'m>, yes: bool },
     /// Claim the message and run a turn on its conversation.
     Turn {
@@ -130,11 +132,14 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         key,
         owner_chat: direct && owner == Some(sender),
     };
-    // Only the owner answers, in their direct chat and in plain words; any
-    // other message runs as usual and the question keeps waiting.
-    if question
+    // Only the owner answers, in their direct chat and in plain words, with
+    // a message the platform says was sent after the question reached them:
+    // an earlier one, such as a catch-up replay, was meant for something
+    // else. Any other message runs as usual and the question keeps waiting.
+    if let Some(asked_ms) = question
         && from.owner_chat
         && message.media.is_empty()
+        && message.sent_ms.is_some_and(|sent_ms| sent_ms >= asked_ms)
         && let Some(yes) = answer(&message.text)
     {
         return Verdict::Answer { sender: from, yes };
@@ -188,11 +193,10 @@ fn unheard(message: &Message) -> bool {
 
 /// Whether `text` explicitly answers a yes/no question: trimmed,
 /// lowercased, and without trailing `.`, `!`, `。`, or `！`, it is one of the
-/// accepted words for yes or for no.
+/// accepted words for yes or for no. Casual replies such as `ok` or `好` are
+/// not answers: the owner may send them about anything else.
 pub(crate) fn answer(text: &str) -> Option<bool> {
-    const YES: &[&str] = &[
-        "yes", "y", "ok", "okay", "是", "是的", "好", "好的", "确认", "可以", "同意",
-    ];
+    const YES: &[&str] = &["yes", "y", "是", "是的", "确认", "同意"];
     const NO: &[&str] = &["no", "n", "否", "不", "不要", "取消", "算了", "stop"];
     let lowered = text.trim().to_lowercase();
     let word = lowered.trim_end_matches(['.', '!', '。', '！']).trim_end();
