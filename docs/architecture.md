@@ -617,9 +617,11 @@ The supported source toolchain is stable Rust 1.88 or newer. Runtime code uses
 portable Rust APIs plus `/bin/bash` on Linux and macOS. The release
 matrix builds `aarch64` and `x86_64` archives for both operating systems.
 
-The primary installation paths are a GitHub Release archive and
-`cargo install --locked --git <repository-url>`. The root package installs both
-executables. SCV does not modify shell profiles or install provider CLIs.
+The primary installation path is crates.io (`cargo install scv-cli
+--locked`), which `scv update` also uses; a GitHub Release archive and
+`cargo install --locked --git <repository-url>` also work. The root package
+installs both executables. SCV does not modify shell profiles or install
+provider CLIs.
 
 ## Verification and performance budgets
 

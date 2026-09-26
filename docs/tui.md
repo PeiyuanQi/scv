@@ -158,6 +158,19 @@ Resize and focus events never enter the composer as text. Styling uses terminal
 default foreground and background colors and remains legible when color is
 unavailable.
 
+## Headless `scv exec`
+
+`scv exec [--yes] PROMPT` runs one prompt without the TUI, for scripts and
+quick questions. It starts a private `scv server --stdio` for a session in the
+current directory, so it needs no running daemon, and passes on the global
+`--model`, `--provider`, `--base-url`, and `--approval-policy` flags. The answer
+streams to stdout; tool progress, approval requests, and failures go to
+stderr. The approval policy decides first, so under `on-risk` reads run
+unasked; every request that would ask a person is denied unless `--yes`
+approves it for this run. A cancelled or failed turn makes the command fail.
+When the turn starts background jobs, `scv exec` stays open until each one has
+been reported, and prints the report.
+
 ## Compatibility boundary
 
 The v0.2 TUI uses SCV protocol version 3 over the existing authenticated stdio
