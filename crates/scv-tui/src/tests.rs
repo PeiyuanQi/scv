@@ -579,6 +579,7 @@ fn running_tools_show_their_latest_progress_line() {
         output: "{}".into(),
         truncated: false,
         error: None,
+        jobs: Vec::new(),
     });
     let finished = screen(&app);
     assert!(!finished.contains("cargo test"), "{finished}");
@@ -673,6 +674,7 @@ fn tool_status_comes_from_the_error_kind_never_the_output_text() {
             output: (*output).into(),
             truncated: false,
             error: *error,
+            jobs: Vec::new(),
         });
     }
     for (call_id, .., expected) in cases {
@@ -752,7 +754,7 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
         turn_id: "t2".into(),
         seq: 1,
         origin: Some(scv_protocol::TurnOrigin {
-            kind: scv_protocol::ORIGIN_BACKGROUND.into(),
+            kind: scv_protocol::OriginKind::Background,
             jobs: vec!["job-1".into()],
         }),
     });
@@ -769,7 +771,7 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
         steps: 1,
         usage: scv_protocol::Usage::default(),
         origin: Some(scv_protocol::TurnOrigin {
-            kind: scv_protocol::ORIGIN_BACKGROUND.into(),
+            kind: scv_protocol::OriginKind::Background,
             jobs: vec!["job-1".into()],
         }),
     });

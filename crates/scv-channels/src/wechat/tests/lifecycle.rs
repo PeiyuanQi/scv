@@ -1443,9 +1443,21 @@ async fn start_background_job(
     job: &str,
     reply: &str,
 ) {
+    start_job_with_task(side, job, "", reply).await;
+}
+
+/// The owner's turn whose call starts background job `job` for `task`, as
+/// the daemon reports it in the call's `jobs`.
+async fn start_job_with_task(
+    side: &mut BufReader<tokio::net::UnixStream>,
+    job: &str,
+    task: &str,
+    reply: &str,
+) {
     let output =
         json!({"job":job,"tool":"agent_codex","status":"running","background":true}).to_string();
-    send_frame(side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent_codex","success":true,"output":output,"truncated":false})).await;
+    let started = json!({"job":job,"tool":"agent_codex","status":"running","task":task});
+    send_frame(side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent_codex","success":true,"output":output,"truncated":false,"jobs":[started]})).await;
     finish_turn(side, reply).await;
 }
 
@@ -1702,7 +1714,9 @@ async fn start_described_job(
     reply: &str,
 ) {
     send_frame(side, json!({"type":"tool.proposed","request_id":"r","session_id":"s","turn_id":"t","seq":0,"call_id":"c","name":"agent_codex","arguments":{"prompt":prompt,"background":true}})).await;
-    start_background_job(side, job, reply).await;
+    // The daemon names the job by its prompt's first line.
+    let task = prompt.lines().next().unwrap_or_default();
+    start_job_with_task(side, job, task, reply).await;
 }
 
 #[tokio::test]
@@ -1771,6 +1785,47 @@ async fn the_hub_sees_owner_work_until_its_report_is_stored_and_can_queue_notice
     };
     bridge.run(&cancel, Duration::from_secs(15), peer).await;
     assert!(hub.owner("wechat:default").is_none(), "withdrawn on stop");
+}
+
+#[tokio::test]
+async fn a_job_whose_result_a_later_call_showed_the_model_stops_holding_the_session() {
+    use crate::hub::{Hub, Link};
+    let directory = tempfile::tempdir().unwrap();
+    let mut ilink = FakeIlink::start().await;
+    let store = saved_store(directory.path(), &ilink.base);
+    let socket = directory.path().join("daemon.sock");
+    let daemon = UnixListener::bind(&socket).unwrap();
+    let cancel = CancellationToken::new();
+    let owner = owner_of("sender");
+    let hub = Hub::new(None);
+    let link = Link::new(Arc::clone(&hub), "wechat:default", Some("sender".into()));
+    let base = ilink.base.clone();
+    let bridge = Bridge::new(directory.path(), &base, &socket, &store)
+        .owner(&owner)
+        .link(&link);
+    let peer = async {
+        wait_until(|| hub.owner("wechat:default").is_some()).await;
+        ilink.push(vec![text_message("m1", "sender", "land it")]);
+        let (mut side, _) = accept_session(&daemon).await;
+        next_turn(&mut side).await;
+        start_described_job(&mut side, "job-1", "Land the fix", "Started job-1.").await;
+        assert_eq!(sent_text(&ilink.sent().await), "Started job-1.");
+        wait_until(|| hub.session_work("s") == 1).await;
+        wait_until(|| store.load_state("default").unwrap().jobs.len() == 1).await;
+        // The owner asks, and the model waits for the job and reads its
+        // result: no report turn will follow.
+        ilink.push(vec![text_message("m2", "sender", "done yet?")]);
+        assert_eq!(next_turn(&mut side).await, "done yet?");
+        let settled =
+            json!({"job":"job-1","tool":"agent_codex","status":"completed","task":"Land the fix"});
+        send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c2","name":"agent_wait","success":true,"output":"{}","truncated":false,"jobs":[settled]})).await;
+        finish_turn(&mut side, "job-1 landed.").await;
+        assert_eq!(sent_text(&ilink.sent().await), "job-1 landed.");
+        wait_until(|| hub.session_work("s") == 0).await;
+        wait_until(|| store.load_state("default").unwrap().jobs.is_empty()).await;
+        cancel.cancel();
+    };
+    bridge.run(&cancel, Duration::from_secs(15), peer).await;
 }
 
 #[tokio::test]

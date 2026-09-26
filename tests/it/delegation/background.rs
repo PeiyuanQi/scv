@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use scv_protocol::{ClientMessage, ORIGIN_BACKGROUND, PROTOCOL_VERSION, PeerInfo, ServerEvent};
+use scv_protocol::{ClientMessage, OriginKind, PROTOCOL_VERSION, PeerInfo, ServerEvent};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -256,7 +256,7 @@ async fn a_finished_background_job_is_reported_in_a_turn_the_server_starts() {
         (Some("job-1"), Some("running"), Some(true))
     );
     let origin = report_origin.unwrap();
-    assert_eq!(origin.kind, ORIGIN_BACKGROUND);
+    assert_eq!(origin.kind, OriginKind::Background);
     assert_eq!(origin.jobs, vec!["job-1".to_owned()]);
     assert_eq!(report_text, "job-1 landed 0.9.9.");
     // The model was told what finished: the job, its conversation, its reply.
@@ -323,6 +323,60 @@ async fn a_job_the_model_waited_for_is_not_reported_again() {
         "a report turn repeated a result the model had seen"
     );
     assert_eq!(requests.try_iter().count(), 3);
+}
+
+#[tokio::test]
+async fn tool_calls_carry_the_jobs_they_start_and_settle() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let _requests = serve_provider(
+        listener,
+        vec![
+            call(
+                "call_1",
+                "agent_codex",
+                json!({"prompt":"Land the fix\nthen publish","background":true}),
+            ),
+            call(
+                "call_2",
+                "agent_wait",
+                json!({"job":"job-1","timeout_seconds":30}),
+            ),
+            text("It landed."),
+        ],
+    );
+    let (_home, home) = home_with_fake_codex();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut server = Server::start(&home, address, workspace.path()).await;
+    server.turn("land it and wait").await;
+    let mut changes = Vec::new();
+    loop {
+        match server.next().await.expect("server went quiet") {
+            ServerEvent::ToolCompleted { call_id, jobs, .. } => changes.push((call_id, jobs)),
+            ServerEvent::TurnCompleted { origin: None, .. } => break,
+            ServerEvent::TurnFailed { message, .. } => panic!("turn failed: {message}"),
+            _ => {}
+        }
+    }
+    let job = |status| scv_protocol::JobChange {
+        job: "job-1".into(),
+        tool: "agent_codex".into(),
+        status,
+        task: "Land the fix".into(),
+    };
+    assert_eq!(
+        changes,
+        [
+            (
+                "call_1".to_owned(),
+                vec![job(scv_protocol::JobStatus::Running)]
+            ),
+            (
+                "call_2".to_owned(),
+                vec![job(scv_protocol::JobStatus::Completed)]
+            ),
+        ]
+    );
 }
 
 #[tokio::test]

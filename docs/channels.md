@@ -441,8 +441,11 @@ model sees `[… download failed]`.
 
 When the owner's session starts a background delegation (an `agent_*` call
 with `background: true`; see [tools](tools.md#background-jobs)), the bridge
-notes the job from the tool result and keeps that conversation's session open,
-without the 30-minute idle limit, until the job is reported. When the server
+notes the job from the call's `tool.completed.jobs` (see
+[protocol](protocol.md#tool-lifecycle-and-approval)) and keeps that
+conversation's session open, without the 30-minute idle limit, until the model
+has seen the job's result: in a report turn, or through a later
+`agent_wait`, `agent_status`, or `agent_cancel` call. When the server
 starts a turn reporting it (`turn.started` with an `origin`), the bridge
 answers that turn's approval requests like the owner's own, collects its
 answer, and sends it to the owner as an unprompted message (for Feishu, a
@@ -466,8 +469,9 @@ which would cancel the jobs; the owner still gets the failure reply.
 The bridge keeps reading a report turn that starts during one of the owner's
 turns and finishes after it, so its answer goes out without waiting for the
 owner's next message. It also records each running job in the account's
-delivery state (`jobs`: the chat, job handle, delegating tool, and the first
-line of the delegated prompt) until the job is reported or its session closes.
+delivery state (`jobs`: the chat, job handle, delegating tool, and the task
+the daemon named, the first line of the delegated prompt) until the job is
+reported or its session closes.
 A restart ends every session and so every job: on the account's next run, each
 chat whose jobs were recorded gets one message listing the jobs that stopped.
 

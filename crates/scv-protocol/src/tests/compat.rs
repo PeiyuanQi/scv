@@ -124,6 +124,7 @@ fn a_failed_call_adds_only_its_error_kind_to_the_0_2_2_frame() {
         output,
         truncated,
         error: Some(ToolErrorKind::Denied),
+        jobs: Vec::new(),
     };
     let mut sent = serde_json::to_value(&typed).unwrap();
     assert_eq!(sent["error"], "denied");
@@ -133,6 +134,46 @@ fn a_failed_call_adds_only_its_error_kind_to_the_0_2_2_frame() {
         sent,
         serde_json::from_str::<serde_json::Value>(denied).unwrap()
     );
+}
+
+#[test]
+fn a_call_that_starts_a_job_adds_only_its_jobs_to_the_0_2_2_frame() {
+    let started = SERVER_EVENTS_0_2_2
+        .iter()
+        .find(|frame| frame.contains(r#"\"background\":true"#))
+        .unwrap();
+    let mut event: ServerEvent = serde_json::from_str(started).unwrap();
+    let ServerEvent::ToolCompleted { jobs, .. } = &mut event else {
+        panic!("not a tool.completed frame");
+    };
+    assert!(jobs.is_empty(), "0.2.2 sent no jobs");
+    jobs.push(JobChange {
+        job: "job-1".into(),
+        tool: "agent_codex".into(),
+        status: JobStatus::Running,
+        task: "Fix it".into(),
+    });
+    let mut sent = serde_json::to_value(&event).unwrap();
+    assert_eq!(sent["jobs"][0]["status"], "running");
+    sent.as_object_mut().unwrap().remove("jobs");
+    assert_eq!(
+        sent,
+        serde_json::from_str::<serde_json::Value>(started).unwrap()
+    );
+    // The report turn's origin keeps its 0.2.2 shape.
+    let report = SERVER_EVENTS_0_2_2
+        .iter()
+        .find(|frame| frame.contains(r#""type":"turn.started""#) && frame.contains("origin"))
+        .unwrap();
+    let ServerEvent::TurnStarted {
+        origin: Some(origin),
+        ..
+    } = serde_json::from_str(report).unwrap()
+    else {
+        panic!("not a report turn");
+    };
+    assert_eq!(origin.kind, OriginKind::Background);
+    assert_eq!(origin.jobs, ["job-1"]);
 }
 
 #[test]

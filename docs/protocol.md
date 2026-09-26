@@ -309,6 +309,27 @@ size, count, depth, or time `limit`, `unknown_tool`, or `failed` otherwise.
 Clients show a call's outcome from `error`, never by reading `output`. A
 successful call omits it, as do servers before 0.3.0.
 
+A call that starts a [background job](tools.md#background-jobs), or shows the
+model a job's result, also carries `jobs`: one entry per job, with its `job`
+handle, the delegating `tool`, its `status` (`scv_protocol::JobStatus`), and
+its `task`, the first line of the delegated prompt, shortened (omitted when
+empty).
+
+```json
+{"type":"tool.completed","request_id":"3","session_id":"...","turn_id":"...","seq":14,"call_id":"call_125","name":"agent_codex","success":true,"output":"{\"job\":\"job-1\",…}","truncated":false,"jobs":[{"job":"job-1","tool":"agent_codex","status":"running","task":"Land the fix"}]}
+{"type":"tool.completed","request_id":"7","session_id":"...","turn_id":"...","seq":31,"call_id":"call_140","name":"agent_wait","success":true,"output":"…","truncated":false,"jobs":[{"job":"job-1","tool":"agent_codex","status":"completed","task":"Land the fix"}]}
+```
+
+A job appears as `running` in the `agent_*` call that started it, and once
+more, with how it ended (`completed`, `failed`, `declined`, `timeout`, or
+`cancelled`), in the `agent_wait`, `agent_status`, or `agent_cancel` call
+through which the model saw its result or asked for its stop; a job reported
+in a server-started turn is named by that turn's `origin.jobs` instead. A job
+is therefore settled once the model has seen its result, not when it
+finishes: a client keeps the session open until then, since closing it
+cancels the session's jobs. The field is omitted when a call touched no job,
+and by servers before 0.3.0.
+
 A successful `chat_attach` call's output is
 `{"attached":{"path":…,"name":…,"size":…,"caption":…},"note":…}`, where
 `path` is a private copy in the channels' media outbox. A chat client reads it
@@ -346,8 +367,11 @@ The server may start a turn itself: when a background delegation (see
 [tools](tools.md#background-jobs)) finishes and the model has not seen its
 result, it reports the job in a new turn once the session is idle and its
 queue is empty. Such a turn is announced and ended like any other, and its
-`turn.started` and terminal event carry an `origin`; a client's own turns have
-none, and older frames without the field parse as client turns.
+`turn.started` and terminal event carry an `origin`: its `kind`
+(`scv_protocol::OriginKind`, `background` for these reports; a kind a client
+does not know parses as `unknown`) and the `jobs` it reports, whose results the
+model sees in this turn. A client's own turns have none, and older frames
+without the field parse as client turns.
 
 ```json
 {"type":"turn.started","request_id":"background:…","session_id":"...","turn_id":"...","seq":20,"origin":{"kind":"background","jobs":["job-1"]}}

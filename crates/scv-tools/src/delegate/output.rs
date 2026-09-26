@@ -6,6 +6,8 @@
 //! stream with no parsable event falls back to its text.
 
 use scv_core::{ProgressSink, ToolFailure, ToolOutput};
+use scv_protocol::JobStatus;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
@@ -409,6 +411,28 @@ impl AgentResult {
             value["turn"] = turn.into();
         }
         (value.to_string(), truncated)
+    }
+}
+
+/// The parts of an agent tool's result ([`AgentResult::to_json`]) that SCV
+/// reads back: for a background job's report and status, and to decide
+/// whether a failed call names other agents.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AgentReply {
+    pub(crate) status: Option<JobStatus>,
+    pub(crate) reply: Option<String>,
+    pub(crate) error: Option<String>,
+    /// The conversation handle to continue it with.
+    pub(crate) session: Option<String>,
+}
+
+impl AgentReply {
+    /// The agent result `value` holds, or `None` for any other value.
+    pub(crate) fn read(value: &Value) -> Option<Self> {
+        value
+            .is_object()
+            .then(|| Self::deserialize(value).ok())
+            .flatten()
     }
 }
 

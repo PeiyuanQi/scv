@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use scv_core::{AgentError, ApprovalGate, EventSink, TurnInput};
-use scv_protocol::{ORIGIN_BACKGROUND, ServerEvent, TurnOrigin};
+use scv_protocol::{OriginKind, ServerEvent, TurnOrigin};
 use scv_tools::background;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -93,6 +93,7 @@ impl TurnStarter {
             meta: meta.clone(),
             output: self.output.clone(),
             cancellation: cancellation.clone(),
+            background: current.background.clone(),
         });
         let gate: Arc<dyn ApprovalGate> = Arc::new(ProtocolApprovalGate {
             policy: current.config.tools.approval_policy,
@@ -139,7 +140,7 @@ impl TurnStarter {
             return Ok(None);
         }
         let origin = TurnOrigin {
-            kind: ORIGIN_BACKGROUND.into(),
+            kind: OriginKind::Background,
             jobs: reports.iter().map(|report| report.job.clone()).collect(),
         };
         let prompt = background::report_prompt(&reports);

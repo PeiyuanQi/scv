@@ -61,6 +61,9 @@ impl ToolRisk {
 /// What a running tool call gets besides its arguments.
 #[derive(Debug, Clone)]
 pub struct ToolContext {
+    /// The model's ID for this call, which its `ToolCompleted` event carries;
+    /// empty for a call the model did not make, such as a background job's.
+    pub call_id: String,
     pub workspace: PathBuf,
     pub cancellation: CancellationToken,
     /// Where the tool may report short status lines while it runs.
@@ -72,9 +75,10 @@ pub struct ToolContext {
 
 impl ToolContext {
     /// A context whose progress reports go nowhere and whose relayed
-    /// approval requests are denied.
+    /// approval requests are denied, for a call without an ID.
     pub fn new(workspace: PathBuf, cancellation: CancellationToken) -> Self {
         Self {
+            call_id: String::new(),
             workspace,
             cancellation,
             progress: ProgressSink::default(),

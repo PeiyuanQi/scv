@@ -301,7 +301,7 @@ fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
         turn_id: "t".into(),
         seq: 4,
         origin: Some(TurnOrigin {
-            kind: ORIGIN_BACKGROUND.into(),
+            kind: OriginKind::Background,
             jobs: vec!["job-1".into()],
         }),
     };
@@ -328,28 +328,55 @@ fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
 }
 
 #[test]
-fn background_job_updates_come_from_start_wait_and_status_outputs() {
-    let started = background_job_update(
-        r#"{"job":"job-1","tool":"agent_codex","status":"running","background":true}"#,
+fn tool_calls_report_the_jobs_they_start_and_settle() {
+    let started = JobChange {
+        job: "job-1".into(),
+        tool: "agent_codex".into(),
+        status: JobStatus::Running,
+        task: "Land the fix".into(),
+    };
+    assert!(started.started());
+    assert_eq!(
+        serde_json::to_value(&started).unwrap(),
+        serde_json::json!({"job":"job-1","tool":"agent_codex","status":"running","task":"Land the fix"})
     );
-    assert_eq!(started.started, vec!["job-1".to_owned()]);
-    assert!(started.settled.is_empty());
-    // A running job listed by agent_status is neither started nor settled.
-    let listed = background_job_update(
-        r#"{"jobs":[{"job":"job-1","status":"running"},{"job":"job-2","status":"failed"}]}"#,
-    );
-    assert!(listed.started.is_empty());
-    assert_eq!(listed.settled, vec!["job-2".to_owned()]);
-    let waited = background_job_update(r#"{"job":"job-1","status":"completed"}"#);
-    assert_eq!(waited.settled, vec!["job-1".to_owned()]);
-    // Ordinary agent results and non-JSON output are no job updates.
-    for other in [
-        r#"{"agent":"codex","status":"completed"}"#,
-        "plain text",
-        "[1]",
+    // The statuses are the strings the model reads in the job tools' results.
+    for (status, wire) in [
+        (JobStatus::Running, "running"),
+        (JobStatus::Completed, "completed"),
+        (JobStatus::Failed, "failed"),
+        (JobStatus::Declined, "declined"),
+        (JobStatus::Timeout, "timeout"),
+        (JobStatus::Cancelled, "cancelled"),
     ] {
-        assert_eq!(background_job_update(other), BackgroundJobUpdate::default());
+        assert_eq!(serde_json::to_value(status).unwrap(), wire);
+        assert_eq!(status.to_string(), wire);
     }
+    let settled: JobChange =
+        serde_json::from_str(r#"{"job":"job-1","tool":"agent_codex","status":"paused"}"#).unwrap();
+    assert_eq!(settled.status, JobStatus::Unknown);
+    assert!(settled.task.is_empty());
+    assert!(!settled.started());
+    let event = ServerEvent::ToolCompleted {
+        request_id: "r".into(),
+        session_id: "s".into(),
+        turn_id: "t".into(),
+        seq: 3,
+        call_id: "c".into(),
+        name: "agent_codex".into(),
+        success: true,
+        output: "{}".into(),
+        truncated: false,
+        error: None,
+        jobs: vec![started],
+    };
+    let wire = serde_json::to_string(&event).unwrap();
+    assert!(wire.contains(r#""jobs":[{"job":"job-1""#), "{wire}");
+    assert_eq!(serde_json::from_str::<ServerEvent>(&wire).unwrap(), event);
+    // A newer server's origin kind parses too.
+    let origin: TurnOrigin = serde_json::from_str(r#"{"kind":"schedule"}"#).unwrap();
+    assert_eq!(origin.kind, OriginKind::Unknown);
+    assert!(origin.jobs.is_empty());
 }
 
 #[test]

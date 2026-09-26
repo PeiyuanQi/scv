@@ -1,8 +1,11 @@
 //! Turning a turn's `CoreEvent`s into protocol `ServerEvent`s.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use scv_core::{AgentError, CoreEvent, EventSink, ToolFailure};
 use scv_protocol::{ErrorCode, ServerEvent, ToolErrorKind};
+use scv_tools::background::BackgroundJobs;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -49,6 +52,9 @@ pub(crate) struct ProtocolSink {
     pub(crate) meta: TurnMeta,
     pub(crate) output: OutboundSender,
     pub(crate) cancellation: CancellationToken,
+    /// The session's background jobs, whose changes each call's
+    /// `tool.completed` carries.
+    pub(crate) background: Option<Arc<BackgroundJobs>>,
 }
 
 #[async_trait]
@@ -106,6 +112,10 @@ impl EventSink for ProtocolSink {
                 name,
                 output,
             } => ServerEvent::ToolCompleted {
+                jobs: self
+                    .background
+                    .as_ref()
+                    .map_or_else(Vec::new, |jobs| jobs.take_changes(&call_id)),
                 request_id: self.meta.request_id.clone(),
                 session_id: self.meta.session_id.clone(),
                 turn_id: self.meta.turn_id.clone(),
