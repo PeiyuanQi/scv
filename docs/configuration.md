@@ -9,9 +9,11 @@ An SCV instance is identified by its home root. Use `--scv-home PATH` or
 the root owns the config file, credentials, agent homes, skills, runtime state,
 and systemd unit identity (see [Instance layout](#instance-layout)). Use
 `--config PATH` or `SCV_CONFIG` for an additional
-explicit file. Both selectors are captured before SCV starts its server or
-TUI child. A custom home never merges or falls back to the default `~/.scv`
-file.
+explicit file. Both selectors are captured once, when an SCV process starts,
+and passed down explicitly; the home is resolved to its canonical path when it
+exists. The environment only hands the selection on to child processes (the
+systemd unit, the planned-restart watchdog, and delegated agents). A custom
+home never merges or falls back to the default `~/.scv` file.
 
 For concurrently running daemons, each process must use a different
 `--scv-home` root. A different `--config` file alone does not create a separate
@@ -197,7 +199,7 @@ max_tool_arguments_bytes = 262144
 max_retries = 2
 
 [skills]
-user_dir = "~/.scv/skills"
+user_dir = "~/.scv/skills"  # left at this default: the instance's own skills/
 project_dir = ".scv/skills"
 scan_projects = true
 max_skills = 128
@@ -610,9 +612,10 @@ or tool results.
 
 ## Daemon and component settings
 
-`scv-client` resolves the default socket as `$SCV_HOME/state/server.sock`,
-normally `~/.scv/state/server.sock`. The TUI and daemon control commands use
-this same path.
+The daemon listens on the instance's socket, `$SCV_HOME/state/server.sock`
+(normally `~/.scv/state/server.sock`), which `scv_client::Layout` places;
+the TUI and daemon control commands take the same path from the instance they
+resolved at startup.
 `scv status` queries the running server; `scv reload` immediately reconciles
 saved accounts and component settings without restarting unrelated sessions.
 The daemon also reconciles on startup and every two seconds.

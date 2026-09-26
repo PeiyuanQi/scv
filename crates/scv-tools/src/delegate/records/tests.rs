@@ -4,7 +4,7 @@ use super::*;
 use std::os::unix::{fs::PermissionsExt as _, process::CommandExt as _};
 
 fn registry(home: &Path) -> Arc<DelegationRegistry> {
-    Arc::new(DelegationRegistry::new(home))
+    Arc::new(DelegationRegistry::new(&Layout::new(home)))
 }
 
 /// Spawn `sh -c script` in its own process group with `environment`.
@@ -30,6 +30,23 @@ async fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
     false
 }
 
+/// The instance ID is part of every `SCV_PARENT` tag, so orphan detection
+/// and planned restarts recognize records of the same instance only while it
+/// stays exactly this hash of the instance home.
+#[test]
+fn the_instance_id_is_a_stable_hash_of_the_home() {
+    let registry = DelegationRegistry::new(&Layout::new(Path::new("/srv/scv")));
+    assert_eq!(registry.instance(), "8973cbc5");
+    assert_eq!(
+        registry.record_dir(),
+        Path::new("/srv/scv/state/delegations")
+    );
+    assert_eq!(
+        registry.conversation_dir(),
+        Path::new("/srv/scv/state/conversations")
+    );
+}
+
 #[test]
 fn chains_match_only_their_own_handle() {
     assert!(chain_names("abcd/s1/codex-1a2b3c", "codex-1a2b3c"));
@@ -44,7 +61,7 @@ fn chains_match_only_their_own_handle() {
 #[test]
 fn a_declared_client_depth_raises_the_recorded_depth() {
     let home = tempfile::tempdir().unwrap();
-    let registry = DelegationRegistry::new(home.path());
+    let registry = DelegationRegistry::new(&Layout::new(home.path()));
     let pending = registry.begin_at(2, "codex", "session", home.path(), None);
     assert_eq!(pending.depth, 3);
     assert!(
@@ -58,7 +75,7 @@ fn a_declared_client_depth_raises_the_recorded_depth() {
 #[test]
 fn nested_tags_extend_the_chain_and_depth() {
     let home = tempfile::tempdir().unwrap();
-    let mut registry = DelegationRegistry::new(home.path());
+    let mut registry = DelegationRegistry::new(&Layout::new(home.path()));
     registry.chain = Some("aaaa/s0/codex-111111".into());
     registry.depth = 1;
     let pending = registry.begin("claude", "s1", home.path(), Some(("claude-1", 2)));
@@ -143,7 +160,7 @@ async fn reconcile_removes_conversation_markers_of_exited_processes() {
     let live = ProcessIdentity::current().unwrap();
     for (id, owner) in [("dead-id", dead), ("live-id", live)] {
         let marker = serde_json::json!({"owner": owner, "agent": "codex", "handle": "codex-1"});
-        write_private_json(&markers, &format!("{id}.json"), &marker).unwrap();
+        write_private_json(markers, &format!("{id}.json"), &marker).unwrap();
     }
     let report = daemon.reconcile().await;
     assert_eq!(report.stale_markers, 1);
@@ -212,7 +229,7 @@ async fn an_abandoned_run_is_cleaned_up_when_its_guard_drops() {
 #[test]
 fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
     let home = tempfile::tempdir().unwrap();
-    let registry = DelegationRegistry::new(home.path());
+    let registry = DelegationRegistry::new(&Layout::new(home.path()));
     let dir = registry.record_dir().to_owned();
     let record = DelegationRecord {
         handle: "codex-abcdef".into(),

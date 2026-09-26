@@ -1,5 +1,6 @@
 //! Reading and layering configuration: defaults, the user's `config.toml`,
-//! a project's `.scv/config.toml`, `SCV_CONFIG`, then environment and flags.
+//! a project's `.scv/config.toml`, the explicit `--config` file
+//! (`SCV_CONFIG`), then environment and flags.
 
 use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
@@ -14,9 +15,10 @@ use super::{
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 impl Config {
-    pub fn init_user_config() -> Result<PathBuf> {
-        let path = user_config_path()
-            .ok_or_else(|| anyhow::anyhow!("cannot determine user config path"))?;
+    /// Write a starter `config.toml` into the instance unless it has one, and
+    /// return its path.
+    pub fn init_user_config(layout: &Layout) -> Result<PathBuf> {
+        let path = layout.config();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("create config directory")?;
             ensure_private_dir(parent)?;
@@ -68,31 +70,36 @@ impl Config {
 }
 
 impl Config {
-    pub fn load(workspace: &std::path::Path, overrides: ConfigOverrides) -> Result<Self> {
-        Self::load_layers(Some(workspace), overrides)
+    /// The configuration a session started in `workspace` of the instance at
+    /// `layout` runs with.
+    pub fn load(
+        layout: &Layout,
+        workspace: &std::path::Path,
+        overrides: ConfigOverrides,
+    ) -> Result<Self> {
+        Self::load_layers(layout, Some(workspace), overrides)
     }
 
     /// Load without a project layer, for settings that project configuration
     /// can never set (such as `[agents]`), so the caller's directory is irrelevant.
-    pub fn load_user(overrides: ConfigOverrides) -> Result<Self> {
-        Self::load_layers(None, overrides)
+    pub fn load_user(layout: &Layout, overrides: ConfigOverrides) -> Result<Self> {
+        Self::load_layers(layout, None, overrides)
     }
 
     fn load_layers(
+        layout: &Layout,
         workspace: Option<&std::path::Path>,
         overrides: ConfigOverrides,
     ) -> Result<Self> {
-        let instance_home = user_home_path()
-            .ok_or_else(|| anyhow::anyhow!("cannot determine SCV instance home"))?;
+        let instance_home = layout.home().to_owned();
         std::fs::create_dir_all(&instance_home).context("create SCV instance home")?;
         ensure_private_dir(&instance_home)?;
         let mut value: toml::Value = toml::from_str(
             &toml::to_string(&Self::default()).context("serialize default configuration")?,
         )?;
 
-        if let Some(user_path) = user_config_path()
-            && user_path.is_file()
-        {
+        let user_path = layout.config();
+        if user_path.is_file() {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -112,7 +119,7 @@ impl Config {
             // A workspace whose `.scv` is the SCV home (such as running from
             // `~`) has no project layer: that file is the user configuration,
             // already applied above at full trust.
-            let user_file = user_config_path().and_then(|path| std::fs::canonicalize(path).ok());
+            let user_file = std::fs::canonicalize(layout.config()).ok();
             if project_path.is_file() {
                 let canonical_project = std::fs::canonicalize(&project_path)
                     .with_context(|| format!("resolve configuration {}", project_path.display()))?;
@@ -134,16 +141,15 @@ impl Config {
             }
         }
 
-        if let Some(explicit) = std::env::var_os("SCV_CONFIG") {
-            let path = PathBuf::from(explicit);
+        if let Some(path) = &overrides.config_file {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if std::fs::metadata(&path)?.permissions().mode() & 0o077 != 0 {
+                if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
                     bail!("explicit configuration is readable by group or others; run chmod 600");
                 }
             }
-            let explicit = read_layer(&path)?;
+            let explicit = read_layer(path)?;
             if explicit.get("channels").is_some() {
                 bail!(
                     "{} cannot set [channels]; channel accounts belong in the instance's config.toml",
@@ -176,10 +182,8 @@ impl Config {
         if let Some(policy) = overrides.approval_policy {
             config.tools.approval_policy = policy;
         }
-        if config.skills.user_dir == std::path::Path::new("~/.scv/skills")
-            && let Some(home) = std::env::var_os("SCV_HOME")
-        {
-            config.skills.user_dir = PathBuf::from(home).join("skills");
+        if config.skills.user_dir == std::path::Path::new("~/.scv/skills") {
+            config.skills.user_dir = layout.skills();
         }
         config.skills.user_dir = expand_home(&config.skills.user_dir);
         config.instance_home = instance_home;
@@ -192,6 +196,7 @@ impl Config {
     /// replaced by `<hidden>`. Channel accounts are left out: `scv config
     /// show` reports them with their credentials.
     pub fn settings_with_origins(
+        layout: &Layout,
         workspace: Option<&std::path::Path>,
         overrides: &ConfigOverrides,
     ) -> Result<Vec<Setting>> {
@@ -206,7 +211,7 @@ impl Config {
         )?;
         apply(&defaults, "default");
         let mut merged = defaults;
-        let user = user_config_path().filter(|path| path.is_file());
+        let user = Some(layout.config()).filter(|path| path.is_file());
         if let Some(path) = &user {
             let layer = read_layer(path)?;
             apply(&layer, "config.toml");
@@ -223,8 +228,8 @@ impl Config {
                 merge(&mut merged, layer);
             }
         }
-        if let Some(path) = std::env::var_os("SCV_CONFIG") {
-            let layer = read_layer(std::path::Path::new(&path))?;
+        if let Some(path) = &overrides.config_file {
+            let layer = read_layer(path)?;
             apply(&layer, "SCV_CONFIG");
             merge(&mut merged, layer);
         }
@@ -292,23 +297,6 @@ impl Config {
                 origin,
             })
             .collect())
-    }
-}
-
-fn user_config_path() -> Option<PathBuf> {
-    user_home_path().map(|path| Layout::new(path).config())
-}
-
-/// The selected instance home (`SCV_HOME`, or `~/.scv`), canonicalized when
-/// it exists. The service unit name and delegation records hash this path.
-pub fn user_home_path() -> Option<PathBuf> {
-    let path = Layout::from_env().ok()?.home().to_owned();
-    if path.exists() {
-        Some(std::fs::canonicalize(path.clone()).unwrap_or(path))
-    } else if path.is_absolute() {
-        Some(path)
-    } else {
-        std::env::current_dir().ok().map(|cwd| cwd.join(path))
     }
 }
 

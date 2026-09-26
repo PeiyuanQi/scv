@@ -136,7 +136,9 @@ async fn conversations_continue_on_one_child_with_progress_and_records() {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let script = fake_scv(dir.path(), "echo");
-    let registry = Arc::new(DelegationRegistry::new(home.path()));
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
     let delegation = DelegationContext {
         registry: Arc::clone(&registry),
         session: "parent-session".into(),
@@ -428,7 +430,9 @@ fn the_registry_offers_agent_scv_only_below_the_depth_limit() {
     for (depth, offered) in [(0, true), (1, true), (2, false)] {
         let config = crate::ToolsConfig {
             delegation: Some(DelegationContext {
-                registry: Arc::new(DelegationRegistry::new(home.path())),
+                registry: Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+                    home.path(),
+                ))),
                 session: "s".into(),
                 depth,
             }),

@@ -21,7 +21,10 @@ workspace, the daemon socket, the `hub::Link`, and a health callback. `run`
 launches no process and spawns no tasks: dropping its future drops active
 requests and protocol sessions, and callers enforce an external bounded stop
 timeout. The health callback reports `true` only after a successful receive,
-and `false` when receiving, sending, or the run fails.
+and `false` when receiving, sending, or the run fails. Nothing in the crate
+reads `SCV_HOME`: accounts, their state, and their media (`MediaOptions`, under
+`Layout::media`, with the shared `Layout::outbox`) are found through the
+`Layout` the caller passes.
 
 Inside the crate each channel supplies a `Transport` (receive a batch of
 messages after a checkpoint, send one part of a message) and

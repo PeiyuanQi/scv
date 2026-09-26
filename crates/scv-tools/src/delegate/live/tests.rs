@@ -5,7 +5,7 @@ use crate::delegate::records::DelegationRegistry;
 
 /// A live `sh -c script` recorded under a fresh registry in `home`.
 fn spawn(home: &std::path::Path, script: &str) -> (Arc<DelegationRegistry>, Arc<LiveChild>) {
-    let registry = Arc::new(DelegationRegistry::new(home));
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(home)));
     let pending = registry.begin("fake", "session", home, Some(("fake-1", 1)));
     let child = LiveChild::spawn(
         LiveSpec {

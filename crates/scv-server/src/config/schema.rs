@@ -445,6 +445,8 @@ impl Default for AgentsConfig {
     }
 }
 
+/// What the command line, or a client's `session.start`, changes on top of
+/// the configuration files.
 #[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
     pub provider: Option<String>,
@@ -452,4 +454,7 @@ pub struct ConfigOverrides {
     pub base_url: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
     pub no_tools: bool,
+    /// An explicit configuration layer (`--config`, or `SCV_CONFIG` as the
+    /// process received it), applied after the user and project files.
+    pub config_file: Option<PathBuf>,
 }

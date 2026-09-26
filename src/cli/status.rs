@@ -2,13 +2,18 @@
 //! delegations, a scheduled restart, and each channel account's health.
 
 use anyhow::Result;
+use scv_client::Layout;
 use scv_protocol::DaemonCommand;
 
 use super::control;
 use super::daemon::describe_restart;
 
-pub(crate) async fn show_status(channel: Option<&str>, account: Option<&str>) -> Result<()> {
-    let status = match control(DaemonCommand::Status).await {
+pub(crate) async fn show_status(
+    layout: &Layout,
+    channel: Option<&str>,
+    account: Option<&str>,
+) -> Result<()> {
+    let status = match control(layout, DaemonCommand::Status).await {
         Ok(status) => status,
         Err(error) => {
             println!("Daemon: unavailable; component connectivity is unknown.");

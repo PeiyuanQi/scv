@@ -104,7 +104,7 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
     .await;
     let mut session_id = None;
     let mut approved = false;
-    let registry = DelegationRegistry::new(&home_path);
+    let registry = DelegationRegistry::new(&scv_client::Layout::new(&home_path));
     let mut record = None;
     // Poll for events and the record under one generous deadline: a busy
     // machine may take a while to start the server and the agent.

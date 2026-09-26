@@ -73,7 +73,7 @@ The repository is one Cargo workspace with these packages:
 | Package | Responsibility |
 | --- | --- |
 | `scv-protocol` | Wire messages, the protocol version, and the bounded line framing (`FrameDecoder`) every connection uses. It contains no runtime policy and does no I/O. |
-| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`), the default socket path, framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
+| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket among them, and the instance's service unit name), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
@@ -471,9 +471,18 @@ An SCV process owns one immutable instance root selected by `--scv-home` or
 socket, service unit identity, skills, credentials, channel state, and nested
 agent state, laid out by `scv_client::Layout` as `config.toml`,
 `credentials/`, `agents/`, `skills/`, and `state/` (see
-[instance layout](configuration.md#instance-layout)); every crate takes its
-paths from `Layout` rather than joining its own. `--config`/`SCV_CONFIG` selects an explicit additional config
-layer for that instance. Custom roots never fall back to the default user
+[instance layout](configuration.md#instance-layout)). Each binary's `main`
+resolves the root once with `Layout::from_env`, right after applying
+`--scv-home`/`--config` (canonical when it exists, so the unit name and
+delegation records hash the same path in every process), and passes the
+`Layout` down explicitly: the server (`run_socket`, `run_stdio`, `Config::load`,
+the components and planned restarts), the delegation registry, the channels
+(`Accounts`, `AccountRun`), and the TUI (its socket path). No library reads
+`SCV_HOME`; the environment only carries the selection to child processes (the
+systemd unit, the restart watchdog, and delegated agents), and every crate
+takes its paths from `Layout` rather than joining its own. `--config`/`SCV_CONFIG`
+selects an explicit additional config layer for that instance, which the
+server receives as `ConfigOverrides::config_file`. Custom roots never fall back to the default user
 configuration, allowing forked SCV processes to choose different providers and
 models without sharing mutable state. The systemd launcher persists the
 selectors and `scv update` restarts only the selected instance.

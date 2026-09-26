@@ -6,6 +6,7 @@ mod imports;
 pub(crate) mod setup;
 
 use anyhow::{Context, Result, bail};
+use scv_client::Layout;
 use scv_protocol::DaemonCommand;
 use scv_server::config::{Config, ConfigOverrides};
 use scv_tools::adapters::{self, AdapterDescriptor};
@@ -16,8 +17,13 @@ use super::args::AgentsCommand;
 use super::control;
 use super::prompt::{prompt_line, read_secret};
 
-pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
+pub(crate) async fn agents(
+    layout: &Layout,
+    overrides: &ConfigOverrides,
+    command: AgentsCommand,
+) -> Result<()> {
     use adapters::{Login, Logout, Status};
+    let user_config = || user_config(layout, overrides);
     match command {
         AgentsCommand::Login {
             agent,
@@ -67,16 +73,16 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                 adapter.product
             );
             match adapter.login {
-                Login::Command(args) => run_agent(name, args, &extra, "sign-in")?,
+                Login::Command(args) => run_agent(user_config, name, args, &extra, "sign-in")?,
                 Login::Interactive { args, hint } => {
                     println!("Opening {} in SCV's agent home: {hint}.", adapter.product);
-                    run_agent(name, args, &extra, "sign-in")?;
+                    run_agent(user_config, name, args, &extra, "sign-in")?;
                 }
                 Login::Import => {
                     if !extra.is_empty() {
                         bail!("{name} copies SCV's own configuration and takes no arguments");
                     }
-                    import_scv_child()?;
+                    import_scv_child(user_config)?;
                 }
                 Login::ApiKey(store) => {
                     if !extra.is_empty() {
@@ -156,7 +162,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
             Ok(())
         }
         AgentsCommand::Ps { all } => {
-            let status = control(DaemonCommand::Delegations { all }).await?;
+            let status = control(layout, DaemonCommand::Delegations { all }).await?;
             print_delegations(&status.delegations.entries);
             Ok(())
         }
@@ -191,7 +197,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
             Ok(())
         }
         AgentsCommand::Kill { handle, orphans } => {
-            let status = control(DaemonCommand::DelegationKill { handle, orphans }).await?;
+            let status = control(layout, DaemonCommand::DelegationKill { handle, orphans }).await?;
             if status.delegations.killed.is_empty() {
                 println!("Nothing to stop.");
             } else {
@@ -246,7 +252,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
                 if from.is_some() {
                     bail!("scv imports SCV's own provider; it takes no --from");
                 }
-                import_scv_child()
+                import_scv_child(user_config)
             }
             "pi" => {
                 if !from_scv_provider || from.is_some() {
@@ -270,7 +276,9 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
         AgentsCommand::Logout { agent } => {
             let adapter = agent_descriptor(&agent)?;
             match adapter.logout {
-                Logout::Command(args) => run_agent(adapter.name, args, &[], "sign-out"),
+                Logout::Command(args) => {
+                    run_agent(user_config, adapter.name, args, &[], "sign-out")
+                }
                 Logout::Stored(store) => {
                     for line in
                         setup::remove_agent_credentials(&user_config()?, adapter.name, store)?
@@ -285,7 +293,7 @@ pub(crate) async fn agents(command: AgentsCommand) -> Result<()> {
 }
 
 /// Give the nested SCV behind `agent_scv` a copy of SCV's own provider.
-fn import_scv_child() -> Result<()> {
+fn import_scv_child(user_config: impl Fn() -> Result<Config>) -> Result<()> {
     println!("Giving SCV's nested SCV (agent_scv) a copy of SCV's own provider");
     for line in setup::import_scv_from_scv_provider(&user_config()?)? {
         println!("  {line}");
@@ -301,13 +309,26 @@ fn agent_descriptor(name: &str) -> Result<&'static AdapterDescriptor> {
 }
 
 /// The user configuration, which is all `scv agents` reads: project
-/// configuration cannot set `[agents]`.
-fn user_config() -> Result<Config> {
-    Config::load_user(ConfigOverrides::default())
+/// configuration cannot set `[agents]`, and the command line's provider
+/// flags do not apply.
+fn user_config(layout: &Layout, overrides: &ConfigOverrides) -> Result<Config> {
+    Config::load_user(
+        layout,
+        ConfigOverrides {
+            config_file: overrides.config_file.clone(),
+            ..ConfigOverrides::default()
+        },
+    )
 }
 
 /// Run an agent's own command inside its SCV agent home.
-fn run_agent(name: &str, args: &[&str], extra: &[String], action: &str) -> Result<()> {
+fn run_agent(
+    user_config: impl Fn() -> Result<Config>,
+    name: &str,
+    args: &[&str],
+    extra: &[String],
+    action: &str,
+) -> Result<()> {
     let status = setup::agent_command(&user_config()?, name)?
         .args(args)
         .args(extra)

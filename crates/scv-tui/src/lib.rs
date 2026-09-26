@@ -35,12 +35,21 @@ use crate::{
 pub use client::LaunchOptions;
 pub use exec::run_exec;
 
-/// Run the terminal UI against the daemon, reconnecting if it restarts.
-pub async fn run_tui(cwd: &Path, options: LaunchOptions) -> Result<()> {
-    let (mut client, session) = Client::connect(cwd, &options).await?;
+/// Run the terminal UI against the daemon listening on `socket`,
+/// reconnecting if it restarts.
+pub async fn run_tui(socket: &Path, cwd: &Path, options: LaunchOptions) -> Result<()> {
+    let (mut client, session) = Client::connect(socket, cwd, &options).await?;
     let mut terminal = TerminalGuard::enter()?;
     let mut app = App::new(session);
-    let result = run_event_loop(&mut terminal.terminal, &mut client, &mut app, cwd, &options).await;
+    let result = run_event_loop(
+        &mut terminal.terminal,
+        &mut client,
+        &mut app,
+        socket,
+        cwd,
+        &options,
+    )
+    .await;
     client.shutdown().await;
     result
 }
@@ -49,13 +58,13 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     client: &mut Client,
     app: &mut App,
+    socket: &Path,
     cwd: &Path,
     options: &LaunchOptions,
 ) -> Result<()> {
     let mut terminal_events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    let socket_path = scv_client::default_socket_path()?;
-    let mut reconnect = Box::pin(reconnect_client(&socket_path, cwd, options));
+    let mut reconnect = Box::pin(reconnect_client(socket, cwd, options));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     loop {
@@ -68,7 +77,7 @@ async fn run_event_loop(
             (new_client, session) = &mut reconnect, if !app.connected => {
                 *client = new_client;
                 app.reconnect(session);
-                reconnect = Box::pin(reconnect_client(&socket_path, cwd, options));
+                reconnect = Box::pin(reconnect_client(socket, cwd, options));
             }
             _ = terminate.recv() => app.quit = true,
             _ = hangup.recv() => app.quit = true,

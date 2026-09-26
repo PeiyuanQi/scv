@@ -344,7 +344,8 @@ SCV is a Cargo workspace with deliberately narrow packages:
 
 - `scv-core`: loop and extension traits;
 - `scv-protocol`: versioned wire types with no runtime policy;
-- `scv-client`: shared default socket path and daemon control helper;
+- `scv-client`: the instance layout (every path under the SCV home, the
+  daemon socket, and the service unit name) and the daemon control helper;
 - `scv-provider-openai`: streaming provider transport;
 - `scv-tools`: filesystem, process, skill, and nested-agent tools, and the
   credential files of the agent CLIs SCV delegates to;

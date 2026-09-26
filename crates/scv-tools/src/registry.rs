@@ -81,7 +81,7 @@ pub fn builtin_registry(
         config
             .delegation
             .as_ref()
-            .map(|context| context.registry.conversation_dir()),
+            .map(|context| context.registry.conversation_dir().to_owned()),
     ));
     for (name, adapter) in adapters {
         let (tool_name, use_for, model, effort) = (

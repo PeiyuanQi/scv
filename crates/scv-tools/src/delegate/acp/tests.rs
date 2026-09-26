@@ -167,7 +167,9 @@ async fn a_conversation_continues_one_session_with_bounded_progress() {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let script = fake_agent(dir.path(), "normal");
-    let registry = Arc::new(DelegationRegistry::new(home.path()));
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
     let delegation = DelegationContext {
         registry: Arc::clone(&registry),
         session: "parent".into(),
@@ -732,7 +734,9 @@ async fn an_idle_conversation_whose_agent_dies_is_collected_and_forgotten() {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let script = fake_agent(dir.path(), "normal");
-    let registry = Arc::new(DelegationRegistry::new(home.path()));
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
     let tool = acp_tool(
         &script,
         store(Duration::from_secs(3600)),
@@ -768,7 +772,9 @@ async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() 
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let script = fake_agent(dir.path(), "normal");
-    let registry = Arc::new(DelegationRegistry::new(home.path()));
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
     let (finished_tx, mut finished) = tokio::sync::mpsc::unbounded_channel();
     let jobs = Arc::new(crate::delegate::background::BackgroundJobs::new(
         1,

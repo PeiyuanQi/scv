@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use scv_channels::state::{self, AccountSettings};
-use scv_channels::{Accounts, ChannelCredentials, ChannelKind, Layout};
+use scv_channels::{Accounts, ChannelCredentials, ChannelKind};
 use scv_protocol::{ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, RemoteTools};
 use std::{
     collections::BTreeMap,
@@ -14,7 +14,7 @@ use std::{
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, ConfigOverrides};
+use crate::config::Instance;
 
 const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How long an operator command waits out a bridge's state commit.
@@ -192,19 +192,11 @@ impl Supervisor {
     }
 }
 
-/// A channel's saved accounts in this daemon's instance, or why they cannot
-/// be reached.
-fn accounts(kind: ChannelKind) -> Result<Accounts> {
-    Ok(kind.accounts(&Layout::from_env()?))
-}
-
 /// Account discovery from saved credentials.
-fn account_names(kind: ChannelKind) -> std::result::Result<Vec<String>, &'static str> {
+fn account_names(accounts: &Accounts) -> std::result::Result<Vec<String>, &'static str> {
     const DISCOVERY: &str =
         "Account discovery failed; components stopped until configuration is readable";
-    accounts(kind)
-        .and_then(|accounts| accounts.names())
-        .map_err(|_| DISCOVERY)
+    accounts.names().map_err(|_| DISCOVERY)
 }
 
 struct ChannelAccount {
@@ -212,8 +204,9 @@ struct ChannelAccount {
     account: String,
     credentials: ChannelCredentials,
     settings: AccountSettings,
+    /// The daemon's instance, whose socket the account's sessions use.
+    instance: Instance,
     workspace: PathBuf,
-    socket: PathBuf,
     /// The account owner holds remote tools.
     tools: bool,
     link: scv_channels::hub::Link,
@@ -223,7 +216,8 @@ struct ChannelAccount {
 impl Component for ChannelAccount {
     async fn run(&self, cancellation: CancellationToken, health: HealthReporter) -> Result<()> {
         let tool_turn_timeout = self.tools.then(|| {
-            let turn_timeout = scv_channels::owner_turn_timeout(max_tool_timeout(&self.workspace));
+            let turn_timeout =
+                scv_channels::owner_turn_timeout(max_tool_timeout(&self.instance, &self.workspace));
             tracing::info!(
                 "{} {} owner turns may run up to {} seconds",
                 self.kind.title(),
@@ -232,17 +226,17 @@ impl Component for ChannelAccount {
             );
             turn_timeout
         });
-        let layout = Layout::from_env()?;
+        let socket = self.instance.layout.socket();
         let report = move |connected| health.contact(connected);
         let run = scv_channels::AccountRun {
-            layout: &layout,
+            layout: &self.instance.layout,
             account: &self.account,
             credentials: &self.credentials,
             settings: &self.settings,
             owner: self.credentials.owner().filter(|owner| !owner.is_empty()),
             tool_turn_timeout,
             workspace: &self.workspace,
-            socket: &self.socket,
+            socket: &socket,
             link: &self.link,
             health: &report,
         };
@@ -260,7 +254,9 @@ pub(crate) struct Components {
     /// Running or disabled accounts by component ID, `<channel>:<account>`.
     desired: BTreeMap<String, (ChannelCredentials, AccountSettings)>,
     inactive: BTreeMap<String, ComponentHealth>,
-    socket: PathBuf,
+    /// The daemon's instance: where accounts are saved and the socket their
+    /// sessions use.
+    instance: Instance,
     workspace: PathBuf,
     /// What the daemon shares with the channel bridges it runs.
     hub: Arc<scv_channels::hub::Hub>,
@@ -270,20 +266,29 @@ pub(crate) struct Components {
 
 impl Components {
     #[cfg(test)]
-    pub fn new(socket: PathBuf, workspace: PathBuf) -> Self {
-        Self::with_hub(socket, workspace, scv_channels::hub::Hub::new(None))
+    pub fn new(instance: Instance, workspace: PathBuf) -> Self {
+        Self::with_hub(instance, workspace, scv_channels::hub::Hub::new(None))
     }
 
-    pub fn with_hub(socket: PathBuf, workspace: PathBuf, hub: Arc<scv_channels::hub::Hub>) -> Self {
+    pub fn with_hub(
+        instance: Instance,
+        workspace: PathBuf,
+        hub: Arc<scv_channels::hub::Hub>,
+    ) -> Self {
         Self {
             supervisor: Supervisor::default(),
             desired: BTreeMap::new(),
             inactive: BTreeMap::new(),
-            socket,
+            instance,
             workspace,
             hub,
             restarter: None,
         }
+    }
+
+    /// One channel's saved accounts in the daemon's instance.
+    fn accounts(&self, kind: ChannelKind) -> Accounts {
+        kind.accounts(&self.instance.layout)
     }
 
     pub(crate) fn set_restarter(&mut self, restarter: Arc<crate::restart::Restarter>) {
@@ -313,7 +318,7 @@ impl Components {
     pub async fn reconcile(&mut self) -> Result<()> {
         let mut failed = false;
         for &channel in ChannelKind::ALL {
-            match account_names(channel) {
+            match account_names(&self.accounts(channel)) {
                 Ok(names) => self.reconcile_channel(channel, names).await,
                 Err(message) => {
                     failed = true;
@@ -362,7 +367,7 @@ impl Components {
         for name in names {
             let id = component_id(channel, &name);
             let loaded = (|| -> Result<_> {
-                let (account, settings) = accounts(channel)?.snapshot(&name)?;
+                let (account, settings) = self.accounts(channel).snapshot(&name)?;
                 Ok((
                     account.ok_or_else(|| anyhow::anyhow!("missing account"))?,
                     settings,
@@ -409,8 +414,8 @@ impl Components {
                         account: name.clone(),
                         credentials: credentials.clone(),
                         settings: settings.clone(),
+                        instance: self.instance.clone(),
                         workspace,
-                        socket: self.socket.clone(),
                         tools,
                         link,
                     }),
@@ -468,8 +473,8 @@ impl Components {
                     }
                     None => None,
                 };
+                let accounts = self.accounts(channel);
                 retry_while_busy(|| {
-                    let accounts = accounts(channel)?;
                     if !accounts.signed_in(&account)? {
                         bail!("Account is not logged in");
                     }
@@ -490,8 +495,8 @@ impl Components {
                 state::validate_name(&account)?;
                 // Persist disabled and tool-free first, so failed deletion can
                 // neither resurrect a live account nor hand a later login the grant.
+                let accounts = self.accounts(channel);
                 retry_while_busy(|| {
-                    let accounts = accounts(channel)?;
                     let mut settings = accounts.settings(&account)?;
                     settings.enabled = false;
                     settings.remote_tools = RemoteTools::None;
@@ -502,7 +507,7 @@ impl Components {
                 self.supervisor.stop(&id).await;
                 self.desired.remove(&id);
                 self.inactive.remove(&id);
-                retry_while_busy(|| accounts(channel)?.remove(&account)).await?;
+                retry_while_busy(|| accounts.remove(&account)).await?;
             }
         }
         self.reconcile().await?;
@@ -516,8 +521,8 @@ impl Components {
 
 /// The longest tool call an owner session in `workspace` may make, from the
 /// configuration its sessions load. Read at each (re)start of the component.
-fn max_tool_timeout(workspace: &std::path::Path) -> std::time::Duration {
-    let seconds = Config::load(workspace, ConfigOverrides::default()).map_or_else(
+fn max_tool_timeout(instance: &Instance, workspace: &std::path::Path) -> std::time::Duration {
+    let seconds = instance.load(workspace).map_or_else(
         |error| {
             tracing::warn!("Channel owner turns use the default tool timeout ceiling: {error:#}");
             crate::config::ToolConfig::default().max_timeout_seconds

@@ -48,8 +48,9 @@
 
 - Use stable Rust 1.88 or newer, Rust 2024 edition, `cargo fmt`, and Clippy with
   warnings denied.
-- Keep protocol types and framing in `scv-protocol`, default socket discovery
-  and daemon control helpers in `scv-client`, loop and extension traits
+- Keep protocol types and framing in `scv-protocol`, the instance layout
+  (every path, the socket, the service unit name) and daemon control helpers
+  in `scv-client`, loop and extension traits
   in `scv-core`, provider transport in provider crates, tool implementations
   and the delegated agents' credential-file formats in `scv-tools`, policy and
   session authority in `scv-server`, terminal presentation in `scv-tui`, and

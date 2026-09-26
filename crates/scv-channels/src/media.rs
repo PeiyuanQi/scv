@@ -4,6 +4,7 @@
 //! executed.
 
 use anyhow::{Result, anyhow};
+use scv_client::Layout;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -129,20 +130,15 @@ pub struct MediaOptions {
 }
 
 impl MediaOptions {
-    /// `<root>/<channel>/<account>` for received files and `<root>/outbox`
-    /// for files to send.
-    pub fn new(root: &Path, channel: &str, account: &str, settings: MediaSettings) -> Self {
+    /// `<media>/<channel>/<account>` for received files and the instance's
+    /// outbox for files to send (see [`Layout::media`]).
+    pub fn new(layout: &Layout, channel: &str, account: &str, settings: MediaSettings) -> Self {
         Self {
-            inbox: root.join(channel).join(account),
-            outbox: outbox(root),
+            inbox: layout.media().join(channel).join(account),
+            outbox: layout.outbox(),
             settings,
         }
     }
-}
-
-/// Where copies of files the model attaches wait to be sent.
-pub fn outbox(root: &Path) -> PathBuf {
-    root.join("outbox")
 }
 
 /// The MIME type of a file named `name` that starts with `head`, preferring

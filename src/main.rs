@@ -19,5 +19,8 @@ fn main() -> Result<()> {
             &cwd,
         )?;
     }
-    tokio::runtime::Runtime::new()?.block_on(cli::run(cli, cwd))
+    // The one place the instance is read from the environment; everything
+    // else takes this layout.
+    let layout = scv_client::Layout::from_env()?;
+    tokio::runtime::Runtime::new()?.block_on(cli::run(cli, cwd, layout))
 }

@@ -10,9 +10,9 @@ use super::*;
 async fn daemon_control_lists_and_stops_delegations() {
     use std::os::unix::process::CommandExt as _;
     let home = tempfile::tempdir().unwrap();
-    let registry = DelegationRegistry::new(home.path());
+    let registry = DelegationRegistry::new(&scv_client::Layout::new(home.path()));
     let components = Arc::new(Mutex::new(components::Components::new(
-        PathBuf::from("/unused.sock"),
+        crate::test_support::test_instance("/unused"),
         PathBuf::from("/"),
     )));
     // A run owned by another live SCV process of the same instance.

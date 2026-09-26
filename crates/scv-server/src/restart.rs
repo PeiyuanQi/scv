@@ -25,6 +25,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use scv_channels::hub::{Hub, Origin, Restart};
+use scv_client::Layout;
 use scv_protocol::{ComponentState, DaemonCommand, RestartInfo};
 use scv_tools::{background::BackgroundJobs, delegation::DelegationRegistry};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::components::Components;
+use crate::config::Instance;
 
 /// Where configuration and state files live and how they are shaped. Bump it
 /// when a release reads or writes them in a way the previous release cannot:
@@ -53,23 +55,6 @@ const DOWN_NOTICE_AFTER: Duration = Duration::from_secs(10 * 60);
 const MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 /// A plan restarted this long ago no longer explains interrupted work.
 const RESTART_CONTEXT_MAX_AGE: u64 = 60 * 60;
-
-/// The directory of SCV's runtime files in an instance home.
-fn runtime_dir(home: &Path) -> PathBuf {
-    scv_client::Layout::new(home).state()
-}
-
-pub(crate) fn plan_path(home: &Path) -> PathBuf {
-    runtime_dir(home).join("update.json")
-}
-
-pub(crate) fn last_owner_path(home: &Path) -> PathBuf {
-    runtime_dir(home).join("last-owner.json")
-}
-
-fn marker_path(home: &Path) -> PathBuf {
-    runtime_dir(home).join("daemon.json")
-}
 
 /// What a binary reports about itself for a planned restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,15 +413,22 @@ pub(crate) struct Notifier {
     /// When an undeliverable notice is dropped.
     give_up: Duration,
     poll: Duration,
+    /// Where the notify list is configured.
+    instance: Instance,
     /// The notify list; `None` reads it from the user configuration.
     #[cfg(test)]
     list: Option<Vec<String>>,
 }
 
 impl Notifier {
-    pub(crate) fn new(hub: Arc<Hub>, components: Weak<Mutex<Components>>) -> Self {
+    pub(crate) fn new(
+        instance: Instance,
+        hub: Arc<Hub>,
+        components: Weak<Mutex<Components>>,
+    ) -> Self {
         Self {
             hub,
+            instance,
             states: States::Components(components),
             grace: Duration::from_secs(120),
             give_up: Duration::from_secs(15 * 60),
@@ -451,7 +443,7 @@ impl Notifier {
         if let Some(list) = &self.list {
             return list.clone();
         }
-        crate::config::Config::load_user(crate::config::ConfigOverrides::default()).map_or_else(
+        self.instance.load_user().map_or_else(
             |error| {
                 tracing::warn!(
                     "Notices use the owner's last chat; configuration failed: {error:#}"
@@ -570,7 +562,7 @@ enum Launcher {
 /// Plans restarts for the daemon.
 pub(crate) struct Restarter {
     launcher: Launcher,
-    home: PathBuf,
+    instance: Instance,
     hub: Arc<Hub>,
     registry: Arc<DelegationRegistry>,
     notifier: Notifier,
@@ -582,7 +574,7 @@ pub(crate) struct Restarter {
 
 impl Restarter {
     pub(crate) fn new(
-        home: PathBuf,
+        instance: Instance,
         hub: Arc<Hub>,
         registry: Arc<DelegationRegistry>,
         components: &Arc<Mutex<Components>>,
@@ -590,8 +582,12 @@ impl Restarter {
     ) -> Arc<Self> {
         Arc::new(Self {
             launcher: Launcher::Systemd,
-            notifier: Notifier::new(Arc::clone(&hub), Arc::downgrade(components)),
-            home,
+            notifier: Notifier::new(
+                instance.clone(),
+                Arc::clone(&hub),
+                Arc::downgrade(components),
+            ),
+            instance,
             hub,
             registry,
             components: Arc::downgrade(components),
@@ -637,7 +633,7 @@ impl Restarter {
                 ))
             };
         }
-        let unit = crate::service_name().map_err(|error| error.to_string())?;
+        let unit = self.instance.layout.service_name();
         if !runs_as_unit(&unit) {
             return Err(format!(
                 "this daemon does not run as {unit}, so it cannot restart itself; \
@@ -696,7 +692,8 @@ impl Restarter {
             .requester
             .as_ref()
             .and_then(|requester| self.hub.origin(&requester.session));
-        save_plan(&plan_path(&self.home), &plan).map_err(|error| format!("{error:#}"))?;
+        save_plan(&self.instance.layout.update_plan(), &plan)
+            .map_err(|error| format!("{error:#}"))?;
         let waiting = self.waiting_for(&plan);
         let info = plan.info(waiting.clone());
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -787,13 +784,13 @@ impl Restarter {
             tracing::error!("Restart into v{} did not start: {error:#}", plan.to_version);
             plan.state = PlanState::Failed;
             plan.detail = Some(format!("the restart did not start: {error:#}"));
-            let _ = save_plan(&plan_path(&self.home), &plan);
+            let _ = save_plan(&self.instance.layout.update_plan(), &plan);
             *self.current.lock().unwrap_or_else(PoisonError::into_inner) = None;
             let text = announcement(&plan, env!("CARGO_PKG_VERSION"));
             self.notifier
                 .deliver(plan.origin.as_ref(), &text, None, &self.cancel)
                 .await;
-            let _ = std::fs::remove_file(plan_path(&self.home));
+            let _ = std::fs::remove_file(self.instance.layout.update_plan());
         }
     }
 
@@ -817,7 +814,7 @@ impl Restarter {
             Launcher::Systemd => {}
             #[cfg(test)]
             Launcher::Record(plans) => {
-                save_plan(&plan_path(&self.home), plan)?;
+                save_plan(&self.instance.layout.update_plan(), plan)?;
                 plans.lock().unwrap().push(plan.clone());
                 return Ok(());
             }
@@ -829,7 +826,7 @@ impl Restarter {
                 None
             }
         };
-        let path = plan_path(&self.home);
+        let path = self.instance.layout.update_plan();
         save_plan(&path, plan)?;
         // The watchdog runs the release known to work: this one.
         let watchdog = plan.previous.clone().unwrap_or_else(|| plan.binary.clone());
@@ -840,8 +837,12 @@ impl Restarter {
             "--collect",
             &format!("--unit=scv-update-{}", plan.id),
         ]);
-        for variable in ["SCV_HOME", "SCV_CONFIG"] {
-            if let Some(value) = std::env::var_os(variable) {
+        // The watchdog selects the same instance and configuration.
+        let layout = &self.instance.layout;
+        let home = (!layout.is_default()).then(|| layout.home());
+        let config = self.instance.overrides.config_file.as_deref();
+        for (variable, value) in [("SCV_HOME", home), ("SCV_CONFIG", config)] {
+            if let Some(value) = value {
                 let mut setting = std::ffi::OsString::from(format!("--setenv={variable}="));
                 setting.push(value);
                 command.arg(setting);
@@ -909,12 +910,12 @@ fn install_copy(source: &Path, target: &Path) -> Result<()> {
 
 /// Restart the unit, check the new release, and roll back when it fails and
 /// the releases share a config layout. Records the outcome in the plan.
-pub async fn watchdog(plan_path: &Path) -> Result<()> {
+pub async fn watchdog(layout: &Layout, plan_path: &Path) -> Result<()> {
     let mut plan = load_plan(plan_path)?.context("no restart plan")?;
     if plan.state != PlanState::Restarting {
         bail!("the restart plan is {:?}, not restarting", plan.state);
     }
-    let socket = scv_client::default_socket_path()?;
+    let socket = layout.socket();
     eprintln!("Restarting {} into v{}", plan.unit, plan.to_version);
     systemctl_restart(&plan.unit);
     let outcome = verify(
@@ -1052,10 +1053,10 @@ struct Marker {
 /// Read the restart plan and the running marker, tell the hub whether this
 /// start is a planned restart (before any bridge recovers), and mark this
 /// daemon running until [`clean_shutdown`].
-pub(crate) fn startup(home: &Path, hub: &Hub) -> Startup {
-    let plan = load_plan(&plan_path(home)).unwrap_or_else(|error| {
+pub(crate) fn startup(layout: &Layout, hub: &Hub) -> Startup {
+    let plan = load_plan(&layout.update_plan()).unwrap_or_else(|error| {
         tracing::warn!("Ignoring an unreadable restart plan: {error:#}");
-        let _ = std::fs::remove_file(plan_path(home));
+        let _ = std::fs::remove_file(layout.update_plan());
         None
     });
     let planned = plan.as_ref().filter(|plan| {
@@ -1067,7 +1068,7 @@ pub(crate) fn startup(home: &Path, hub: &Hub) -> Startup {
     hub.set_restart(planned.map(|plan| Restart {
         to_version: plan.to_version.clone(),
     }));
-    let marker = marker_path(home);
+    let marker = layout.daemon_marker();
     let unclean = std::fs::read(&marker)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Marker>(&bytes).ok())
@@ -1088,8 +1089,8 @@ pub(crate) fn startup(home: &Path, hub: &Hub) -> Startup {
 }
 
 /// The daemon stopped on request: the next one will not report a crash.
-pub(crate) fn clean_shutdown(home: &Path) {
-    let _ = std::fs::remove_file(marker_path(home));
+pub(crate) fn clean_shutdown(layout: &Layout) {
+    let _ = std::fs::remove_file(layout.daemon_marker());
 }
 
 /// What the next daemon should say about a plan, given its own version.
@@ -1161,14 +1162,14 @@ fn announcement(plan: &Plan, own: &str) -> String {
 
 /// Announce how the previous run ended, once the accounts can take it.
 pub(crate) async fn announce(
-    home: PathBuf,
+    layout: Layout,
     startup: Startup,
     notifier: Notifier,
     cancel: CancellationToken,
 ) {
     let own = env!("CARGO_PKG_VERSION");
     if let Some(mut plan) = startup.plan {
-        let path = plan_path(&home);
+        let path = layout.update_plan();
         let overdue_at = plan.restart_unix.unwrap_or(plan.requested_unix)
             + plan.verify_seconds
             + ROLLBACK_SECONDS

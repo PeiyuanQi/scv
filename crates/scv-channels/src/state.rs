@@ -354,11 +354,6 @@ impl<C: Credentials> Store<C> {
         }
     }
 
-    /// The store of the instance selected by `SCV_HOME`.
-    pub fn from_env(channel: &str) -> Result<Self> {
-        Ok(Self::new(&Layout::from_env()?, channel))
-    }
-
     pub fn credentials_path(&self, name: &str) -> Result<PathBuf> {
         validate_name(name)?;
         Ok(self.credentials.join(format!("{name}.json")))

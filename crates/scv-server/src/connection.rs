@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::{
     approval::ApprovalBroker,
     attachments, components,
-    config::{Config, ConfigOverrides},
+    config::{Config, ConfigOverrides, Instance},
     control::{ControlFailure, daemon_control},
     daemon::AbortGuard,
     events::error_code,
@@ -48,7 +48,7 @@ const PROMPT_LIMIT_BYTES: usize = 256 * 1024;
 pub(crate) async fn run_managed<R, W>(
     reader: R,
     writer: W,
-    overrides: ConfigOverrides,
+    instance: Instance,
     components: Option<Arc<Mutex<components::Components>>>,
     registry: Arc<DelegationRegistry>,
     cancellation: CancellationToken,
@@ -81,7 +81,7 @@ where
             cancellation: cancellation.clone(),
         },
         output,
-        overrides,
+        instance,
         components,
         registry,
         cancellation: cancellation.clone(),
@@ -171,7 +171,9 @@ struct SessionStartRequest {
 struct Connection {
     output: OutboundSender,
     turns: TurnStarter,
-    overrides: ConfigOverrides,
+    /// The server's instance and command-line overrides, which each
+    /// session's own overrides fall back to.
+    instance: Instance,
     components: Option<Arc<Mutex<components::Components>>>,
     registry: Arc<DelegationRegistry>,
     cancellation: CancellationToken,
@@ -520,14 +522,17 @@ impl Connection {
             channel: request.channel,
             auto_approve: request.auto_approve.unwrap_or(false),
         };
+        let defaults = &self.instance.overrides;
         let overrides = ConfigOverrides {
-            provider: request.provider.or_else(|| self.overrides.provider.clone()),
-            model: request.model.or_else(|| self.overrides.model.clone()),
-            base_url: request.base_url.or_else(|| self.overrides.base_url.clone()),
-            approval_policy: self.overrides.approval_policy,
-            no_tools: request.no_tools.unwrap_or(self.overrides.no_tools),
+            provider: request.provider.or_else(|| defaults.provider.clone()),
+            model: request.model.or_else(|| defaults.model.clone()),
+            base_url: request.base_url.or_else(|| defaults.base_url.clone()),
+            approval_policy: defaults.approval_policy,
+            no_tools: request.no_tools.unwrap_or(defaults.no_tools),
+            config_file: defaults.config_file.clone(),
         };
         let built = build_session(
+            &self.instance.layout,
             &request.cwd,
             overrides,
             request.delegation_depth.unwrap_or(0),

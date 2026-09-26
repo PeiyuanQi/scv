@@ -22,6 +22,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use scv_client::Layout;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -127,6 +128,7 @@ struct Inner {
 #[derive(Debug)]
 pub struct DelegationRegistry {
     record_dir: PathBuf,
+    conversation_dir: PathBuf,
     instance: String,
     owner: Option<ProcessIdentity>,
     depth: u32,
@@ -147,17 +149,18 @@ pub(crate) struct PendingDelegation {
 }
 
 impl DelegationRegistry {
-    /// The registry for the SCV instance rooted at `instance_home`. Its
-    /// records live where `scv_client::Layout::delegations` says; the server
-    /// tests that the two agree.
-    pub fn new(instance_home: &Path) -> Self {
-        let digest = Sha256::digest(instance_home.as_os_str().as_encoded_bytes());
+    /// The registry for the SCV instance at `layout`: records in
+    /// [`Layout::delegations`], conversation markers in
+    /// [`Layout::conversations`], and an instance ID hashed from its home.
+    pub fn new(layout: &Layout) -> Self {
+        let digest = Sha256::digest(layout.home().as_os_str().as_encoded_bytes());
         let instance = digest[..4]
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
         Self {
-            record_dir: instance_home.join("state").join("delegations"),
+            record_dir: layout.delegations(),
+            conversation_dir: layout.conversations(),
             instance,
             owner: ProcessIdentity::current(),
             depth: current_depth(),
@@ -188,11 +191,8 @@ impl DelegationRegistry {
     }
 
     /// Where live conversations leave markers for `scv agents gc`.
-    pub fn conversation_dir(&self) -> PathBuf {
-        self.record_dir.parent().map_or_else(
-            || self.record_dir.join("conversations"),
-            |state| state.join("conversations"),
-        )
+    pub fn conversation_dir(&self) -> &Path {
+        &self.conversation_dir
     }
 
     #[cfg(test)]
@@ -350,7 +350,7 @@ impl DelegationRegistry {
         }
         lock(&self.inner).reaped += report.reaped.len() as u64;
         report.stale_markers =
-            crate::delegate::conversation::remove_stale_markers(&self.conversation_dir());
+            crate::delegate::conversation::remove_stale_markers(self.conversation_dir());
         report
     }
 

@@ -2,14 +2,22 @@
 //! running daemon into it.
 
 use anyhow::{Context, Result, bail};
+use scv_client::Layout;
 use scv_server::config::{Config, ConfigOverrides};
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 
-pub(crate) fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<()> {
-    let configured = Config::load(workspace, ConfigOverrides::default())?
-        .update
-        .index_url;
+pub(crate) fn update_cli(
+    layout: &Layout,
+    overrides: &ConfigOverrides,
+    workspace: &Path,
+    index_url: Option<String>,
+) -> Result<()> {
+    let files = ConfigOverrides {
+        config_file: overrides.config_file.clone(),
+        ..ConfigOverrides::default()
+    };
+    let configured = Config::load(layout, workspace, files)?.update.index_url;
     let index_url = index_url
         .or_else(|| std::env::var("SCV_CARGO_INDEX_URL").ok())
         .or(configured);
@@ -27,7 +35,7 @@ pub(crate) fn update_cli(workspace: &Path, index_url: Option<String>) -> Result<
         bail!("SCV update failed while installing scv-cli");
     }
 
-    let service = scv_server::service_name()?;
+    let service = layout.service_name();
     let active = ProcessCommand::new("systemctl")
         .args(["--user", "is-active", "--quiet"])
         .arg(&service)

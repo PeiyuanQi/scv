@@ -4,7 +4,7 @@
 //! secret.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use scv_client::Layout;
@@ -14,16 +14,17 @@ use crate::cli::{agents::setup, service};
 
 /// Render the overview for a session started in `workspace`. With `all`,
 /// settings left at their defaults are listed too.
-pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -> Result<String> {
-    let layout = Layout::from_env()?;
-    let home = scv_server::config::user_home_path()
-        .map_or_else(|| layout.home().to_owned(), |home| home.clone());
-    let layout = Layout::new(home);
+pub(crate) fn render(
+    layout: &Layout,
+    workspace: &Path,
+    overrides: &ConfigOverrides,
+    all: bool,
+) -> Result<String> {
     let mut out = String::new();
-    let selected = if std::env::var_os("SCV_HOME").is_some() {
-        "selected by SCV_HOME or --scv-home"
-    } else {
+    let selected = if layout.is_default() {
         "the default instance"
+    } else {
+        "selected by SCV_HOME or --scv-home"
     };
     writeln!(out, "SCV instance {} ({selected})", tilde(layout.home()))?;
 
@@ -35,8 +36,8 @@ pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -
         (layout.skills(), "your skills"),
         (layout.state(), "runtime state SCV writes; not for editing"),
     ];
-    if let Some(explicit) = std::env::var_os("SCV_CONFIG") {
-        files.push((PathBuf::from(explicit), "extra settings from SCV_CONFIG"));
+    if let Some(explicit) = &overrides.config_file {
+        files.push((explicit.clone(), "extra settings from SCV_CONFIG"));
     }
     let project = workspace.join(".scv/config.toml");
     if project.is_file()
@@ -58,7 +59,7 @@ pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -
         "no daemon is listening"
     };
     row(&mut out, &tilde(&socket), daemon)?;
-    if let Ok(unit) = service::service_unit_path() {
+    if let Ok(unit) = service::service_unit_path(layout) {
         let state = if unit.exists() { "present" } else { "missing" };
         row(
             &mut out,
@@ -69,7 +70,7 @@ pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -
 
     writeln!(out, "\nSettings (value, then where it was set)")?;
     let mut active = None;
-    match Config::settings_with_origins(Some(workspace), overrides) {
+    match Config::settings_with_origins(layout, Some(workspace), overrides) {
         Ok(settings) => {
             active = settings
                 .iter()
@@ -98,7 +99,7 @@ pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -
         }
         Err(error) => writeln!(out, "  unreadable: {}", safe_error(&error))?,
     }
-    match Config::load(workspace, overrides.clone()) {
+    match Config::load(layout, workspace, overrides.clone()) {
         Ok(config) => {
             let provider = &config.provider;
             let key = match (&provider.api_key, &provider.api_key_env) {
@@ -136,7 +137,7 @@ pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -
         all,
     };
     for kind in scv_channels::ChannelKind::ALL {
-        any |= channel(&mut out, &listing, &kind.accounts(&layout))?;
+        any |= channel(&mut out, &listing, &kind.accounts(layout))?;
     }
     if !any {
         writeln!(out, "  none signed in; see `scv channels login`")?;
@@ -162,8 +163,15 @@ pub(crate) fn render(workspace: &Path, overrides: &ConfigOverrides, all: bool) -
             .map(|file| format!("{file} {}", describe(&home.join(file))))
             .collect();
         row(&mut out, adapter.name, &credentials.join(", "))?;
-        let user_config =
-            user_config.get_or_insert_with(|| Config::load_user(ConfigOverrides::default()));
+        let user_config = user_config.get_or_insert_with(|| {
+            Config::load_user(
+                layout,
+                ConfigOverrides {
+                    config_file: overrides.config_file.clone(),
+                    ..ConfigOverrides::default()
+                },
+            )
+        });
         let status = match user_config {
             Ok(config) => setup::agent_import_status(config, adapter.name),
             Err(error) => Err(anyhow::anyhow!("{error}")),
