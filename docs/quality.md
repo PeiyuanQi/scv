@@ -146,6 +146,9 @@ Daemon and component changes require focused coverage for:
   an isolated daemon with no owner chat; and `publish.sh` asking before its
   first `cargo publish` only when delegated, publishing only on yes, and
   never asking for `--check`;
+- notices stored while another state write waits out an account's busy
+  transaction, with receiving and delivery going on, and a notice the daemon
+  stopped waiting for never sent;
 - refused replies held per conversation within count, byte, total, and age
   limits, delivered ahead of the next reply only as far as one message allows,
   restored when the carrying reply is refused, busy and voice notices never held, and

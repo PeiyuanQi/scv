@@ -536,3 +536,93 @@ async fn a_question_reaches_the_owners_chat_and_a_plain_answer_resolves_it_witho
         })
         .await;
 }
+
+/// Hold the account's transaction, as a daemon command or the reconciler
+/// does, and have the poller save a batch meanwhile: its save waits out the
+/// busy account while holding the state lock.
+async fn park_the_poller(bench: &Bench, peer: &Peer) -> std::fs::File {
+    let transaction = bench.store.transaction("default").unwrap();
+    let batches = *bench.transport.received.lock().unwrap();
+    peer.push(vec![Inbound::Ignored { id: "i1".into() }]);
+    eventually(|| *bench.transport.received.lock().unwrap() > batches).await;
+    transaction
+}
+
+#[tokio::test]
+async fn a_notice_arriving_while_a_save_waits_out_a_busy_account_is_stored() {
+    let (bench, mut peer) = Bench::new();
+    let hub = hub::Hub::new(None);
+    let link = hub::Link::new(Arc::clone(&hub), "fake:default", Some("owner".into()));
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.owner("fake:default").is_some()).await;
+            let transaction = park_the_poller(&bench, &peer).await;
+            let release = async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                drop(transaction);
+            };
+            let notify = tokio::time::timeout(
+                Duration::from_secs(5),
+                hub.notify("fake:default", "owner", "Heads up"),
+            );
+            let (stored, ()) = tokio::join!(notify, release);
+            assert_eq!(
+                stored.expect("the notice is stored once the account is free"),
+                Ok(())
+            );
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: String::new(),
+                    text: "Heads up".into(),
+                }
+            );
+            // The poller went on too: its batch is checkpointed.
+            eventually(|| {
+                let saved = bench.state();
+                saved.cursor == "c1" && saved.seen == ["i1"] && saved.pending.is_empty()
+            })
+            .await;
+            // And it still receives.
+            peer.push(vec![message("m1", "alice", "hello")]);
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            finish_turn(&mut side, "hi").await;
+            assert_eq!(peer.sent().await.text, "hi");
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_notice_its_sender_gave_up_on_is_never_sent() {
+    let (bench, mut peer) = Bench::new();
+    let hub = hub::Hub::new(None);
+    let link = hub::Link::new(Arc::clone(&hub), "fake:default", Some("owner".into()));
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.owner("fake:default").is_some()).await;
+            // The account cannot store it before its sender stops waiting,
+            // as `Hub::notify` does after 30 seconds.
+            let transaction = park_the_poller(&bench, &peer).await;
+            let late = tokio::time::timeout(
+                Duration::from_millis(50),
+                hub.notify("fake:default", "owner", "Too late"),
+            )
+            .await;
+            assert!(late.is_err(), "the sender gave up");
+            drop(transaction);
+            hub.notify("fake:default", "owner", "In time")
+                .await
+                .unwrap();
+            // Notices are stored in order, so the dropped one would be first.
+            assert_eq!(peer.sent().await.text, "In time");
+            eventually(|| {
+                let saved = bench.state();
+                saved.pending.is_empty() && saved.seen == ["i1"]
+            })
+            .await;
+            assert!(peer.sent.try_recv().is_err(), "nothing else was sent");
+        })
+        .await;
+}

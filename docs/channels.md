@@ -140,8 +140,10 @@ another identity's state. These locks are nonblocking: contention returns a
 retry error, and network I/O never holds the transaction lock. The daemon's
 account commands (enable, disable, settings, logout) retry that error for up to
 five seconds, so they wait out a running bridge's state commit instead of
-failing. Lock files remain in place after logout so open descriptors cannot
-refer to different lock inodes.
+failing. The bridge's own state writes wait out a command's transaction the
+same way, and receiving, delivering, running turns, and storing notices keep
+going while one of them waits. Lock files remain in place after logout so open
+descriptors cannot refer to different lock inodes.
 
 ## WeChat iLink contract
 
@@ -526,7 +528,10 @@ the daemon stopped unexpectedly, an enabled account disconnected for ten
 minutes, which may mean its sign-in expired) go to the owner of the first
 connected account in `[notify].owner`, or else to the chat the owner last
 wrote from, and never through the account the notice is about. Each is queued
-in that account's outbox like a background report. See
+in that account's outbox like a background report. The daemon waits up to 30
+seconds for the account to store a notice and otherwise counts it as not sent,
+possibly trying another account; the account then drops it rather than sending
+it late. See
 [configuration](configuration.md#daemon-and-component-settings).
 
 ## Questions to the owner
