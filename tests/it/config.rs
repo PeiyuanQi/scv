@@ -482,3 +482,51 @@ fn the_service_unit_is_named_by_a_hash_of_the_resolved_home() {
         "missing scv-{suffix}.service in:\n{shown}"
     );
 }
+
+#[test]
+fn agents_check_calls_an_agent_as_scv_does_and_fails_when_the_call_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = home.path().join("fake-dsh");
+    let script = |reply: &str| {
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'fake-dsh 9.9'; exit 0; }}\n{reply}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script("case \"$*\" in *'Reply with exactly: ok') echo ok ;; *) exit 3 ;; esac");
+    write_private(
+        &home.path().join("config.toml"),
+        &format!(
+            "{}[agents.dsh]\ncommand = {:?}\n",
+            provider("model"),
+            fake.display().to_string()
+        ),
+    );
+    let stdout = success(&scv(home.path(), &["agents", "check", "dsh"], ""));
+    assert!(stdout.starts_with("dsh (DeepSeek Harness)\n"), "{stdout}");
+    assert!(
+        stdout.contains("  reached   through its CLI, once per turn: "),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  version   fake-dsh 9.9\n"), "{stdout}");
+    assert!(
+        stdout.contains("with its own default model: \"ok\"\n"),
+        "{stdout}"
+    );
+
+    script("echo 'not logged in' >&2; exit 1");
+    let output = scv(home.path(), &["agents", "check", "dsh"], "");
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("  call      failed after "), "{stdout}");
+    assert!(stdout.contains("scv agents login dsh"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("check failed for: dsh"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

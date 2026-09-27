@@ -1,7 +1,8 @@
 //! `scv agents`: sign the delegated agent CLIs in and out of SCV's private
-//! agent homes, import setups into them, and list, collect, or stop their
-//! runs.
+//! agent homes, import setups into them, check that each one works as SCV
+//! runs it, and list, collect, or stop their runs.
 
+mod check;
 mod imports;
 pub(crate) mod setup;
 
@@ -161,6 +162,10 @@ pub(crate) async fn agents(
             }
             Ok(())
         }
+        AgentsCommand::Check {
+            agent,
+            timeout_seconds,
+        } => check::check(&user_config()?, agent.as_deref(), timeout_seconds).await,
         AgentsCommand::Ps { all } => {
             let status = control(layout, DaemonCommand::Delegations { all }).await?;
             print_delegations(&status.delegations.entries);

@@ -36,6 +36,7 @@ fn uninstalled_agents_are_not_offered() {
         use_for: None,
         model: None,
         effort: None,
+        options_file: None,
     };
     let registry = builtin_registry(
         ToolsConfig::default(),
@@ -90,6 +91,7 @@ fn agents_are_not_offered_at_the_delegation_depth_limit() {
         use_for: None,
         model: None,
         effort: None,
+        options_file: None,
     };
     let home = tempfile::tempdir().unwrap();
     for (max_depth, offered) in [(0, false), (1, true)] {
@@ -157,6 +159,7 @@ fn installed(model_args: bool) -> AgentAdapterConfig {
         use_for: None,
         model: None,
         effort: None,
+        options_file: None,
     }
 }
 
@@ -220,4 +223,132 @@ fn one_agent_tool_offers_every_installed_agent_with_the_preferred_one_as_default
     assert!(registry.get("agent_status").is_none());
     let spec = registry.get("agent").unwrap().spec();
     assert!(spec.parameters["properties"].get("background").is_none());
+}
+
+#[test]
+fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
+    use crate::delegate::options::{self, AgentOptions, Choice};
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("claude-agent-acp");
+    std::fs::write(&server, "#!/bin/sh\n").unwrap();
+    let file = dir.path().join("state/agent-options/claude.json");
+    let adapter = || {
+        let mut adapter = installed(true);
+        adapter.effort_args = vec!["--effort".into(), "{effort}".into()];
+        adapter.acp = Some(crate::AcpAgentLaunch {
+            command: server.display().to_string(),
+            args: Vec::new(),
+            full_mode: None,
+            environment: Vec::new(),
+            required: false,
+        });
+        adapter.options_file = Some(file.clone());
+        adapter
+    };
+    let spec = || {
+        builtin_registry(
+            ToolsConfig {
+                max_background: 0,
+                ..ToolsConfig::default()
+            },
+            SkillMap::new(),
+            Vec::new(),
+            1024,
+            HashMap::from([("claude".to_owned(), adapter())]),
+        )
+        .unwrap()
+        .get("agent")
+        .unwrap()
+        .spec()
+        .parameters
+    };
+
+    let unknown = spec();
+    let line = unknown["properties"]["agent"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(line.contains("which SCV has not seen yet"), "{line}");
+    assert!(
+        !line.contains("Model ID"),
+        "the CLI's hint does not apply: {line}"
+    );
+    // The user's configured effort is always a value the schema allows.
+    let mut configured = adapter();
+    configured.effort = Some("turbo".into());
+    let efforts = builtin_registry(
+        ToolsConfig {
+            max_background: 0,
+            ..ToolsConfig::default()
+        },
+        SkillMap::new(),
+        Vec::new(),
+        1024,
+        HashMap::from([("claude".to_owned(), configured)]),
+    )
+    .unwrap()
+    .get("agent")
+    .unwrap()
+    .spec()
+    .parameters["properties"]["effort"]["enum"]
+        .clone();
+    assert!(
+        efforts.as_array().unwrap().contains(&"turbo".into()),
+        "{efforts}"
+    );
+
+    options::save(
+        &file,
+        "claude",
+        &server,
+        &AgentOptions {
+            model: Some(Choice {
+                values: vec!["default".into(), "opus[1m]".into(), "sonnet".into()],
+                current: Some("default".into()),
+            }),
+            effort: Some(Choice {
+                values: vec!["default".into(), "high".into(), "ultra".into()],
+                current: Some("high".into()),
+            }),
+        },
+    )
+    .unwrap();
+    let known = spec();
+    let line = known["properties"]["agent"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        line.contains(
+            "Takes model (one of: opus[1m], sonnet), effort (one of: high, ultra; its default \
+             is high), and session."
+        ),
+        "{line}"
+    );
+    let efforts = known["properties"]["effort"]["enum"].as_array().unwrap();
+    assert!(efforts.contains(&"ultra".into()), "{efforts:?}");
+    assert!(efforts.contains(&"max".into()), "{efforts:?}");
+    assert!(!efforts.contains(&"default".into()), "{efforts:?}");
+
+    // A server that lists efforts but no model: omit model.
+    options::save(
+        &file,
+        "claude",
+        &server,
+        &AgentOptions {
+            model: None,
+            effort: Some(Choice {
+                values: vec!["low".into()],
+                current: None,
+            }),
+        },
+    )
+    .unwrap();
+    let efforts_only = spec();
+    let line = efforts_only["properties"]["agent"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        line.contains("model (its ACP server lists no model to choose, so omit model)"),
+        "{line}"
+    );
 }

@@ -106,7 +106,18 @@ directories can already run code as the user.
 Project skill discovery reads only `SKILL.md` files that resolve inside the
 workspace, bounded in count and size, and only for tool-enabled sessions, so a
 tool-free remote sender never learns the workspace's project or skill names.
-Listed skills are untrusted instructions, like `.scv/skills`.
+Listed skills are untrusted instructions, like `.scv/skills`. SCV's built-in
+`delegating` skill is compiled in and grants nothing; a user or project skill
+of the same name replaces it, like any skill the user installs.
+
+The model and effort values an ACP server lists reach the model through the
+`agent` tool's description, so they are treated as untrusted agent output: SCV
+saves at most 64 per option, only values that could be one argument (model
+values under the `model` rules, effort values of letters, digits, `-`, and
+`_` that start with a letter or digit), in a private file under `state/agent-options/`, and checks them again
+when it reads that file back. A value only ever becomes the single argument of
+`session/set_config_option`, never shell text. `scv agents check` prints what
+agents reply on one line without control characters.
 
 ### Delegated runs
 

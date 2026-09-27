@@ -20,6 +20,7 @@ use crate::{
         agent::AGENT_TOOL,
         conversation::TurnGuard,
         live::{LiveChild, LiveSpec},
+        options::{self, AgentOptions, EFFORT_OPTIONS, Listed},
         output::{AgentResult, AgentUsage, RunStatus, add_sign_in_hint},
         progress::redact,
         records,
@@ -42,9 +43,6 @@ pub(super) const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 /// How long a cancelled or timed-out prompt may take to settle before the
 /// agent is shut down.
 pub(super) const SETTLE_GRACE: Duration = Duration::from_secs(2);
-
-/// Config option IDs agents use for reasoning effort.
-pub(super) const EFFORT_OPTIONS: [&str; 3] = ["effort", "reasoning_effort", "thought_level"];
 
 /// A conversation's ACP server and its session.
 #[derive(Debug)]
@@ -229,6 +227,7 @@ impl AcpAgentTool {
         else {
             return Err((rpc, "the agent's session/new returned no sessionId".into()));
         };
+        self.remember_offered(&session);
         let child = AcpChild {
             rpc,
             session_id,
@@ -242,6 +241,25 @@ impl AcpAgentTool {
             return Err((child.rpc, error));
         }
         Ok(child)
+    }
+
+    /// Keep what a new session offers for `model` and `effort`, and save it
+    /// so later sessions list those values before calling this agent. A
+    /// session that offers neither leaves the known values alone.
+    fn remember_offered(&self, session: &Value) {
+        let Some(offered) = AgentOptions::from_acp(session) else {
+            return;
+        };
+        if let (Some(file), Some(executable)) =
+            (self.options_file.as_deref(), self.resolved.as_deref())
+            && let Err(error) = options::save(file, &self.name, executable, &offered)
+        {
+            tracing::debug!(agent = %self.name, %error, "could not save the agent's options");
+        }
+        *lock(&self.offered) = Some(Listed {
+            options: offered,
+            seen: std::time::SystemTime::now(),
+        });
     }
 
     /// Select the session mode that grants full permissions: through

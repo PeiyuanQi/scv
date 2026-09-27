@@ -1,6 +1,11 @@
 //! [`AcpAgentTool`]: the backend of an agent reached over ACP.
 
-use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    ffi::OsString,
+    path::PathBuf,
+    sync::{Arc, Mutex as StdMutex},
+    time::SystemTime,
+};
 
 use async_trait::async_trait;
 use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
@@ -13,14 +18,18 @@ use crate::{
     delegate::{
         agent::{Accepts, Backend},
         conversation::{Attachment, ConversationStore},
+        options::{self, AgentOptions, Choice, Listed},
         output::RunStatus,
         progress::redact,
         records,
-        request::{AgentArgs, resolve_agent_cwd, valid_model_name, validate_agent_cwd},
+        request::{
+            AgentArgs, resolve_agent_cwd, valid_effort, valid_model_name, validate_agent_cwd,
+        },
     },
 };
 
 use super::{AcpChild, TurnEnd};
+use crate::sync::lock;
 
 pub(crate) struct AcpAgentTool {
     /// The adapter name, such as `claude`: conversation handles and results.
@@ -37,6 +46,14 @@ pub(crate) struct AcpAgentTool {
     pub(super) output_limit: usize,
     pub(super) delegation: Option<DelegationContext>,
     pub(super) conversations: Arc<ConversationStore>,
+    /// Where this agent's offered model and effort values are saved.
+    pub(super) options_file: Option<PathBuf>,
+    /// Those values, when they are recent and from the installed server;
+    /// each new ACP session of this tool replaces them.
+    pub(super) offered: StdMutex<Option<Listed>>,
+    /// Refuse a model the saved values do not list before starting. Off for
+    /// `scv agents check`, where the agent's own list decides.
+    precheck: bool,
 }
 
 impl AcpAgentTool {
@@ -51,6 +68,13 @@ impl AcpAgentTool {
         delegation: Option<DelegationContext>,
         conversations: Arc<ConversationStore>,
     ) -> Self {
+        let offered = adapter
+            .options_file
+            .as_deref()
+            .zip(resolved.as_deref())
+            .and_then(|(file, executable)| {
+                options::load(file, &name, executable, SystemTime::now())
+            });
         Self {
             name,
             launch,
@@ -66,12 +90,75 @@ impl AcpAgentTool {
             output_limit,
             delegation,
             conversations,
+            options_file: adapter.options_file.clone(),
+            offered: StdMutex::new(offered),
+            precheck: true,
         }
+    }
+
+    /// Whether a model the saved values do not list is refused before the
+    /// call starts.
+    pub(crate) fn with_precheck(mut self, precheck: bool) -> Self {
+        self.precheck = precheck;
+        self
     }
 
     /// What this agent takes.
     pub(crate) fn accepts(&self) -> Accepts {
         self.accepts
+    }
+
+    /// The model and effort values this agent's server offered recently.
+    pub(crate) fn offered(&self) -> Option<AgentOptions> {
+        lock(&self.offered)
+            .as_ref()
+            .filter(|listed| listed.fresh(SystemTime::now()))
+            .map(|listed| listed.options.clone())
+    }
+
+    /// Refuse a model the agent did not list, before anything starts. The
+    /// saved file is read again first, since another session or `scv agents
+    /// check` may have saved a newer list. Effort levels are left to the
+    /// agent: they depend on the model, and a session's model is not always
+    /// known here.
+    fn check_offered(&self, args: &AgentArgs) -> Result<(), ToolError> {
+        let Some(model) = args.model.as_deref().filter(|_| self.precheck) else {
+            return Ok(());
+        };
+        let refusing = |listed: Option<&Listed>| -> Option<Choice> {
+            listed
+                .and_then(|listed| listed.options.model.clone())
+                .filter(|choice| !choice.offers(model))
+        };
+        let now = SystemTime::now();
+        let current = lock(&self.offered)
+            .clone()
+            .filter(|listed| listed.fresh(now));
+        if refusing(current.as_ref()).is_none() {
+            return Ok(());
+        }
+        let reloaded = self
+            .options_file
+            .as_deref()
+            .zip(self.resolved.as_deref())
+            .and_then(|(file, executable)| options::load(file, &self.name, executable, now));
+        let refused = refusing(reloaded.as_ref());
+        if reloaded.is_some() {
+            *lock(&self.offered) = reloaded;
+        }
+        let Some(choice) = refused else {
+            return Ok(());
+        };
+        Err(ToolError::invalid_arguments(format!(
+            "model {:?} is not one {} offers; choose one of: {}, or omit model for its \
+             default. This list is from {}'s last session; if the user named a newer one, \
+             run `scv agents check {}` to refresh it",
+            bounded(model, 80),
+            self.name,
+            choice.shown().join(", "),
+            self.name,
+            self.name
+        )))
     }
 
     pub(super) fn validate(&self, args: &AgentArgs) -> Result<(), ToolError> {
@@ -98,17 +185,13 @@ impl AcpAgentTool {
             )));
         }
         if let Some(effort) = &args.effort
-            && (effort.is_empty()
-                || effort.len() > 32
-                || !effort
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            && !valid_effort(effort)
         {
             return Err(ToolError::invalid_arguments(format!(
                 "invalid effort {effort:?}"
             )));
         }
-        Ok(())
+        self.check_offered(args)
     }
 
     pub(super) fn owner_depth(&self) -> u32 {

@@ -21,6 +21,7 @@ use serde_json::Value;
 use crate::delegate::{
     adapters,
     agent::{Accepts, Offered},
+    options::{AgentOptions, Choice},
     output::{self, AgentReply},
 };
 
@@ -95,19 +96,49 @@ fn choice_note(use_for: Option<&str>, model: Option<&str>, effort: Option<&str>)
     }
 }
 
-/// What an agent takes of `model` (with its hint), `effort`, and `session`.
-fn takes(accepts: Accepts, model_hint: &str) -> String {
+/// `model (one of: a, b; its default is a)`, from what the agent's server
+/// listed; `None` when it listed nothing to choose from.
+fn listed(label: &str, choice: Option<&Choice>) -> Option<String> {
+    let choice = choice?;
+    let values = choice.shown();
+    if values.is_empty() {
+        return None;
+    }
+    Some(match choice.named_default() {
+        Some(default) => format!(
+            "{label} (one of: {}; its default is {default})",
+            values.join(", ")
+        ),
+        None => format!("{label} (one of: {})", values.join(", ")),
+    })
+}
+
+/// What an agent takes of `model` (the values its server listed, or its
+/// hint), `effort`, and `session`.
+fn takes(accepts: Accepts, model_hint: &str, offered: Option<&AgentOptions>) -> String {
     let mut taken = Vec::new();
     if accepts.model {
         let hint = model_hint.trim().trim_end_matches('.');
-        taken.push(if hint.is_empty() {
-            "model".to_owned()
-        } else {
-            format!("model ({hint})")
-        });
+        taken.push(
+            listed("model", offered.and_then(|offered| offered.model.as_ref())).unwrap_or_else(
+                || {
+                    if hint.is_empty() {
+                        "model".to_owned()
+                    } else {
+                        format!("model ({hint})")
+                    }
+                },
+            ),
+        );
     }
     if accepts.effort {
-        taken.push("effort".to_owned());
+        taken.push(
+            listed(
+                "effort",
+                offered.and_then(|offered| offered.effort.as_ref()),
+            )
+            .unwrap_or_else(|| "effort".to_owned()),
+        );
     }
     if accepts.session {
         taken.push("session".to_owned());
@@ -132,7 +163,11 @@ pub(crate) fn entry(agent: &Offered) -> String {
         None => format!("{}.", agent.name),
     };
     line.push(' ');
-    line.push_str(&takes(agent.accepts, &agent.model_hint));
+    line.push_str(&takes(
+        agent.accepts,
+        &agent.model_hint,
+        agent.offered.as_ref(),
+    ));
     if let Some(note) = choice_note(
         agent.use_for.as_deref(),
         agent.model.as_deref(),

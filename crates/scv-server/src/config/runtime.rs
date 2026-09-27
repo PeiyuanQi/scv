@@ -46,6 +46,7 @@ impl Config {
             background: None,
             chat_attach: None,
             chat_history: None,
+            precheck_agent_models: true,
         }
     }
 
@@ -226,6 +227,7 @@ impl Config {
                         use_for: config.use_for.clone(),
                         model: config.model.clone(),
                         effort: config.effort.clone(),
+                        options_file: Some(self.layout().agent_options(name)),
                     },
                 ))
             })

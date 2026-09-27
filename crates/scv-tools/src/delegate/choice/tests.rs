@@ -39,6 +39,7 @@ fn offered(name: &str, accepts: Accepts) -> Offered {
         model_hint: adapters::adapter(name)
             .map_or("", |adapter| adapter.model_hint)
             .into(),
+        offered: None,
         use_for: Some("current events and posts on X".into()),
         model: None,
         effort: None,

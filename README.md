@@ -4,10 +4,12 @@
 
 # SCV
 
-**Your coding agents, one message away.**
+**One agent to find them all, one agent to guide them.**
 
-A fast, native agent runtime that lives on your machine<br>
-and answers from your terminal, WeChat, and Feishu.
+A fast, native agent runtime that lives on your machine,<br>
+leads your coding agents, and answers from your terminal, Feishu, and WeChat.
+
+English · [简体中文](https://github.com/PeiyuanQi/scv/blob/main/README.zh-CN.md)
 
 [![crates.io](https://img.shields.io/crates/v/scv-cli?style=flat-square&logo=rust&color=2f6fd6)](https://crates.io/crates/scv-cli)
 [![CI](https://img.shields.io/github/actions/workflow/status/PeiyuanQi/scv/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/PeiyuanQi/scv/actions/workflows/ci.yml)
@@ -22,15 +24,15 @@ and answers from your terminal, WeChat, and Feishu.
 
 SCV is a small agent runtime written in Rust. One long-running daemon holds
 your sessions, tools, and approvals, and you talk to it from a terminal UI or
-from WeChat and Feishu/Lark on your phone. It handles quick questions itself,
-hands real work to Claude Code, Codex, and other coding agents as background
-jobs, and messages you when they are done.
+from Feishu/Lark and WeChat on your phone. It handles quick questions itself,
+finds the right coding agent for real work (Claude Code, Codex, and others),
+briefs it, runs it as a background job, and messages you when it is done.
 
 ## Highlights
 
 ### Chat from your phone
 
-Scan a QR code to pair WeChat or Feishu/Lark. SCV answers only you by default,
+Scan a QR code to pair Feishu/Lark or WeChat. SCV answers only you by default,
 reads the photos, files, and videos you send, and sends files back. Long work
 runs in the background while you keep chatting; results and yes/no questions
 arrive as messages. SCV keeps a log of your chat, so a conversation carries on
@@ -42,7 +44,11 @@ starts a fresh one.
 One `agent` tool delegates to Claude Code, Codex, Grok Build, DeepSeek Harness,
 pi, or a nested SCV, over the [Agent Client Protocol](https://agentclientprotocol.com)
 where available. Your `prefer` list and `use_for` notes pick who does what, and
-`agent_wait`, `agent_status`, and `agent_cancel` manage background jobs.
+`agent_wait`, `agent_status`, and `agent_cancel` manage background jobs. SCV
+learns each agent's models and effort levels from the agent itself and passes
+them exactly, instead of guessing names that change with every release. A
+built-in `delegating` skill teaches it how to brief an agent and what to do
+when a call fails, and `scv agents check` shows every agent working.
 
 ### Private homes, private keys
 
@@ -101,11 +107,14 @@ scv                              # the terminal UI, in the current directory
 scv exec "Explain this repository"   # or one headless prompt
 ```
 
-**3. Connect your phone.**
+**3. Connect your phone.** We recommend Feishu (or Lark, its international
+edition). SCV keeps one WebSocket connection open to it, so your messages
+arrive at once. WeChat also works, but SCV has to poll its API for new
+messages, and in our use it answers noticeably slower.
 
 ```bash
-scv channels login wechat        # scan the QR code (or: feishu, lark)
-scv channels run wechat --workspace ~/code --remote-tools owner
+scv channels login feishu        # scan the QR code (or: lark, wechat)
+scv channels run feishu --workspace ~/code --remote-tools owner
 scv channels status              # Channels: 1 of 1 enabled accounts connected
 ```
 
@@ -113,12 +122,14 @@ scv channels status              # Channels: 1 of 1 enabled accounts connected
 > gives your own account every SCV tool, with approvals granted automatically.
 > Leave it out and SCV chats with you tool-free.
 
-**4. Sign in the agents it delegates to.**
+**4. Sign in the agents it delegates to**, then check that each one works as
+SCV runs it.
 
 ```bash
 scv agents login claude          # once per agent, in SCV's private home
 scv agents login codex
 scv agents status
+scv agents check                 # version, models, and one short call each
 ```
 
 ### Everyday commands
@@ -129,14 +140,14 @@ scv agents status
 | `scv exec [--yes] "…"` | Run one prompt headless; `--yes` approves risky tools for that run |
 | `scv run`, `start`, `stop`, `status`, `reload` | Run or manage the daemon |
 | `scv channels login`, `run`, `stop`, `status`, `logout` | Manage chat accounts (`wechat`, `feishu`, `lark`) |
-| `scv agents login`, `status`, `ps`, `kill` | Sign agents in, and list or stop their runs |
+| `scv agents login`, `status`, `check`, `ps`, `kill` | Sign agents in, check them, and list or stop their runs |
 | `scv confirm "…"` | Ask the owner yes or no in chat; exits 0 only on yes |
 | `scv config show` | Every path and setting in effect, secrets hidden |
 | `scv update` | Install the latest release and restart the daemon |
 
 ## What it looks like
 
-An illustration of a WeChat chat with SCV:
+An illustration of a Feishu chat with SCV:
 
 ```text
 You  The checkout test in shop/ has failed since this morning.
@@ -164,7 +175,7 @@ own release flow asks this way before it publishes.
 ## How it works
 
 ```text
-   WeChat · Feishu/Lark                        Terminal
+   Feishu/Lark · WeChat                        Terminal
      (your phone)                              (scv TUI)
           │ bot account, QR sign-in               │ Unix socket
           ▼                                       ▼
@@ -206,11 +217,16 @@ approval_policy = "on-risk"   # reads run; writes, shell, and agents ask first
 [agent]
 prefer = ["codex", "claude"]  # who gets delegated work first
 
+[agents.claude]
+use_for = "coding"
+model = "opus[1m]"            # a value `scv agents check` lists for claude
+effort = "xhigh"
+
 [agents.grok]
 use_for = "current events, and anything that needs posts on X"
 
 [notify]
-owner = ["wechat:default"]    # where unprompted notices go
+owner = ["feishu:default"]    # where unprompted notices go
 ```
 
 `scv config show` prints every path and setting with where it came from,
@@ -232,8 +248,8 @@ and report vulnerabilities as
 | Guide | What's inside |
 | --- | --- |
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | Crates, the agent loop, planned restarts, and where to start reading the code |
-| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | WeChat and Feishu/Lark: sign-in, media, background reports, questions to the owner |
-| [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | Built-in tools, delegated agents, ACP, background jobs, and agent sign-ins |
+| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | Feishu/Lark and WeChat: sign-in, media, background reports, questions to the owner |
+| [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | Built-in tools, delegated agents, their models and checks, ACP, background jobs, and agent sign-ins |
 | [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | Instance layout, every setting, providers, the daemon, and notices |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | Trust boundaries, approvals, remote tools, and delegated runs |
 | [Context management](https://github.com/PeiyuanQi/scv/blob/main/docs/context-management.md) | The token budget and deterministic compaction |

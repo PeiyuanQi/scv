@@ -1,8 +1,14 @@
 //! [`builtin_registry`]: the tools one session offers its model.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
-use scv_core::{ToolError, ToolRegistry};
+use scv_core::{ToolContext, ToolError, ToolRegistry};
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentAdapterConfig, DelegationContext, SkillMap, ToolsConfig,
@@ -17,7 +23,7 @@ use crate::{
     delegate::{
         acp::AcpAgentTool,
         adapters::{self, Transport},
-        agent::{AgentTool, Backend, Offered},
+        agent::{AGENT_TOOL, AgentTool, Backend, Offered},
         background,
         conversation::ConversationStore,
         native::NativeAgentTool,
@@ -116,6 +122,155 @@ pub fn builtin_registry(
     Ok(registry)
 }
 
+/// How long `call_agent` waits for its agent to shut down after the call
+/// before stopping what is left of it.
+const CHECK_STOP_WAIT: Duration = Duration::from_secs(10);
+
+/// Make one `agent` call to `name` from `cwd`, as a session's `agent` tool
+/// makes it, for `scv agents check`. The call runs in the foreground and
+/// may take `timeout`; when `interrupted` completes first, it is cancelled.
+/// The agent's model list decides, not a saved one. The run is recorded
+/// under `delegation`, like a session's, and this returns only once the
+/// agent's process group is gone. The result is the tool's JSON result, or
+/// SCV's own error when the call was refused or nothing could run.
+pub async fn call_agent(
+    name: &str,
+    adapter: AgentAdapterConfig,
+    cwd: &Path,
+    arguments: Value,
+    timeout: Duration,
+    delegation: DelegationContext,
+    interrupted: impl Future<Output = ()>,
+) -> Result<Value, String> {
+    let records = Arc::clone(&delegation.registry);
+    let session = delegation.session.clone();
+    let result = call_once(
+        name,
+        adapter,
+        cwd,
+        arguments,
+        timeout,
+        delegation,
+        interrupted,
+    )
+    .await;
+    // Dropping the tool asked its agent to stop; wait for its whole group.
+    let deadline = tokio::time::Instant::now() + CHECK_STOP_WAIT;
+    loop {
+        let left: Vec<String> = records
+            .list(true)
+            .into_iter()
+            .filter(|entry| entry.record.session == session)
+            .map(|entry| entry.record.handle)
+            .collect();
+        if left.is_empty() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            for handle in left {
+                let _ = records.kill(&handle).await;
+            }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    result
+}
+
+async fn call_once(
+    name: &str,
+    adapter: AgentAdapterConfig,
+    cwd: &Path,
+    arguments: Value,
+    timeout: Duration,
+    delegation: DelegationContext,
+    interrupted: impl Future<Output = ()>,
+) -> Result<Value, String> {
+    let defaults = ToolsConfig::default();
+    let tools = ToolsConfig {
+        agent_timeout: timeout,
+        max_timeout: timeout.max(defaults.max_timeout),
+        max_background: 0,
+        prefer: vec![name.to_owned()],
+        delegation: Some(delegation),
+        precheck_agent_models: false,
+        ..defaults
+    };
+    let registry = builtin_registry(
+        tools,
+        SkillMap::new(),
+        Vec::new(),
+        0,
+        [(name.to_owned(), adapter)],
+    )
+    .map_err(|error| error.message)?;
+    let agent = registry.get(AGENT_TOOL).ok_or_else(|| {
+        format!(
+            "{name} is not offered here: it is not installed, or this SCV is at its delegation \
+             depth limit"
+        )
+    })?;
+    let cancellation = CancellationToken::new();
+    let call = agent.execute(
+        arguments,
+        ToolContext::new(cwd.to_owned(), cancellation.clone()),
+    );
+    tokio::pin!(call);
+    let result = tokio::select! {
+        result = &mut call => result,
+        () = interrupted => {
+            // The call stops its agent before it returns.
+            cancellation.cancel();
+            call.await
+        }
+    };
+    let output = result.map_err(|error| error.message)?;
+    serde_json::from_str(&output.content).map_err(|_| output.content)
+}
+
+/// How SCV reaches an agent, decided from its adapter settings and what is
+/// installed; the `agent` tool and `scv agents check` decide the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// Its Agent Client Protocol server.
+    Acp(PathBuf),
+    /// Its CLI, once per turn.
+    Cli(PathBuf),
+    /// A nested `scv server --stdio`.
+    Scv(PathBuf),
+    /// Not installed: the named command resolves nowhere, so the agent is
+    /// not offered.
+    Missing(String),
+}
+
+/// How SCV would reach the agent `adapter` configures.
+pub fn reach(adapter: &AgentAdapterConfig) -> Reach {
+    let resolve = |command: &str| adapters::resolve_agent_executable(command, &adapter.search_dirs);
+    if adapter.transport == Transport::ScvProtocol {
+        return resolve(&adapter.command)
+            .map_or_else(|| Reach::Missing(adapter.command.clone()), Reach::Scv);
+    }
+    if let Some(launch) = &adapter.acp {
+        if let Some(server) = resolve(&launch.command) {
+            return Reach::Acp(server);
+        }
+        // `transport = "acp"` never falls back to the CLI.
+        if launch.required {
+            return Reach::Missing(launch.command.clone());
+        }
+    }
+    resolve(&adapter.command).map_or_else(|| Reach::Missing(adapter.command.clone()), Reach::Cli)
+}
+
+/// The `model` hint for an agent reached over ACP before SCV has seen what
+/// its server offers; once it has, the description lists the values instead.
+const ACP_MODEL_HINT: &str = "a value its ACP server lists, which SCV has not seen yet; omit model \
+     unless the user names one, and a value the server does not list fails naming those it does";
+
+/// The `model` hint for an agent whose ACP server listed its options but no
+/// model to choose; a listed model replaces it.
+const ACP_NO_MODEL_HINT: &str = "its ACP server lists no model to choose, so omit model";
+
 /// The agent `name` as the `agent` tool offers it, on the backend its
 /// adapter and transport call for; `None` when it is not installed.
 fn offer(
@@ -128,9 +283,11 @@ fn offer(
         default: config.agent_timeout,
         max: config.max_timeout,
     };
-    let (backend, accepts): (Arc<dyn Backend>, _) = if adapter.transport == Transport::ScvProtocol {
-        let resolved = adapters::resolve_agent_executable(&adapter.command, &adapter.search_dirs)?;
-        (
+    let mut model_hint = adapter.model_hint.clone();
+    let mut offered = None;
+    let (backend, accepts): (Arc<dyn Backend>, _) = match reach(&adapter) {
+        Reach::Missing(_) => return None,
+        Reach::Scv(resolved) => (
             Arc::new(ScvAgentTool {
                 name: name.clone(),
                 command: adapter.command.clone(),
@@ -143,44 +300,51 @@ fn offer(
                 conversations: Arc::clone(conversations),
             }),
             ScvAgentTool::ACCEPTS,
-        )
-    } else if let Some(launch) = adapter.acp.clone()
-        && let Some(resolved) =
-            adapters::resolve_agent_executable(&launch.command, &adapter.search_dirs)
-    {
-        let tool = AcpAgentTool::new(
-            name.clone(),
-            &adapter,
-            launch,
-            Some(resolved),
-            timeouts,
-            config.output_limit_bytes,
-            config.delegation.clone(),
-            Arc::clone(conversations),
-        );
-        let accepts = tool.accepts();
-        (Arc::new(tool), accepts)
-    } else if adapter.acp.as_ref().is_some_and(|launch| launch.required) {
-        // `transport = "acp"` without its server: not offered.
-        return None;
-    } else {
-        let tool = NativeAgentTool::new(
-            name.clone(),
-            adapter.clone(),
-            timeouts,
-            config.output_limit_bytes,
-            config.delegation.clone(),
-            Arc::clone(conversations),
-        );
-        tool.resolved.as_ref()?;
-        let accepts = tool.accepts();
-        (Arc::new(tool), accepts)
+        ),
+        Reach::Acp(resolved) => {
+            let launch = adapter.acp.clone()?;
+            let tool = AcpAgentTool::new(
+                name.clone(),
+                &adapter,
+                launch,
+                Some(resolved),
+                timeouts,
+                config.output_limit_bytes,
+                config.delegation.clone(),
+                Arc::clone(conversations),
+            )
+            .with_precheck(config.precheck_agent_models);
+            let accepts = tool.accepts();
+            offered = tool.offered();
+            // Its CLI's own model names may not be what the server accepts.
+            model_hint = if offered.is_some() {
+                ACP_NO_MODEL_HINT
+            } else {
+                ACP_MODEL_HINT
+            }
+            .to_owned();
+            (Arc::new(tool), accepts)
+        }
+        Reach::Cli(_) => {
+            let tool = NativeAgentTool::new(
+                name.clone(),
+                adapter.clone(),
+                timeouts,
+                config.output_limit_bytes,
+                config.delegation.clone(),
+                Arc::clone(conversations),
+            );
+            tool.resolved.as_ref()?;
+            let accepts = tool.accepts();
+            (Arc::new(tool), accepts)
+        }
     };
     Some(Offered {
         name,
         backend,
         accepts,
-        model_hint: adapter.model_hint,
+        model_hint,
+        offered,
         use_for: adapter.use_for,
         model: adapter.model,
         effort: adapter.effort,

@@ -78,6 +78,7 @@ pub(crate) async fn build_session(
     let skills = discover_skills(&workspace, &config, !no_tools)?;
     let listings = SkillListings {
         listing: skills.listing,
+        builtin_listing: skills.builtin_listing,
         project_listing: skills.project_listing,
     };
     let mut provider = OpenAiProvider::new(

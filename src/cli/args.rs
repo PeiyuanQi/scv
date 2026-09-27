@@ -285,6 +285,17 @@ pub(crate) enum AgentsCommand {
         #[arg(value_parser = agent_names())]
         agent: Option<String>,
     },
+    /// Check each installed agent the way SCV runs it: its version, how SCV
+    /// reaches it, the models and efforts it offers, and one short call with
+    /// your configured model and effort, which costs one small turn. Exits
+    /// non-zero when a call fails.
+    Check {
+        #[arg(value_parser = agent_names())]
+        agent: Option<String>,
+        /// How long each agent's call may take.
+        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u64).range(10..=3600))]
+        timeout_seconds: u64,
+    },
     /// Remove an agent's SCV-private sign-in; your own login is untouched.
     Logout {
         #[arg(value_parser = agent_names())]

@@ -251,7 +251,9 @@ impl Config {
             if let Some(effort) = &adapter.effort {
                 if !scv_tools::valid_effort(effort) {
                     bail!(
-                        "agents.{agent}.effort must be one of {}",
+                        "agents.{agent}.effort must be 1-32 letters, digits, '-', or '_', starting \
+                         with a letter or digit, such as one of {} or another value `scv agents \
+                         check {agent}` lists",
                         scv_tools::AGENT_EFFORTS.join(", ")
                     );
                 }

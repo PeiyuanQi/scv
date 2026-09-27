@@ -1,10 +1,11 @@
-//! Finding skills: SCV's own and the user's, which `read_skill` serves, and
-//! the agent skills of the workspace's projects, which delegated agents load.
+//! Finding skills: the workspace's SCV skills, the user's, and the ones built
+//! into SCV, which `read_skill` serves, and the agent skills of the
+//! workspace's projects, which delegated agents load.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use scv_tools::SkillMap;
+use scv_tools::{Skill, SkillMap};
 
 use super::read_prefix;
 use crate::config::Config;
@@ -15,8 +16,19 @@ pub(crate) struct DiscoveredSkills {
     pub(crate) map: SkillMap,
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) listing: String,
+    /// The built-in skills a file does not replace, listed only when the
+    /// session offers the `agent` tool, which they are about.
+    pub(crate) builtin_listing: String,
     pub(crate) project_listing: String,
 }
+
+/// Skills built into SCV, by name. A skill file with the same name in
+/// `skills.project_dir` or `skills.user_dir` replaces one; a project's agent
+/// skill of the same name does not.
+pub(crate) const BUILTIN_SKILLS: [(&str, &str); 1] = [(
+    "delegating",
+    include_str!("../../skills/delegating/SKILL.md"),
+)];
 
 /// Agent-native skill directories, relative to a project, that Codex and
 /// Claude Code load from their working directory.
@@ -66,14 +78,16 @@ pub(crate) fn discover_skills(
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            skills.entry(name).or_insert(canonical_file);
+            skills.entry(name).or_insert(Skill::File(canonical_file));
         }
     }
     let mut names: Vec<_> = skills.keys().cloned().collect();
     names.sort();
     let mut listing = String::new();
     for name in names {
-        let path = &skills[&name];
+        let Skill::File(path) = &skills[&name] else {
+            continue;
+        };
         let bytes = read_prefix(path, config.skills.max_skill_bytes)
             .map(|(bytes, _)| bytes)
             .unwrap_or_default();
@@ -88,10 +102,21 @@ pub(crate) fn discover_skills(
     } else {
         String::new()
     };
+    // Built-in skills come last, so they never take a file's place under
+    // `max_skills`, and only tool sessions, which can read them, get them.
+    let mut builtin_listing = String::new();
+    for (name, text) in BUILTIN_SKILLS.into_iter().filter(|_| tools) {
+        if skills.contains_key(name) {
+            continue;
+        }
+        skills.insert(name.to_owned(), Skill::Builtin(text));
+        builtin_listing.push_str(&format!("- {name}: {}\n", skill_description(text)));
+    }
     Ok(DiscoveredSkills {
         map: skills,
         roots,
         listing,
+        builtin_listing,
         project_listing,
     })
 }
@@ -173,8 +198,12 @@ pub(crate) fn discover_project_skills(
                     Some(project) => (format!("{project}:{skill}"), format!("project {project}")),
                     None => (skill, "workspace root".to_owned()),
                 };
-                // SCV's own and the user's skills keep their names.
-                if skills.contains_key(&name) {
+                // SCV's own and the user's skills keep their names, built-in
+                // ones included: a repository's skill for its own agents
+                // does not replace what SCV tells its main agent.
+                if skills.contains_key(&name)
+                    || BUILTIN_SKILLS.iter().any(|(builtin, _)| *builtin == name)
+                {
                     continue;
                 }
                 let header = read_prefix(
@@ -191,7 +220,7 @@ pub(crate) fn discover_project_skills(
                     .take(MAX_PROJECT_SKILL_DESCRIPTION)
                     .collect();
                 listing.push_str(&format!("- {name} ({location}): {description}\n"));
-                skills.insert(name, file);
+                skills.insert(name, Skill::File(file));
             }
         }
     }

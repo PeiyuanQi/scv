@@ -237,7 +237,8 @@ fn agent_choice_settings_are_validated_and_user_only() {
     for (agent, model, effort) in [
         ("claude", Some("--oops"), None),
         ("claude", Some("@file"), None),
-        ("claude", None, Some("extreme")),
+        ("claude", None, Some("very high")),
+        ("claude", None, Some("--high")),
         ("dsh", Some("deepseek-chat"), None),
         ("dsh", None, Some("high")),
     ] {

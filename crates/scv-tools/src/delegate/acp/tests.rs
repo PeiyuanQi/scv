@@ -76,6 +76,7 @@ fn adapter(full: bool) -> AgentAdapterConfig {
         use_for: None,
         model: None,
         effort: None,
+        options_file: None,
     }
 }
 
@@ -820,4 +821,155 @@ async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() 
     until(|| registry.list(true).is_empty()).await;
     assert!(!zombie(agent));
     assert_eq!(jobs.running(), 0, "the slot is free");
+}
+
+#[tokio::test]
+async fn a_session_saves_what_the_agent_offers_and_later_calls_are_checked_before_starting() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "normal");
+    let file = dir.path().join("state/agent-options/claude.json");
+    let build = || {
+        let mut config = adapter(false);
+        config.options_file = Some(file.clone());
+        AcpAgentTool::new(
+            "claude".into(),
+            &config,
+            AcpAgentLaunch {
+                command: script.display().to_string(),
+                args: Vec::new(),
+                full_mode: None,
+                environment: Vec::new(),
+                required: false,
+            },
+            Some(script.clone()),
+            Timeouts {
+                default: Duration::from_secs(20),
+                max: Duration::from_secs(30),
+            },
+            64 * 1024,
+            None,
+            store(Duration::from_secs(60)),
+        )
+    };
+    let first = build();
+    assert!(first.offered().is_none());
+    first.risk(&json!({"prompt":"x","model":"m9"})).unwrap();
+    let output = first
+        .execute(json!({"prompt":"hello"}), context(dir.path(), None))
+        .await
+        .unwrap();
+    assert_eq!(json(&output)["status"], "completed");
+    // The session that just ran knows the list too.
+    assert!(first.risk(&json!({"prompt":"x","model":"m9"})).is_err());
+
+    let second = build();
+    let offered = second
+        .offered()
+        .expect("the first session saved its options");
+    assert_eq!(offered.model.as_ref().unwrap().values, ["m1", "m2"]);
+    assert_eq!(offered.effort.as_ref().unwrap().values, ["low", "high"]);
+    let error = second
+        .risk(&json!({"prompt":"x","model":"m9"}))
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("model \"m9\" is not one claude offers; choose one of: m1, m2")
+            && error.message.contains("scv agents check claude"),
+        "{}",
+        error.message
+    );
+    second.risk(&json!({"prompt":"x","model":"m2"})).unwrap();
+    // Efforts depend on the model, so the agent checks them.
+    second.risk(&json!({"prompt":"x","effort":"max"})).unwrap();
+    // A check turns the refusal off, so the agent's own list decides.
+    let checking = build().with_precheck(false);
+    checking.risk(&json!({"prompt":"x","model":"m9"})).unwrap();
+
+    // A newer list saved by another session is read before refusing.
+    let newer = crate::delegate::options::AgentOptions {
+        model: Some(crate::delegate::options::Choice {
+            values: vec!["m1".into(), "m9".into()],
+            current: None,
+        }),
+        effort: None,
+    };
+    crate::delegate::options::save(&file, "claude", &script, &newer).unwrap();
+    second.risk(&json!({"prompt":"x","model":"m9"})).unwrap();
+    let error = second
+        .risk(&json!({"prompt":"x","model":"m2"}))
+        .unwrap_err();
+    assert!(
+        error.message.contains("choose one of: m1, m9"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn a_check_call_returns_only_once_its_agent_and_what_it_started_are_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "normal");
+    let mut config = adapter(false);
+    config.model_args = vec!["--model".into(), "{model}".into()];
+    config.options_file = Some(dir.path().join("home/state/agent-options/claude.json"));
+    config.acp = Some(AcpAgentLaunch {
+        command: script.display().to_string(),
+        args: Vec::new(),
+        full_mode: None,
+        environment: Vec::new(),
+        required: false,
+    });
+    let records = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        dir.path().join("home"),
+    )));
+    let delegation = DelegationContext {
+        registry: Arc::clone(&records),
+        session: "agents-check-1".into(),
+        depth: 0,
+    };
+    // A saved list that lacks the model does not stop a check.
+    crate::delegate::options::save(
+        config.options_file.as_ref().unwrap(),
+        "claude",
+        &script,
+        &crate::delegate::options::AgentOptions {
+            model: Some(crate::delegate::options::Choice {
+                values: vec!["m0".into()],
+                current: None,
+            }),
+            effort: None,
+        },
+    )
+    .unwrap();
+    let result = crate::registry::call_agent(
+        "claude",
+        config,
+        &dir.path().canonicalize().unwrap(),
+        json!({"agent":"claude","prompt":"leave","model":"m2"}),
+        Duration::from_secs(20),
+        delegation,
+        std::future::pending(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["reply"], "left one behind");
+    let leftover: u32 = std::fs::read_to_string(dir.path().join("leftover"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!alive(pid(dir.path())), "the ACP server is gone");
+    // Killed with its group before the run's record went; the signal may
+    // take a moment to show.
+    wait_gone(leftover).await;
+    assert!(records.list(true).is_empty(), "no run is left recorded");
+    // The call refreshed the saved list from the agent itself.
+    let (saved, _) = crate::delegate::options::read_saved(
+        &dir.path().join("home/state/agent-options/claude.json"),
+        "claude",
+    )
+    .unwrap();
+    assert_eq!(saved.model.unwrap().values, ["m1", "m2"]);
 }
