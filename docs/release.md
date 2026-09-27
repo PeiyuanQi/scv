@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.2`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.2` pins.
+The current workspace release is `0.3.3`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.3` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,46 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.3
+
+`0.3.3` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.2` checks the new release and can roll it back.
+
+What changes for a person running SCV:
+
+- **SCV learns each agent's models from the agent.** Every ACP session's
+  model and effort values are saved in `$SCV_HOME/state/agent-options/`, and
+  later sessions list them in the `agent` tool. A model the list lacks is
+  refused before a job starts, instead of starting a job that fails. See
+  [model and effort values](tools.md#model-and-effort-values).
+- **`scv agents check`** makes one short call to each installed agent the way
+  SCV runs it. It shows how SCV reaches the agent, its version, the models and
+  efforts it offers, and whether your configured model and effort work. See
+  [checking delegated agents](tools.md#checking-delegated-agents).
+- **A built-in `delegating` skill** tells the main agent how to choose an
+  agent, model, and effort, how to write a brief, and what to do when a call
+  fails. The system prompt asks it to read the skill before its first agent
+  call. A `delegating` skill in your SCV skill directory replaces it. A
+  project's agent skill of that name is no longer listed for the main agent.
+- **`[agents.<name>] effort`** takes any value of letters, digits, `-`, and
+  `_` that starts with a letter or digit, such as Codex's `ultra`, and the
+  agent checks it. `0.3.2` accepts only `low`, `medium`, `high`, `xhigh`, and
+  `max`, so change any other value before going back to `0.3.2` by hand. A
+  rollback ignores `state/agent-options/`.
+- The README recommends Feishu over WeChat for phones, and a Simplified
+  Chinese README is added.
+
+What changes for code that embeds SCV's crates:
+
+- `SkillMap` values are `scv_tools::Skill` (`File` or `Builtin`) instead of
+  paths.
+- `AgentAdapterConfig` has an `options_file`, and `ToolsConfig` has a
+  `precheck_agent_models` flag. `Layout` has an `agent_options(name)` path.
+  `scv_tools` adds `reach`/`Reach`, `call_agent`, and the `agent_options`
+  module.
+- `scv_tools::valid_effort` checks that a value is well formed instead of
+  checking it against `AGENT_EFFORTS`.
 
 ## Upgrading to 0.3.2
 
