@@ -72,10 +72,27 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
     let skills = discover_skills(&workspace, &config, true).unwrap();
     let mut names: Vec<_> = skills.map.keys().cloned().collect();
     names.sort();
-    assert_eq!(names, ["notes", "scv:feature-flow", "triage", "web:deploy"]);
+    assert_eq!(
+        names,
+        [
+            "delegating",
+            "notes",
+            "scv:feature-flow",
+            "triage",
+            "web:deploy"
+        ]
+    );
     assert_eq!(
         skills.map["triage"],
-        workspace.join(".scv/skills/triage/SKILL.md")
+        Skill::File(workspace.join(".scv/skills/triage/SKILL.md"))
+    );
+    assert!(matches!(skills.map["delegating"], Skill::Builtin(_)));
+    assert!(
+        skills
+            .builtin_listing
+            .starts_with("- delegating: How to hand work to another agent"),
+        "{}",
+        skills.builtin_listing
     );
     assert_eq!(
         skills.project_listing,
@@ -85,6 +102,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
     );
     let listings = SkillListings {
         listing: skills.listing.clone(),
+        builtin_listing: skills.builtin_listing.clone(),
         project_listing: skills.project_listing.clone(),
     };
     let agents = ["claude".to_owned(), "pi".to_owned()];
@@ -121,6 +139,10 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
     .unwrap();
     assert!(!without_agents.contains("agent tool"), "{without_agents}");
     assert!(without_agents.contains("read_skill loads one for reference"));
+    // The delegating skill is listed only where it applies.
+    assert!(prompt.contains("- delegating: "), "{prompt}");
+    assert!(prompt.contains("Read the delegating skill before your first agent call"));
+    assert!(!without_agents.contains("delegating"), "{without_agents}");
 
     let registry = builtin_registry(
         config.tools(),
@@ -139,17 +161,67 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
         .await
         .unwrap();
     assert!(loaded.content.contains("Body of Land SCV"));
+    let builtin = read_skill
+        .execute(
+            serde_json::json!({"name":"delegating"}),
+            scv_core::ToolContext::new(workspace.clone(), CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    assert!(builtin.content.contains("# Delegating to agents"));
+    assert!(builtin.content.contains("scv agents check"));
 
     let tool_free = discover_skills(&workspace, &config, false).unwrap();
     assert!(tool_free.project_listing.is_empty());
     assert!(!tool_free.map.contains_key("scv:feature-flow"));
+    assert!(!tool_free.map.contains_key("delegating"));
     config.skills.scan_projects = false;
     let disabled = discover_skills(&workspace, &config, true).unwrap();
     assert!(disabled.project_listing.is_empty());
     config.skills.scan_projects = true;
     config.skills.max_skills = 3;
     let capped = discover_skills(&workspace, &config, true).unwrap();
-    assert_eq!(capped.map.len(), 3);
+    // Three files, plus the built-in skill, which takes no file's place.
+    assert_eq!(capped.map.len(), 4);
     assert!(capped.map.contains_key("scv:feature-flow"));
     assert!(!capped.map.contains_key("web:deploy"));
+}
+
+#[test]
+fn a_user_skill_replaces_a_built_in_one_of_the_same_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().canonicalize().unwrap();
+    let user = workspace.join("user-skills");
+    std::fs::create_dir_all(user.join("delegating")).unwrap();
+    std::fs::write(
+        user.join("delegating/SKILL.md"),
+        "---\ndescription: My own delegation rules\n---\nBody",
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.skills.user_dir = user.clone();
+    let skills = discover_skills(&workspace, &config, true).unwrap();
+    assert_eq!(
+        skills.map["delegating"],
+        Skill::File(user.join("delegating/SKILL.md"))
+    );
+    assert_eq!(skills.listing, "- delegating: My own delegation rules\n");
+    assert!(skills.builtin_listing.is_empty());
+
+    // A repository's skill for its own agents does not replace it.
+    std::fs::remove_dir_all(user.join("delegating")).unwrap();
+    std::fs::create_dir_all(workspace.join(".claude/skills/delegating")).unwrap();
+    std::fs::write(
+        workspace.join(".claude/skills/delegating/SKILL.md"),
+        "---\ndescription: How Claude Code delegates here\n---\nBody",
+    )
+    .unwrap();
+    let skills = discover_skills(&workspace, &config, true).unwrap();
+    assert!(matches!(skills.map["delegating"], Skill::Builtin(_)));
+    assert!(
+        !skills.project_listing.contains("delegating"),
+        "{}",
+        skills.project_listing
+    );
+    assert!(skills.builtin_listing.starts_with("- delegating: "));
 }

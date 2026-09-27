@@ -67,6 +67,7 @@ fn fake_agent_with_prompt_args(
             use_for: None,
             model: None,
             effort: None,
+            options_file: None,
         },
         Timeouts {
             default: Duration::from_secs(2),
@@ -144,7 +145,8 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
     for invalid in [
         json!({"prompt":"hi","model":"--dangerously-skip-permissions"}),
         json!({"prompt":"hi","model":"sonnet medium"}),
-        json!({"prompt":"hi","effort":"extreme"}),
+        json!({"prompt":"hi","effort":"very high"}),
+        json!({"prompt":"hi","effort":"--effort=max"}),
         json!({"prompt":"hi","model":"@/etc/passwd"}),
         json!({"prompt":"--resume"}),
     ] {
@@ -170,6 +172,7 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
             use_for: None,
             model: None,
             effort: None,
+            options_file: None,
         },
         Timeouts {
             default: Duration::from_secs(2),
@@ -532,6 +535,7 @@ fn conversing_agent(
             use_for: None,
             model: None,
             effort: None,
+            options_file: None,
         },
         Timeouts {
             default: timeout,

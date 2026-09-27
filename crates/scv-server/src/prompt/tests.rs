@@ -7,6 +7,7 @@ fn prompt_for(config: &Config, context: &PromptContext<'_>) -> String {
     let workspace = tempfile::tempdir().unwrap();
     let listings = SkillListings {
         listing: String::new(),
+        builtin_listing: String::new(),
         project_listing: String::new(),
     };
     build_system_prompt(workspace.path(), config, &listings, context).unwrap()

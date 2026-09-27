@@ -9,6 +9,8 @@
 //! - [`adapters`]: the built-in agents and how to launch each one.
 //! - [`request`]: the arguments every agent call takes.
 //! - [`choice`]: what the model is told to choose between agents.
+//! - [`options`]: the model and effort values each ACP agent offers, as
+//!   SCV last saw them.
 //! - [`background`]: jobs that run while the conversation goes on.
 //! - [`conversation`]: handles that continue an agent's conversation.
 //! - [`records`]: the on-disk record of every delegated process, for
@@ -27,6 +29,7 @@ pub mod choice;
 pub mod conversation;
 pub(crate) mod live;
 pub(crate) mod native;
+pub mod options;
 pub(crate) mod output;
 pub(crate) mod progress;
 pub mod records;

@@ -64,6 +64,7 @@ six places:
     ├── delegations/<handle>.json
     ├── conversations/
     ├── imports/<agent>.json
+    ├── agent-options/<agent>.json  models and efforts the agent's ACP server offers
     ├── daemon.json    the running daemon, removed on a clean stop
     ├── update.json    a planned restart, until its outcome is announced
     ├── last-owner.json  the chat the owner last wrote from
@@ -90,8 +91,9 @@ The rules behind it:
   `agents/codex/auth.json`). `scv agents login|logout` manage them, and
   `scv config show` reports each file without reading it.
 - **State is not configuration.** `state/` holds only what SCV writes and
-  reads back: the daemon socket, delegated-run records, channel delivery
-  checkpoints, chat media, and locks. Nothing there is meant to be edited.
+  reads back: the daemon socket, delegated-run records, the model and effort
+  values each agent offers, channel delivery checkpoints, chat media, and
+  locks. Nothing there is meant to be edited.
 - **History is kept.** `history/` holds the owners' conversations and the
   files they kept, meant to last (see [chat history](channels.md#chat-history));
   back it up like any other personal data.
@@ -360,7 +362,10 @@ such as `["codex", "claude"]`; the system prompt names the ones a session
 offers, and the first of those runs an `agent` call that names no agent.
 Without one the model must name the agent in every call. Unknown names fail
 validation, and project configuration cannot set it. `[agents.<name>] use_for`, `model`, and `effort` add per-agent defaults
-for a kind of work (see [Choosing an agent](tools.md#choosing-an-agent)).
+for a kind of work (see [Choosing an agent](tools.md#choosing-an-agent)); take
+`model` and `effort` from the values the agent offers, which
+`scv agents check` prints
+([Model and effort values](tools.md#model-and-effort-values)).
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,
 including its streamed response, not just idle time, so it must cover the
 longest single response. Project configuration may lower all of these but not
@@ -478,7 +483,9 @@ the agent skills of the workspace and of each immediate, non-hidden child
 directory: `SKILL.md` files under `.agents/skills/<name>/` (Codex) and
 `.claude/skills/<name>/` (Claude Code). A child project's skill is listed as
 `<project>:<name>`, a workspace-root skill as `<name>`, and names from
-`skills.project_dir` or `skills.user_dir` win collisions. The listing tells the
+`skills.project_dir` or `skills.user_dir` win collisions. A project skill never
+replaces one of SCV's built-in skills
+([`read_skill`](tools.md#read_skill)). The listing tells the
 model to delegate with the `agent` tool and `cwd` set to the project: the nested agent
 then loads that project's instructions and skills natively, so a repository
 adds skills without any SCV registration. `read_skill` can load a listed skill

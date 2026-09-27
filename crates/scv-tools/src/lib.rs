@@ -32,13 +32,16 @@ mod registry;
 mod sync;
 
 pub use builtin::{chat_attach, chat_history, web};
-pub use config::{AcpAgentLaunch, AgentAdapterConfig, DelegationContext, SkillMap, ToolsConfig};
+pub use config::{
+    AcpAgentLaunch, AgentAdapterConfig, DelegationContext, Skill, SkillMap, ToolsConfig,
+};
 pub use delegate::{
     adapters,
     agent::offered_agents,
-    background, choice as agent_choice, conversation, records as delegation,
+    background, choice as agent_choice, conversation, options as agent_options,
+    records as delegation,
     request::{AGENT_EFFORTS, valid_effort, valid_model_name},
     stores,
 };
 pub use process::apply_agent_environment;
-pub use registry::builtin_registry;
+pub use registry::{Reach, builtin_registry, call_agent, reach};

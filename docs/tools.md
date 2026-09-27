@@ -266,11 +266,14 @@ claude, codex`. Naming an agent the session does not offer fails the same way
 
 The `agent` argument is an enum of the offered agents. Its description says
 how the default is chosen, then gives each agent one line: its value, its
-product and what that harness offers, which options it takes (with the model
-family `model` expects), and the user's `use_for` note and defaults, such as:
+product and what that harness offers, which options it takes, and the user's
+`use_for` note and defaults. For an agent reached over ACP, the options are
+the exact model and effort values its server listed (see
+[Model and effort values](#model-and-effort-values)). For any other agent,
+the line names the kind of model name its CLI expects. For example:
 
 ```text
-- codex (Codex): OpenAI's coding agent; it reads, edits, and runs code in a project, with live web search under full permissions. Takes model (OpenAI model ID from the Codex configuration; not a Claude alias), effort, and session. The user's note on when to use it: coding. For that work, pass model gpt-5.5 and effort high; omit model and effort for other work so the agent uses its own default.
+- codex (Codex): OpenAI's coding agent; it reads, edits, and runs code in a project, with live web search under full permissions. Takes model (one of: gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5; its default is gpt-5.6-sol), effort (one of: low, medium, high, xhigh, max, ultra; its default is xhigh), and session. The user's note on when to use it: coding. For that work, pass model gpt-5.5 and effort high; omit model and effort for other work so the agent uses its own default.
 ```
 
 | Agent | Its line starts with |
@@ -291,7 +294,7 @@ prefer = ["codex", "claude"]   # named in the system prompt, in order; the first
 
 [agents.claude]
 use_for = "coding"
-model = "opus-5.5"
+model = "opus[1m]"             # a value claude's line lists; `scv agents check` prints them
 effort = "xhigh"
 
 [agents.grok]
@@ -363,16 +366,21 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 (default 3600) and may be raised up to `tools.max_timeout_seconds` (default
 14400) for long work such as builds, releases, or landing a change.
 
-Each agent's line names the model family its `model` takes (Claude aliases
-such as `sonnet` for `claude`, OpenAI model IDs for `codex`, Grok model IDs
-for `grok`, pi model patterns or `provider/id` for `pi`), and the `model` and
+Each agent's line lists the values its ACP server offers, or names the model
+family its CLI takes (Claude aliases such as `sonnet` for `claude`, OpenAI
+model IDs for `codex`, Grok model IDs for `grok`, pi model patterns or
+`provider/id` for `pi`), and the `model` and
 `effort` descriptions tell the model to set them when the user asks or when
 the work matches a configured `use_for` default; an omitted value leaves the
 agent's own configured default in place. A blank `agent`, `cwd`, `session`,
 `model`, or `effort` counts as omitted, since models often send `""` for an
 optional field they mean to leave unset. A model is 1-128 ASCII letters,
-digits, or `._:/@[]-` and cannot start with `-` or `@`; an effort is `low`,
-`medium`, `high`, `xhigh`, or `max`. Each selected value becomes one
+digits, or `._:/@[]-` and cannot start with `-` or `@`; an effort is 1-32
+ASCII letters, digits, `-`, or `_`, starting with a letter or digit. The schema's `effort` enum is `low`,
+`medium`, `high`, `xhigh`, and `max`, plus the values offered agents list or
+the user configured (see [Model and effort values](#model-and-effort-values)).
+Which efforts an agent supports is its own to check, since its levels change
+with its releases. Each selected value becomes one
 substituted argument, never shell text, so the CLI itself reports values it
 does not support.
 
@@ -417,6 +425,66 @@ Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness takes its
 model from its profile, so `dsh` takes no `model` or `effort`.
 `permissions = "full"` switches follow the fixed arguments, before the output
 format arguments.
+
+Tool-enabled sessions that offer agents also list the built-in `delegating`
+skill, and the system prompt tells the model to read it before its first
+`agent` call. The skill covers choosing the agent, model, and effort, and
+writing a brief that stands on its own. It also covers background jobs and
+continuing conversations, and what to do about each error a call can
+return. It names no model: it points the model at its `agent` line for
+current values, and at `scv agents check`. A `delegating` skill in the
+workspace's or user's skill directory replaces it (see
+[`read_skill`](#read_skill)).
+
+### Model and effort values
+
+Model names and effort levels belong to each agent and change when it
+updates, so SCV reads them from the agent instead of shipping a list. Each
+time SCV opens an ACP session, the server's `session/new` result lists its
+`configOptions`. SCV saves the `model` option and the effort option
+(`effort`, `reasoning_effort`, or `thought_level`), each with its values and
+current value. The file is `$SCV_HOME/state/agent-options/<agent>.json`
+(mode `0600`). It records when it was saved and the server's resolved file,
+size, and modification time. SCV keeps at most 64 values per option, and
+only values it can pass as one argument: model values follow the `model`
+rules in [Choosing an agent](#choosing-an-agent), and effort values follow
+the effort rules there.
+
+A new session uses the saved file when the agent is reached over ACP, the
+file names the same server file unchanged, and it was saved within the last
+seven days. Then:
+
+- The agent's line lists the values in place of a hint, as in `Takes model
+  (one of: opus[1m], claude-fable-5-1[1m], sonnet, haiku), effort (one of:
+  low, medium, high, xhigh, max), and session.` It leaves out `default`,
+  since omitting the argument selects that anyway, and appends a named
+  default, as in `; its default is gpt-5.6-sol`.
+- The `effort` enum gains any listed value beyond SCV's own `low`, `medium`,
+  `high`, `xhigh`, and `max`, such as Codex's `ultra`, and any effort the
+  user configured for the agent.
+- A call whose model is not listed is refused before anything starts, even
+  as a background job:
+  ```text
+  model "opus-5.5" is not one claude offers; choose one of: opus[1m], claude-fable-5-1[1m], sonnet, haiku, or omit model for its default. This list is from claude's last session; if the user named a newer one, run `scv agents check claude` to refresh it
+  ```
+  Before refusing, the tool reads the saved file again. Another session, or
+  `scv agents check`, may have saved a newer list, and the tool then goes by
+  that list. Each new ACP session of the tool also replaces the tool's copy.
+  Efforts are not refused this way: their values depend on the model, and a
+  continued conversation's model is not known here. The agent checks them
+  and fails the call with its own list.
+
+Without a usable file, the line says the model must be a value the ACP
+server lists, which SCV has not seen yet. A server that listed efforts but
+no model gets `its ACP server lists no model to choose, so omit model`. A
+value the server does not list fails in `session/set_config_option` with its
+list, and that session's values are saved for the next one. An agent that
+runs its CLI once per turn lists nothing, so its line keeps the adapter's
+hint (such as `Claude model alias or ID, such as sonnet or opus`) and the
+CLI checks the value.
+`[agents.<name>] model` and `effort` should be values from the agent's list,
+which `scv agents check` prints (see
+[Checking delegated agents](#checking-delegated-agents)).
 
 ### Results
 
@@ -800,7 +868,8 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   DeepSeek Harness), become `session/set_config_option` on the session's
   `model` and `effort`/`reasoning_effort` options, at any turn. A value the
   agent does not offer fails the call with the offered list and keeps the
-  conversation.
+  conversation. Each new session's lists are saved and shown to later
+  sessions (see [Model and effort values](#model-and-effort-values)).
 - `session/update` notifications become `tool.progress`: completed lines of
   the agent's message, each tool call's title (or kind), `… failed` for a
   failed tool call, and the current plan step. Thoughts and tool output never
@@ -861,6 +930,7 @@ scv agents login pi                     # opens pi: run /login, then /quit
 scv agents login pi --openai-compatible # or point pi at any OpenAI-compatible endpoint
 scv agents import pi --from-scv-provider # or reuse SCV's own provider
 scv agents status                       # every agent's sign-in state
+scv agents check                        # does each one work as SCV runs it?
 scv agents logout claude
 ```
 
@@ -960,6 +1030,58 @@ missing sign-in, its tool result gains a `hint` naming
 `scv agents login <name>`, since the agent's own advice (`/login`) cannot be
 followed from a remote chat.
 
+### Checking delegated agents
+
+`scv agents check [<agent>] [--timeout-seconds N]` checks each installed
+agent the way SCV runs it, or only the one named, and costs one short model
+turn per agent. It reads only the user's configuration and prints, per agent:
+
+- how SCV reaches it: over ACP (the server's path), through its CLI once per
+  turn, or as a nested SCV. An agent that is not installed is only noted,
+  unless it was named;
+- the first line of its CLI's `--version`, run in its private home;
+- the models and efforts its ACP server offers, as that call just saved them
+  (or, if the call failed first, as an earlier session did, and when), or
+  that its CLI lists none;
+- one `agent` call, made through the same tool and backend a session uses,
+  from the current directory, in the foreground. It sends `SCV is checking
+  that it can reach you. Reply with exactly: ok` with the user's configured
+  `[agents.<name>] model` and `effort`, if any, and times out after
+  `--timeout-seconds` (default 180, 10 to 3600). The saved list does not
+  refuse the model here. The agent's own list decides, so a check can
+  refresh a list that no longer matches the agent. The line reports `ok`
+  with the time taken and the reply, or the status and the error, and the
+  sign-in hint when there is one. Replies, errors, and versions come from
+  the agent, so they are printed on one line without control characters,
+  cut to 300 characters.
+
+Each call is recorded under the session `agents-check-<pid>` like any
+delegation, so `scv agents ps` lists it while it runs, and the daemon stops
+anything the check leaves behind if it dies. A call returns only once its
+run's record is gone, that is once the agent's whole process group has
+stopped. The command gives the agent 10 seconds to exit after its input
+closes, then kills what is left.
+
+For example:
+
+```text
+claude (Claude Code)
+  reached   over ACP: /home/me/.local/bin/claude-agent-acp
+  version   2.1.283 (Claude Code)
+  models    opus[1m], claude-fable-5-1[1m], sonnet, haiku
+  efforts   low, medium, high, xhigh, max
+  call      ok in 3.7s with your configured model opus[1m] and effort xhigh: "ok"
+```
+
+Ctrl-C at any point cancels the running call or version probe, stops its
+agent, and ends the check without calling the rest. The command exits
+non-zero when any call fails, a named agent is missing, or it was
+interrupted. Run
+it after an agent updates, or when a delegated call fails in a way that
+looks like SCV's fault. Arguments the CLI no longer accepts, or output SCV
+cannot read, show up here first. Fixing those means changing the agent's
+descriptor in `scv_tools::adapters`.
+
 Scripted backends behind the `agent` tool cover its choice of agent (an
 explicit `agent`, the `prefer` default, the agent a `session` handle names,
 and a handle that disagrees with `agent`), refusals before anything launches
@@ -991,6 +1113,13 @@ timeout including an agent that ignores it, an agent dying mid-turn, sign-in
 and protocol-version failures, full-permission modes and model and effort
 options, idle teardown, and that the registry prefers an installed ACP server,
 falls back to one process per turn, and hides a required one that is missing.
+The same stand-in shows a session saving what it offers, and later tools
+listing those values and refusing an unlisted model before they start. It
+also shows a tool going by a newer list saved elsewhere, and a check call
+that passes an unlisted model through. It shows a check call returning only
+after the server and a process it left behind are gone. Unit tests cover
+reading, sanitizing, and invalidating the saved file. A fake `dsh` covers
+`scv agents check` end to end, both a passing call and a signed-out one.
 
 ## Tool extension contract
 
@@ -1012,6 +1141,14 @@ directories and builds a name-to-canonical-path map. `read_skill` accepts only a
 name from that map, revalidates containment under its original project or user
 skill root, and returns at most `skills.max_skill_bytes` of `SKILL.md`. It does
 not accept a path and cannot be used as a general out-of-workspace read.
+Tool-enabled sessions also map SCV's built-in skills, whose text is compiled
+into the binary. There is one, `delegating` (see
+[Choosing an agent](#choosing-an-agent)). A skill file of the same name in
+`skills.project_dir` or `skills.user_dir` replaces a built-in one. A
+workspace-root project skill of the same name does not, and is not listed:
+it is meant for agents working in that project, not for SCV's main agent.
+Built-in skills do not count toward `skills.max_skills`. They are listed only
+in sessions that offer the `agent` tool.
 Tool-enabled sessions also map workspace project skills (`.agents/skills` and
 `.claude/skills` of the workspace and its child projects) under
 `<project>:<name>`, listed separately with the instruction to delegate to that

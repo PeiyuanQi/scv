@@ -1,4 +1,4 @@
-//! The `read_skill` tool: loads a discovered skill by name, only from
+//! The `read_skill` tool: loads a discovered skill by name, a file only from
 //! inside its configured roots.
 
 use std::{io::Read as _, path::PathBuf};
@@ -8,7 +8,7 @@ use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRisk, ToolSpec};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SkillMap, args::parse_args};
+use crate::{Skill, SkillMap, args::parse_args};
 
 pub(crate) struct ReadSkillTool {
     pub(crate) skills: SkillMap,
@@ -57,6 +57,18 @@ impl Tool for ReadSkillTool {
             .skills
             .get(&args.name)
             .ok_or_else(|| ToolError::invalid_arguments(format!("unknown skill: {}", args.name)))?;
+        let configured = match configured {
+            Skill::File(path) => path,
+            Skill::Builtin(text) => {
+                let (content, truncated) =
+                    crate::delegate::output::truncate_utf8(text, self.max_bytes);
+                return Ok(ToolOutput {
+                    content: content.to_owned(),
+                    failure: None,
+                    truncated,
+                });
+            }
+        };
         let path = std::fs::canonicalize(configured)
             .map_err(|error| ToolError::failed(format!("load skill {}: {error}", args.name)))?;
         if !self.roots.iter().any(|root| path.starts_with(root)) {

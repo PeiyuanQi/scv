@@ -20,6 +20,7 @@ use crate::{
     args::{Timeouts, bounded, parse_args, timeout_schema},
     delegate::{
         choice, conversation,
+        options::AgentOptions,
         request::{AGENT_EFFORTS, AgentArgs},
     },
 };
@@ -76,6 +77,9 @@ pub(crate) struct Offered {
     pub(crate) accepts: Accepts,
     /// Describes the `model` values this agent takes.
     pub(crate) model_hint: String,
+    /// The model and effort values its ACP server offered recently, which
+    /// the description lists in place of the hint.
+    pub(crate) offered: Option<AgentOptions>,
     /// The user's `[agents.<name>] use_for` note.
     pub(crate) use_for: Option<String>,
     /// `[agents.<name>] model`, passed when the work matches `use_for`.
@@ -204,6 +208,26 @@ impl AgentTool {
         })
     }
 
+    /// The `effort` values the schema allows: SCV's own, then any other that
+    /// an offered agent's ACP server listed or the user configured for it.
+    fn efforts(&self) -> Vec<&str> {
+        let mut efforts: Vec<&str> = AGENT_EFFORTS.to_vec();
+        for agent in self.agents.iter().filter(|agent| agent.accepts.effort) {
+            let listed = agent
+                .offered
+                .as_ref()
+                .and_then(|offered| offered.effort.as_ref())
+                .map(|choice| choice.shown())
+                .unwrap_or_default();
+            for effort in listed.into_iter().chain(agent.effort.as_deref()) {
+                if !efforts.contains(&effort) {
+                    efforts.push(effort);
+                }
+            }
+        }
+        efforts
+    }
+
     /// The `agent` argument's description: how the agent is chosen, then
     /// one line per agent.
     fn agent_description(&self) -> String {
@@ -282,7 +306,7 @@ impl Tool for AgentTool {
                 "effort".into(),
                 json!({
                     "type":"string",
-                    "enum":AGENT_EFFORTS,
+                    "enum":self.efforts(),
                     "description":"Reasoning effort. Set when the user asks, or when the work \
                         matches a configured use_for default; omit to use the agent's configured \
                         default."
@@ -386,6 +410,7 @@ impl AgentTool {
             backend,
             accepts,
             model_hint: String::new(),
+            offered: None,
             use_for: None,
             model: None,
             effort: None,

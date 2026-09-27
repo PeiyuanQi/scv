@@ -88,6 +88,7 @@ fn offered(recorder: &Arc<Recorder>) -> Offered {
         backend: Arc::clone(recorder) as Arc<dyn Backend>,
         accepts: built_in(recorder.name),
         model_hint: adapter.model_hint.to_owned(),
+        offered: None,
         use_for: None,
         model: None,
         effort: None,

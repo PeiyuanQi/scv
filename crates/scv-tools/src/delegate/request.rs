@@ -70,8 +70,12 @@ pub(crate) fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<P
     Ok(resolved)
 }
 
-/// Effort values the built-in adapters accept.
+/// Effort values the `agent` tool's schema always lists; an ACP agent's own
+/// values are added to them.
 pub const AGENT_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Longest effort value accepted, in bytes.
+const MAX_EFFORT_BYTES: usize = 32;
 
 /// Model names are passed as one argument, so only reject values that could
 /// read as a flag, name an `@file` argument, or carry unexpected characters.
@@ -84,7 +88,17 @@ pub fn valid_model_name(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._:/@[]-".contains(c))
 }
 
-/// Whether `value` is one of [`AGENT_EFFORTS`].
+/// Whether `value` can be passed as an effort: 1-32 ASCII letters, digits,
+/// `-`, or `_`, starting with a letter or digit so it never reads as a flag.
+/// Which values an agent supports is the agent's to check, since its levels
+/// change with its releases.
 pub fn valid_effort(value: &str) -> bool {
-    AGENT_EFFORTS.contains(&value)
+    value.len() <= MAX_EFFORT_BYTES
+        && value
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }

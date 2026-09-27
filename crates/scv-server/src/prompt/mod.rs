@@ -12,6 +12,8 @@ use crate::config::Config;
 /// The skill listings a session's system prompt carries.
 pub(crate) struct SkillListings {
     pub(crate) listing: String,
+    /// Built-in skills, listed only when the session offers agents.
+    pub(crate) builtin_listing: String,
     pub(crate) project_listing: String,
 }
 
@@ -54,9 +56,13 @@ pub(crate) fn build_system_prompt(
             prompt.push_str("\n[AGENTS.md truncated by configured read limit]\n");
         }
     }
-    if !skills.listing.is_empty() {
+    let mut listing = skills.listing.clone();
+    if !context.agents.is_empty() {
+        listing.push_str(&skills.builtin_listing);
+    }
+    if !listing.is_empty() {
         prompt.push_str("\n# Available skills\n");
-        prompt.push_str(&skills.listing);
+        prompt.push_str(&listing);
         prompt.push_str("\nUse read_skill with a skill name when its workflow applies.\n");
     }
     if !skills.project_listing.is_empty() {
@@ -118,7 +124,10 @@ pub(crate) fn delegation_guidance(config: &Config, context: &PromptContext<'_>) 
         "\n# Delegating work\n\
          You can hand work to other agents with the agent tool, naming one in its agent \
          argument: {}. That argument's description says what each agent offers and which \
-         options it takes.",
+         options it takes, with the exact model and effort values an agent listed. Read \
+         the delegating skill before your first agent call in a session: it covers \
+         choosing the agent, model, and effort, writing the brief, and what to do when a \
+         call fails.",
         named.join(", ")
     );
     let preferred: Vec<&str> = config

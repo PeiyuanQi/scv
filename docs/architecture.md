@@ -86,7 +86,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-channels` | The chat channels. The bridge they share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, questions to the owner, restart context). Behind Cargo features, both on by default: `wechat` (iLink authentication, polling, and sending, and its credentials) and `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark). |
-| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in and importing their setups (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
+| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
 The integration dependency chain is
 `server -> channels -> client -> protocol`.
@@ -139,7 +139,7 @@ What lives where in the largest crates:
 | | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, and questions to the owner |
 | | `outbound.rs` | The byte- and frame-bounded outbound queue and event encoding |
 | | `session/` | A session (`mod.rs`), building one (`build.rs`), starting a chat session with its log's open episode (`reload.rs`), its turn queue (`queue.rs`), and running a turn (`turn.rs`) |
-| | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`) |
+| | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`), with the built-in skills from `skills/<name>/SKILL.md` |
 | | `approval.rs`, `events.rs` | Approval gates, and `CoreEvent` to `ServerEvent` |
 | | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
 | | `components.rs` | `Component`, `HealthReporter`, `Supervisor`, and the channel accounts they run |
@@ -147,13 +147,13 @@ What lives where in the largest crates:
 | | `confirm.rs` | [Questions to the owner](#questions-to-the-owner) (`scv confirm`) |
 | | `attachments.rs` | Files attached to a turn, such as chat media |
 | | `disk.rs` | The free-space floor for the chat log, chat media, and kept files |
-| `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, the tools' settings, and the argument helpers every tool shares |
+| `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, how an agent is reached (`reach`) and one call to it for `scv agents check` (`call_agent`), the tools' settings, and the argument helpers every tool shares |
 | | `builtin/` | Tools that run inside SCV: `fs.rs` (`read`, `write`), `skill.rs` (`read_skill`), `shell.rs` (`bash`), `web.rs` (`web_fetch`, `web_search`), `chat_attach.rs`, `chat_history.rs` (`chat_history`, `chat_keep`) |
 | | `process.rs` | Spawning a child in its own process group, draining its output, and `ProcessGroup`, the only way SCV signals a group |
 | | `delegate/agent.rs`, `delegate/request.rs` | The `agent` tool, which chooses the agent, checks the call against what it takes, and hands it to that agent's backend, and the arguments every call takes |
 | | `delegate/native.rs` | The per-turn CLI backend |
 | | `delegate/acp/`, `delegate/scv.rs`, `delegate/live.rs` | Long-running delegations over ACP (`rpc`, `session`, `permission`, `progress`, `tool`) and the SCV protocol, on one live-child runtime |
-| | `delegate/adapters.rs`, `delegate/choice.rs` | One descriptor per delegated agent CLI, and how the `agent` tool describes each agent and names the others after a failure |
+| | `delegate/adapters.rs`, `delegate/choice.rs`, `delegate/options.rs` | One descriptor per delegated agent CLI, how the `agent` tool describes each agent and names the others after a failure, and the model and effort values each ACP agent last offered (public as `scv_tools::agent_options`) |
 | | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
@@ -532,11 +532,22 @@ libraries because Rust has no stable dylib ABI and in-process plugins
 would share all of SCV's authority.
 
 Skills are Markdown instruction packages discovered from `.scv/skills/*/SKILL.md`
-and the configured user skill directory. The loader exposes their name and
-description in the system prompt. The model loads an applicable skill by name
-through `read_skill`, which resolves only the immutable discovery map and checks
-containment under the configured skill roots. A skill does not gain authority
-beyond the tools and approvals available to the session.
+and the configured user skill directory. SCV also compiles in its own skills
+(`crates/scv-server/skills/<name>/SKILL.md`), which a skill file of the same
+name replaces; the one it has, `delegating`, teaches the main agent how to
+delegate and is listed only in sessions that offer the `agent` tool. The
+loader exposes their name and description in the system prompt. The model
+loads an applicable skill by name through `read_skill`, which resolves only
+the immutable discovery map and checks containment under the configured skill
+roots for skill files. A skill does not gain authority beyond the tools and
+approvals available to the session.
+
+What an agent accepts for `model` and `effort` is the agent's, not SCV's: the
+ACP backend saves the values each new session lists
+(`state/agent-options/<agent>.json`), and later sessions list them in the
+`agent` tool and refuse others before starting. `scv agents check` makes one
+call to each agent through the same `scv_tools::call_agent` path, so an agent
+update that breaks its adapter shows up there rather than in a chat.
 
 Repositories carry their own agent skills in `.agents/skills` (Codex) and
 `.claude/skills` (Claude Code). SCV does not execute or translate them: in

@@ -46,6 +46,9 @@ pub struct ToolsConfig {
     /// Offers `chat_history` and `chat_keep` when the session answers a
     /// conversation that has a chat log.
     pub chat_history: Option<chat_history::ChatHistoryConfig>,
+    /// Refuse a model an ACP agent's saved list lacks before the call starts.
+    /// `scv agents check` turns it off so the agent's own list decides.
+    pub precheck_agent_models: bool,
 }
 
 impl Default for ToolsConfig {
@@ -68,6 +71,7 @@ impl Default for ToolsConfig {
             background: None,
             chat_attach: None,
             chat_history: None,
+            precheck_agent_models: true,
         }
     }
 }
@@ -130,6 +134,9 @@ pub struct AgentAdapterConfig {
     pub model: Option<String>,
     /// Default effort to pass the same way as `model`.
     pub effort: Option<String>,
+    /// Where SCV keeps the model and effort values this agent's ACP server
+    /// offers (`state/agent-options/<name>.json`); `None` keeps none.
+    pub options_file: Option<PathBuf>,
 }
 
 /// An agent's Agent Client Protocol server, resolved from its adapter-table
@@ -150,4 +157,15 @@ pub struct AcpAgentLaunch {
     pub required: bool,
 }
 
-pub type SkillMap = HashMap<String, PathBuf>;
+/// Where a skill's text comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Skill {
+    /// A `SKILL.md` file, read when loaded and only from inside one of the
+    /// configured skill roots.
+    File(PathBuf),
+    /// Built into SCV.
+    Builtin(&'static str),
+}
+
+/// A session's skills by name.
+pub type SkillMap = HashMap<String, Skill>;

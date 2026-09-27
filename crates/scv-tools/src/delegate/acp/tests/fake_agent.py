@@ -1,4 +1,4 @@
-import json, os, sys
+import json, os, subprocess, sys
 DIR, MODE = sys.argv[1], sys.argv[2]
 open(os.path.join(DIR, "pid"), "w").write(str(os.getpid()))
 def log(line):
@@ -93,6 +93,11 @@ for line in sys.stdin:
         elif text == "refuse":
             chunk(session, "I can't help get past authentication or a 403 on that site.")
             send({"id": rid, "result": {"stopReason": "refusal"}})
+        elif text == "leave":
+            leftover = subprocess.Popen(["sleep", "60"])
+            open(os.path.join(DIR, "leftover"), "w").write(str(leftover.pid))
+            chunk(session, "left one behind")
+            send({"id": rid, "result": {"stopReason": "end_turn"}})
         elif text == "env":
             chunk(session, "CODEX_CONFIG=" + os.environ.get("CODEX_CONFIG", "unset"))
             send({"id": rid, "result": {"stopReason": "end_turn"}})
