@@ -5,9 +5,11 @@ use super::*;
 #[test]
 fn channels_keep_their_names_and_order() {
     let names: Vec<_> = ChannelKind::ALL.iter().map(|kind| kind.name()).collect();
-    assert_eq!(names, ["wechat", "feishu"]);
+    assert_eq!(names, ["wechat", "feishu", "email"]);
     assert_eq!(ChannelKind::parse("wechat").unwrap(), ChannelKind::Wechat);
     assert_eq!(ChannelKind::parse("feishu").unwrap(), ChannelKind::Feishu);
+    assert_eq!(ChannelKind::parse("email").unwrap(), ChannelKind::Email);
+    assert!(ChannelKind::Feishu.is_chat() && !ChannelKind::Email.is_chat());
     // Lark is a Feishu brand, not a channel.
     assert_eq!(
         ChannelKind::parse("lark").unwrap_err().to_string(),

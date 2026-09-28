@@ -131,6 +131,7 @@ impl Session {
                 // get the same answer without a turn to carry it.
                 auto_approve: Some(tools),
                 chat,
+                system_prompt: None,
             })
             .await?;
         loop {

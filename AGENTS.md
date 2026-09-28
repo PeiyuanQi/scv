@@ -59,9 +59,11 @@
   session authority in `scv-server`, terminal presentation in `scv-tui`, and
   administration only the command line does (agent sign-ins and imports,
   `scv config show`, the systemd unit) in the root package's `src/cli/`. Keep
-  the chat channels in `scv-channels`: the bridge they share, and each
-  platform's transport in its own module behind a Cargo feature (WeChat in
-  `wechat`, Feishu/Lark in `feishu`). Preserve
+  the chat and mail channels in `scv-channels`: the bridge the chat channels
+  share, and each platform's transport in its own module behind a Cargo
+  feature (WeChat in `wechat`, Feishu/Lark in `feishu`), and read-only mail
+  triage with its provider adapters in `email`. Mail text never reaches a
+  tool-enabled session, a log, or any chat but a mail chat. Preserve
   `server -> channels -> client -> protocol`;
   TUI and channels must not depend on server. A change to an internal
   dependency updates the diagram in `docs/architecture.md` in the same commit.

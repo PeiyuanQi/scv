@@ -247,6 +247,8 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
         remote_tools: RemoteTools::Owner,
         senders: Senders::Owner,
         media: MediaSettings::default(),
+        purpose: Purpose::Chat,
+        mail: None,
     };
     store.save_settings("default", &settings).unwrap();
     assert_eq!(store.settings("default").unwrap(), settings);
@@ -293,6 +295,41 @@ fn settings_live_in_config_toml_and_keep_the_rest_of_the_file() {
     assert!(
         text.contains("# keep this") && !text.contains("workspace"),
         "{text}"
+    );
+
+    // A mail chat's purpose is written, and an ordinary chat's is not; the
+    // person's `mail` table survives SCV's edits untouched.
+    let mail_chat = AccountSettings {
+        purpose: Purpose::Mail,
+        ..settings.clone()
+    };
+    store.save_settings("default", &mail_chat).unwrap();
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("purpose = \"mail\"")
+    );
+    assert_eq!(store.settings("default").unwrap().purpose, Purpose::Mail);
+    store.save_settings("default", &settings).unwrap();
+    assert!(
+        !std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("purpose")
+    );
+    let with_mail = std::fs::read_to_string(&config).unwrap()
+        + "\n[channels.test.default.mail]\nmailbox = \"INBOX\" # watched\n";
+    atomic_write(&config, &with_mail).unwrap();
+    let read = store.settings("default").unwrap();
+    assert_eq!(
+        read.mail.as_ref().and_then(|mail| mail.get("mailbox")),
+        Some(&toml::Value::String("INBOX".into()))
+    );
+    store.save_settings("default", &read).unwrap();
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("mailbox = \"INBOX\" # watched"),
+        "the mail table must survive"
     );
 
     for invalid in [

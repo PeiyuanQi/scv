@@ -53,6 +53,9 @@ pub enum ChannelKind {
     /// Feishu and Lark, through a bot app: `feishu`.
     #[cfg(feature = "feishu")]
     Feishu,
+    /// Mailboxes, read and reported to a mail chat: `email`.
+    #[cfg(feature = "email")]
+    Email,
 }
 
 impl ChannelKind {
@@ -62,6 +65,8 @@ impl ChannelKind {
         Self::Wechat,
         #[cfg(feature = "feishu")]
         Self::Feishu,
+        #[cfg(feature = "email")]
+        Self::Email,
     ];
 
     /// The channel's name in commands, component IDs, and paths.
@@ -71,6 +76,8 @@ impl ChannelKind {
             Self::Wechat => crate::wechat::CHANNEL,
             #[cfg(feature = "feishu")]
             Self::Feishu => crate::feishu::CHANNEL,
+            #[cfg(feature = "email")]
+            Self::Email => crate::email::CHANNEL,
         }
     }
 
@@ -81,6 +88,8 @@ impl ChannelKind {
             Self::Wechat => "WeChat",
             #[cfg(feature = "feishu")]
             Self::Feishu => "Feishu",
+            #[cfg(feature = "email")]
+            Self::Email => "Email",
         }
     }
 
@@ -100,6 +109,19 @@ impl ChannelKind {
             Self::Wechat => Accounts::new(self, crate::wechat::Store::new(layout, self.name())),
             #[cfg(feature = "feishu")]
             Self::Feishu => Accounts::new(self, crate::feishu::Store::new(layout, self.name())),
+            #[cfg(feature = "email")]
+            Self::Email => Accounts::new(self, crate::email::store(layout)),
+        }
+    }
+
+    /// Whether the channel's accounts are chats, which answer people, as
+    /// opposed to mailboxes, which SCV only reads.
+    pub fn is_chat(self) -> bool {
+        match self {
+            #[cfg(feature = "email")]
+            Self::Email => false,
+            #[allow(unreachable_patterns, reason = "every other channel is a chat")]
+            _ => true,
         }
     }
 }
@@ -111,6 +133,8 @@ pub enum ChannelCredentials {
     Wechat(crate::wechat::Account),
     #[cfg(feature = "feishu")]
     Feishu(crate::feishu::Account),
+    #[cfg(feature = "email")]
+    Email(crate::email::Account),
 }
 
 impl ChannelCredentials {
@@ -121,6 +145,8 @@ impl ChannelCredentials {
             Self::Wechat(ref credentials) => crate::wechat::WeChat::owner(credentials),
             #[cfg(feature = "feishu")]
             Self::Feishu(ref credentials) => crate::feishu::Feishu::owner(credentials),
+            #[cfg(feature = "email")]
+            Self::Email(ref credentials) => crate::email::Email::owner(credentials),
         }
     }
 
@@ -131,6 +157,8 @@ impl ChannelCredentials {
             Self::Wechat(ref credentials) => crate::wechat::WeChat::bot_id(credentials),
             #[cfg(feature = "feishu")]
             Self::Feishu(ref credentials) => crate::feishu::Feishu::bot_id(credentials),
+            #[cfg(feature = "email")]
+            Self::Email(ref credentials) => crate::email::Email::bot_id(credentials),
         }
     }
 }
@@ -146,6 +174,13 @@ impl From<crate::wechat::Account> for ChannelCredentials {
 impl From<crate::feishu::Account> for ChannelCredentials {
     fn from(credentials: crate::feishu::Account) -> Self {
         Self::Feishu(credentials)
+    }
+}
+
+#[cfg(feature = "email")]
+impl From<crate::email::Account> for ChannelCredentials {
+    fn from(credentials: crate::email::Account) -> Self {
+        Self::Email(credentials)
     }
 }
 
@@ -231,9 +266,10 @@ trait Stored: Send + Sync {
     fn credentials_path(&self, name: &str) -> Result<PathBuf>;
 }
 
-impl<C> Stored for state::Store<C>
+impl<C, S> Stored for state::Store<C, S>
 where
     C: state::Credentials + Into<ChannelCredentials> + Send + Sync,
+    S: state::AccountState,
 {
     fn names(&self) -> Result<Vec<String>> {
         self.account_names()
@@ -308,6 +344,10 @@ impl<'a> AccountRun<'a> {
     /// instance's media directory, within the account's limits.
     pub(crate) fn bridge(&self, kind: ChannelKind) -> Result<crate::BridgeRun<'a>> {
         state::validate_name(self.account)?;
+        let purpose = self.settings.purpose;
+        // A mail chat answers only its owner and never runs a model, with or
+        // without tools, whatever else its settings say.
+        let mail = purpose == state::Purpose::Mail;
         Ok(crate::BridgeRun {
             account: self.account,
             workspace: self.workspace,
@@ -316,11 +356,17 @@ impl<'a> AccountRun<'a> {
             tool_owner: self
                 .owner
                 .zip(self.tool_turn_timeout)
+                .filter(|_| !mail)
                 .map(|(user_id, turn_timeout)| ToolOwner {
                     user_id: user_id.to_owned(),
                     turn_timeout,
                 }),
-            senders: self.settings.senders,
+            senders: if mail {
+                state::Senders::Owner
+            } else {
+                self.settings.senders
+            },
+            purpose,
             media: MediaOptions::new(
                 self.layout,
                 kind.name(),
@@ -352,6 +398,10 @@ pub async fn run(run: AccountRun<'_>) -> Result<()> {
         #[cfg(feature = "feishu")]
         ChannelCredentials::Feishu(ref credentials) => {
             reported(&run, crate::feishu::Feishu::run(run, credentials).await)
+        }
+        #[cfg(feature = "email")]
+        ChannelCredentials::Email(ref credentials) => {
+            reported(&run, crate::email::Email::run(run, credentials).await)
         }
     }
 }

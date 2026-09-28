@@ -195,6 +195,7 @@ fn received(
             reply_to: id.to_owned(),
             group: group.then(|| chat_id.to_owned()),
             media: parsed.media,
+            quoted: reference.is_some(),
             reference,
             sent_ms: (created_ms > 0).then_some(created_ms),
         }),

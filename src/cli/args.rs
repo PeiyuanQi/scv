@@ -1,7 +1,7 @@
 //! The `scv` command line: every subcommand, flag, and value type clap parses.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use scv_protocol::{DEFAULT_CONFIRM_SECONDS, MAX_CONFIRM_SECONDS, RemoteTools, Senders};
+use scv_protocol::{DEFAULT_CONFIRM_SECONDS, MAX_CONFIRM_SECONDS, Purpose, RemoteTools, Senders};
 use std::path::PathBuf;
 
 use super::common::ApprovalArg;
@@ -116,9 +116,9 @@ pub(crate) enum Command {
         #[arg(long, value_name = "URL")]
         index_url: Option<String>,
     },
-    /// Connect chat channels (WeChat, Feishu/Lark) to this SCV instance:
-    /// sign accounts in, run them under the daemon, and check their
-    /// connections.
+    /// Connect chat channels (WeChat, Feishu/Lark) and mailboxes (email) to
+    /// this SCV instance: sign accounts in, run them under the daemon, and
+    /// check their connections.
     Channels {
         #[command(subcommand)]
         command: ChannelsCommand,
@@ -165,7 +165,8 @@ pub(crate) enum ConfigCommand {
 pub(crate) enum ChannelsCommand {
     /// Sign a channel account in by scanning the QR code it shows. For
     /// Feishu the scan creates a bot app; `--app-id` signs in an existing
-    /// app instead.
+    /// app instead. For email, name the IMAP server and user; the password
+    /// or authorization code is read from a hidden prompt or stdin.
     Login {
         #[arg(value_enum)]
         channel: ChannelArg,
@@ -182,6 +183,20 @@ pub(crate) enum ChannelsCommand {
         /// sender remote tools can reach. Without it nobody gets tools.
         #[arg(long, value_name = "OPEN_ID", requires = "app_id")]
         owner_open_id: Option<String>,
+        /// Email: the IMAP server, reached over TLS, such as imap.qq.com.
+        #[arg(long, value_name = "HOST")]
+        imap_host: Option<String>,
+        /// Email: the IMAP server's TLS port.
+        #[arg(
+            long,
+            value_name = "PORT",
+            default_value_t = 993,
+            requires = "imap_host"
+        )]
+        imap_port: u16,
+        /// Email: the mailbox's user name, usually its address.
+        #[arg(long, value_name = "NAME", requires = "imap_host")]
+        user: Option<String>,
     },
     /// Enable a signed-in account under the SCV daemon.
     Run {
@@ -202,6 +217,12 @@ pub(crate) enum ChannelsCommand {
         /// keeps the saved setting.
         #[arg(long, value_enum)]
         senders: Option<SendersArg>,
+        /// What a chat account carries: `chat` (the default) runs model
+        /// conversations; `mail` makes it a mail chat that only carries the
+        /// email accounts' reports, where no model ever answers. Omitted
+        /// keeps the saved setting.
+        #[arg(long, value_enum)]
+        purpose: Option<PurposeArg>,
     },
     /// Persistently disable a supervised account (credentials are retained).
     Stop {
@@ -228,7 +249,7 @@ pub(crate) enum ChannelsCommand {
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ChannelArg {
     /// WeChat, through its ClawBot (iLink) bot.
     Wechat,
@@ -236,6 +257,8 @@ pub(crate) enum ChannelArg {
     Feishu,
     /// Lark, Feishu's international edition: the `feishu` channel.
     Lark,
+    /// A mailbox over IMAP, read-only, reported to a mail chat.
+    Email,
 }
 
 impl ChannelArg {
@@ -243,6 +266,7 @@ impl ChannelArg {
         match self {
             Self::Wechat => scv_channels::wechat::CHANNEL,
             Self::Feishu | Self::Lark => scv_channels::feishu::CHANNEL,
+            Self::Email => scv_channels::email::CHANNEL,
         }
     }
 
@@ -251,6 +275,7 @@ impl ChannelArg {
             Self::Wechat => "WeChat",
             Self::Feishu => "Feishu",
             Self::Lark => "Lark",
+            Self::Email => "Email",
         }
     }
 }
@@ -382,6 +407,21 @@ impl From<RemoteToolsArg> for RemoteTools {
         match value {
             RemoteToolsArg::None => Self::None,
             RemoteToolsArg::Owner => Self::Owner,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PurposeArg {
+    Chat,
+    Mail,
+}
+
+impl From<PurposeArg> for Purpose {
+    fn from(value: PurposeArg) -> Self {
+        match value {
+            PurposeArg::Chat => Self::Chat,
+            PurposeArg::Mail => Self::Mail,
         }
     }
 }

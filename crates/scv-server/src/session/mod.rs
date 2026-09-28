@@ -67,6 +67,18 @@ pub(crate) struct SessionClient {
     pub(crate) auto_approve: bool,
     /// The conversation's chat log, relative to the history directory.
     pub(crate) chat: Option<PathBuf>,
+    /// The client's whole system prompt, for a tool-free session only.
+    pub(crate) system_prompt: Option<String>,
+}
+
+/// A client's own system prompt: at most
+/// [`scv_protocol::MAX_SYSTEM_PROMPT_BYTES`], and no control characters but
+/// line breaks and tabs.
+pub(crate) fn valid_system_prompt(prompt: &str) -> bool {
+    prompt.len() <= scv_protocol::MAX_SYSTEM_PROMPT_BYTES
+        && !prompt
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
 }
 
 pub(crate) fn valid_channel_name(name: &str) -> bool {

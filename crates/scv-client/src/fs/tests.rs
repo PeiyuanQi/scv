@@ -24,3 +24,14 @@ fn replace_private_needs_an_existing_directory() {
     let dir = tempfile::tempdir().unwrap();
     assert!(replace_private(&dir.path().join("missing/state.json"), b"x").is_err());
 }
+
+#[test]
+fn a_temporary_file_is_named_for_its_target() {
+    assert_eq!(
+        temporary_prefix(Path::new("/state/channels/email/work.json")),
+        ".work.json."
+    );
+    let long = "x".repeat(MAX_NAMED + 1);
+    assert_eq!(temporary_prefix(Path::new(&long)), ".tmp.");
+    assert_eq!(temporary_prefix(Path::new("/")), ".tmp.");
+}

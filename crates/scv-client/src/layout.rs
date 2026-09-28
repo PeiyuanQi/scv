@@ -181,6 +181,12 @@ impl Layout {
         self.state().join("channels").join(channel)
     }
 
+    /// One mail account's private working files: the empty working
+    /// directory its tool-free triage sessions start in. Removed at logout.
+    pub fn mail_state(&self, account: &str) -> PathBuf {
+        self.state().join("mail").join(account)
+    }
+
     /// Files chat users sent, under `<channel>/<account>`, and copies of files
     /// the model sends back, under `outbox`.
     pub fn media(&self) -> PathBuf {

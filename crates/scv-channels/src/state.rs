@@ -8,6 +8,7 @@
 use crate::media::{MediaKind, MediaSettings};
 use anyhow::{Result, anyhow, bail};
 use scv_client::Layout;
+pub use scv_protocol::Purpose;
 pub(crate) use scv_protocol::{RemoteTools, Senders};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -22,7 +23,7 @@ pub trait Credentials: Clone + PartialEq + Serialize + DeserializeOwned {
     fn fingerprint(&self) -> Result<String>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccountSettings {
     pub enabled: bool,
@@ -36,6 +37,15 @@ pub struct AccountSettings {
     /// Limits on files senders send.
     #[serde(skip_serializing_if = "MediaSettings::is_default")]
     pub media: MediaSettings,
+    /// What a chat account carries: `chat` (the default, never written) or
+    /// `mail`, a mail chat that only the email accounts write to.
+    #[serde(skip_serializing_if = "is_chat")]
+    pub purpose: Purpose,
+    /// An email account's `mail` table. The daemon's configuration keeps it
+    /// opaque, so a mistake in it fails only that account: the email
+    /// channel reads it strictly when the account starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<toml::Table>,
 }
 
 impl Default for AccountSettings {
@@ -46,8 +56,18 @@ impl Default for AccountSettings {
             remote_tools: RemoteTools::None,
             senders: Senders::Owner,
             media: MediaSettings::default(),
+            purpose: Purpose::Chat,
+            mail: None,
         }
     }
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_chat(purpose: &Purpose) -> bool {
+    *purpose == Purpose::Chat
 }
 
 #[allow(
@@ -97,6 +117,10 @@ pub(crate) struct PendingDelivery {
     /// releases ignore the field and send the text as a notice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) question: Option<String>,
+    /// The key of the quarantined notice this is (mail chats only): its
+    /// delivery is recorded under the key in `recent_keys`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) notice_key: Option<String>,
 }
 
 #[allow(
@@ -160,6 +184,51 @@ pub(crate) struct BridgeState {
     /// tell each chat which of its jobs a restart stopped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) jobs: Vec<RunningJob>,
+    /// Set on a mail chat's first run and kept until logout: an account
+    /// that has carried mail never runs as an ordinary chat again, where a
+    /// model could be shown what the chat holds. Older releases ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) mail_chat: bool,
+    /// Keys of quarantined notices this mail chat stored lately, and how
+    /// each went: the record behind the hub's outcome mirror, so a notice
+    /// handed over twice is stored once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) recent_keys: Vec<RecentKey>,
+}
+
+/// A quarantined notice a mail chat stored, and its delivery so far.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RecentKey {
+    pub(crate) key: String,
+    pub(crate) outcome: crate::hub::KeyedOutcome,
+    /// Unix seconds when it was stored.
+    pub(crate) stored_at: u64,
+}
+
+/// The most notice keys a mail chat remembers, and for how long.
+pub(crate) const MAX_RECENT_KEYS: usize = 512;
+pub(crate) const RECENT_KEY_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+impl BridgeState {
+    /// Whether the account has run as an ordinary chat: it holds a
+    /// transport position, messages seen, replies or notices to deliver,
+    /// claims to recover, or background jobs to report.
+    pub(crate) fn ordinary(&self) -> bool {
+        !self.cursor.is_empty()
+            || !self.seen.is_empty()
+            || !self.pending.is_empty()
+            || !self.in_flight.is_empty()
+            || !self.held.is_empty()
+            || !self.jobs.is_empty()
+    }
+
+    /// Forget notice keys past their age, then the oldest beyond the count.
+    pub(crate) fn prune_recent_keys(&mut self, now: u64) {
+        self.recent_keys
+            .retain(|recent| now.saturating_sub(recent.stored_at) < RECENT_KEY_SECONDS);
+        let excess = self.recent_keys.len().saturating_sub(MAX_RECENT_KEYS);
+        self.recent_keys.drain(..excess);
+    }
 }
 
 /// A background job a direct chat's session started and has not reported.
@@ -228,9 +297,38 @@ mod one_or_many {
     }
 }
 
-fn check_binding<C: Credentials>(state: &BridgeState, account: Option<&C>) -> Result<()> {
-    if let Some(binding) = &state.credential_fingerprint {
-        let matches = account.map(C::fingerprint).transpose()?.as_ref() == Some(binding);
+/// An account's durable state, bound to the credentials it was built with.
+pub(crate) trait AccountState: Default + Serialize + DeserializeOwned {
+    /// The fingerprint of the credentials this state belongs to; `None`
+    /// until the first run binds it.
+    fn binding(&self) -> Option<&str>;
+    fn bind(&mut self, fingerprint: String);
+    /// Whether the state holds a position or work that credentials for
+    /// another identity must not inherit.
+    fn in_use(&self) -> bool;
+}
+
+impl AccountState for BridgeState {
+    fn binding(&self) -> Option<&str> {
+        self.credential_fingerprint.as_deref()
+    }
+
+    fn bind(&mut self, fingerprint: String) {
+        self.credential_fingerprint = Some(fingerprint);
+    }
+
+    fn in_use(&self) -> bool {
+        !self.pending.is_empty()
+            || !self.in_flight.is_empty()
+            || !self.held.is_empty()
+            || !self.cursor.is_empty()
+            || !self.seen.is_empty()
+    }
+}
+
+fn check_binding<C: Credentials>(state: &impl AccountState, account: Option<&C>) -> Result<()> {
+    if let Some(binding) = state.binding() {
+        let matches = account.map(C::fingerprint).transpose()?.as_deref() == Some(binding);
         if !matches {
             bail!("channel state does not match saved credentials")
         }
@@ -359,20 +457,23 @@ fn toml_line(text: &str, span: Option<std::ops::Range<usize>>) -> String {
 ///
 /// - credentials in `credentials/<channel>/<account>.json`;
 /// - settings in `config.toml`, as `[channels.<channel>.<account>]`;
-/// - delivery state in `state/channels/<channel>/<account>.json`, beside the
+/// - state `S` in `state/channels/<channel>/<account>.json`, beside the
 ///   account's `.lock` (held for a whole run) and `.transaction` (held for
-///   each short filesystem transaction).
-pub(crate) struct Store<C> {
+///   each short filesystem transaction);
+/// - for a channel that keeps them, private working files in
+///   `<private>/<account>/`, removed with the account.
+pub(crate) struct Store<C, S = BridgeState> {
     channel: String,
     home: PathBuf,
     credentials: PathBuf,
     state: PathBuf,
     config: PathBuf,
     config_lock: PathBuf,
-    kind: PhantomData<fn() -> C>,
+    private: Option<PathBuf>,
+    kind: PhantomData<fn() -> (C, S)>,
 }
 
-impl<C: Credentials> Store<C> {
+impl<C: Credentials, S: AccountState> Store<C, S> {
     pub(crate) fn new(layout: &Layout, channel: &str) -> Self {
         Self {
             channel: channel.to_owned(),
@@ -381,8 +482,23 @@ impl<C: Credentials> Store<C> {
             state: layout.channel_state(channel),
             config: layout.config(),
             config_lock: layout.config_lock(),
+            private: None,
             kind: PhantomData,
         }
+    }
+
+    /// Keep each account's private working files in `<root>/<account>/`,
+    /// which [`Store::remove`] deletes with the account.
+    #[cfg(feature = "email")]
+    pub(crate) fn with_private(mut self, root: PathBuf) -> Self {
+        self.private = Some(root);
+        self
+    }
+
+    /// The account's private working directory, when the channel keeps one.
+    pub(crate) fn private_path(&self, name: &str) -> Result<Option<PathBuf>> {
+        validate_name(name)?;
+        Ok(self.private.as_ref().map(|root| root.join(name)))
     }
 
     pub(crate) fn credentials_path(&self, name: &str) -> Result<PathBuf> {
@@ -465,17 +581,10 @@ impl<C: Credentials> Store<C> {
         let fingerprint = value.fingerprint()?;
         let changed =
             previous.as_ref().map(C::fingerprint).transpose()?.as_ref() != Some(&fingerprint);
-        if changed
-            && (previous.is_some()
-                || !state.pending.is_empty()
-                || !state.in_flight.is_empty()
-                || !state.held.is_empty()
-                || !state.cursor.is_empty()
-                || !state.seen.is_empty())
-        {
+        if changed && (previous.is_some() || state.in_use()) {
             bail!("channel credentials cannot replace this account; logout first")
         }
-        state.credential_fingerprint = Some(fingerprint);
+        state.bind(fingerprint);
         // Persist the binding before credentials. A crash between files fails
         // closed; identity replacement never resets or archives a runner's state.
         self.save_state_unlocked(name, &state)?;
@@ -600,6 +709,16 @@ impl<C: Credentials> Store<C> {
                 }
                 Senders::Anyone => table["senders"] = toml_edit::value("anyone"),
             }
+            // An ordinary chat's purpose stays out of the file, so a release
+            // before mail chats still reads it.
+            match settings.purpose {
+                Purpose::Chat => {
+                    table.remove("purpose");
+                }
+                Purpose::Mail => table["purpose"] = toml_edit::value("mail"),
+            }
+            // The `mail` table is the person's own: SCV never writes it, and
+            // it survives every change SCV makes here.
             // Default media limits stay out of the file.
             if settings.media.is_default() {
                 table.remove("media");
@@ -668,27 +787,36 @@ impl<C: Credentials> Store<C> {
     }
 
     #[cfg(test)]
-    pub(crate) fn load_state(&self, name: &str) -> Result<BridgeState> {
+    pub(crate) fn load_state(&self, name: &str) -> Result<S> {
         let _transaction = self.transaction(name)?;
         self.load_state_unlocked(name)
     }
 
-    fn load_state_unlocked(&self, name: &str) -> Result<BridgeState> {
+    fn load_state_unlocked(&self, name: &str) -> Result<S> {
         let path = self.state_path(name)?;
         if !path.try_exists()? {
-            return Ok(BridgeState::default());
+            return Ok(S::default());
         }
         check_private(&path, "state")?;
         Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
 
-    pub(crate) fn save_state(&self, name: &str, value: &BridgeState) -> Result<()> {
+    pub(crate) fn save_state(&self, name: &str, value: &S) -> Result<()> {
         let _transaction = self.transaction(name)?;
         check_binding(value, self.account_unlocked(name)?.as_ref())?;
         self.save_state_unlocked(name, value)
     }
 
-    fn save_state_unlocked(&self, name: &str, value: &BridgeState) -> Result<()> {
+    /// [`Store::save_state`] for state its caller already serialized as
+    /// `text`, such as to check its size first.
+    #[cfg(feature = "email")]
+    pub(crate) fn save_serialized(&self, name: &str, value: &S, text: &str) -> Result<()> {
+        let _transaction = self.transaction(name)?;
+        check_binding(value, self.account_unlocked(name)?.as_ref())?;
+        self.write_private(&self.state_path(name)?, text)
+    }
+
+    fn save_state_unlocked(&self, name: &str, value: &S) -> Result<()> {
         self.write_private(&self.state_path(name)?, &serde_json::to_string(value)?)
     }
 
@@ -699,7 +827,7 @@ impl<C: Credentials> Store<C> {
         &self,
         name: &str,
         running: impl FnOnce(&C) -> Result<bool>,
-    ) -> Result<BridgeState> {
+    ) -> Result<S> {
         let _transaction = self.transaction(name)?;
         let account = self
             .account_unlocked(name)?
@@ -709,8 +837,8 @@ impl<C: Credentials> Store<C> {
         }
         let mut state = self.load_state_unlocked(name)?;
         check_binding(&state, Some(&account))?;
-        if state.credential_fingerprint.is_none() {
-            state.credential_fingerprint = Some(account.fingerprint()?);
+        if state.binding().is_none() {
+            state.bind(account.fingerprint()?);
             self.save_state_unlocked(name, &state)?;
         }
         Ok(state)
@@ -745,8 +873,9 @@ impl<C: Credentials> Store<C> {
             .unwrap_or_default())
     }
 
-    /// Remove the account's credentials, delivery state, and settings. The
-    /// caller must stop the account's running component first.
+    /// Remove the account's credentials, delivery state, private working
+    /// files, and settings. The caller must stop the account's running
+    /// component first.
     pub(crate) fn remove(&self, name: &str) -> Result<()> {
         let _lock = self.lock(name)?;
         let _transaction = self.transaction(name)?;
@@ -754,8 +883,26 @@ impl<C: Credentials> Store<C> {
         // fall back to enabled-by-default on the next startup.
         remove_if_present(&self.credentials_path(name)?)?;
         remove_if_present(&self.state_path(name)?)?;
+        if let Some(directory) = self.private_path(name)? {
+            remove_tree(&directory)?;
+        }
         self.edit_settings(name, None)
     }
+}
+
+/// Remove `directory` and everything in it, without following symbolic
+/// links, if it exists.
+fn remove_tree(directory: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(directory)?,
+        Ok(_) => std::fs::remove_file(directory)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    if let Some(parent) = directory.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn remove_if_present(path: &Path) -> Result<()> {

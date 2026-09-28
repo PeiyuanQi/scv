@@ -165,7 +165,7 @@ pub(crate) fn local_now() -> (u64, LocalTime) {
 
 /// Seconds east of UTC of the host's time zone at `unix`, as the C library
 /// sees it (`TZ`, else `/etc/localtime`); 0 when it cannot tell.
-fn utc_offset(unix: i64) -> i32 {
+pub(crate) fn utc_offset(unix: i64) -> i32 {
     // `time_t` is 64 bits on every platform SCV supports.
     let time = unix as libc::time_t;
     // SAFETY: an all-zero `tm` is a valid value of the plain C struct.

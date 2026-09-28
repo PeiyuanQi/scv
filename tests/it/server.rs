@@ -143,6 +143,7 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             channel: None,
             auto_approve: None,
             chat: None,
+            system_prompt: None,
         },
     )
     .await;
@@ -251,6 +252,7 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
             channel: None,
             auto_approve: None,
             chat: None,
+            system_prompt: None,
         },
     )
     .await;
@@ -372,6 +374,7 @@ async fn tool_results_are_replayed_after_their_calls() {
             channel: None,
             auto_approve: None,
             chat: None,
+            system_prompt: None,
         },
     )
     .await;
@@ -557,6 +560,7 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
             channel: None,
             auto_approve: None,
             chat: None,
+            system_prompt: None,
         },
     )
     .await;
@@ -720,6 +724,7 @@ async fn tool_free_sessions_get_no_web_access() {
             channel: None,
             auto_approve: None,
             chat: None,
+            system_prompt: None,
         },
     )
     .await;
@@ -832,6 +837,7 @@ async fn chat_sessions_attach_files_and_show_images() {
             channel: Some("WeChat".into()),
             auto_approve: None,
             chat: None,
+            system_prompt: None,
         },
     )
     .await;
@@ -1001,6 +1007,7 @@ async fn chat_sessions_carry_on_their_open_episode_and_can_search_their_log() {
             account: "default".into(),
             conversation: conversation.into(),
         }),
+        system_prompt: None,
     };
     // A log named with anything but plain parts is refused.
     send(&mut input, &start("../0a1b")).await;
@@ -1069,4 +1076,145 @@ async fn chat_sessions_carry_on_their_open_episode_and_can_search_their_log() {
         "{}",
         texts[2]
     );
+}
+
+/// A tool-free client may bring its whole system prompt, as mail triage
+/// does: the provider then sees that prompt and none of the configured one,
+/// the working directory, or the user's skills. A session with tools may
+/// not, and neither may an oversized prompt.
+#[tokio::test]
+async fn a_tool_free_session_may_replace_the_whole_system_prompt() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = read_json_body(&mut stream);
+        let reply = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        body
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let skill = config_home.path().join("skills/private-notes");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\ndescription: The owner's private notes\n---\nsecret",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+        .isolated(config_home.path())
+        .args([
+            "--stdio",
+            "--model",
+            "fake-model",
+            "--base-url",
+            &format!("http://{address}/v1"),
+        ])
+        .env("OPENAI_API_KEY", "test-only")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    send(
+        &mut input,
+        &ClientMessage::Initialize {
+            request_id: "init".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerInfo {
+                name: "integration-test".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_event(&mut lines).await,
+        ServerEvent::Initialized { .. }
+    ));
+    let start = |no_tools: Option<bool>, prompt: &str| ClientMessage::SessionStart {
+        request_id: "session".into(),
+        cwd: workspace.path().display().to_string(),
+        provider: None,
+        model: None,
+        base_url: None,
+        no_tools,
+        delegation_depth: None,
+        channel: None,
+        auto_approve: None,
+        chat: None,
+        system_prompt: Some(prompt.into()),
+    };
+    for (no_tools, prompt) in [
+        (None, "MAIL FRAME"),
+        (Some(false), "MAIL FRAME"),
+        (
+            Some(true),
+            &*"x".repeat(scv_protocol::MAX_SYSTEM_PROMPT_BYTES + 1),
+        ),
+        (Some(true), "a\u{0}b"),
+    ] {
+        send(&mut input, &start(no_tools, prompt)).await;
+        match next_event(&mut lines).await {
+            ServerEvent::Error { message, .. } => {
+                assert!(message.contains("system_prompt"), "{message}");
+            }
+            event => panic!("expected a refusal, received {event:?}"),
+        }
+    }
+    send(&mut input, &start(Some(true), "MAIL FRAME")).await;
+    let session_id = loop {
+        match next_event(&mut lines).await {
+            ServerEvent::SessionStarted { session_id, .. } => break session_id,
+            ServerEvent::Error { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    };
+    send(
+        &mut input,
+        &ClientMessage::TurnStart {
+            request_id: "turn".into(),
+            session_id,
+            prompt: "one mail".into(),
+            attachments: Vec::new(),
+        },
+    )
+    .await;
+    loop {
+        match next_event(&mut lines).await {
+            ServerEvent::TurnCompleted { .. } => break,
+            ServerEvent::TurnFailed { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    input.shutdown().await.unwrap();
+    drop(input);
+    let body = provider.join().unwrap().to_string();
+    assert!(body.contains("MAIL FRAME"), "{body}");
+    for absent in [
+        "Use tools to inspect",
+        "private-notes",
+        "read_skill",
+        "Current working directory",
+    ] {
+        assert!(
+            !body.contains(absent),
+            "{absent} reached the provider: {body}"
+        );
+    }
+    assert!(
+        !body.contains("\"tools\":[{"),
+        "a tool-free session offers no tool: {body}"
+    );
+    let _ = timeout(Duration::from_secs(3), child.wait()).await;
 }

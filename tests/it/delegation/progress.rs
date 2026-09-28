@@ -126,6 +126,7 @@ async fn delegated_agent_events_arrive_as_bounded_tool_progress() {
         channel: None,
         auto_approve: None,
         chat: None,
+        system_prompt: None,
     })
     .await;
 

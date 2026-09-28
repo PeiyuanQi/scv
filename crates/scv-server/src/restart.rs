@@ -371,6 +371,7 @@ fn channel_title(component: &str) -> &str {
     match component.split(':').next() {
         Some("wechat") => "WeChat",
         Some("feishu") => "Feishu",
+        Some("email") => "Email",
         Some(other) => other,
         None => component,
     }
@@ -487,25 +488,33 @@ impl Notifier {
         }
     }
 
-    /// The notify list, or else the chat the owner last wrote from.
+    /// The notify list, or else the chat the owner last wrote from; never a
+    /// mail chat, which carries only mail, and never a mailbox.
     fn candidates(&self) -> Vec<Candidate> {
         let list = self.notify_list();
-        if !list.is_empty() {
-            return list
+        let candidates: Vec<Candidate> = if list.is_empty() {
+            self.hub
+                .last_owner()
+                .map(|last| Candidate {
+                    component: last.component,
+                    peer: Some(last.peer),
+                })
                 .into_iter()
+                .collect()
+        } else {
+            list.into_iter()
                 .map(|component| Candidate {
                     component,
                     peer: None,
                 })
-                .collect();
-        }
-        self.hub
-            .last_owner()
-            .map(|last| Candidate {
-                component: last.component,
-                peer: Some(last.peer),
-            })
+                .collect()
+        };
+        candidates
             .into_iter()
+            .filter(|candidate| {
+                !self.hub.is_mail_chat(&candidate.component)
+                    && !candidate.component.starts_with("email:")
+            })
             .collect()
     }
 

@@ -153,17 +153,22 @@ pub(crate) async fn build_session(
         Arc::new(registry)
     };
     let agents = scv_tools::offered_agents(&tools);
-    let system_prompt = build_system_prompt(
-        &workspace,
-        &config,
-        &listings,
-        &PromptContext {
-            agents: &agents,
-            background: tools.get("agent_status").is_some(),
-            channel: client.channel.as_deref(),
-            chat_history: tools.get("chat_history").is_some(),
-        },
-    )?;
+    // A tool-free client may bring its whole prompt (mail triage does), so
+    // none of the owner's own instructions reach that model.
+    let system_prompt = match (&client.system_prompt, no_tools) {
+        (Some(prompt), true) => prompt.clone(),
+        _ => build_system_prompt(
+            &workspace,
+            &config,
+            &listings,
+            &PromptContext {
+                agents: &agents,
+                background: tools.get("agent_status").is_some(),
+                channel: client.channel.as_deref(),
+                chat_history: tools.get("chat_history").is_some(),
+            },
+        )?,
+    };
     // A chat with a log carries on with its open episode.
     let history = client.chat.as_ref().map_or_else(Vec::new, |conversation| {
         reload::reload(

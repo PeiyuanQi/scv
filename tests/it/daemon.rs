@@ -106,6 +106,7 @@ async fn session(
             channel: None,
             auto_approve: None,
             chat: None,
+            system_prompt: None,
         },
     ] {
         write
@@ -182,6 +183,7 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
                 workspace: None,
                 remote_tools: Some(RemoteTools::Owner),
                 senders: None,
+                purpose: None,
             },
         )
         .await
@@ -235,6 +237,7 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
             workspace: None,
             remote_tools: None,
             senders: None,
+            purpose: None,
         },
     )
     .await
@@ -353,6 +356,7 @@ async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_rea
             workspace: Some(workspace.path().display().to_string()),
             remote_tools: Some(RemoteTools::None),
             senders: None,
+            purpose: None,
         },
     )
     .await
@@ -369,6 +373,7 @@ async fn account_settings_come_from_config_toml_and_old_layout_files_are_not_rea
         workspace: None,
         remote_tools: None,
         senders: Some(senders),
+        purpose: None,
     };
     let opened = scv_client::control(&socket, senders(Senders::Anyone))
         .await

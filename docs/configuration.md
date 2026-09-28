@@ -49,7 +49,8 @@ six places:
 │                      [notify]
 ├── credentials/       sign-ins SCV writes itself (0700)
 │   ├── wechat/<account>.json
-│   └── feishu/<account>.json
+│   ├── feishu/<account>.json
+│   └── email/<account>.json   a mailbox's server, user, and password or code
 ├── agents/<name>/     private homes of the delegated agents (claude, codex,
 │                      grok, dsh, pi, scv), with their own sign-ins
 ├── skills/            your SCV skills
@@ -68,7 +69,10 @@ six places:
     ├── daemon.json    the running daemon, removed on a clean stop
     ├── update.json    a planned restart, until its outcome is announced
     ├── last-owner.json  the chat the owner last wrote from
-    └── channels/<channel>/<account>.json, .lock, .transaction
+    ├── channels/<channel>/<account>.json, .lock, .transaction
+    │                  (for email: the mail account's cursor, claims, and
+    │                  queued reports)
+    └── mail/<account>/empty/  the working directory of mail triage sessions
 ```
 
 The rules behind it:
@@ -497,7 +501,7 @@ adds skills without any SCV registration. `read_skill` can load a listed skill
 for reference. At most 256 child projects and `skills.max_skills` skills in
 total are considered; entries that resolve outside the workspace, or that
 cannot be read, are skipped. Tool-free sessions, such as WeChat senders
-without remote tools, never list project skills.
+without remote tools or mail triage, list no skills at all.
 
 ### Web tools
 
@@ -571,7 +575,9 @@ The daemon sends some notices nobody asked for: an update started from a
 terminal or the TUI, a rollback of a failed update, a restart after the daemon
 stopped unexpectedly, an enabled chat account disconnected for ten
 minutes, and a disk holding chat files running low (see `[history]` below). `[notify].owner` lists the accounts that may carry them, as
-`<channel>:<account>`:
+`<channel>:<account>`; it may not name an email account or a mail chat
+(`purpose = "mail"`), which carries only mail, and neither is ever used as
+the owner's last chat:
 
 ```toml
 [notify]
@@ -705,7 +711,7 @@ process has died, at startup and every 60 seconds; `scv agents ps` and
 [Tracking and cleanup](tools.md#tracking-and-cleanup).
 
 Channel credentials live in `credentials/<channel>/<account>.json`
-(`<channel>` is `wechat` or `feishu`) and durable delivery state in
+(`<channel>` is `wechat`, `feishu`, or `email`) and durable delivery state in
 `state/channels/<channel>/<account>.json` under the same root. Each account's
 settings are a table in the instance's `config.toml`:
 
@@ -774,6 +780,86 @@ retaining credentials. Credential or settings changes join the old instance
 before a replacement starts. `scv channels logout <channel> --account NAME` requires a live daemon
 and removes credentials, delivery state, and the account's `[channels]` table
 only after joining.
+
+A chat account's `purpose` is `"chat"` (the default, never written to the
+file) or `"mail"`, which makes it a [mail chat](channels.md#mail-chats): it
+carries only the email accounts' reports, no model ever answers in it, and
+it refuses `remote_tools = "owner"` and `senders = "anyone"`. `scv channels
+run <channel> --account NAME --purpose mail` sets it. Once an account has run
+as a mail chat it refuses to run as an ordinary one until logout.
+
+### Mail accounts
+
+`scv channels login email --imap-host HOST --user NAME [--imap-port 993]
+[--account NAME]` signs a mailbox in (see [Email](channels.md#email)). An
+email account's table holds `enabled` and a `mail` table, and takes no
+`workspace`, `remote_tools`, `senders`, or `purpose`. The daemon's
+configuration keeps `mail` opaque: the account reads it strictly when it
+starts, so an unknown key or an out-of-range value fails that account alone,
+and `scv config show` says why. Every key but `notify.route` has a default:
+
+```toml
+[channels.email.default]
+enabled = true
+
+[channels.email.default.mail]
+mailbox = "INBOX"            # the folder watched
+poll_seconds = 60            # 15–3600
+instructions = ""            # standing triage instructions, ≤ 4 KiB
+triage_model = ""            # the model triage uses; "" is the daemon's default
+send_body = true             # false: the model sees headers and attachment names only
+max_body_kib = 8             # cleaned body text a model sees, 1–64
+max_fetch_kib = 64           # bytes of one text part fetched, 16–1024
+max_triage_per_hour = 30     # model turns per rolling hour, 1–600
+max_tokens_per_day = 150000  # per local day; 0 turns the model off; ≤ 10000000
+catchup_hours = 24           # mail older than this when first seen is counted, 1–168
+dedupe_message_id = true     # count a message listed again within a week
+
+[[channels.email.default.mail.rules]]  # first match wins, before the built-in rules
+from = ["boss@example.com", "@bank.example"]  # addresses, or domains and their subdomains
+# list_id = ["news.example.com"]       # text a List-Id contains
+# bulk = true                          # a list, Precedence bulk/list/junk, or Auto-Submitted
+# noreply = true                       # a no-reply or system sender, or an empty Return-Path
+action = "triage"                      # count | header | triage_meta | triage
+urgent = true
+
+[channels.email.default.mail.notify]
+route = ["feishu:mail"]      # required: 1–4 mail chats, tried in order
+settle_seconds = 120         # 0–3600
+max_delay_seconds = 900      # settle_seconds–86400
+max_items = 10               # 1–50
+max_message_kib = 12         # 4–15
+urgent_by_model = true
+max_urgent_per_hour = 4      # 0–60
+max_messages_per_hour = 6    # 1–60
+max_messages_per_day = 48    # 1–500, digests and urgent messages together
+max_responses_per_hour = 60  # 1–600
+quiet_hours = ""             # such as "23:00-07:30"; may cross midnight
+utc_offset = ""              # such as "+08:00"; "" is the host's time zone
+quiet_urgent = "deliver"     # or "hold"
+skipped = "count"            # or "off": say how much mail was counted
+max_queue = 256              # 16–1024; max_queue × 1.5 KiB ≤ half of max_state_kib
+give_up_hours = 72           # 1–168
+
+[channels.email.default.mail.retention]
+max_state_kib = 2048         # 512–16384
+min_free_mib = 64            # 16–4096
+sweep_minutes = 60           # 5–1440
+```
+
+Rules match on what code can check without a model: `from`, `list_id`,
+`bulk`, and `noreply`, each optional, all required to hold when given; a rule
+naming none matches every message. Their actions, cheapest first: `count`
+counts the message in the next digest's header, `header` reports its headers
+without a model, `triage_meta` has a model read its headers and attachment
+names, and `triage` a cleaned body too. After the owner's rules come the
+built-in ones: bulk and automated mail is counted, no-reply senders are
+reported by their headers, and the rest is triaged. `urgent` has matching
+mail reported as urgent, within `max_urgent_per_hour`.
+
+This release cannot write to a mailbox or send mail: a `mail.actions` table
+(drafts, sending, moving mail) is refused with "not available in this
+release".
 
 For an offline opt-out, set `enabled = false` in the account's table before
 starting the daemon. Keep channel directories mode

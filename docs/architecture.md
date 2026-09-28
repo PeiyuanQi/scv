@@ -57,6 +57,10 @@ SCV provides:
 - a TUI and chat channel bridges (WeChat, Feishu/Lark) that attach to the
   daemon through the same protocol, including media in both directions
   (`chat_attach`);
+- read-only mail triage: an email account watches an IMAP mailbox, decides
+  each new message with deterministic rules and, within a token budget, one
+  tool-free model turn, and reports to a *mail chat*, a chat account set
+  apart so that no model ever answers in it;
 - a chat log of each account owner's direct chat, from which a new session
   carries on the open episode and which the model can search, with the files
   the owner keeps and a free-disk-space floor;
@@ -79,13 +83,13 @@ The repository is one Cargo workspace with these packages:
 | Package | Responsibility |
 | --- | --- |
 | `scv-protocol` | Wire messages, the protocol version, and the bounded line framing (`FrameDecoder`) every connection uses. It contains no runtime policy and does no I/O. |
-| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket among them, and the instance's service unit name), the chat log (`history`: its episode files, writer, and readers), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
+| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket among them, and the instance's service unit name), the chat log (`history`: its episode files, writer, and readers), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`, whose temporary files are named for their target), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
-| `scv-channels` | The chat channels. The bridge they share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, questions to the owner, restart context). Behind Cargo features, both on by default: `wechat` (iLink authentication, polling, and sending, and its credentials) and `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark). |
+| `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), and `email` (read-only mail triage: the provider-neutral mail core and the IMAP adapter). |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
 The integration dependency chain is
@@ -94,7 +98,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.4` and exact workspace dependency pins.
+`0.3.5` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -159,10 +163,12 @@ What lives where in the largest crates:
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
 | | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
-| | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state, what the daemon shares with running bridges, chat media, and logging the owner's direct chat |
+| | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state (a `Store` generic over the account's state type), what the daemon shares with running bridges, chat media, and logging the owner's direct chat |
+| | `mail_chat.rs` | A mail chat's fixed replies to its owner (`mail status`, `mail help`) |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
 | | `wechat/` | WeChat login, polling `getupdates`, and sending (`mod.rs`); iLink requests (`ilink.rs`); credentials (`credentials.rs`); CDN files, AES-encrypted both ways (`cdn.rs`) |
 | | `feishu/` | The Feishu transport (`mod.rs`) and its Open Platform client (`api.rs`); the event long connection, its protobuf frames, and parsing events and catch-up history (`socket.rs`, `frame.rs`, `inbound.rs`); signing in by QR scan or with an existing app (`login.rs`); credentials (`credentials.rs`) |
+| | `email/` | The email channel and its run (`mod.rs`); the provider-neutral mailbox interface, `MailSource` and `SourceRef` (`source.rs`); the read-only IMAP adapter with its response parser, command guard, and typed client (`imap/`); decoding and cleaning mail text (`parse.rs`, `clean.rs`); rules, the token ladder, and triage turns (`rules.rs`, `worker.rs`, `triage.rs`, `model.rs`); the account's state and its single writer (`ledger.rs`); notification planning, rendering, and delivery (`plan.rs`, `render.rs`, `notify.rs`); retention (`janitor.rs`); settings and credentials (`settings.rs`, `credentials.rs`) |
 | `scv-core` | `message.rs`, `tool.rs` | History messages; the `Tool` trait, its context and output, and `ToolRegistry` |
 | | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` |
 | | `progress.rs` | Bounded, paced tool progress lines |
@@ -294,10 +300,13 @@ owner of the first connected account in the user configuration's
 `notify.owner` list, on that account only; with no list, to the chat the owner
 last wrote from (`$SCV_HOME/state/last-owner.json`), and otherwise only to the
 log. `scv_channels::hub::Hub` carries what the daemon and its bridges share:
-each running account's owner and outbox, which daemon session each direct chat
-runs on and its unreported background work, claimed owner messages, the
-owner's last chat, questions waiting for the owner's answer, and whether this
-start is a planned restart. `scv_tools::delegation::DelegationRegistry::own_run`
+each running account's owner, purpose, and outbox, which daemon session each
+direct chat runs on and its unreported background work, claimed owner
+messages, the owner's last chat, questions waiting for the owner's answer,
+whether this start is a planned restart, and for mail the outcome of each
+keyed notice a mail chat stored and each running email account's routes and
+counts. Notices and questions never go to a mail chat, and keyed mail notices
+only to one. `scv_tools::delegation::DelegationRegistry::own_run`
 reads an `SCV_PARENT` chain for both planned restarts and questions: which of
 the daemon's own delegations the caller runs inside, and its session.
 

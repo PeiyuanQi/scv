@@ -422,6 +422,7 @@ impl ScvAgentTool {
                 channel: None,
                 auto_approve: None,
                 chat: None,
+                system_prompt: None,
             })
             .await?;
             loop {

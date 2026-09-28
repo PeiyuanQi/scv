@@ -241,6 +241,19 @@ fn channel(
             (listing.all || line.contains("[config.toml]")).then_some(line)
         });
         let settings = match settings {
+            Ok(settings) if !store.kind().is_chat() => {
+                let enabled = if settings.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                match scv_channels::email::describe_settings(settings.mail.as_ref()) {
+                    Ok(summary) => format!("{enabled}, reads mail read-only, {summary}"),
+                    Err(error) => {
+                        format!("{enabled}, invalid mail settings: {}", safe_error(&error))
+                    }
+                }
+            }
             Ok(settings) => {
                 let workspace = settings
                     .workspace
@@ -261,7 +274,13 @@ fn channel(
                 } else {
                     "disabled"
                 };
-                format!("{enabled}, {senders}, {tools}, workspace {workspace}")
+                if settings.purpose == scv_protocol::Purpose::Mail {
+                    format!(
+                        "{enabled}, mail chat: carries only mail reports, no model answers, {senders}"
+                    )
+                } else {
+                    format!("{enabled}, {senders}, {tools}, workspace {workspace}")
+                }
             }
             Err(error) => format!("invalid settings: {}", safe_error(&error)),
         };

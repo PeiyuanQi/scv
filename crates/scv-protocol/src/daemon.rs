@@ -56,6 +56,51 @@ pub struct ComponentHealth {
     /// answers nobody. `None` from daemons before 0.3.0, which answer anyone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub senders: Option<Senders>,
+    /// What a chat account carries, when it is not an ordinary chat:
+    /// `mail` for a mail chat. Absent for ordinary chats, email accounts,
+    /// and daemons before mail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<Purpose>,
+    /// An email account's counts: never addresses, subjects, or any other
+    /// mail text. Absent for chat accounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail: Option<MailCounts>,
+}
+
+/// What a chat account carries.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Purpose {
+    /// Conversations with a model (the default).
+    #[default]
+    Chat,
+    /// Only the email accounts' reports to the owner: no model ever answers
+    /// in it, it has no tools, and SCV never logs it.
+    Mail,
+}
+
+/// An email account's activity, as counts only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MailCounts {
+    /// Mail claimed and not yet decided.
+    pub claimed: u64,
+    /// Report items waiting to be sent to the mail chat.
+    pub queued: u64,
+    /// Mail decided today (the account's local day).
+    pub seen_today: u64,
+    /// Of those, mail a model triaged.
+    pub triaged_today: u64,
+    /// Of those, mail reported to the owner.
+    pub reported_today: u64,
+    /// Model tokens spent today.
+    pub tokens_today: u64,
+    /// The daily token budget.
+    pub token_budget: u64,
+    /// Digest messages sent to the mail chat in the last 24 hours.
+    pub messages_24h: u64,
+    /// When the mailbox was last checked, in Unix seconds.
+    pub last_check_unix_seconds: Option<u64>,
 }
 
 /// Who may use tools through a remote bridge account.
@@ -250,6 +295,9 @@ pub enum DaemonCommand {
         /// setting.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         senders: Option<Senders>,
+        /// What a chat account carries; omitted keeps the saved setting.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<Purpose>,
     },
     /// Stop one channel account and remove its credentials and state.
     ChannelLogout {

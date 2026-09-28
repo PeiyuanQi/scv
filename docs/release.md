@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.4`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.4` pins.
+The current workspace release is `0.3.5`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.5` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,54 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.5
+
+`0.3.5` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.4` checks the new release and can roll it back,
+as long as the instance does not use mail yet (below).
+
+What changes for a person running SCV:
+
+- **Read-only mail triage.** `scv channels login email` signs an IMAP mailbox
+  in (a password, or the authorization code QQ, Foxmail, and 163 require),
+  and `[channels.email.<account>.mail]` says what to watch, how much a model
+  may read and spend, and which mail chats to report to. The account decides
+  each new message with rules first and a tool-free model turn only within
+  its budget, and sends deterministic digests. It cannot write to a mailbox or
+  send mail. See [Email](channels.md#email) and
+  [Mail accounts](configuration.md#mail-accounts).
+- **Mail chats.** A chat account with `purpose = "mail"` (`scv channels run
+  <channel> --account NAME --purpose mail`) carries only mail reports: no
+  model answers in it, it is never chat-logged, never takes SCV's notices or
+  questions, and once it has carried mail it refuses to run as an ordinary
+  chat until logout. See [Mail chats](channels.md#mail-chats).
+- **Tool-free sessions list no skills.** A chat stranger's session, for
+  example, no longer learns the names of the owner's skills; it could never
+  read them.
+- **Going back to `0.3.4`.** `0.3.4` rejects `purpose` and `mail` in a
+  `[channels]` table and does not know `[channels.email]`, so with either in
+  `config.toml` it cannot start, and an automatic rollback would fail too.
+  Before going back, log out every email account and every mail chat, or
+  remove those tables and keys. An instance that never used mail is
+  unaffected: SCV writes `purpose` only for a mail chat.
+
+What changes for code that embeds SCV's crates:
+
+- `scv-channels` has a default `email` feature (`ChannelKind::Email`,
+  `ChannelCredentials::Email`, and `scv_channels::email`), and
+  `AccountSettings` gains `purpose` and an opaque `mail` table; it is no
+  longer `Eq`, since the table may hold floats.
+- The hub gains `Link::register_as(Purpose)`, `Hub::purpose`,
+  `Hub::is_mail_chat`, `Hub::notify_keyed`, `Hub::keyed_outcome`, and
+  `Hub::register_mail`/`mail_counts`. `Hub::notify` and `send_question` refuse
+  a mail chat with the new `NotifyError::WrongPurpose`.
+- `scv-protocol` adds `Purpose`, `MailCounts`, `session.start`
+  `system_prompt`, `channel_set` `purpose`, and `ComponentHealth` `purpose`
+  and `mail`, all optional.
+- New dependencies of `scv-channels` under `email`: `encoding_rs` for mail
+  charsets, and `rustls`, `tokio-rustls`, `webpki-roots`, and `html2text`,
+  which the workspace already used.
 
 ## Upgrading to 0.3.4
 

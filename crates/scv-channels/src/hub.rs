@@ -9,7 +9,16 @@
 //! has delivered its text, and the owner's next explicit answer there, sent
 //! after that, resolves it. Bridges learn why the daemon last restarted, so
 //! they describe work that a planned restart interrupted accurately.
+//!
+//! Mail chats (`purpose = "mail"`) are set apart here: the hub queues SCV's
+//! own notices and questions only to ordinary chats, and quarantined keyed
+//! notices, which carry mail text, only to mail chats
+//! ([`Hub::notify_keyed`]). It mirrors how each keyed notice went, so the
+//! email account that handed it over learns whether it was stored,
+//! delivered, or refused, and it holds each running email account's counts
+//! for `mail status` and daemon status.
 
+use scv_protocol::{MailCounts, Purpose};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -50,17 +59,38 @@ pub struct LastOwner {
 
 /// A message for one account's outbox, sent like a background report. Its
 /// text is SCV's own, never the model's, so a channel that marks SCV's words
-/// (WeChat's `system msg: ` code block) marks it when the bridge stores it.
+/// (WeChat's `system msg: ` code block) marks it when the bridge stores it,
+/// unless it is quarantined.
 pub struct Notice {
     pub to: String,
     pub text: String,
     /// The question whose text this is ([`Hub::send_question`]): it opens
     /// only once the text reaches the chat, and is never held for later.
     pub question: Option<String>,
+    /// A quarantined notice's key ([`Hub::notify_keyed`]). Its text holds
+    /// mail and goes out as it is, unlabelled; only a mail chat stores it,
+    /// once per key.
+    pub key: Option<String>,
     stored: oneshot::Sender<()>,
 }
 
+/// Which kind of notice [`Hub::queue`] hands over.
+enum NoticeKind {
+    /// SCV's own words, for an ordinary chat, possibly a question's text.
+    Plain(Option<String>),
+    /// A quarantined notice for a mail chat, under its key.
+    Keyed(String),
+}
+
 impl Notice {
+    fn plain(question: Option<&str>) -> NoticeKind {
+        NoticeKind::Plain(question.map(str::to_owned))
+    }
+
+    fn keyed(key: &str) -> NoticeKind {
+        NoticeKind::Keyed(key.to_owned())
+    }
+
     /// The bridge stored the notice durably.
     pub fn stored(self) {
         let _ = self.stored.send(());
@@ -81,6 +111,9 @@ pub enum NotifyError {
     NotRunning,
     /// The bridge stopped or did not store the notice in time.
     NotStored,
+    /// The account carries the other kind of notice: a mail chat takes only
+    /// quarantined mail notices, and an ordinary chat never takes one.
+    WrongPurpose,
 }
 
 impl std::fmt::Display for NotifyError {
@@ -88,8 +121,25 @@ impl std::fmt::Display for NotifyError {
         formatter.write_str(match self {
             Self::NotRunning => "the account's bridge is not running",
             Self::NotStored => "the account's bridge did not store the notice",
+            Self::WrongPurpose => {
+                "the account is a mail chat, or a mail notice went to an ordinary chat"
+            }
         })
     }
+}
+
+/// How a quarantined keyed notice went, as the mail chat that stored it
+/// records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum KeyedOutcome {
+    /// Stored in the outbox and not yet sent.
+    Pending,
+    /// The platform accepted it, at this Unix millisecond by this host's
+    /// clock.
+    Delivered { at_ms: u64 },
+    /// The platform refused it; it is not sent again.
+    Refused,
 }
 
 impl std::error::Error for NotifyError {}
@@ -140,7 +190,24 @@ struct Inner {
     /// Questions waiting for an answer, by account and direct chat; at most
     /// one per chat. They live only as long as this daemon.
     questions: HashMap<(String, String), Question>,
+    /// How each quarantined notice went, by mail chat and key: a mirror of
+    /// each mail chat's `recent_keys`, reloaded when it registers.
+    keyed: HashMap<(String, String), KeyedOutcome>,
+    /// Running email accounts, by component ID.
+    mail: HashMap<String, MailAccount>,
 }
+
+/// A running email account as the hub knows it.
+struct MailAccount {
+    id: u64,
+    /// The mail chats it reports to, in order.
+    routes: Vec<String>,
+    counts: MailCounts,
+}
+
+/// The most keyed outcomes the mirror holds for one mail chat; a mail
+/// chat keeps no more in its own state.
+const MAX_KEYED_PER_CHAT: usize = crate::state::MAX_RECENT_KEYS;
 
 /// A yes/no question to the owner, waiting in their direct chat.
 struct Question {
@@ -156,6 +223,8 @@ struct Bridge {
     id: u64,
     /// The account owner's ID, whoever holds its tool grant.
     owner: Option<String>,
+    /// What the account carries: an ordinary chat or a mail chat.
+    purpose: Purpose,
     notices: mpsc::UnboundedSender<Notice>,
     /// Owner messages claimed and not yet answered durably.
     owner_claims: usize,
@@ -255,6 +324,92 @@ impl Hub {
             .map(|bridge| bridge.owner.clone())
     }
 
+    /// `None` while no bridge of `component` runs; otherwise what it
+    /// carries.
+    pub fn purpose(&self, component: &str) -> Option<Purpose> {
+        self.inner()
+            .bridges
+            .get(component)
+            .map(|bridge| bridge.purpose)
+    }
+
+    /// Whether a running bridge of `component` is a mail chat, which never
+    /// takes SCV's notices or questions.
+    pub fn is_mail_chat(&self, component: &str) -> bool {
+        self.purpose(component) == Some(Purpose::Mail)
+    }
+
+    /// Queue a quarantined notice, whose `text` holds mail, for `to` in the
+    /// mail chat `component`'s outbox under `key`, and wait until it is
+    /// stored, as [`Hub::notify`] does. The hub refuses any account that is
+    /// not a running mail chat, and the bridge stores a key once: handing
+    /// the same key over again is acknowledged without a second copy.
+    pub async fn notify_keyed(
+        &self,
+        component: &str,
+        to: &str,
+        text: &str,
+        key: &str,
+    ) -> Result<(), NotifyError> {
+        self.queue(component, to, text, Notice::keyed(key)).await
+    }
+
+    /// How the quarantined notice `key` went in mail chat `component`;
+    /// `None` when that chat has no record of it.
+    pub fn keyed_outcome(&self, component: &str, key: &str) -> Option<KeyedOutcome> {
+        self.inner()
+            .keyed
+            .get(&(component.to_owned(), key.to_owned()))
+            .copied()
+    }
+
+    /// Announce a running email account that reports to the mail chats
+    /// `routes`. Dropping the registration withdraws it.
+    pub fn register_mail(
+        self: &Arc<Self>,
+        component: &str,
+        routes: Vec<String>,
+    ) -> MailRegistration {
+        let mut inner = self.inner();
+        inner.next += 1;
+        let id = inner.next;
+        inner.mail.insert(
+            component.to_owned(),
+            MailAccount {
+                id,
+                routes,
+                counts: MailCounts::default(),
+            },
+        );
+        MailRegistration {
+            hub: Arc::clone(self),
+            component: component.to_owned(),
+            id,
+        }
+    }
+
+    /// A running email account's counts, for daemon status.
+    pub fn mail_counts(&self, component: &str) -> Option<MailCounts> {
+        self.inner()
+            .mail
+            .get(component)
+            .map(|account| account.counts.clone())
+    }
+
+    /// The running email accounts that report to mail chat `route`, by
+    /// component ID, with their counts.
+    pub fn mail_accounts_for(&self, route: &str) -> Vec<(String, MailCounts)> {
+        let mut accounts: Vec<_> = self
+            .inner()
+            .mail
+            .iter()
+            .filter(|(_, account)| account.routes.iter().any(|r| r == route))
+            .map(|(component, account)| (component.clone(), account.counts.clone()))
+            .collect();
+        accounts.sort_by(|a, b| a.0.cmp(&b.0));
+        accounts
+    }
+
     /// The chat the account owner last wrote from, on any account.
     pub fn last_owner(&self) -> Option<LastOwner> {
         self.inner().last_owner.clone()
@@ -265,7 +420,7 @@ impl Hub {
     /// Once this returns an error, or its future is dropped, the bridge
     /// drops the notice instead of storing it late.
     pub async fn notify(&self, component: &str, to: &str, text: &str) -> Result<(), NotifyError> {
-        self.queue(component, to, text, None).await
+        self.queue(component, to, text, Notice::plain(None)).await
     }
 
     /// Queue the text of question `id`, held with [`Hub::ask`], as
@@ -279,7 +434,8 @@ impl Hub {
         to: &str,
         text: &str,
     ) -> Result<(), NotifyError> {
-        self.queue(component, to, text, Some(id)).await
+        self.queue(component, to, text, Notice::plain(Some(id)))
+            .await
     }
 
     async fn queue(
@@ -287,13 +443,18 @@ impl Hub {
         component: &str,
         to: &str,
         text: &str,
-        question: Option<&str>,
+        kind: NoticeKind,
     ) -> Result<(), NotifyError> {
         let (stored, done) = oneshot::channel();
+        let (question, key) = match kind {
+            NoticeKind::Plain(question) => (question, None),
+            NoticeKind::Keyed(key) => (None, Some(key)),
+        };
         let notice = Notice {
             to: to.to_owned(),
             text: text.to_owned(),
-            question: question.map(str::to_owned),
+            question,
+            key,
             stored,
         };
         {
@@ -302,6 +463,11 @@ impl Hub {
                 .bridges
                 .get(component)
                 .ok_or(NotifyError::NotRunning)?;
+            // Mail goes only to mail chats, and SCV's notices and questions
+            // never do: a mail chat carries nothing else.
+            if (bridge.purpose == Purpose::Mail) != notice.key.is_some() {
+                return Err(NotifyError::WrongPurpose);
+            }
             bridge
                 .notices
                 .send(notice)
@@ -420,9 +586,14 @@ impl Link {
         if first { hub.restart() } else { None }
     }
 
-    /// Announce a running bridge, which then stores each [`Notice`] it
-    /// receives. Dropping the registration withdraws it.
+    /// Announce a running ordinary chat's bridge; see [`Link::register_as`].
     pub fn register(&self) -> (Registration, mpsc::UnboundedReceiver<Notice>) {
+        self.register_as(Purpose::Chat)
+    }
+
+    /// Announce a running bridge carrying `purpose`, which then stores each
+    /// [`Notice`] it receives. Dropping the registration withdraws it.
+    pub fn register_as(&self, purpose: Purpose) -> (Registration, mpsc::UnboundedReceiver<Notice>) {
         let (notices, received) = mpsc::unbounded_channel();
         let Some(hub) = &self.hub else {
             // Nothing sends: keep the sender so the receiver never closes.
@@ -445,6 +616,7 @@ impl Link {
                 Bridge {
                     id,
                     owner: self.owner.clone(),
+                    purpose,
                     notices,
                     owner_claims: 0,
                 },
@@ -463,6 +635,17 @@ impl Link {
     }
 }
 
+#[cfg(feature = "email")]
+impl Link {
+    /// Announce this email account, which reports to the mail chats
+    /// `routes`; `None` for a link to no daemon.
+    pub(crate) fn register_mail(&self, routes: Vec<String>) -> Option<MailRegistration> {
+        self.hub
+            .as_ref()
+            .map(|hub| hub.register_mail(&self.component, routes))
+    }
+}
+
 /// A running bridge's entry in the hub.
 pub struct Registration {
     hub: Option<Arc<Hub>>,
@@ -472,6 +655,55 @@ pub struct Registration {
 }
 
 impl Registration {
+    /// Load this mail chat's record of its keyed notices into the hub's
+    /// mirror, replacing whatever the mirror held for it.
+    pub(crate) fn load_keyed(&self, keys: impl IntoIterator<Item = (String, KeyedOutcome)>) {
+        let Some(hub) = &self.hub else { return };
+        let mut inner = hub.inner();
+        inner
+            .keyed
+            .retain(|(component, _), _| component != &self.component);
+        for (key, outcome) in keys.into_iter().take(MAX_KEYED_PER_CHAT) {
+            inner.keyed.insert((self.component.clone(), key), outcome);
+        }
+    }
+
+    /// Record how this mail chat's keyed notice `key` went.
+    pub(crate) fn record_keyed(&self, key: &str, outcome: KeyedOutcome) {
+        let Some(hub) = &self.hub else { return };
+        let mut inner = hub.inner();
+        let held = inner
+            .keyed
+            .keys()
+            .filter(|(component, _)| component == &self.component)
+            .count();
+        let entry = (self.component.clone(), key.to_owned());
+        if held >= MAX_KEYED_PER_CHAT && !inner.keyed.contains_key(&entry) {
+            // Past its bound the chat's own record is the authority; the
+            // email account then treats the key as unknown and hands over
+            // again, which the chat acknowledges without a second copy.
+            return;
+        }
+        inner.keyed.insert(entry, outcome);
+    }
+
+    /// Forget keyed notices this mail chat no longer remembers.
+    pub(crate) fn forget_keyed(&self, keep: &dyn Fn(&str) -> bool) {
+        let Some(hub) = &self.hub else { return };
+        hub.inner()
+            .keyed
+            .retain(|(component, key), _| component != &self.component || keep(key));
+    }
+
+    /// The running email accounts that report to this mail chat, with their
+    /// counts.
+    pub(crate) fn mail_accounts(&self) -> Vec<(String, MailCounts)> {
+        self.hub
+            .as_ref()
+            .map(|hub| hub.mail_accounts_for(&self.component))
+            .unwrap_or_default()
+    }
+
     /// Whether the daemon found a disk holding chat files nearly full.
     pub(crate) fn low_disk(&self) -> bool {
         self.hub.as_ref().is_some_and(|hub| hub.low_disk())
@@ -585,6 +817,42 @@ impl Drop for Registration {
             {
                 inner.bridges.remove(&self.component);
             }
+        }
+    }
+}
+
+/// A running email account's entry in the hub.
+pub struct MailRegistration {
+    hub: Arc<Hub>,
+    component: String,
+    id: u64,
+}
+
+impl MailRegistration {
+    /// Publish the account's current counts.
+    pub fn set_counts(&self, counts: MailCounts) {
+        if let Some(account) = self.hub.inner().mail.get_mut(&self.component)
+            && account.id == self.id
+        {
+            account.counts = counts;
+        }
+    }
+
+    /// The hub this account reports through.
+    pub fn hub(&self) -> &Arc<Hub> {
+        &self.hub
+    }
+}
+
+impl Drop for MailRegistration {
+    fn drop(&mut self) {
+        let mut inner = self.hub.inner();
+        if inner
+            .mail
+            .get(&self.component)
+            .is_some_and(|account| account.id == self.id)
+        {
+            inner.mail.remove(&self.component);
         }
     }
 }

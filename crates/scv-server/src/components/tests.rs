@@ -277,3 +277,61 @@ async fn a_cancelled_channel_account_stops_before_touching_anything() {
     account.run(cancellation, health.clone()).await.unwrap();
     assert_eq!(health.snapshot().state, ComponentState::Starting);
 }
+
+#[test]
+fn a_mailbox_and_a_mail_chat_never_take_tools_or_other_senders() {
+    use scv_protocol::Purpose;
+    let settings = |remote_tools, senders, purpose| AccountSettings {
+        remote_tools,
+        senders,
+        purpose,
+        ..Default::default()
+    };
+    let chat = settings(RemoteTools::Owner, Senders::Anyone, Purpose::Chat);
+    assert_eq!(refusal(ChannelKind::Feishu, &chat), None);
+    for (remote_tools, senders) in [
+        (RemoteTools::Owner, Senders::Owner),
+        (RemoteTools::None, Senders::Anyone),
+    ] {
+        assert!(
+            refusal(
+                ChannelKind::Feishu,
+                &settings(remote_tools, senders, Purpose::Mail)
+            )
+            .is_some()
+        );
+        assert!(
+            refusal(
+                ChannelKind::Email,
+                &settings(remote_tools, senders, Purpose::Chat)
+            )
+            .is_some()
+        );
+    }
+    let quiet = settings(RemoteTools::None, Senders::Owner, Purpose::Mail);
+    assert_eq!(refusal(ChannelKind::Feishu, &quiet), None);
+    assert!(refusal(ChannelKind::Email, &quiet).is_some());
+    assert_eq!(
+        refusal(ChannelKind::Email, &AccountSettings::default()),
+        None
+    );
+}
+
+#[tokio::test]
+async fn status_shows_an_email_accounts_counts_and_nothing_else() {
+    let hub = scv_channels::hub::Hub::new(None);
+    let components = Components::with_hub(
+        crate::test_support::test_instance("/unused"),
+        std::path::PathBuf::from("/"),
+        Arc::clone(&hub),
+    );
+    let registration = hub.register_mail("email:default", vec!["feishu:mail".into()]);
+    registration.set_counts(scv_protocol::MailCounts {
+        queued: 3,
+        ..Default::default()
+    });
+    assert_eq!(hub.mail_counts("email:default").unwrap().queued, 3);
+    drop(registration);
+    assert_eq!(hub.mail_counts("email:default"), None);
+    assert!(components.status().components.is_empty());
+}

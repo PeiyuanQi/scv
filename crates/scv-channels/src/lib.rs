@@ -1,5 +1,7 @@
 //! SCV's chat channels: WeChat ([`wechat`], feature `wechat`) and Feishu or
-//! Lark ([`feishu`], feature `feishu`), on the bridge they share.
+//! Lark ([`feishu`], feature `feishu`), on the bridge they share, and read-only
+//! mail triage ([`email`], feature `email`), which reports only to chat
+//! accounts set apart as mail chats.
 //!
 //! The bridge claims inbound messages durably, runs each conversation's
 //! turns in order on its own SCV daemon session, and delivers replies with
@@ -7,14 +9,14 @@
 //! receiving messages and sending them. The daemon runs an account with
 //! [`run`] and manages saved accounts through [`ChannelKind::accounts`].
 
-// Without a channel the bridge has no transport to run, and the channel
-// dispatch has no arms that use their inputs.
+// Without a chat channel the bridge has no transport to run, and without
+// any channel the dispatch has no arms that use their inputs.
 #![cfg_attr(
     not(any(feature = "wechat", feature = "feishu")),
     allow(
         dead_code,
         unused_variables,
-        reason = "a build without channels only checks the shared code"
+        reason = "a build without chat channels only checks the shared code"
     )
 )]
 
@@ -39,10 +41,13 @@ use intake::{Conversation, Verdict};
 
 mod channel;
 mod chatlog;
+#[cfg(feature = "email")]
+pub mod email;
 #[cfg(feature = "feishu")]
 pub mod feishu;
 pub mod hub;
 mod intake;
+mod mail_chat;
 pub mod media;
 mod retry;
 mod session;
@@ -269,6 +274,10 @@ pub(crate) struct Message {
     /// clock; `None` when the platform did not say. Only a message sent after
     /// a question reached the chat can answer it.
     pub(crate) sent_ms: Option<u64>,
+    /// It quotes or forwards another message (WeChat `ref_msg`, Feishu
+    /// `parent_id` or a forwarded bundle), whose text a transport may have
+    /// put into `text`. A mail chat never reads such a message as a command.
+    pub(crate) quoted: bool,
 }
 
 impl Message {
@@ -290,6 +299,7 @@ impl Message {
             media: Vec::new(),
             reference: None,
             sent_ms: None,
+            quoted: false,
         }
     }
 }
@@ -449,6 +459,9 @@ pub(crate) struct BridgeRun<'a> {
     pub(crate) tool_owner: Option<ToolOwner>,
     /// Whose messages the account answers; the rest are only marked seen.
     pub(crate) senders: state::Senders,
+    /// What the account carries: model conversations, or only mail reports
+    /// (a mail chat, which runs no turn and keeps no chat log).
+    pub(crate) purpose: state::Purpose,
     /// Where received and outgoing files live and how large they may be.
     pub(crate) media: MediaOptions,
     /// Where the owner's direct chat is logged.
@@ -482,6 +495,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         owner,
         tool_owner,
         senders,
+        purpose,
         media,
         log,
         link,
@@ -489,7 +503,20 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
     } = run;
     let _lock = store.lock(account)?;
     let mut state = store.bind_state(account, running)?;
-    let log = owner.and_then(|owner| chatlog::ChatLog::new(log, owner));
+    let mail = purpose == state::Purpose::Mail;
+    if mail {
+        prepare_mail_chat(store, account, &mut state, &log.root)?;
+    } else if state.mail_chat {
+        bail!(
+            "This chat has carried SCV mail, so a model must not answer in it. Log out before \
+             using the app as an ordinary chat."
+        );
+    }
+    // A mail chat is never logged: its notices hold mail, which must never
+    // reach a session that could reload the log.
+    let log = owner
+        .filter(|_| !mail)
+        .and_then(|owner| chatlog::ChatLog::new(log, owner));
     let recovered = recover_interrupted_after(
         store,
         account,
@@ -504,7 +531,15 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
             }
         }
     }
-    let (registration, notices) = link.register();
+    let (registration, notices) = link.register_as(purpose);
+    if mail {
+        registration.load_keyed(
+            state
+                .recent_keys
+                .iter()
+                .map(|recent| (recent.key.clone(), recent.outcome)),
+        );
+    }
     let bridge = Bridge {
         transport,
         account,
@@ -515,6 +550,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         owner,
         tool_owner: tool_owner.as_ref().map(|owner| owner.user_id.as_str()),
         senders,
+        mail,
         registration,
         media: &media,
         log,
@@ -546,6 +582,51 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
             Some(result) = conversations.next(), if !conversations.is_empty() => result?,
         }
     }
+}
+
+/// Make ready to run `account` as a mail chat. Only an account that has
+/// never run as an ordinary chat may become one: its state must hold no
+/// position, message, reply, claim, or job, and it must have no chat log,
+/// since any of these could put ordinary chat text into the mail chat. An
+/// account that fails is refused and left as it is, for the person to log
+/// out or clear; otherwise it is marked as a mail chat for good, until
+/// logout.
+fn prepare_mail_chat<C: state::Credentials>(
+    store: &state::Store<C>,
+    account: &str,
+    state: &mut state::BridgeState,
+    history: &Path,
+) -> Result<()> {
+    if state.mail_chat {
+        return Ok(());
+    }
+    if state.ordinary() {
+        bail!(
+            "This account has run as an ordinary chat, so it cannot become a mail chat. Sign in \
+             a new app for mail, or log this account out and sign it in again first."
+        );
+    }
+    // Only a log that is not there is no log; one that cannot be read
+    // might hold anything.
+    let logged = match std::fs::read_dir(history) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "could not check {} for a chat log, so this account cannot become a mail chat",
+                history.display()
+            )));
+        }
+    };
+    if logged {
+        bail!(
+            "This account has a chat log, so it cannot become a mail chat. Sign in a new app for \
+             mail, or remove {} first.",
+            history.display()
+        );
+    }
+    state.mail_chat = true;
+    store.save_state(account, state)
 }
 
 /// One accepted message, claimed durably before it is queued.
@@ -618,6 +699,8 @@ struct Bridge<'a, C, T> {
     tool_owner: Option<&'a str>,
     /// Whose messages the account answers.
     senders: state::Senders,
+    /// A mail chat: no turns, no log, only mail notices and fixed replies.
+    mail: bool,
     registration: hub::Registration,
     media: &'a MediaOptions,
     /// The owner's direct chat log; `None` when the account names no owner.
@@ -756,6 +839,9 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         conversations: &mut HashMap<String, Conversation>,
         start: &Starter,
     ) -> Result<()> {
+        if self.mail {
+            return self.accept_mail(inbound).await;
+        }
         let id = inbound.id();
         let mut state = self.state.lock().await;
         // Only the owner's direct chat can hold a question, and only once
@@ -896,6 +982,52 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 );
             }
         }
+    }
+
+    /// Answer a message in a mail chat: the owner's direct messages get one
+    /// of SCV's fixed replies ([`mail_chat`]); everything else is only
+    /// marked seen. No session, turn, download, or chat log is involved, and
+    /// the owner writing here never makes it their last chat.
+    async fn accept_mail(&self, inbound: &Inbound) -> Result<()> {
+        let id = inbound.id();
+        let mut state = self.state.lock().await;
+        if state.seen.iter().any(|seen| seen == id)
+            || state.pending.iter().any(|pending| pending.message_id == id)
+        {
+            return Ok(());
+        }
+        let message = match inbound {
+            Inbound::Text(message)
+                if message.group.is_none() && self.owner == Some(message.sender.as_str()) =>
+            {
+                message
+            }
+            Inbound::Text(_) => {
+                tracing::info!("a mail chat ignored a message from someone other than its owner");
+                mark_seen(&mut state, id);
+                return self.save(&state).await;
+            }
+            Inbound::Ignored { .. } => {
+                mark_seen(&mut state, id);
+                return self.save(&state).await;
+            }
+        };
+        let command = mail_chat::command(message);
+        let text = mail_chat::reply(command, &self.registration.mail_accounts(), unix_now());
+        let mut reply = new_pending(
+            id,
+            &message.sender,
+            &message.reply_to,
+            &self.system(&text),
+            MAX_REPLY_BYTES,
+        );
+        reply.key.clone_from(&message.sender);
+        reply.transient = true;
+        state.pending.push(reply);
+        self.save(&state).await?;
+        drop(state);
+        self.replies.notify_one();
+        Ok(())
     }
 
     /// Answer the owner's question with `sender`'s message and queue the
@@ -1515,6 +1647,15 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             tracing::warn!("dropped a notice the daemon stopped waiting for");
             return Ok(());
         }
+        // The hub already sends each chat only its own kind of notice; this
+        // holds the line even if it did not.
+        if self.mail != notice.key.is_some() {
+            tracing::warn!("refused a notice meant for another kind of chat");
+            return Ok(());
+        }
+        if let Some(key) = notice.key.clone() {
+            return self.store_mail_notice(state, notice, key).await;
+        }
         if let Some(log) = self.log_for(&notice.to) {
             log.system(&notice.text);
         }
@@ -1527,6 +1668,47 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         pending.question.clone_from(&notice.question);
         state.pending.push(pending);
         self.save(&state).await?;
+        drop(state);
+        self.replies.notify_one();
+        notice.stored();
+        Ok(())
+    }
+
+    /// Store a quarantined mail notice under `key`, once: a key this chat
+    /// already holds or delivered is acknowledged without a second copy. Its
+    /// text goes out as the email account wrote it, never marked as SCV's
+    /// words, and a refused one is dropped rather than held.
+    async fn store_mail_notice(
+        &self,
+        mut state: tokio::sync::MutexGuard<'_, state::BridgeState>,
+        notice: hub::Notice,
+        key: String,
+    ) -> Result<()> {
+        let now = unix_now();
+        let known = state.recent_keys.iter().any(|recent| recent.key == key)
+            || state
+                .pending
+                .iter()
+                .any(|pending| pending.notice_key.as_deref() == Some(key.as_str()));
+        if !known {
+            let mut pending = new_pending("", &notice.to, "", &notice.text, MAX_REPLY_BYTES);
+            pending.key.clone_from(&notice.to);
+            pending.transient = true;
+            pending.notice_key = Some(key.clone());
+            state.pending.push(pending);
+            state.recent_keys.push(state::RecentKey {
+                key: key.clone(),
+                outcome: hub::KeyedOutcome::Pending,
+                stored_at: now,
+            });
+            state.prune_recent_keys(now);
+            self.save(&state).await?;
+            self.registration
+                .record_keyed(&key, hub::KeyedOutcome::Pending);
+            let kept: std::collections::HashSet<String> =
+                state.recent_keys.iter().map(|r| r.key.clone()).collect();
+            self.registration.forget_keyed(&|key| kept.contains(key));
+        }
         drop(state);
         self.replies.notify_one();
         notice.stored();
@@ -1670,6 +1852,19 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         if !pending.message_id.is_empty() {
             mark_seen(&mut state, &pending.message_id);
         }
+        let keyed = pending.notice_key.as_ref().map(|key| {
+            let outcome = if refused {
+                hub::KeyedOutcome::Refused
+            } else {
+                hub::KeyedOutcome::Delivered {
+                    at_ms: hub::unix_ms(),
+                }
+            };
+            if let Some(recent) = state.recent_keys.iter_mut().find(|r| &r.key == key) {
+                recent.outcome = outcome;
+            }
+            (key, outcome)
+        });
         if refused {
             if !pending.files.is_empty() {
                 tracing::warn!(
@@ -1681,6 +1876,12 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         }
         self.save(&state).await?;
         drop(state);
+        if let Some((key, outcome)) = keyed {
+            if refused {
+                tracing::warn!("the platform refused a mail notice");
+            }
+            self.registration.record_keyed(key, outcome);
+        }
         for file in &pending.files {
             let _ = std::fs::remove_file(&file.path);
         }

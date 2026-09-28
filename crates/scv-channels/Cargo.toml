@@ -4,30 +4,35 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Chat channels for the SCV daemon: the shared bridge and the WeChat and Feishu/Lark transports"
+description = "Chat and mail channels for the SCV daemon: the shared bridge, the WeChat and Feishu/Lark transports, and read-only mail triage"
 repository.workspace = true
 
 [lints]
 workspace = true
 
 [features]
-default = ["wechat", "feishu"]
+default = ["wechat", "feishu", "email"]
 # WeChat through a ClawBot (iLink) bot.
 wechat = ["dep:aes", "dep:md-5", "dep:base64", "dep:reqwest"]
 # Feishu and Lark through a bot app on the event long connection.
 feishu = ["dep:prost", "dep:qrcode", "dep:reqwest", "dep:tokio-tungstenite", "futures-util/sink"]
+# Read-only mail triage: an IMAP mailbox reported to a mail chat.
+email = ["dep:encoding_rs", "dep:html2text", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots", "dep:base64"]
 
 [dependencies]
 aes = { workspace = true, optional = true }
 anyhow.workspace = true
 async-trait.workspace = true
 base64 = { workspace = true, optional = true }
+encoding_rs = { workspace = true, optional = true }
 futures-util.workspace = true
+html2text = { workspace = true, optional = true }
 libc.workspace = true
 md-5 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 qrcode = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 scv-client.workspace = true
 scv-protocol.workspace = true
 serde.workspace = true
@@ -35,11 +40,13 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+webpki-roots = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

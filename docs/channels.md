@@ -8,12 +8,17 @@ through its ClawBot iLink HTTP API, and Feishu with its international edition
 Lark, through a bot app and Feishu's event long connection (`lark` is accepted
 wherever `feishu` is).
 
+The `email` channel is different: it reads a mailbox, answers nobody, and
+reports what arrives to a *mail chat*, a Feishu or WeChat account set apart
+with `purpose = "mail"` that no model ever answers in (see
+[Mail chats](#mail-chats) and [Email](#email)).
+
 Each account runs as a supervised component inside the single SCV daemon,
 which remains authoritative for sessions, provider selection, policy, and turn
 execution. `scv-channels` holds the bridge every channel shares and, in a
 module behind a Cargo feature of the same name, each channel's transport
-(`wechat`, `feishu`; both on by default), which supplies only receiving and
-sending. `scv-server` runs accounts through `scv_channels::run`; the crate
+(`wechat`, `feishu`) and read-only mail triage (`email`), all on by default;
+a transport supplies only receiving and sending. `scv-server` runs accounts through `scv_channels::run`; the crate
 uses `scv-client` and `scv-protocol` and never depends on the server crate.
 
 ## User workflow
@@ -22,7 +27,9 @@ uses `scv-client` and `scv-protocol` and never depends on the server crate.
 scv channels login wechat [--account NAME] [--login-url URL]
 scv channels login feishu|lark [--account NAME]
 scv channels login feishu|lark --app-id CLI_ID [--owner-open-id OPEN_ID] [--account NAME]
-scv channels run <channel> --workspace PATH [--account NAME] [--remote-tools none|owner] [--senders owner|anyone]
+scv channels login email --imap-host HOST --user NAME [--imap-port 993] [--account NAME]
+scv channels run <channel> --workspace PATH [--account NAME] [--remote-tools none|owner] [--senders owner|anyone] [--purpose chat|mail]
+scv channels run email [--account NAME]
 scv channels stop <channel> [--account NAME]
 scv channels status [<channel>] [--account NAME]
 scv channels logout <channel> [--account NAME]
@@ -32,7 +39,9 @@ scv reload
 `--account` defaults to `default`, except for `status`, which lists every
 channel and account unless narrowed. `--login-url` is WeChat's iLink login
 origin (default `https://ilinkai.weixin.qq.com`); `--app-id` and
-`--owner-open-id` are Feishu's, and each channel refuses the other's options.
+`--owner-open-id` are Feishu's; `--imap-host`, `--imap-port`, and `--user`
+are email's; and each channel refuses the others' options. `--purpose` is
+for chat accounts only.
 Daemon status names each account `<channel>:<account>`, such as
 `wechat:default` or `feishu:default`, with a `channel` field, the bot's
 identity in `bot_id` (the iLink bot, or the Feishu app ID), and the owner in
@@ -908,3 +917,243 @@ sign-in, the long connection, catch-up, message parsing, resources, uploads,
 and sending. `scv-server::components` owns lifecycle and
 health. Account selection uses `--account` (default `default`), not project
 configuration. The [quality contract](quality.md) defines local-only verification.
+
+## Mail chats
+
+A mail chat is a chat account whose `purpose` is `"mail"`: the only place
+email accounts report to, and one where no model ever answers. Set it with
+`scv channels run feishu --account mail --purpose mail` (or
+`purpose = "mail"` in the account's table). Use an account of its own, such as
+a second Feishu app signed in with `scv channels login feishu --account mail`:
+quoting a mail report in a chat a model reads would put the mail's text in
+front of that model, so reports never go to an ordinary chat.
+
+A mail chat:
+
+- never starts a daemon session or a model turn, and holds no tools: the
+  daemon and configuration validation refuse `remote_tools = "owner"` and
+  `senders = "anyone"` on it;
+- answers its owner's direct messages with SCV's fixed replies only.
+  `mail status` lists each running email account that reports there, as
+  counts (mail seen, triaged, and reported today, reports waiting, model
+  tokens used against the daily budget, and the last check). `mail help`, and
+  anything that is not a command, gets the help reply. The mail design's
+  action commands (`approve`, `deny`, `批准`, `拒绝`, and `mail reply`,
+  `trash`, `spam`, `compose`, `revise`) are recognised only to answer "Mail
+  actions are not available in this release; nothing was done." A message
+  that quotes or forwards another (WeChat `ref_msg`, Feishu `parent_id` or a
+  forwarded bundle) or carries files is never read as a command;
+- drops everyone else's messages, and group messages, the owner's included,
+  as an owner-only account does;
+- is never chat-logged, so mail never reaches `history/`;
+- starts only on an account that has never run as an ordinary chat. An
+  account whose delivery state holds anything of one (a transport position,
+  messages seen, replies or notices to deliver, interrupted turns, or
+  background jobs to report) refuses to start as a mail chat until it is
+  logged out and signed in again, and so does one with a chat log, or whose
+  chat log cannot be read, until that log is removed. A new app signed in
+  for mail avoids both. Nothing is changed or sent when it refuses;
+- is never the owner's last chat, a `[notify].owner` target (validation
+  refuses one), or asked a `scv confirm` question: the hub refuses to queue
+  SCV's own notices or questions to it;
+- stores only *quarantined* notices from email accounts, each under a key
+  that it stores once: handing the same key over again, as after a lost
+  acknowledgement, is acknowledged without a second copy. They are sent as
+  written, never marked as SCV's words, and never held for a later reply if
+  the platform refuses them. The account keeps its last 512 keys for a week
+  (`recent_keys` in its delivery state) with how each went (pending,
+  delivered, or refused), and the daemon's hub mirrors that record so the
+  email account learns of refusals. An ordinary chat refuses quarantined
+  notices, whatever asked.
+
+On its first run as a mail chat the account's delivery state records
+`mail_chat`; from then on it refuses to start as an ordinary chat ("This chat
+has carried SCV mail, so a model must not answer in it. Log out before using
+the app as an ordinary chat."). Logout removes that marker with the rest of
+the delivery state. The platform keeps the chat's history, so sign in a new
+app before using one that carried mail as an ordinary chat.
+
+## Email
+
+An email account reads one mailbox and reports what arrives to mail chats. It
+is read-only: this release has no code that writes to a mailbox or sends
+mail. Saving drafts, replying, sending, and moving mail to Trash or Spam are
+not available, and a `mail.actions` table is refused.
+
+**Sign-in.** `scv channels login email --imap-host imap.qq.com --user
+me@qq.com` reads the password or, as QQ, Foxmail, and 163 require, the
+authorization code from a hidden prompt or stdin, never an argument. It
+connects over implicit TLS (port 993 unless `--imap-port` says otherwise; no
+plaintext and no STARTTLS), logs in, sends `ID` when the server offers it (163
+requires it), opens `INBOX` with `EXAMINE`, logs out, and only then saves
+`credentials/email/<account>.json` (mode `0600`). The credential fingerprint
+is the server, port, and user name: signing in again with a new password or
+code keeps the account's state, and another mailbox needs a logout. Status
+shows the server as the account's `bot_id`, never the user name. A refused
+sign-in names only the server's status and a standard IMAP response code
+(such as `NO [AUTHENTICATIONFAILED]`) with SCV's own advice; the server's
+text is never shown or logged, since a hostile server could put the password
+it was just sent in it. No other error from the server carries its text
+either.
+
+**Settings.** `[channels.email.<account>]` holds `enabled` and the `mail`
+table, which needs at least `notify.route`, the mail chats to report to (see
+[configuration](configuration.md#mail-accounts)). The daemon's configuration
+keeps `mail` opaque, so a mistake in it fails only that account, when it
+starts, with the error in its status and in `scv config show`. An email
+account refuses `remote_tools`, `senders`, `workspace`, and `purpose`.
+
+**Reading.** The account's IMAP client can only read. It offers no command
+that changes a mailbox, and under it a guard checks every command whole,
+before any byte is written, against a read-only allowlist: `CAPABILITY`,
+`ID`, `LOGIN` or `AUTHENTICATE PLAIN`, `EXAMINE`, `LIST`, `STATUS`, `UID
+SEARCH`, `UID FETCH` of `UID`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`,
+`ENVELOPE`, `BODYSTRUCTURE`, `RFC822.HEADER`, and `BODY.PEEK[…]`, `NOOP`, and
+`LOGOUT`. Content is read only with `BODY.PEEK`, which sets no flag. Every
+`poll_seconds` (60) the account opens the mailbox again with `EXAMINE` and
+lists UIDs past its cursor. The first run starts from the current position
+without reading older mail. It claims at most 64 messages at a time, in the
+same state write that moves the cursor past them, so a crash repeats work but
+never skips a message. When the server resets the mailbox's numbering
+(`UIDVALIDITY` changes), the account lists the last `catchup_hours` (24) of
+mail again, skips what it had already decided, counts what did not fit, and
+says so once that day. A lost connection is retried with backoff from 1 to 60
+seconds without dropping claims.
+
+**Deciding.** Each claimed message climbs a ladder and stops at the first
+rung that decides it, so tokens are spent only when cheaper rungs pass:
+
+1. Its metadata (sender, recipients, subject, size, the list and automation
+   headers, and its structure, never its body) is fetched, within bounds
+   (below). A message that arrived more than `catchup_hours` before SCV saw
+   it is counted, and so, with `dedupe_message_id`, is one decided in the
+   last week that is listed again: the same mailbox, `Message-ID` (or none),
+   received time, size, sender address, and subject. A `Message-ID` alone
+   never makes two messages one, since a sender chooses it: a message that
+   reuses the `Message-ID` of one decided lately is decided on its own, and
+   the reuse is logged by message number.
+2. The owner's `rules` apply in order, then the built-in ones: bulk and
+   automated mail (a `List-Id` or `List-Unsubscribe`, `Precedence: bulk`,
+   `list`, or `junk`, or `Auto-Submitted` other than `no`) is counted; mail
+   from a no-reply or system sender, or with an empty `Return-Path`, is
+   reported by its headers; everything else is triaged. A rule's action is
+   `count`, `header`, `triage_meta` (a model sees headers and attachment names
+   only), or `triage`, and it may mark matching mail urgent.
+3. Triage runs only within the budget: at most `max_triage_per_hour` (30)
+   turns in any hour and `max_tokens_per_day` (150000) tokens in the owner's
+   local day, estimated before the turn at three bytes a token plus 400 for
+   the answer and charged afterwards with what the provider reports. Past
+   either limit mail is reported by its headers, and the mail chat is told
+   once that day. A budget of 0 turns the model off.
+4. For `triage`, one text part is fetched: the first plain-text part that is
+   not an attachment, or else the first HTML one, and at most
+   `max_fetch_kib` (64) of it. Attachments are never downloaded; they are
+   listed by name, type, and size. The text is decoded (transfer encoding and
+   charset, GBK and Big5 included), HTML is turned into text with each link's
+   real target shown, every URL becomes `[link: <host>]`, quoted history and
+   signatures are removed, and the result is cut at a line to `max_body_kib`
+   (8). With `send_body = false` no body is fetched.
+5. One fresh daemon session per message, closed after one turn: tool-free,
+   with no channel, started in the account's empty private directory, on
+   `triage_model` or the daemon's default, and with a fixed frame as its
+   whole system prompt, so neither `agent.system_prompt` nor any skill
+   reaches it. The frame carries the owner's `instructions` and tells the
+   model that the mail between two delimiter lines, which carry a random
+   nonce, is untrusted. The model answers with one JSON object, `notify`,
+   `urgent`, and up to five `summary` lines; code reads those three fields and
+   ignores the rest, so the model chooses no target, recipient, or action.
+   `notify: false` counts the message. Any tool or approval event ends the
+   turn. A turn that fails, times out (120 seconds), or answers unreadably
+   still reports the message by its headers, with a note saying why, and so
+   does one whose frame and message together would pass 128 KiB, which is
+   never started.
+
+Metadata is bounded as it is read, whatever the message's headers hold:
+only the first 16 KiB of a header value is decoded; a subject keeps 1 KiB, a
+display name, attachment name, or `List-Id` 256 bytes, an address 320, and a
+MIME type or other label 128, each ending in `…` when cut; To and Cc keep 64
+addresses each, and 16 attachments are listed.
+
+A message whose decision was interrupted twice is reported by its headers;
+after four attempts it is counted as unreadable.
+
+**Reporting.** Reports wait in the account's queue until a pure function of
+the queue, the send log, the settings, and the clock decides a message is
+due. That happens when no new report arrived for `settle_seconds` (120), when
+the oldest waited `max_delay_seconds` (900), or when `max_items` (10) are
+waiting. One message holds at most `max_items` reports and `max_message_kib`
+(12) of text. Urgent mail goes at once, the other reports riding along,
+within `max_urgent_per_hour` (4); beyond that it waits like the rest. Digests
+are limited to `max_messages_per_hour` (6) and, with urgent ones,
+`max_messages_per_day` (48), all as rolling windows over a durable send log.
+When a limit holds reports back, the mail chat is told once a local day until
+when. During `quiet_hours` only urgent mail goes, unless `quiet_urgent =
+"hold"`. Times and local days use `utc_offset`, or the host's time zone when
+it is empty.
+
+A digest looks like this:
+
+```text
+Mail · default · 2 new (1 urgent), 5 skipped · 09:12–09:31 (+08:00)
+
+! alice@example.com · 09:12 (sender not verified)
+│ From: Alice Chen
+│ Subject: Contract renewal due Friday
+│ Asks you to sign the renewal by Fri 3 Oct; amount ¥12,000.
+│ Attachment: contract.pdf (application/pdf, 120 KiB)
+  Replies would go to bob@example.net, not the sender.
+
+news@example.com · 09:31 (sender not verified)
+│ Subject: Weekly digest
+  (not triaged: today's model budget is used up)
+
+1 earlier report could not be delivered.
+```
+
+Lines that start with `│ ` hold what a sender or a model wrote: display
+names, subjects, summary lines, and attachment names, sanitized (control,
+bidi, zero-width, and tag characters removed; line breaks split into more
+`│ ` lines) with links replaced by their hosts. SCV's own lines hold only
+its words, times, counts, and addresses that are plain `local@domain`, so no
+mail can pass for SCV's line or a command. The body itself is never reported.
+
+The account refuses to start while a route in `notify.route` is not
+configured as a mail chat, and checks again before every message: it hands
+each one to the first route that is a running mail chat with an owner, and a
+route running as an ordinary chat is skipped and logged as an error. Each message has a key made of a random epoch
+kept with the account's state and a random ID, so a key never repeats, even
+after a logout. If no route stores it within 30 seconds, and the route has no
+record of it either, it is tried again from the first route after 30 seconds,
+doubling to 30 minutes. A message no route took within `give_up_hours` (72)
+is given up, and its reports are counted as undelivered in the next digest,
+as are messages the platform refused.
+
+**State and cleanup.** The account's state,
+`state/channels/email/<account>.json` (mode `0600`), holds its cursor,
+claims, the identities of mail decided in the last week (at most 1024), the
+queue, the message being handed over, the send log, and today's counts. It
+holds mail text only in queued reports (at most 1.5 KiB each and
+`max_queue`, 256, of them, the oldest collapsing into a count beyond that)
+and in the message being handed over; the mail chat's outbox holds that
+message until it is delivered. Every change is one atomic write, the file is
+kept within `retention.max_state_kib` (2048) by trimming the identity list and
+collapsing old reports, and a state written by a newer SCV is refused rather
+than silently truncated. Writes run off the daemon's async threads, and no
+lock a reader needs is held while they do, so a slow disk delays only the
+next change; each write holds the account's run lock until it lands, so a
+restarted account starts only after its last write. `state/mail/<account>/empty/` (mode `0700`) is the
+triage sessions' working directory. A janitor runs at start and every
+`retention.sweep_minutes` (60): it prunes the lists by age and count, empties
+that directory, removes temporary files older than an hour that a crash left
+(in `state/channels/email/`, which the accounts share, only its own: a state
+write's temporary file is named `.<account>.json.<random>.tmp`), and, while
+the disk holding the state has less than `retention.min_free_mib` (64) free
+or its free space cannot be told, has new mail counted instead of reported,
+saying so once a day.
+Mail being decided lives only in memory, for that one turn.
+
+The account logs counts, message numbers, and IMAP verbs, never an address,
+subject, body, or summary. Daemon status and `scv channels status` show
+counts only (`mail` in the component's status). `scv channels logout email`
+removes the credentials, the state file, `state/mail/<account>/`, and the
+account's table.

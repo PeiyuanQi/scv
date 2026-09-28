@@ -26,7 +26,7 @@ pub use client::{ChatLog, ClientMessage};
 pub use daemon::{
     ComponentHealth, ComponentState, ConfirmInfo, ConfirmState, DEFAULT_CONFIRM_SECONDS,
     DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary, MAX_CONFIRM_SECONDS,
-    RemoteTools, RestartInfo, Senders,
+    MailCounts, Purpose, RemoteTools, RestartInfo, Senders,
 };
 pub use error::{ErrorCode, ToolErrorKind};
 pub use frame::{Frame, FrameDecoder, Overflow, Step, encode_frame, trim_line};
@@ -37,6 +37,8 @@ pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The longest `session.start` channel name.
 pub const MAX_CHANNEL_NAME_BYTES: usize = 32;
+/// Longest `session.start` `system_prompt`, in bytes.
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 16 * 1024;
 /// Files one `turn.start` may attach.
 pub const MAX_TURN_ATTACHMENTS: usize = 16;
 /// The tool a chat session's model calls to send a file with its reply.

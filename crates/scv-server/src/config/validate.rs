@@ -137,6 +137,42 @@ impl Config {
     }
 }
 
+/// What only one kind of account may say. An email account's `mail` table
+/// stays opaque here, so a mistake in it fails only that account when it
+/// starts, but no other account may carry one. A mailbox answers nobody,
+/// and a mail chat only its owner; neither may hold tools.
+fn validate_purpose(
+    channel: &str,
+    account: &str,
+    settings: &scv_channels::state::AccountSettings,
+) -> Result<()> {
+    use scv_channels::state::Purpose;
+    use scv_protocol::{RemoteTools, Senders};
+    let chat =
+        scv_channels::ChannelKind::parse(channel).is_ok_and(scv_channels::ChannelKind::is_chat);
+    let table = format!("[channels.{channel}.{account}]");
+    let open = settings.remote_tools == RemoteTools::Owner || settings.senders == Senders::Anyone;
+    if chat {
+        if settings.mail.is_some() {
+            bail!("{table}: only email accounts have a mail table");
+        }
+        if settings.purpose == Purpose::Mail && open {
+            bail!(
+                "{table}: a mail chat answers only its owner and holds no tools; set \
+                 remote_tools = \"none\" and remove senders"
+            );
+        }
+    } else {
+        if settings.purpose != Purpose::Chat {
+            bail!("{table}: purpose belongs to the chat account that carries mail");
+        }
+        if open || settings.workspace.is_some() {
+            bail!("{table}: an email account takes no remote_tools, senders, or workspace");
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     pub(super) fn validate(&self) -> Result<()> {
         for account in &self.notify.owner {
@@ -151,6 +187,20 @@ impl Config {
                 bail!(
                     "notify.owner entries must look like \"feishu:default\" (<channel>:<account>)"
                 );
+            }
+            // SCV's notices go to chats that answer the owner: never a
+            // mailbox, and never a mail chat, which carries mail alone.
+            let (channel, name) = account.split_once(':').unwrap_or_default();
+            if scv_channels::ChannelKind::parse(channel).is_ok_and(|kind| !kind.is_chat()) {
+                bail!("notify.owner cannot name an email account ({account})");
+            }
+            let mail_chat = self
+                .channels
+                .get(channel)
+                .and_then(|accounts| accounts.get(name))
+                .is_some_and(|settings| settings.purpose == scv_channels::state::Purpose::Mail);
+            if mail_chat {
+                bail!("notify.owner cannot name a mail chat ({account}); it carries only mail");
             }
         }
         if !(1..=MAX_EPISODE_GAP_MINUTES).contains(&self.history.episode_gap_minutes) {
@@ -213,6 +263,7 @@ impl Config {
                 {
                     bail!("channels.{channel}.{account}.workspace must be an absolute path");
                 }
+                validate_purpose(channel, account, settings)?;
             }
         }
         for (agent, adapter) in &self.agents.0 {

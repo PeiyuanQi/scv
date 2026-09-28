@@ -171,10 +171,32 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
     assert!(builtin.content.contains("# Delegating to agents"));
     assert!(builtin.content.contains("scv agents check"));
 
+    // A tool-free session (a chat stranger's, or mail triage) cannot read
+    // skills, so it learns of none, not even the user's own.
     let tool_free = discover_skills(&workspace, &config, false).unwrap();
     assert!(tool_free.project_listing.is_empty());
-    assert!(!tool_free.map.contains_key("scv:feature-flow"));
-    assert!(!tool_free.map.contains_key("delegating"));
+    assert!(tool_free.listing.is_empty());
+    assert!(tool_free.builtin_listing.is_empty());
+    assert!(tool_free.map.is_empty());
+    assert!(tool_free.roots.is_empty());
+    let prompt = build_system_prompt(
+        &workspace,
+        &config,
+        &SkillListings {
+            listing: tool_free.listing,
+            builtin_listing: tool_free.builtin_listing,
+            project_listing: tool_free.project_listing,
+        },
+        &PromptContext {
+            agents: &[],
+            background: false,
+            channel: None,
+            chat_history: false,
+        },
+    )
+    .unwrap();
+    assert!(!prompt.contains("skills"), "{prompt}");
+    assert!(!prompt.contains("read_skill"), "{prompt}");
     config.skills.scan_projects = false;
     let disabled = discover_skills(&workspace, &config, true).unwrap();
     assert!(disabled.project_listing.is_empty());
