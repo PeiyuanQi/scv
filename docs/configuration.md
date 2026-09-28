@@ -242,8 +242,9 @@ permissions = "default"
 model_args = ["--model", "{model}"]
 effort_args = ["--effort", "{effort}"]
 # use_for = "coding"
-# model = "opus-5.5"
+# model = "opus[1m]"        # a value `scv agents check claude` lists
 # effort = "xhigh"
+# hard_task_effort = "max"
 
 [agents.codex]
 command = "codex"
@@ -286,14 +287,16 @@ Every table also accepts `prompt_args` (default `[]` except Grok),
 `permissions` (default `"default"`; see [Agent permissions](#agent-permissions)),
 `transport` (default `"auto"`; see [Agent transport](#agent-transport)), and
 `use_for`, an optional one-line note (at most 500 bytes) on when to choose that
-agent, added to its tool description, and optional `model` and `effort` defaults
-for that work (see [Choosing an agent](tools.md#choosing-an-agent)). The agent
+agent, added to its tool description; optional `model` and `effort`, which an
+`agent` call that leaves them out runs with; and an optional
+`hard_task_effort`, which the main agent is told to pass for a hard task (see
+[Choosing an agent](tools.md#choosing-an-agent)). The agent
 names are fixed; an unknown `[agents.<name>]` is a startup error that lists the
 known ones.
 
 `agents.*.args` is an argument vector, not a shell string. SCV appends the
 delegated prompt as the final argument and runs the child in the session
-workspace, or in the directory inside it that the call names with `cwd`. When a call selects a `model` or `effort`, SCV substitutes the value
+workspace, or in the directory inside it that the call names with `cwd`. When a call selects a `model` or `effort`, or the table's `model` or `effort` supplies one, SCV substitutes the value
 for `{model}` or `{effort}` in `model_args` or `effort_args` and inserts those
 arguments between the fixed arguments and the prompt, followed by
 `prompt_args` for CLIs whose prompt is a flag value. An empty template means
@@ -361,9 +364,11 @@ background jobs; see [Background jobs](tools.md#background-jobs).
 such as `["codex", "claude"]`; the system prompt names the ones a session
 offers, and the first of those runs an `agent` call that names no agent.
 Without one the model must name the agent in every call. Unknown names fail
-validation, and project configuration cannot set it. `[agents.<name>] use_for`, `model`, and `effort` add per-agent defaults
-for a kind of work (see [Choosing an agent](tools.md#choosing-an-agent)); take
-`model` and `effort` from the values the agent offers, which
+validation, and project configuration cannot set it. `[agents.<name>] use_for` says when to choose an agent, `model` and
+`effort` are the defaults its calls run with, and `hard_task_effort` is the
+effort to pass for a hard task (see
+[Choosing an agent](tools.md#choosing-an-agent)); take
+`model` and both efforts from the values the agent offers, which
 `scv agents check` prints
 ([Model and effort values](tools.md#model-and-effort-values)).
 `providers.*.timeout_seconds` (default 600) bounds each whole model request,

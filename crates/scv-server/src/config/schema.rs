@@ -409,11 +409,23 @@ pub(crate) struct AdapterConfig {
     /// When to choose this agent, in the user's words; added to its tool
     /// description so the model can pick between agents.
     pub(crate) use_for: Option<String>,
-    /// Model to pass when the work matches `use_for`. Without `use_for`, pass
-    /// it whenever this agent is called, unless the user asks for another.
+    /// The model an `agent` call to this agent runs on when it names none.
     pub(crate) model: Option<String>,
-    /// Effort to pass the same way as `model`.
+    /// The effort an `agent` call runs at when it names none.
     pub(crate) effort: Option<String>,
+    /// The effort the main agent is told to pass for a hard task.
+    pub(crate) hard_task_effort: Option<String>,
+}
+
+impl AdapterConfig {
+    /// The user's model and efforts for this agent, as the tools take them.
+    pub(crate) fn defaults(&self) -> scv_tools::AgentDefaults {
+        scv_tools::AgentDefaults {
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            hard_task_effort: self.hard_task_effort.clone(),
+        }
+    }
 }
 
 /// How SCV talks to a delegated agent that has an ACP server.
@@ -466,6 +478,7 @@ impl Default for AgentsConfig {
                             use_for: None,
                             model: None,
                             effort: None,
+                            hard_task_effort: None,
                         },
                     )
                 })

@@ -9,6 +9,11 @@
 //! names; the `agent` argument; the first agent in the user's `[agent]
 //! prefer` that the session offers. Without that default the schema requires
 //! `agent`, so SCV itself never picks one.
+//!
+//! A call that names no `model` or `effort` gets the user's
+//! `[agents.<name>]` defaults, filled in here so every backend, background
+//! job, and approval sees the values that run. A continued conversation
+//! keeps what its session holds instead.
 
 use std::sync::Arc;
 
@@ -17,6 +22,7 @@ use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRisk,
 use serde_json::{Map, Value, json};
 
 use crate::{
+    AgentDefaults,
     args::{Timeouts, bounded, parse_args, timeout_schema},
     delegate::{
         choice, conversation,
@@ -82,10 +88,47 @@ pub(crate) struct Offered {
     pub(crate) offered: Option<AgentOptions>,
     /// The user's `[agents.<name>] use_for` note.
     pub(crate) use_for: Option<String>,
-    /// `[agents.<name>] model`, passed when the work matches `use_for`.
-    pub(crate) model: Option<String>,
-    /// `[agents.<name>] effort`, passed the same way as `model`.
-    pub(crate) effort: Option<String>,
+    /// The user's `[agents.<name>]` model and efforts.
+    pub(crate) defaults: AgentDefaults,
+    /// Whether a continued conversation keeps the model and effort its
+    /// session was given, as an ACP server or a nested SCV does. A CLI run
+    /// once per turn does not, so the defaults fill in on every turn.
+    pub(crate) holds_settings: bool,
+}
+
+impl Offered {
+    /// `arguments` as this agent's backend receives them: a `model` or
+    /// `effort` the call leaves out (or blank) is the user's default, when
+    /// the agent takes it. A turn of a conversation whose session holds its
+    /// settings gets none, so it keeps what it was started with.
+    fn with_defaults(&self, arguments: &Value, args: &AgentArgs) -> Value {
+        let mut arguments = arguments.clone();
+        if args.session.is_some() && self.holds_settings {
+            return arguments;
+        }
+        let Some(object) = arguments.as_object_mut() else {
+            return arguments;
+        };
+        for (option, given, default, taken) in [
+            (
+                "model",
+                &args.model,
+                &self.defaults.model,
+                self.accepts.model,
+            ),
+            (
+                "effort",
+                &args.effort,
+                &self.defaults.effort,
+                self.accepts.effort,
+            ),
+        ] {
+            if let Some(default) = default.as_ref().filter(|_| given.is_none() && taken) {
+                object.insert(option.into(), default.clone().into());
+            }
+        }
+        arguments
+    }
 }
 
 /// The `agent` tool.
@@ -124,8 +167,10 @@ impl AgentTool {
     }
 
     /// The agent that runs a call, once the call's options are checked
-    /// against what that agent takes. Nothing has launched when this fails.
-    pub(crate) fn route(&self, arguments: &Value) -> Result<&Offered, ToolError> {
+    /// against what that agent takes, and the arguments its backend gets,
+    /// with the user's defaults filled in. Nothing has launched when this
+    /// fails.
+    pub(crate) fn route(&self, arguments: &Value) -> Result<(&Offered, Value), ToolError> {
         let args: AgentArgs = parse_args(arguments)?;
         let agent = self.choose(&args)?;
         for (option, given) in [
@@ -137,7 +182,7 @@ impl AgentTool {
                 return Err(self.not_taken(agent, option));
             }
         }
-        Ok(agent)
+        Ok((agent, agent.with_defaults(arguments, &args)))
     }
 
     fn choose(&self, args: &AgentArgs) -> Result<&Offered, ToolError> {
@@ -209,7 +254,8 @@ impl AgentTool {
     }
 
     /// The `effort` values the schema allows: SCV's own, then any other that
-    /// an offered agent's ACP server listed or the user configured for it.
+    /// an offered agent's ACP server listed or the user configured for it,
+    /// for all tasks or for hard ones.
     fn efforts(&self) -> Vec<&str> {
         let mut efforts: Vec<&str> = AGENT_EFFORTS.to_vec();
         for agent in self.agents.iter().filter(|agent| agent.accepts.effort) {
@@ -219,7 +265,10 @@ impl AgentTool {
                 .and_then(|offered| offered.effort.as_ref())
                 .map(|choice| choice.shown())
                 .unwrap_or_default();
-            for effort in listed.into_iter().chain(agent.effort.as_deref()) {
+            let configured = [&agent.defaults.effort, &agent.defaults.hard_task_effort]
+                .into_iter()
+                .filter_map(Option::as_deref);
+            for effort in listed.into_iter().chain(configured) {
                 if !efforts.contains(&effort) {
                     efforts.push(effort);
                 }
@@ -296,8 +345,8 @@ impl Tool for AgentTool {
                 json!({
                     "type":"string",
                     "description":"Model for the chosen agent, in the form its line under agent \
-                        names. Set when the user asks, or when the work matches a configured use_for \
-                        default; omit to use the agent's configured default."
+                        names. Set it when the user asks for one; omit it to use the user's default \
+                        that line gives, or else the agent's own."
                 }),
             );
         }
@@ -307,9 +356,9 @@ impl Tool for AgentTool {
                 json!({
                     "type":"string",
                     "enum":self.efforts(),
-                    "description":"Reasoning effort. Set when the user asks, or when the work \
-                        matches a configured use_for default; omit to use the agent's configured \
-                        default."
+                    "description":"Reasoning effort. Set it when the user asks for one, or to \
+                        the hard-task effort the chosen agent's line gives when the task is hard; \
+                        omit it to use the user's default that line gives, or else the agent's own."
                 }),
             );
         }
@@ -347,15 +396,16 @@ impl Tool for AgentTool {
     }
 
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
-        self.route(arguments)?.backend.risk(arguments)
+        let (agent, arguments) = self.route(arguments)?;
+        agent.backend.risk(&arguments)
     }
 
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
-        let agent = self.route(arguments)?;
+        let (agent, arguments) = self.route(arguments)?;
         Ok(format!(
             "agent {}: {}",
             agent.name,
-            agent.backend.approval_summary(arguments)?
+            agent.backend.approval_summary(&arguments)?
         ))
     }
 
@@ -364,7 +414,7 @@ impl Tool for AgentTool {
         arguments: Value,
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let agent = self.route(&arguments)?;
+        let (agent, arguments) = self.route(&arguments)?;
         let result = agent.backend.execute(arguments, context).await;
         let others: Vec<&str> = self
             .names()
@@ -412,8 +462,8 @@ impl AgentTool {
             model_hint: String::new(),
             offered: None,
             use_for: None,
-            model: None,
-            effort: None,
+            defaults: AgentDefaults::default(),
+            holds_settings: true,
         };
         let mut agents = vec![offered(name, backend, accepts)];
         agents.extend(

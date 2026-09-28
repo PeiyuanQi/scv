@@ -13,7 +13,7 @@ use crate::delegate::{
     records::{DelegationRegistry, ProcessIdentity},
 };
 use crate::{
-    AcpAgentLaunch, AgentAdapterConfig, DelegationContext, args::Timeouts,
+    AcpAgentLaunch, AgentAdapterConfig, AgentDefaults, DelegationContext, args::Timeouts,
     delegate::conversation::ConversationStore,
 };
 use scv_core::{Tool, ToolContext, ToolOutput, ToolRisk};
@@ -74,8 +74,7 @@ fn adapter(full: bool) -> AgentAdapterConfig {
         transport: Transport::Process,
         acp: None,
         use_for: None,
-        model: None,
-        effort: None,
+        defaults: AgentDefaults::default(),
         options_file: None,
     }
 }
@@ -824,6 +823,68 @@ async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() 
 }
 
 #[tokio::test]
+async fn the_user_s_defaults_start_a_conversation_that_then_keeps_its_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "normal");
+    let mut config = adapter(false);
+    config.model_args = vec!["--model".into(), "{model}".into()];
+    config.effort_args = vec!["--effort".into(), "{effort}".into()];
+    config.defaults = AgentDefaults {
+        model: Some("m2".into()),
+        effort: Some("low".into()),
+        hard_task_effort: Some("high".into()),
+    };
+    config.acp = Some(AcpAgentLaunch {
+        command: script.display().to_string(),
+        args: Vec::new(),
+        full_mode: None,
+        environment: Vec::new(),
+        required: false,
+    });
+    // Built as a session builds it, so the registry decides how the
+    // defaults apply to this backend.
+    let registry = crate::builtin_registry(
+        crate::ToolsConfig {
+            max_background: 0,
+            prefer: vec!["claude".into()],
+            ..crate::ToolsConfig::default()
+        },
+        crate::SkillMap::new(),
+        Vec::new(),
+        1024,
+        [("claude".to_owned(), config)],
+    )
+    .unwrap();
+    let agent = registry.get("agent").unwrap();
+    let call = |arguments: Value| agent.execute(arguments, context(dir.path(), None));
+    let set = |dir: &Path| {
+        calls(dir)
+            .lines()
+            .filter(|line| line.starts_with("model=") || line.starts_with("reasoning_effort="))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+
+    let first = call(json!({"prompt":"hello"})).await.unwrap();
+    assert_eq!(json(&first)["status"], "completed", "{}", first.content);
+    assert_eq!(set(dir.path()), ["model=m2", "reasoning_effort=low"]);
+    // The conversation keeps them: nothing is set again.
+    let again = call(json!({"prompt":"hello","session":"claude-1"}))
+        .await
+        .unwrap();
+    assert_eq!(json(&again)["status"], "completed", "{}", again.content);
+    assert_eq!(set(dir.path()).len(), 2);
+    // A named value wins; the other still comes from the defaults.
+    call(json!({"prompt":"hello","effort":"high"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        set(dir.path())[2..],
+        ["model=m2".to_owned(), "reasoning_effort=high".to_owned()]
+    );
+}
+
+#[tokio::test]
 async fn a_session_saves_what_the_agent_offers_and_later_calls_are_checked_before_starting() {
     let dir = tempfile::tempdir().unwrap();
     let script = fake_agent(dir.path(), "normal");
@@ -885,6 +946,52 @@ async fn a_session_saves_what_the_agent_offers_and_later_calls_are_checked_befor
     // A check turns the refusal off, so the agent's own list decides.
     let checking = build().with_precheck(false);
     checking.risk(&json!({"prompt":"x","model":"m9"})).unwrap();
+
+    // A refused default names the setting, since omitting the model would
+    // bring it back; another refused model points at that default.
+    let mut configured = adapter(false);
+    configured.options_file = Some(file.clone());
+    configured.defaults.model = Some("m9".into());
+    let with_default = AcpAgentTool::new(
+        "claude".into(),
+        &configured,
+        AcpAgentLaunch {
+            command: script.display().to_string(),
+            args: Vec::new(),
+            full_mode: None,
+            environment: Vec::new(),
+            required: false,
+        },
+        Some(script.clone()),
+        Timeouts {
+            default: Duration::from_secs(20),
+            max: Duration::from_secs(30),
+        },
+        64 * 1024,
+        None,
+        store(Duration::from_secs(60)),
+    );
+    let error = with_default
+        .risk(&json!({"prompt":"x","model":"m9"}))
+        .unwrap_err();
+    assert!(
+        error.message.starts_with(
+            "model \"m9\" is the user's default for claude ([agents.claude] model), but not \
+             one claude offers; pass one of: m1, m2, and tell the user"
+        ),
+        "{}",
+        error.message
+    );
+    let error = with_default
+        .risk(&json!({"prompt":"x","model":"m7"}))
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("choose one of: m1, m2, or omit model for the user's default, m9."),
+        "{}",
+        error.message
+    );
 
     // A newer list saved by another session is read before refusing.
     let newer = crate::delegate::options::AgentOptions {

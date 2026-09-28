@@ -633,8 +633,8 @@ impl Tool for BackgroundCapable {
             return self.inner.execute(arguments, context).await;
         }
         // Validate before returning a job handle, so a bad call fails now.
-        let agent = self.inner.route(&arguments)?;
-        agent.backend.risk(&arguments)?;
+        let (agent, routed) = self.inner.route(&arguments)?;
+        agent.backend.risk(&routed)?;
         let agent = agent.name.clone();
         let started = self.jobs.start(
             Arc::clone(&self.inner) as Arc<dyn Tool>,

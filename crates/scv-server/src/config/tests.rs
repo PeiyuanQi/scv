@@ -211,18 +211,39 @@ fn agent_choice_settings_are_validated_and_user_only() {
     config.agent.prefer = vec!["codex".into(), "claude".into()];
     config.agents.0.get_mut("grok").unwrap().use_for = Some("current events and X posts".into());
     config.agents.0.get_mut("claude").unwrap().use_for = Some("coding".into());
-    config.agents.0.get_mut("claude").unwrap().model = Some("opus-5.5".into());
+    config.agents.0.get_mut("claude").unwrap().model = Some("opus[1m]".into());
     config.agents.0.get_mut("claude").unwrap().effort = Some("xhigh".into());
+    let grok = config.agents.0.get_mut("grok").unwrap();
+    grok.model = Some("grok-4.7".into());
+    grok.effort = Some("medium".into());
+    grok.hard_task_effort = Some("high".into());
     assert!(config.validate().is_ok());
     let adapters = config.adapters();
     assert_eq!(
         adapters["grok"].use_for.as_deref(),
         Some("current events and X posts")
     );
-    assert_eq!(adapters["claude"].model.as_deref(), Some("opus-5.5"));
-    assert_eq!(adapters["claude"].effort.as_deref(), Some("xhigh"));
+    assert_eq!(
+        adapters["claude"].defaults,
+        scv_tools::AgentDefaults {
+            model: Some("opus[1m]".into()),
+            effort: Some("xhigh".into()),
+            hard_task_effort: None,
+        }
+    );
+    assert_eq!(
+        adapters["grok"].defaults,
+        scv_tools::AgentDefaults {
+            model: Some("grok-4.7".into()),
+            effort: Some("medium".into()),
+            hard_task_effort: Some("high".into()),
+        }
+    );
     assert_eq!(adapters["codex"].use_for, None);
-    assert_eq!(adapters["codex"].model, None);
+    assert_eq!(
+        adapters["codex"].defaults,
+        scv_tools::AgentDefaults::default()
+    );
     // The preference reaches the tools, where the first offered agent runs
     // an `agent` call that names none.
     assert_eq!(config.tools().prefer, ["codex", "claude"]);
@@ -249,6 +270,24 @@ fn agent_choice_settings_are_validated_and_user_only() {
             config.validate().is_err(),
             "{agent} model={model:?} effort={effort:?}"
         );
+    }
+    // A hard-task effort follows the rules for effort, on its own too.
+    for (agent, effort, error) in [
+        (
+            "grok",
+            "--high",
+            "agents.grok.hard_task_effort must be 1-32 letters",
+        ),
+        (
+            "scv",
+            "high",
+            "agents.scv.hard_task_effort is set but scv does not offer effort selection",
+        ),
+    ] {
+        let mut config = Config::default();
+        config.agents.0.get_mut(agent).unwrap().hard_task_effort = Some(effort.to_owned());
+        let message = config.validate().unwrap_err().to_string();
+        assert!(message.starts_with(error), "{message}");
     }
     let project: toml::Value = toml::from_str("[agent]\nprefer = [\"pi\"]\n").unwrap();
     assert!(validate_project_keys(&project).is_err());

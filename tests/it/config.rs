@@ -530,3 +530,51 @@ fn agents_check_calls_an_agent_as_scv_does_and_fails_when_the_call_fails() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn agent_defaults_are_shown_and_checked_with_the_hard_task_effort_named() {
+    let home = tempfile::tempdir().unwrap();
+    // A custom command runs Grok through its CLI, once per turn.
+    let fake = home.path().join("fake-grok");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'fake-grok 1.0'; exit 0; }\n\
+         echo \"$*\" > \"$(dirname \"$0\")/grok-args\"\n\
+         case \"$*\" in *'Reply with exactly: ok') echo ok ;; *) exit 3 ;; esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_private(
+        &home.path().join("config.toml"),
+        &format!(
+            "{}[agents.grok]\ncommand = {:?}\nmodel = \"grok-4.7\"\neffort = \"medium\"\n\
+             hard_task_effort = \"high\"\n",
+            provider("model"),
+            fake.display().to_string()
+        ),
+    );
+    let shown = success(&scv(home.path(), &["config", "show"], ""));
+    for expected in [
+        "agents.grok.model = \"grok-4.7\"  [config.toml]",
+        "agents.grok.effort = \"medium\"  [config.toml]",
+        "agents.grok.hard_task_effort = \"high\"  [config.toml]",
+    ] {
+        assert!(
+            shown.contains(expected),
+            "missing {expected:?} in:\n{shown}"
+        );
+    }
+
+    let stdout = success(&scv(home.path(), &["agents", "check", "grok"], ""));
+    assert!(stdout.contains("  hard task effort high\n"), "{stdout}");
+    assert!(
+        stdout.contains("with your configured model grok-4.7 and effort medium: \"ok\"\n"),
+        "{stdout}"
+    );
+    // The call ran with the defaults; the hard-task effort is only named.
+    let args = std::fs::read_to_string(home.path().join("grok-args")).unwrap();
+    assert!(
+        args.starts_with("-m grok-4.7 --reasoning-effort medium -p "),
+        "{args}"
+    );
+}

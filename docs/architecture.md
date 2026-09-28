@@ -94,7 +94,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.3` and exact workspace dependency pins.
+`0.3.4` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -446,10 +446,13 @@ one tool the model sees for delegation: its `agent` argument is an enum of the
 offered agents, and it routes each call to that agent's `Backend` (native,
 ACP, or nested SCV), taking the agent from a `session` handle, the argument,
 or the first offered `agent.prefer`, and refusing an option the agent does not
-take before anything launches. `delegate/choice.rs` writes each agent's line
-in the argument's description (product, what it offers, what it takes, the
-user's `use_for` and any default `model`/`effort` for that work) and names the
-other offered agents on availability failures. A
+take before anything launches. It fills the user's `[agents.<name>] model` and
+`effort` (`scv_tools::AgentDefaults`) into a call that leaves them out before
+the backend validates, summarizes, or runs it, except on a continued ACP or
+nested-SCV conversation, whose session keeps its own. `delegate/choice.rs`
+writes each agent's line in the argument's description (product, what it
+offers, what it takes, the user's `use_for`, defaults, and `hard_task_effort`)
+and names the other offered agents on availability failures. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a

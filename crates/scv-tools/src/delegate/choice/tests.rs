@@ -41,8 +41,8 @@ fn offered(name: &str, accepts: Accepts) -> Offered {
             .into(),
         offered: None,
         use_for: Some("current events and posts on X".into()),
-        model: None,
-        effort: None,
+        defaults: AgentDefaults::default(),
+        holds_settings: true,
     }
 }
 
@@ -76,7 +76,7 @@ fn entries_name_the_product_what_it_offers_and_the_users_note() {
     assert!(
         grok.ends_with(
             "Takes model (xAI Grok model ID, such as grok-4.7) and effort. The user's note on \
-             when to use it: current events and posts on X"
+             when to use it: current events and posts on X."
         ),
         "{grok}"
     );
@@ -106,29 +106,41 @@ fn entries_name_each_agent_s_model_family() {
 }
 
 #[test]
-fn entries_name_task_defaults_for_matching_work() {
+fn entries_name_the_user_s_defaults_and_hard_task_effort() {
     let mut grok = offered("grok", ALL);
-    grok.model = Some("grok-4.7".into());
-    grok.effort = Some("high".into());
+    grok.defaults = AgentDefaults {
+        model: Some("grok-4.7".into()),
+        effort: Some("medium".into()),
+        hard_task_effort: Some("high".into()),
+    };
     assert!(
         entry(&grok).ends_with(
-            "The user's note on when to use it: current events and posts on X. For that work, \
-             pass model grok-4.7 and effort high; omit model and effort for other work so the \
-             agent uses its own default."
+            "The user's note on when to use it: current events and posts on X. The user's \
+             defaults, used when a call leaves them out: model grok-4.7 and effort medium. For \
+             a hard task, pass effort high."
         ),
         "{}",
         entry(&grok)
     );
     let mut claude = offered("claude", ALL);
-    claude.use_for = None;
-    claude.model = Some("sonnet".into());
+    claude.use_for = Some("coding.".into());
+    claude.defaults.model = Some("sonnet".into());
     assert!(
         entry(&claude).ends_with(
-            "Pass model sonnet unless the user asks for another; omit them to use the agent's \
-             own default."
+            "The user's note on when to use it: coding. The user's default, used when a call \
+             leaves it out: model sonnet."
         ),
         "{}",
         entry(&claude)
+    );
+    // A hard-task effort alone leaves other tasks to the agent's default.
+    let mut codex = offered("codex", ALL);
+    codex.use_for = None;
+    codex.defaults.hard_task_effort = Some("xhigh".into());
+    assert!(
+        entry(&codex).ends_with("and session. For a hard task, pass effort xhigh."),
+        "{}",
+        entry(&codex)
     );
 }
 

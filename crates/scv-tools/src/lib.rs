@@ -33,7 +33,8 @@ mod sync;
 
 pub use builtin::{chat_attach, chat_history, web};
 pub use config::{
-    AcpAgentLaunch, AgentAdapterConfig, DelegationContext, Skill, SkillMap, ToolsConfig,
+    AcpAgentLaunch, AgentAdapterConfig, AgentDefaults, DelegationContext, Skill, SkillMap,
+    ToolsConfig,
 };
 pub use delegate::{
     adapters,

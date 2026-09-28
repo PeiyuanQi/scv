@@ -1,8 +1,9 @@
 //! What lets the model choose between delegated agents: the `agent` tool
 //! lists each agent with its product, what that harness offers, what it
-//! takes, and the user's own `use_for` note, and, when a call fails because
-//! the agent is missing, signed out, or its provider returned an error,
-//! names the other agents to call instead.
+//! takes, the user's own `use_for` note, the defaults a call that leaves out
+//! `model` or `effort` runs with, and the effort for a hard task, and, when a
+//! call fails because the agent is missing, signed out, or its provider
+//! returned an error, names the other agents to call instead.
 //!
 //! That fallback is decided from the structured failure alone: the result's
 //! `status` and the `error` the agent reported, read against a list of
@@ -18,11 +19,14 @@ use scv_core::{ToolError, ToolFailure, ToolOutput};
 use scv_protocol::JobStatus;
 use serde_json::Value;
 
-use crate::delegate::{
-    adapters,
-    agent::{Accepts, Offered},
-    options::{AgentOptions, Choice},
-    output::{self, AgentReply},
+use crate::{
+    AgentDefaults,
+    delegate::{
+        adapters,
+        agent::{Accepts, Offered},
+        options::{AgentOptions, Choice},
+        output::{self, AgentReply},
+    },
 };
 
 /// Lowercase fragments of an error an agent reported that another agent
@@ -69,9 +73,10 @@ pub(crate) fn reports_unavailable(text: &str) -> bool {
     UNAVAILABLE.iter().any(|needle| lower.contains(needle))
 }
 
-/// `model opus-5.5 and effort xhigh`, when either default is set.
-pub fn model_effort_phrase(model: Option<&str>, effort: Option<&str>) -> Option<String> {
-    match (model, effort) {
+/// `model opus[1m] and effort xhigh`: the model and effort a call to the
+/// agent runs with when it leaves them out, if the user set either.
+pub fn defaults_phrase(defaults: &AgentDefaults) -> Option<String> {
+    match (defaults.model.as_deref(), defaults.effort.as_deref()) {
         (Some(model), Some(effort)) => Some(format!("model {model} and effort {effort}")),
         (Some(model), None) => Some(format!("model {model}")),
         (None, Some(effort)) => Some(format!("effort {effort}")),
@@ -79,32 +84,47 @@ pub fn model_effort_phrase(model: Option<&str>, effort: Option<&str>) -> Option<
     }
 }
 
-/// The `use_for` note and configured model/effort defaults, as a suffix.
-fn choice_note(use_for: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Option<String> {
-    let defaults = model_effort_phrase(model, effort);
-    match (use_for, defaults) {
-        (Some(use_for), Some(defaults)) => Some(format!(
-            " The user's note on when to use it: {use_for}. For that work, pass {defaults}; \
-             omit model and effort for other work so the agent uses its own default."
-        )),
-        (Some(use_for), None) => Some(format!(" The user's note on when to use it: {use_for}")),
-        (None, Some(defaults)) => Some(format!(
-            " Pass {defaults} unless the user asks for another; omit them to use the agent's \
-             own default."
-        )),
-        (None, None) => None,
+/// A `use_for` note without its closing period, to go inside a sentence.
+pub fn note_clause(use_for: &str) -> &str {
+    use_for.trim().trim_end_matches('.')
+}
+
+/// The `use_for` note, the user's defaults, and the effort for a hard task,
+/// as a suffix of sentences.
+fn choice_note(use_for: Option<&str>, defaults: &AgentDefaults) -> String {
+    let mut note = String::new();
+    if let Some(use_for) = use_for {
+        note.push_str(&format!(
+            " The user's note on when to use it: {}.",
+            note_clause(use_for)
+        ));
     }
+    if let Some(phrase) = defaults_phrase(defaults) {
+        let (noun, them) = if defaults.model.is_some() && defaults.effort.is_some() {
+            ("defaults", "them")
+        } else {
+            ("default", "it")
+        };
+        note.push_str(&format!(
+            " The user's {noun}, used when a call leaves {them} out: {phrase}."
+        ));
+    }
+    if let Some(effort) = &defaults.hard_task_effort {
+        note.push_str(&format!(" For a hard task, pass effort {effort}."));
+    }
+    note
 }
 
 /// `model (one of: a, b; its default is a)`, from what the agent's server
-/// listed; `None` when it listed nothing to choose from.
-fn listed(label: &str, choice: Option<&Choice>) -> Option<String> {
+/// listed; `None` when it listed nothing to choose from. The agent's own
+/// default is left out when the user set one, since the user's runs instead.
+fn listed(label: &str, choice: Option<&Choice>, user_default: bool) -> Option<String> {
     let choice = choice?;
     let values = choice.shown();
     if values.is_empty() {
         return None;
     }
-    Some(match choice.named_default() {
+    Some(match choice.named_default().filter(|_| !user_default) {
         Some(default) => format!(
             "{label} (one of: {}; its default is {default})",
             values.join(", ")
@@ -115,20 +135,28 @@ fn listed(label: &str, choice: Option<&Choice>) -> Option<String> {
 
 /// What an agent takes of `model` (the values its server listed, or its
 /// hint), `effort`, and `session`.
-fn takes(accepts: Accepts, model_hint: &str, offered: Option<&AgentOptions>) -> String {
+fn takes(
+    accepts: Accepts,
+    model_hint: &str,
+    offered: Option<&AgentOptions>,
+    defaults: &AgentDefaults,
+) -> String {
     let mut taken = Vec::new();
     if accepts.model {
         let hint = model_hint.trim().trim_end_matches('.');
         taken.push(
-            listed("model", offered.and_then(|offered| offered.model.as_ref())).unwrap_or_else(
-                || {
-                    if hint.is_empty() {
-                        "model".to_owned()
-                    } else {
-                        format!("model ({hint})")
-                    }
-                },
-            ),
+            listed(
+                "model",
+                offered.and_then(|offered| offered.model.as_ref()),
+                defaults.model.is_some(),
+            )
+            .unwrap_or_else(|| {
+                if hint.is_empty() {
+                    "model".to_owned()
+                } else {
+                    format!("model ({hint})")
+                }
+            }),
         );
     }
     if accepts.effort {
@@ -136,6 +164,7 @@ fn takes(accepts: Accepts, model_hint: &str, offered: Option<&AgentOptions>) -> 
             listed(
                 "effort",
                 offered.and_then(|offered| offered.effort.as_ref()),
+                defaults.effort.is_some(),
             )
             .unwrap_or_else(|| "effort".to_owned()),
         );
@@ -153,7 +182,7 @@ fn takes(accepts: Accepts, model_hint: &str, offered: Option<&AgentOptions>) -> 
 
 /// One agent's line in the `agent` argument's description: its name,
 /// product, and what that harness offers, then what it takes, then the
-/// user's note and defaults.
+/// user's note, defaults, and hard-task effort.
 pub(crate) fn entry(agent: &Offered) -> String {
     let mut line = match adapters::adapter(&agent.name) {
         Some(descriptor) => format!(
@@ -167,14 +196,9 @@ pub(crate) fn entry(agent: &Offered) -> String {
         agent.accepts,
         &agent.model_hint,
         agent.offered.as_ref(),
+        &agent.defaults,
     ));
-    if let Some(note) = choice_note(
-        agent.use_for.as_deref(),
-        agent.model.as_deref(),
-        agent.effort.as_deref(),
-    ) {
-        line.push_str(&note);
-    }
+    line.push_str(&choice_note(agent.use_for.as_deref(), &agent.defaults));
     line
 }
 

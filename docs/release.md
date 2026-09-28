@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.3`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.3` pins.
+The current workspace release is `0.3.4`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.4` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,35 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.4
+
+`0.3.4` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.3` checks the new release and can roll it back.
+
+What changes for a person running SCV:
+
+- **Agent defaults can distinguish ordinary and hard work.** `[agents.<name>]`
+  `model` and `effort` now apply to every call that leaves those values out,
+  while `hard_task_effort` tells the main agent which effort to pass when a
+  task needs sustained reasoning. Defaults are filled before validation,
+  approval, and background execution. ACP and nested-SCV conversations keep
+  the settings they started with; one-process-per-turn CLIs receive defaults
+  on every turn. See [delegated-agent defaults](tools.md#model-and-effort-values).
+- **Prompts and checks show the complete choice.** Agent lines, the built-in
+  `delegating` skill, `scv agents check`, and configuration output distinguish
+  ordinary defaults from the hard-task effort, and validate both effort values
+  against the agent's accepted format.
+- `0.3.3` rejects `[agents.<name>] hard_task_effort`, so remove it before
+  going back to `0.3.3` by hand.
+
+What changes for code that embeds SCV's crates:
+
+- `AgentAdapterConfig` carries an `AgentDefaults` value with `model`,
+  `effort`, and `hard_task_effort`; `AgentTool::route` returns the arguments
+  after defaults are applied.
+- `scv_tools::AgentDefaults` and `choice::defaults_phrase` are the shared
+  representation and prompt formatting for these settings.
 
 ## Upgrading to 0.3.3
 

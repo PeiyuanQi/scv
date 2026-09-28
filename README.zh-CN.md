@@ -43,7 +43,8 @@ Codex 等），写好任务说明，作为后台任务交给它，完成后发�
 一个 `agent` 工具就能把工作委派给 Claude Code、Codex、Grok Build、
 DeepSeek Harness、pi 或一个嵌套的 SCV。条件允许时，它们通过
 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）运行。
-由你的 `prefer` 列表和 `use_for` 备注决定谁做什么；`agent_wait`、`agent_status`
+由你的 `prefer` 列表和 `use_for` 备注决定谁做什么，每个智能体的默认模型和推理强度
+（以及困难任务单独使用的推理强度）决定怎么做；`agent_wait`、`agent_status`
 和 `agent_cancel` 管理后台任务。SCV 直接从每个智能体获知它支持的模型和推理强度，
 并原样传递，而不是去猜那些随版本变化的名字。内置的 `delegating` 技能教它
 如何给智能体写任务说明，以及调用失败时该怎么办；`scv agents check` 可以
@@ -214,6 +215,8 @@ effort = "xhigh"
 
 [agents.grok]
 use_for = "current events, and anything that needs posts on X"
+effort = "medium"             # 调用未指定推理强度时使用
+hard_task_effort = "high"     # 困难任务时主智能体传入的推理强度
 
 [notify]
 owner = ["feishu:default"]    # 主动通知发往哪里
