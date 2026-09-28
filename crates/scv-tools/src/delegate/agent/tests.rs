@@ -90,8 +90,8 @@ fn offered(recorder: &Arc<Recorder>) -> Offered {
         model_hint: adapter.model_hint.to_owned(),
         offered: None,
         use_for: None,
-        model: None,
-        effort: None,
+        defaults: AgentDefaults::default(),
+        holds_settings: true,
     }
 }
 
@@ -295,7 +295,7 @@ fn the_schema_lists_only_offered_agents_and_the_options_some_of_them_take() {
             properties[option]["description"]
                 .as_str()
                 .unwrap()
-                .contains("omit to use the agent's configured default"),
+                .contains("omit it to use the user's default that line gives"),
             "{option}"
         );
     }
@@ -361,21 +361,108 @@ fn agent_lines_carry_the_user_s_note_and_defaults() {
     let codex = Recorder::new("codex");
     let mut entry = offered(&codex);
     entry.use_for = Some("coding".into());
-    entry.model = Some("gpt-5.5".into());
-    entry.effort = Some("high".into());
+    entry.defaults = AgentDefaults {
+        model: Some("gpt-5.5".into()),
+        effort: Some("medium".into()),
+        hard_task_effort: Some("ultra".into()),
+    };
     let tool = AgentTool::new(vec![entry], &[], timeouts());
-    let agent = tool.spec().parameters["properties"]["agent"]["description"]
+    let spec = tool.spec();
+    let agent = spec.parameters["properties"]["agent"]["description"]
         .as_str()
-        .unwrap()
-        .to_owned();
+        .unwrap();
     assert!(
         agent.ends_with(
-            "and session. The user's note on when to use it: coding. For that work, pass model \
-             gpt-5.5 and effort high; omit model and effort for other work so the agent uses \
-             its own default."
+            "and session. The user's note on when to use it: coding. The user's defaults, used \
+             when a call leaves them out: model gpt-5.5 and effort medium. For a hard task, \
+             pass effort ultra."
         ),
         "{agent}"
     );
+    // The hard-task effort is a value the schema allows.
+    let efforts = spec.parameters["properties"]["effort"]["enum"]
+        .as_array()
+        .unwrap();
+    assert!(efforts.contains(&"ultra".into()), "{efforts:?}");
+}
+
+#[tokio::test]
+async fn a_call_that_leaves_out_model_or_effort_runs_with_the_user_s_defaults() {
+    let (claude, codex, dsh) = (
+        Recorder::new("claude"),
+        Recorder::new("codex"),
+        Recorder::new("dsh"),
+    );
+    let defaults = AgentDefaults {
+        model: Some("opus[1m]".into()),
+        effort: Some("medium".into()),
+        hard_task_effort: Some("high".into()),
+    };
+    let with_defaults = |recorder: &Arc<Recorder>, holds_settings: bool| {
+        let mut entry = offered(recorder);
+        entry.accepts.session = true;
+        entry.defaults = defaults.clone();
+        entry.holds_settings = holds_settings;
+        entry
+    };
+    // claude keeps a conversation's settings, as over ACP; codex runs its
+    // CLI once per turn; dsh takes neither option.
+    let tool = AgentTool::new(
+        vec![
+            with_defaults(&claude, true),
+            with_defaults(&codex, false),
+            with_defaults(&dsh, false),
+        ],
+        &["claude".to_owned()],
+        timeouts(),
+    );
+    let last = |recorder: &Arc<Recorder>| {
+        let ran = recorder.ran.lock().unwrap();
+        let arguments = ran.last().unwrap();
+        (arguments["model"].clone(), arguments["effort"].clone())
+    };
+    let pair = |model: &str, effort: &str| (json!(model), json!(effort));
+
+    // Left out, or blank as models send it: the user's defaults.
+    for arguments in [
+        json!({"prompt":"hi"}),
+        json!({"prompt":"hi","model":"","effort":" "}),
+    ] {
+        run(&tool, arguments).await.unwrap();
+        assert_eq!(last(&claude), pair("opus[1m]", "medium"));
+    }
+    // The backend validates, and the user approves, what will run.
+    tool.risk(&json!({"prompt":"hi"})).unwrap();
+    let risked = claude.risked.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(risked["model"], "opus[1m]");
+    // Named values win, one at a time; the hard-task effort is only ever
+    // passed by the caller.
+    run(&tool, json!({"prompt":"hi","effort":"high"}))
+        .await
+        .unwrap();
+    assert_eq!(last(&claude), pair("opus[1m]", "high"));
+    run(&tool, json!({"prompt":"hi","model":"sonnet"}))
+        .await
+        .unwrap();
+    assert_eq!(last(&claude), pair("sonnet", "medium"));
+    // A continued conversation keeps what its session holds.
+    run(&tool, json!({"prompt":"more","session":"claude-1"}))
+        .await
+        .unwrap();
+    assert_eq!(last(&claude), (Value::Null, Value::Null));
+    // A CLI run once per turn gets them on every turn.
+    run(
+        &tool,
+        json!({"agent":"codex","prompt":"more","session":"codex-1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(last(&codex), pair("opus[1m]", "medium"));
+    // An agent that takes neither is never given them.
+    run(&tool, json!({"agent":"dsh","prompt":"hi"}))
+        .await
+        .unwrap();
+    assert_eq!(last(&dsh), (Value::Null, Value::Null));
 }
 
 #[test]

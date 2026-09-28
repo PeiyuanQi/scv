@@ -225,8 +225,7 @@ impl Config {
                                 required: config.transport == AgentTransport::Acp,
                             }),
                         use_for: config.use_for.clone(),
-                        model: config.model.clone(),
-                        effort: config.effort.clone(),
+                        defaults: config.defaults(),
                         options_file: Some(self.layout().agent_options(name)),
                     },
                 ))

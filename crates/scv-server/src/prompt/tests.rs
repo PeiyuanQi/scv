@@ -111,10 +111,13 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
 fn the_prompt_names_per_agent_task_defaults() {
     let mut config = Config::default();
     config.agents.0.get_mut("claude").unwrap().use_for = Some("coding".into());
-    config.agents.0.get_mut("claude").unwrap().model = Some("opus-5.5".into());
+    config.agents.0.get_mut("claude").unwrap().model = Some("opus[1m]".into());
     config.agents.0.get_mut("claude").unwrap().effort = Some("xhigh".into());
-    config.agents.0.get_mut("grok").unwrap().use_for =
-        Some("current events, and anything that needs posts on X".into());
+    let grok = config.agents.0.get_mut("grok").unwrap();
+    grok.use_for = Some("current events, and anything that needs posts on X.".into());
+    grok.model = Some("grok-4.7".into());
+    grok.effort = Some("medium".into());
+    grok.hard_task_effort = Some("high".into());
     let agents = ["claude".to_owned(), "grok".to_owned()];
     let prompt = prompt_for(
         &config,
@@ -129,18 +132,13 @@ fn the_prompt_names_per_agent_task_defaults() {
         prompt.starts_with("You are SCV, a concise and careful agent."),
         "{prompt}"
     );
-    assert!(
-        prompt.contains("For coding, prefer claude with model opus-5.5 and effort xhigh."),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("For current events, and anything that needs posts on X, prefer grok."),
-        "{prompt}"
-    );
+    // A note's own closing period is not doubled.
     assert!(
         prompt.contains(
-            "When the work does not match a note, omit model and effort so the agent uses \
-             its own default."
+            " For coding, prefer claude. For current events, and anything that needs posts on \
+             X, prefer grok. When a call leaves out model or effort, SCV passes the user's \
+             defaults: model opus[1m] and effort xhigh to claude, and model grok-4.7 and effort \
+             medium to grok. For a hard task, pass effort high to grok.\n"
         ),
         "{prompt}"
     );
@@ -164,12 +162,13 @@ fn defaults_without_a_note_apply_whenever_that_agent_runs() {
     );
     assert!(
         prompt.contains(
-            "When delegating to codex, pass model gpt-5.5 unless the user asks for another."
+            "When a call leaves out model or effort, SCV passes the user's defaults: model \
+             gpt-5.5 to codex."
         ),
         "{prompt}"
     );
     assert!(!prompt.contains("prefers"), "{prompt}");
-    assert!(!prompt.contains("omit model and effort"), "{prompt}");
+    assert!(!prompt.contains("hard task"), "{prompt}");
 }
 
 #[test]

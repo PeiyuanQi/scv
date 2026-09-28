@@ -43,12 +43,14 @@ starts a fresh one.
 
 One `agent` tool delegates to Claude Code, Codex, Grok Build, DeepSeek Harness,
 pi, or a nested SCV, over the [Agent Client Protocol](https://agentclientprotocol.com)
-where available. Your `prefer` list and `use_for` notes pick who does what, and
-`agent_wait`, `agent_status`, and `agent_cancel` manage background jobs. SCV
-learns each agent's models and effort levels from the agent itself and passes
-them exactly, instead of guessing names that change with every release. A
-built-in `delegating` skill teaches it how to brief an agent and what to do
-when a call fails, and `scv agents check` shows every agent working.
+where available. Your `prefer` list and `use_for` notes pick who does what,
+each agent's default model and effort (and a separate effort for hard tasks)
+set how, and `agent_wait`, `agent_status`, and `agent_cancel` manage
+background jobs. SCV learns each agent's models and effort levels from the
+agent itself and passes them exactly, instead of guessing names that change
+with every release. A built-in `delegating` skill teaches it how to brief an
+agent and what to do when a call fails, and `scv agents check` shows every
+agent working.
 
 ### Private homes, private keys
 
@@ -224,6 +226,8 @@ effort = "xhigh"
 
 [agents.grok]
 use_for = "current events, and anything that needs posts on X"
+effort = "medium"             # when a call names no effort
+hard_task_effort = "high"     # what the main agent passes for a hard task
 
 [notify]
 owner = ["feishu:default"]    # where unprompted notices go

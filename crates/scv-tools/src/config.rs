@@ -129,14 +129,25 @@ pub struct AgentAdapterConfig {
     /// The user's note on when to choose this agent (`[agents.<name>]
     /// use_for`), added to its line in the `agent` tool's description.
     pub use_for: Option<String>,
-    /// Default model to pass when the work matches `use_for` (or on every
-    /// call to this agent, when `use_for` is unset).
-    pub model: Option<String>,
-    /// Default effort to pass the same way as `model`.
-    pub effort: Option<String>,
+    /// The user's model and effort for this agent.
+    pub defaults: AgentDefaults,
     /// Where SCV keeps the model and effort values this agent's ACP server
     /// offers (`state/agent-options/<name>.json`); `None` keeps none.
     pub options_file: Option<PathBuf>,
+}
+
+/// The user's model and effort for one agent: `[agents.<name>] model`,
+/// `effort`, and `hard_task_effort`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentDefaults {
+    /// The model an `agent` call that names none runs on.
+    pub model: Option<String>,
+    /// The effort an `agent` call that names none runs at.
+    pub effort: Option<String>,
+    /// The effort the calling model is told to pass for a hard task. SCV
+    /// never applies it by itself, since only the caller can tell a task is
+    /// hard.
+    pub hard_task_effort: Option<String>,
 }
 
 /// An agent's Agent Client Protocol server, resolved from its adapter-table

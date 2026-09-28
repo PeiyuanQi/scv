@@ -3,9 +3,12 @@
 use std::{collections::HashMap, path::Path};
 
 use super::*;
-use crate::delegate::{
-    adapters::{OutputFormat, Resume},
-    records::DelegationRegistry,
+use crate::{
+    AgentDefaults,
+    delegate::{
+        adapters::{OutputFormat, Resume},
+        records::DelegationRegistry,
+    },
 };
 
 fn delegation_context(home: &Path) -> DelegationContext {
@@ -34,8 +37,7 @@ fn uninstalled_agents_are_not_offered() {
         transport: Transport::Process,
         acp: None,
         use_for: None,
-        model: None,
-        effort: None,
+        defaults: AgentDefaults::default(),
         options_file: None,
     };
     let registry = builtin_registry(
@@ -89,8 +91,7 @@ fn agents_are_not_offered_at_the_delegation_depth_limit() {
         transport: Transport::Process,
         acp: None,
         use_for: None,
-        model: None,
-        effort: None,
+        defaults: AgentDefaults::default(),
         options_file: None,
     };
     let home = tempfile::tempdir().unwrap();
@@ -157,8 +158,7 @@ fn installed(model_args: bool) -> AgentAdapterConfig {
         transport: Transport::Process,
         acp: None,
         use_for: None,
-        model: None,
-        effort: None,
+        defaults: AgentDefaults::default(),
         options_file: None,
     }
 }
@@ -246,7 +246,7 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
         adapter.options_file = Some(file.clone());
         adapter
     };
-    let spec = || {
+    let spec = |adapter: AgentAdapterConfig| {
         builtin_registry(
             ToolsConfig {
                 max_background: 0,
@@ -255,7 +255,7 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
             SkillMap::new(),
             Vec::new(),
             1024,
-            HashMap::from([("claude".to_owned(), adapter())]),
+            HashMap::from([("claude".to_owned(), adapter)]),
         )
         .unwrap()
         .get("agent")
@@ -264,7 +264,7 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
         .parameters
     };
 
-    let unknown = spec();
+    let unknown = spec(adapter());
     let line = unknown["properties"]["agent"]["description"]
         .as_str()
         .unwrap();
@@ -273,29 +273,18 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
         !line.contains("Model ID"),
         "the CLI's hint does not apply: {line}"
     );
-    // The user's configured effort is always a value the schema allows.
+    // The user's configured efforts, for all tasks and for hard ones, are
+    // always values the schema allows.
     let mut configured = adapter();
-    configured.effort = Some("turbo".into());
-    let efforts = builtin_registry(
-        ToolsConfig {
-            max_background: 0,
-            ..ToolsConfig::default()
-        },
-        SkillMap::new(),
-        Vec::new(),
-        1024,
-        HashMap::from([("claude".to_owned(), configured)]),
-    )
-    .unwrap()
-    .get("agent")
-    .unwrap()
-    .spec()
-    .parameters["properties"]["effort"]["enum"]
-        .clone();
-    assert!(
-        efforts.as_array().unwrap().contains(&"turbo".into()),
-        "{efforts}"
-    );
+    configured.defaults.effort = Some("turbo".into());
+    configured.defaults.hard_task_effort = Some("warp".into());
+    let efforts = spec(configured)["properties"]["effort"]["enum"].clone();
+    for effort in ["turbo", "warp"] {
+        assert!(
+            efforts.as_array().unwrap().contains(&effort.into()),
+            "{efforts}"
+        );
+    }
 
     options::save(
         &file,
@@ -313,7 +302,7 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
         },
     )
     .unwrap();
-    let known = spec();
+    let known = spec(adapter());
     let line = known["properties"]["agent"]["description"]
         .as_str()
         .unwrap();
@@ -328,6 +317,21 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
     assert!(efforts.contains(&"ultra".into()), "{efforts:?}");
     assert!(efforts.contains(&"max".into()), "{efforts:?}");
     assert!(!efforts.contains(&"default".into()), "{efforts:?}");
+    // With the user's own effort, the agent's default no longer runs, so
+    // the line names only the user's.
+    let mut configured = adapter();
+    configured.defaults.effort = Some("ultra".into());
+    let with_default = spec(configured);
+    let line = with_default["properties"]["agent"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        line.contains(
+            "Takes model (one of: opus[1m], sonnet), effort (one of: high, ultra), and \
+             session. The user's default, used when a call leaves it out: effort ultra."
+        ),
+        "{line}"
+    );
 
     // A server that lists efforts but no model: omit model.
     options::save(
@@ -343,7 +347,7 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
         },
     )
     .unwrap();
-    let efforts_only = spec();
+    let efforts_only = spec(adapter());
     let line = efforts_only["properties"]["agent"]["description"]
         .as_str()
         .unwrap();

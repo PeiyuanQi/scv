@@ -267,13 +267,13 @@ claude, codex`. Naming an agent the session does not offer fails the same way
 The `agent` argument is an enum of the offered agents. Its description says
 how the default is chosen, then gives each agent one line: its value, its
 product and what that harness offers, which options it takes, and the user's
-`use_for` note and defaults. For an agent reached over ACP, the options are
+`use_for` note, defaults, and hard-task effort. For an agent reached over ACP, the options are
 the exact model and effort values its server listed (see
 [Model and effort values](#model-and-effort-values)). For any other agent,
 the line names the kind of model name its CLI expects. For example:
 
 ```text
-- codex (Codex): OpenAI's coding agent; it reads, edits, and runs code in a project, with live web search under full permissions. Takes model (one of: gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5; its default is gpt-5.6-sol), effort (one of: low, medium, high, xhigh, max, ultra; its default is xhigh), and session. The user's note on when to use it: coding. For that work, pass model gpt-5.5 and effort high; omit model and effort for other work so the agent uses its own default.
+- codex (Codex): OpenAI's coding agent; it reads, edits, and runs code in a project, with live web search under full permissions. Takes model (one of: gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5), effort (one of: low, medium, high, xhigh, max, ultra), and session. The user's note on when to use it: coding. The user's defaults, used when a call leaves them out: model gpt-5.5 and effort high. For a hard task, pass effort xhigh.
 ```
 
 | Agent | Its line starts with |
@@ -299,16 +299,35 @@ effort = "xhigh"
 
 [agents.grok]
 use_for = "current events, and anything that needs posts on X"
+model = "grok-4.7"
+effort = "medium"              # every task that names no effort
+hard_task_effort = "high"      # what the main agent passes for a hard task
 ```
 
-`use_for` (one line, at most 500 bytes) is appended to that agent's line.
-`model` and `effort` are the values to pass when the work matches that note;
-other work omits them so the agent uses its own default. Without `use_for`,
-they apply whenever that agent is called, unless the user asks for another.
+`use_for` (one line, at most 500 bytes) is appended to that agent's line and
+says when to choose the agent. `model` and `effort` are that agent's defaults
+in SCV: the `agent` tool fills them in for a call that leaves them out (or
+sends them blank) before the call is checked, approved, or run, whatever the
+work and whoever made the call, including background jobs. A value the call
+names wins, one option at a time, so a call that names only `effort` still
+gets the default `model`. A turn that continues a conversation over ACP, or
+with a nested SCV, gets no defaults: its session keeps the model and effort
+it started with, or the last ones a turn named. An agent run as one CLI
+process per turn keeps nothing between turns, so it gets the defaults on
+every turn that leaves them out. Without a default, an omitted value is left
+to the agent's own configuration.
+
+`hard_task_effort` is the effort for a hard task. SCV never applies it by
+itself, since only the calling model can tell a task is hard; the agent's
+line, the system prompt, and the `delegating` skill tell the main agent to
+pass it as `effort` for such a task. It may be set without `effort`, leaving
+other tasks at the agent's own default.
+
 `prefer` names only agents the session offers, the first of which runs a call
 that names no agent, and an unknown name fails configuration validation. A
-`model` or `effort` on an agent that does not offer that selection is a
-configuration error. When a call fails in a way another agent
+`model`, `effort`, or `hard_task_effort` on an agent that does not offer that
+selection is a configuration error, and both efforts follow the effort rules
+below. When a call fails in a way another agent
 could avoid (the executable is missing or exits, it is signed out, or its
 provider returned an HTTP 401, 403, 404, 429, or 5xx, a quota error, or an
 unknown model), the result gains a `fallback` field naming the other agents
@@ -369,23 +388,24 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 Each agent's line lists the values its ACP server offers, or names the model
 family its CLI takes (Claude aliases such as `sonnet` for `claude`, OpenAI
 model IDs for `codex`, Grok model IDs for `grok`, pi model patterns or
-`provider/id` for `pi`), and the `model` and
-`effort` descriptions tell the model to set them when the user asks or when
-the work matches a configured `use_for` default; an omitted value leaves the
-agent's own configured default in place. A blank `agent`, `cwd`, `session`,
+`provider/id` for `pi`). The `model` and `effort` descriptions tell the model
+to set them when the user asks, and `effort` also to the line's hard-task
+effort for a hard task; an omitted value runs with the user's default the
+line gives, or else the agent's own. A blank `agent`, `cwd`, `session`,
 `model`, or `effort` counts as omitted, since models often send `""` for an
 optional field they mean to leave unset. A model is 1-128 ASCII letters,
 digits, or `._:/@[]-` and cannot start with `-` or `@`; an effort is 1-32
 ASCII letters, digits, `-`, or `_`, starting with a letter or digit. The schema's `effort` enum is `low`,
 `medium`, `high`, `xhigh`, and `max`, plus the values offered agents list or
-the user configured (see [Model and effort values](#model-and-effort-values)).
+the user configured as `effort` or `hard_task_effort` (see
+[Model and effort values](#model-and-effort-values)).
 Which efforts an agent supports is its own to check, since its levels change
 with its releases. Each selected value becomes one
 substituted argument, never shell text, so the CLI itself reports values it
 does not support.
 
 Each agent resolves only its configured executable and fixed argument vector,
-adds any selected model/effort arguments, then any `prompt_args` (for CLIs
+adds any selected or default model/effort arguments, then any `prompt_args` (for CLIs
 whose prompt is a flag value, such as `grok -p`), appends the prompt as one
 argument, and starts it directly in the workspace or the selected `cwd`. A
 prompt cannot start with `-`, so it is never read as a flag.
@@ -458,15 +478,23 @@ seven days. Then:
   (one of: opus[1m], claude-fable-5-1[1m], sonnet, haiku), effort (one of:
   low, medium, high, xhigh, max), and session.` It leaves out `default`,
   since omitting the argument selects that anyway, and appends a named
-  default, as in `; its default is gpt-5.6-sol`.
+  default, as in `; its default is gpt-5.6-sol`, unless the user set their
+  own default for that option, which runs instead.
 - The `effort` enum gains any listed value beyond SCV's own `low`, `medium`,
-  `high`, `xhigh`, and `max`, such as Codex's `ultra`, and any effort the
-  user configured for the agent.
+  `high`, `xhigh`, and `max`, such as Codex's `ultra`, and any `effort` or
+  `hard_task_effort` the user configured for the agent.
 - A call whose model is not listed is refused before anything starts, even
   as a background job:
   ```text
   model "opus-5.5" is not one claude offers; choose one of: opus[1m], claude-fable-5-1[1m], sonnet, haiku, or omit model for its default. This list is from claude's last session; if the user named a newer one, run `scv agents check claude` to refresh it
   ```
+  When the refused model is the user's `[agents.<name>] model`, omitting it
+  would bring it back, so the error says so instead:
+  ```text
+  model "opus-5.5" is the user's default for claude ([agents.claude] model), but not one claude offers; pass one of: opus[1m], claude-fable-5-1[1m], sonnet, haiku, and tell the user so they can change that setting. This list is from claude's last session; …
+  ```
+  Another refused model, while a default is set, ends `or omit model for
+  the user's default, <model>` instead of `for its default`.
   Before refusing, the tool reads the saved file again. Another session, or
   `scv agents check`, may have saved a newer list, and the tool then goes by
   that list. Each new ACP session of the tool also replaces the tool's copy.
@@ -482,8 +510,8 @@ list, and that session's values are saved for the next one. An agent that
 runs its CLI once per turn lists nothing, so its line keeps the adapter's
 hint (such as `Claude model alias or ID, such as sonnet or opus`) and the
 CLI checks the value.
-`[agents.<name>] model` and `effort` should be values from the agent's list,
-which `scv agents check` prints (see
+`[agents.<name>] model`, `effort`, and `hard_task_effort` should be values
+from the agent's list, which `scv agents check` prints (see
 [Checking delegated agents](#checking-delegated-agents)).
 
 ### Results
@@ -668,8 +696,10 @@ work* section, generated from the agents actually offered (so it applies even
 when `agent.system_prompt` is replaced). It names each offered agent by its
 `agent` value with its product (`codex (Codex)`), adds `agent.prefer` in order
 and that a call naming no agent goes to the first of them, so the main agent
-names one whenever the work calls for another, and any `[agents.<name>]
-use_for` / `model` / `effort` defaults, and, when background jobs are on, asks
+names one whenever the work calls for another, any `[agents.<name>]
+use_for` note (`For coding, prefer claude.`), the `model` / `effort` defaults
+SCV passes when a call leaves them out, and each `hard_task_effort` to pass
+for a hard task, and, when background jobs are on, asks
 the main agent to stay available: answer quick things (short reads, lookups, status
 checks) itself, and hand real work (changes, multi-step investigation, builds,
 tests, releases, anything likely to take more than about a minute) to a
@@ -866,7 +896,9 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   `agent.conversation_idle_seconds`.
 - `model` and `effort`, for an agent whose adapter offers them (so not
   DeepSeek Harness), become `session/set_config_option` on the session's
-  `model` and `effort`/`reasoning_effort` options, at any turn. A value the
+  `model` and `effort`/`reasoning_effort` options, at any turn. The user's
+  defaults are set this way when a conversation starts; a later turn sets
+  only what it names, so the session keeps the rest. A value the
   agent does not offer fails the call with the offered list and keeps the
   conversation. Each new session's lists are saved and shown to later
   sessions (see [Model and effort values](#model-and-effort-values)).
@@ -1043,6 +1075,9 @@ turn per agent. It reads only the user's configuration and prints, per agent:
 - the models and efforts its ACP server offers, as that call just saved them
   (or, if the call failed first, as an earlier session did, and when), or
   that its CLI lists none;
+- the user's `hard_task_effort`, if set, which the call does not use. When
+  the saved efforts lack it, the line says so and names the setting. Efforts
+  depend on the model, so this is a warning and does not fail the check;
 - one `agent` call, made through the same tool and backend a session uses,
   from the current directory, in the foreground. It sends `SCV is checking
   that it can reach you. Reply with exactly: ok` with the user's configured
@@ -1070,6 +1105,7 @@ claude (Claude Code)
   version   2.1.283 (Claude Code)
   models    opus[1m], claude-fable-5-1[1m], sonnet, haiku
   efforts   low, medium, high, xhigh, max
+  hard task effort max
   call      ok in 3.7s with your configured model opus[1m] and effort xhigh: "ok"
 ```
 

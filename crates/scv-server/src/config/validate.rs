@@ -248,18 +248,24 @@ impl Config {
                     bail!("agents.{agent}.model is set but {agent} does not offer model selection");
                 }
             }
-            if let Some(effort) = &adapter.effort {
+            for (field, effort) in [
+                ("effort", &adapter.effort),
+                ("hard_task_effort", &adapter.hard_task_effort),
+            ] {
+                let Some(effort) = effort else {
+                    continue;
+                };
                 if !scv_tools::valid_effort(effort) {
                     bail!(
-                        "agents.{agent}.effort must be 1-32 letters, digits, '-', or '_', starting \
-                         with a letter or digit, such as one of {} or another value `scv agents \
-                         check {agent}` lists",
+                        "agents.{agent}.{field} must be 1-32 letters, digits, '-', or '_', \
+                         starting with a letter or digit, such as one of {} or another value \
+                         `scv agents check {agent}` lists",
                         scv_tools::AGENT_EFFORTS.join(", ")
                     );
                 }
                 if adapter.effort_args.is_empty() {
                     bail!(
-                        "agents.{agent}.effort is set but {agent} does not offer effort selection"
+                        "agents.{agent}.{field} is set but {agent} does not offer effort selection"
                     );
                 }
             }

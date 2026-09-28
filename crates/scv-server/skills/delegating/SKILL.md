@@ -22,9 +22,10 @@ from the `agent` tool itself:
   agent's list yet. Omit `model` unless the user named one. A wrong value
   then fails with the list, and SCV saves it for later sessions.
 - The user's own choices are in that description and in the system prompt:
-  their `use_for` note and default model and effort for each agent, and
-  their preferred order. Follow them unless the user asks for something else
-  in this conversation.
+  their `use_for` note for each agent, the default model and effort SCV
+  passes when a call leaves them out, the effort for a hard task, and their
+  preferred order. Follow them unless the user asks for something else in
+  this conversation.
 
 Never make a model value up from a product name. "Opus 5.5" or "GPT-5.5" is
 what a person says, not what an agent accepts. Find the listed value that
@@ -38,14 +39,28 @@ the next session.
 
 1. A `session` handle keeps its conversation's agent.
 2. Next comes the agent the user named.
-3. Next comes the agent whose `use_for` note matches the work, with the
-   model and effort that note gives.
+3. Next comes the agent whose `use_for` note matches the work.
 4. Otherwise use the first of the user's preferred agents. Choose another
    only when the work needs something only that agent has, such as live web
    or X search, or when the preferred one is unavailable.
 
 A nested SCV (`scv`) suits a self-contained side task whose details should
 stay out of this conversation.
+
+## Choosing the model and effort
+
+- Leave `model` and `effort` out. SCV then passes the user's defaults from
+  the agent's line, or the agent uses its own when the user set none.
+- For a hard task, pass the hard-task effort from the agent's line as
+  `effort`. A task is hard when getting it right takes sustained reasoning:
+  a bug whose cause is unknown, a change that spans many files or
+  components, a design, security, or data-loss decision, deep research, or
+  work that already failed once at the default effort. A lookup, a summary,
+  a small edit, or a known fix is not hard. When unsure, use the default.
+- Otherwise pass a value only when the user asks for one, using the exact
+  value from the agent's line.
+- On a follow-up with `session`, leave both out unless the effort should
+  change, such as when the follow-up is itself a hard task.
 
 ## Writing the brief
 
@@ -88,6 +103,7 @@ cause.
 | The result says | Do this |
 | --- | --- |
 | `model "…" is not one … offers; choose one of: …`, or `… is not offered by …` | Pass a listed value, found as described in *Where the facts are*. Tell the user which one you used. |
+| `model "…" is the user's default for …` | Pass a listed value for this call. Tell the user their `[agents.<name>] model` is not one the agent offers, and offer the corrected line. |
 | `effort "…"` is not offered | Pass a listed effort, or omit `effort`. |
 | `… does not take model` (or `effort`, or `session`) | Omit that argument, or call one of the agents the error names. |
 | A `hint` to run `scv agents login <agent>` | Tell the owner that exact command. Don't retry until they have signed it in. |
@@ -108,16 +124,20 @@ cause.
   being read. The fix is a change to SCV's adapter table, which the owner can
   ask you to hand to an agent in the `scv` project.
 - When the owner states a lasting preference, such as "for coding always use
-  Claude Code on Opus at xhigh", it lasts only for this session unless it is
-  in their `config.toml`. Offer the exact lines, using values from the
-  agent's list:
+  Claude Code on Opus at xhigh" or "Grok at medium effort, high for hard
+  tasks", it lasts only for this session unless it is in their
+  `config.toml`. Offer the exact lines, using values from the agent's list:
 
   ```toml
   [agents.claude]
   use_for = "coding"
   model = "<a listed value>"
   effort = "xhigh"
+  hard_task_effort = "max"   # optional: the effort for a hard task
   ```
+
+  `model` and `effort` apply to every call to that agent that leaves them
+  out, not only to the work its `use_for` names.
 
   Add `[agent] prefer = [...]` too if they want the order changed. Edit the
   file only after the owner says yes. New sessions read it.

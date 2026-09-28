@@ -54,6 +54,8 @@ pub(crate) struct AcpAgentTool {
     /// Refuse a model the saved values do not list before starting. Off for
     /// `scv agents check`, where the agent's own list decides.
     precheck: bool,
+    /// `[agents.<name>] model`, named when that is the model refused.
+    default_model: Option<String>,
 }
 
 impl AcpAgentTool {
@@ -93,6 +95,7 @@ impl AcpAgentTool {
             options_file: adapter.options_file.clone(),
             offered: StdMutex::new(offered),
             precheck: true,
+            default_model: adapter.defaults.model.clone(),
         }
     }
 
@@ -149,15 +152,28 @@ impl AcpAgentTool {
         let Some(choice) = refused else {
             return Ok(());
         };
+        let (name, values) = (&self.name, choice.shown().join(", "));
+        let refresh = format!(
+            "This list is from {name}'s last session; if the user named a newer one, run `scv \
+             agents check {name}` to refresh it"
+        );
+        // Omitting the model would bring the same default back.
+        if self.default_model.as_deref() == Some(model) {
+            return Err(ToolError::invalid_arguments(format!(
+                "model {:?} is the user's default for {name} ([agents.{name}] model), but not \
+                 one {name} offers; pass one of: {values}, and tell the user so they can change \
+                 that setting. {refresh}",
+                bounded(model, 80)
+            )));
+        }
+        let omit = self.default_model.as_deref().map_or_else(
+            || "its default".to_owned(),
+            |default| format!("the user's default, {default}"),
+        );
         Err(ToolError::invalid_arguments(format!(
-            "model {:?} is not one {} offers; choose one of: {}, or omit model for its \
-             default. This list is from {}'s last session; if the user named a newer one, \
-             run `scv agents check {}` to refresh it",
-            bounded(model, 80),
-            self.name,
-            choice.shown().join(", "),
-            self.name,
-            self.name
+            "model {:?} is not one {name} offers; choose one of: {values}, or omit model for \
+             {omit}. {refresh}",
+            bounded(model, 80)
         )))
     }
 

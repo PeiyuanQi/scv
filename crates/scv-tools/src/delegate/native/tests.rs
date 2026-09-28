@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    ToolsConfig,
+    AgentDefaults, ToolsConfig,
     builtin::shell::BashTool,
     delegate::{adapters::Transport, agent::AgentTool, request::MAX_AGENT_CWD_BYTES},
 };
@@ -65,8 +65,7 @@ fn fake_agent_with_prompt_args(
             transport: Transport::Process,
             acp: None,
             use_for: None,
-            model: None,
-            effort: None,
+            defaults: AgentDefaults::default(),
             options_file: None,
         },
         Timeouts {
@@ -170,8 +169,7 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
             transport: Transport::Process,
             acp: None,
             use_for: None,
-            model: None,
-            effort: None,
+            defaults: AgentDefaults::default(),
             options_file: None,
         },
         Timeouts {
@@ -533,8 +531,7 @@ fn conversing_agent(
             transport: Transport::Process,
             acp: None,
             use_for: None,
-            model: None,
-            effort: None,
+            defaults: AgentDefaults::default(),
             options_file: None,
         },
         Timeouts {

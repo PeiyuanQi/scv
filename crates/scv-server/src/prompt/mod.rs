@@ -191,62 +191,55 @@ pub(crate) fn delegation_guidance(config: &Config, context: &PromptContext<'_>) 
     text
 }
 
-/// Per-agent `use_for` / model / effort defaults, as one calm paragraph.
+/// Per-agent `use_for` notes, the defaults SCV passes when a call leaves out
+/// model or effort, and the effort for a hard task, as one calm paragraph.
 fn task_defaults_guidance(config: &Config, context: &PromptContext<'_>) -> String {
-    let mut matched = Vec::new();
-    let mut always = Vec::new();
-    let mut any_match_defaults = false;
+    use scv_tools::agent_choice::{defaults_phrase, note_clause};
+
+    let mut sentences = Vec::new();
+    let mut defaults = Vec::new();
+    let mut hard = Vec::new();
     for agent in context.agents {
         let Some(adapter) = config.agents.0.get(agent) else {
             continue;
         };
-        let defaults = scv_tools::agent_choice::model_effort_phrase(
-            adapter.model.as_deref(),
-            adapter.effort.as_deref(),
-        );
-        match adapter.use_for.as_deref() {
-            Some(use_for) => {
-                let mut clause = format!("for {use_for}, prefer {agent}");
-                if let Some(defaults) = &defaults {
-                    clause.push_str(" with ");
-                    clause.push_str(defaults);
-                    any_match_defaults = true;
-                }
-                matched.push(clause);
-            }
-            None => {
-                if let Some(defaults) = defaults {
-                    always.push(format!(
-                        "when delegating to {agent}, pass {defaults} unless the user asks for \
-                         another"
-                    ));
-                }
-            }
+        if let Some(use_for) = adapter.use_for.as_deref() {
+            sentences.push(capitalize_ascii(&format!(
+                "for {}, prefer {agent}",
+                note_clause(use_for)
+            )));
+        }
+        let configured = adapter.defaults();
+        if let Some(phrase) = defaults_phrase(&configured) {
+            defaults.push(format!("{phrase} to {agent}"));
+        }
+        if let Some(effort) = &configured.hard_task_effort {
+            hard.push(format!("effort {effort} to {agent}"));
         }
     }
-    if matched.is_empty() && always.is_empty() {
-        return String::new();
+    if !defaults.is_empty() {
+        sentences.push(format!(
+            "When a call leaves out model or effort, SCV passes the user's defaults: {}",
+            joined(&defaults)
+        ));
     }
-    let mut text = String::new();
-    let mut first = true;
-    for clause in matched.iter().chain(always.iter()) {
-        if first {
-            text.push(' ');
-            text.push_str(&capitalize_ascii(clause));
-            first = false;
-        } else {
-            text.push_str(". ");
-            text.push_str(&capitalize_ascii(clause));
-        }
+    if !hard.is_empty() {
+        sentences.push(format!("For a hard task, pass {}", joined(&hard)));
     }
-    text.push('.');
-    if any_match_defaults {
-        text.push_str(
-            " When the work does not match a note, omit model and effort so the agent uses \
-             its own default.",
-        );
+    sentences
+        .iter()
+        .map(|sentence| format!(" {sentence}."))
+        .collect()
+}
+
+/// `a`, `a, and b`, or `a, b, and c`: the comma keeps items that contain
+/// "and" apart.
+fn joined(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
     }
-    text
 }
 
 fn capitalize_ascii(text: &str) -> String {

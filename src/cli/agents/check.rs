@@ -1,7 +1,7 @@
 //! `scv agents check`: call each installed agent the way SCV's `agent` tool
 //! does, and report its version, how SCV reaches it, the models and efforts
-//! it offers, and whether a short call with the user's configured model and
-//! effort works.
+//! it offers, whether a short call with the user's configured model and
+//! effort works, and whether it lists the user's hard-task effort.
 
 use std::{
     path::Path,
@@ -13,7 +13,9 @@ use std::{
 use anyhow::{Result, bail};
 use scv_server::config::Config;
 use scv_tools::{
-    DelegationContext, Reach, adapters, agent_options, delegation::DelegationRegistry,
+    DelegationContext, Reach, adapters,
+    agent_options::{self, AgentOptions},
+    delegation::DelegationRegistry,
 };
 use serde_json::json;
 use tokio::sync::watch;
@@ -99,11 +101,12 @@ pub(crate) async fn check(
         let mut arguments =
             json!({"agent": name, "prompt": PROMPT, "timeout_seconds": timeout_seconds});
         let mut with = Vec::new();
-        if let Some(model) = &adapter.model {
+        let defaults = adapter.defaults.clone();
+        if let Some(model) = &defaults.model {
             arguments["model"] = model.clone().into();
             with.push(format!("model {model}"));
         }
-        if let Some(effort) = &adapter.effort {
+        if let Some(effort) = &defaults.effort {
             arguments["effort"] = effort.clone().into();
             with.push(format!("effort {effort}"));
         }
@@ -132,13 +135,29 @@ pub(crate) async fn check(
         }
 
         // The call's ACP session saved what the agent offers now.
-        match (&reached, options_file) {
+        let offered = match (&reached, options_file) {
             (Reach::Acp(_), Some(file)) => print_offered(&file, name),
-            (Reach::Cli(_), _) => println!(
-                "  models    passed to its CLI as given; it lists none ({})",
-                model_hint.trim_end_matches('.')
-            ),
-            _ => {}
+            (Reach::Cli(_), _) => {
+                println!(
+                    "  models    passed to its CLI as given; it lists none ({})",
+                    model_hint.trim_end_matches('.')
+                );
+                None
+            }
+            _ => None,
+        };
+        // Not called: only a hard task passes it. Efforts depend on the
+        // model, so an unlisted one is a warning, not a failure.
+        if let Some(effort) = &defaults.hard_task_effort {
+            let listed = offered.as_ref().and_then(|offered| offered.effort.as_ref());
+            if listed.is_some_and(|choice| !choice.offers(effort)) {
+                println!(
+                    "  hard task effort {effort}, which is not among the efforts {name} listed; \
+                     check [agents.{name}] hard_task_effort"
+                );
+            } else {
+                println!("  hard task effort {effort}");
+            }
         }
         match result {
             Ok(value) if value["status"] == "completed" => {
@@ -179,12 +198,12 @@ pub(crate) async fn check(
     Ok(())
 }
 
-/// The model and effort values saved for `agent`, as its last ACP session
-/// listed them.
-fn print_offered(file: &Path, agent: &str) {
+/// Print the model and effort values saved for `agent`, as its last ACP
+/// session listed them, and return them.
+fn print_offered(file: &Path, agent: &str) -> Option<AgentOptions> {
     let Some((offered, seen)) = agent_options::read_saved(file, agent) else {
         println!("  models    not known yet: no ACP session has listed them");
-        return;
+        return None;
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -206,6 +225,7 @@ fn print_offered(file: &Path, agent: &str) {
             .unwrap_or_default();
         println!("  {label:<9} {}{default}{when}", choice.shown().join(", "));
     }
+    Some(offered)
 }
 
 fn ago(seconds: u64) -> String {

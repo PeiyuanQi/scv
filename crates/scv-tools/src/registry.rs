@@ -285,7 +285,11 @@ fn offer(
     };
     let mut model_hint = adapter.model_hint.clone();
     let mut offered = None;
-    let (backend, accepts): (Arc<dyn Backend>, _) = match reach(&adapter) {
+    let reached = reach(&adapter);
+    // An ACP server or nested SCV keeps a conversation's model and effort;
+    // a CLI started once per turn is given them again on every turn.
+    let holds_settings = !matches!(reached, Reach::Cli(_));
+    let (backend, accepts): (Arc<dyn Backend>, _) = match reached {
         Reach::Missing(_) => return None,
         Reach::Scv(resolved) => (
             Arc::new(ScvAgentTool {
@@ -346,8 +350,8 @@ fn offer(
         model_hint,
         offered,
         use_for: adapter.use_for,
-        model: adapter.model,
-        effort: adapter.effort,
+        defaults: adapter.defaults,
+        holds_settings,
     })
 }
 
