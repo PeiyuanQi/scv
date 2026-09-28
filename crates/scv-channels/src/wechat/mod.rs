@@ -346,8 +346,10 @@ fn inbound(msg: &Value) -> Option<Inbound> {
         .unwrap_or_default();
     let mut text = String::new();
     let mut files = Vec::new();
+    let mut quotes = false;
     for item in items {
         if let Some(quoted) = item.get("ref_msg") {
+            quotes = true;
             let mut parts = Vec::new();
             if let Some(title) = quoted
                 .get("title")
@@ -406,6 +408,7 @@ fn inbound(msg: &Value) -> Option<Inbound> {
         media: files,
         reference: None,
         sent_ms: sent_ms(msg),
+        quoted: quotes,
     }))
 }
 

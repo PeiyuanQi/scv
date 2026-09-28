@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Attachment, DaemonCommand, PeerInfo};
 #[cfg(doc)]
-use crate::{CHAT_ATTACH_TOOL, MAX_CHANNEL_NAME_BYTES, MAX_TURN_ATTACHMENTS};
+use crate::{
+    CHAT_ATTACH_TOOL, MAX_CHANNEL_NAME_BYTES, MAX_SYSTEM_PROMPT_BYTES, MAX_TURN_ATTACHMENTS,
+};
 
 /// A conversation's chat log under the server's history directory,
 /// `<channel>/<account>/<conversation>`. Each part is at most 64 bytes of
@@ -87,6 +89,14 @@ pub enum ClientMessage {
         /// account owner's direct chat.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         chat: Option<ChatLog>,
+        /// The whole system prompt, in place of the configured one and
+        /// everything the server adds to it (the working directory, project
+        /// instructions, skills, the chat channel). Accepted only with
+        /// `no_tools: true`, and at most [`MAX_SYSTEM_PROMPT_BYTES`]. Mail
+        /// triage sends a fixed frame this way, so no personal instruction
+        /// reaches a model reading untrusted mail.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
     },
     /// Attach to an existing session. Not supported: sessions belong to the
     /// connection that started them.

@@ -273,6 +273,7 @@ impl Parent {
                 channel: None,
                 auto_approve: None,
                 chat: None,
+                system_prompt: None,
             })
             .await;
         parent.session_id = loop {

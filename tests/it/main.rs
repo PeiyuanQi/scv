@@ -14,6 +14,7 @@ mod daemon;
 mod delegation;
 mod feature_flow;
 mod guard;
+mod mail;
 mod restart;
 mod server;
 mod support;

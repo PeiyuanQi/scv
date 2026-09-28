@@ -171,6 +171,12 @@ impl Confirmer {
                  owner account (or the owner's last chat) is connected",
             )?,
         };
+        if self.hub.is_mail_chat(&chat.component) {
+            return Err(format!(
+                "{} is a mail chat, which carries only mail and takes no questions",
+                chat.component
+            ));
+        }
         match self.hub.owner(&chat.component) {
             Some(Some(owner)) if owner == chat.peer => Ok(chat),
             Some(_) => Err(format!(

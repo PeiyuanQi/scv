@@ -87,6 +87,7 @@ fn tool_progress_and_delegation_depth_round_trip() {
         channel: None,
         auto_approve: None,
         chat: None,
+        system_prompt: None,
     };
     let nested = serde_json::to_string(&start(Some(2))).unwrap();
     assert!(nested.contains(r#""delegation_depth":2"#));
@@ -118,6 +119,7 @@ fn chat_sessions_name_their_channel_and_approval_mode() {
         channel: Some("WeChat".into()),
         auto_approve: Some(true),
         chat: None,
+        system_prompt: None,
     };
     let wire = serde_json::to_string(&chat).unwrap();
     assert!(wire.contains(r#""channel":"WeChat""#), "{wire}");
@@ -307,6 +309,7 @@ fn remote_tools_fields_are_additive() {
         workspace: None,
         remote_tools: Some(RemoteTools::Owner),
         senders: None,
+        purpose: None,
     };
     let encoded = serde_json::to_string(&owner).unwrap();
     assert!(encoded.contains(r#""remote_tools":"owner""#));
@@ -340,6 +343,7 @@ fn senders_fields_are_additive() {
         workspace: None,
         remote_tools: None,
         senders: Some(Senders::Anyone),
+        purpose: None,
     };
     let encoded = serde_json::to_string(&anyone).unwrap();
     assert_eq!(
@@ -638,4 +642,57 @@ fn unknown_event_types_parse_as_unknown() {
     assert_eq!(event.turn_request_id(), None);
     // A known type with a malformed body is still an error.
     assert!(serde_json::from_str::<ServerEvent>(r#"{"type":"turn.started"}"#).is_err());
+}
+
+#[test]
+fn mail_fields_are_additive_and_carry_counts_only() {
+    let legacy: DaemonCommand = serde_json::from_str(
+        r#"{"action":"channel_set","channel":"feishu","account":"a","enabled":true,"workspace":null}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy,
+        DaemonCommand::ChannelSet { purpose: None, .. }
+    ));
+    let mail = DaemonCommand::ChannelSet {
+        channel: "feishu".into(),
+        account: "mail".into(),
+        enabled: true,
+        workspace: None,
+        remote_tools: None,
+        senders: None,
+        purpose: Some(Purpose::Mail),
+    };
+    let encoded = serde_json::to_string(&mail).unwrap();
+    assert!(encoded.ends_with(r#""purpose":"mail"}"#), "{encoded}");
+    assert_eq!(
+        serde_json::from_str::<DaemonCommand>(&encoded).unwrap(),
+        mail
+    );
+    let health: ComponentHealth = serde_json::from_str(
+        r#"{"id":"email:a","channel":"email","account":"a","bot_id":"imap.example.com","user_id":null,"enabled":true,"state":"connected","last_success_unix_seconds":null,"error":null,"restarts":0,"mail":{"queued":2,"tokens_today":9}}"#,
+    )
+    .unwrap();
+    assert_eq!(health.purpose, None);
+    let counts = health.mail.clone().unwrap();
+    assert_eq!(
+        (counts.queued, counts.tokens_today, counts.seen_today),
+        (2, 9, 0)
+    );
+    let chat: ComponentHealth = serde_json::from_str(
+        r#"{"id":"feishu:mail","account":"mail","bot_id":null,"user_id":null,"enabled":true,"state":"connected","last_success_unix_seconds":null,"error":null,"restarts":0,"purpose":"mail"}"#,
+    )
+    .unwrap();
+    assert_eq!(chat.purpose, Some(Purpose::Mail));
+    // Neither field is written for an ordinary chat.
+    let plain = serde_json::to_string(&ComponentHealth {
+        purpose: None,
+        mail: None,
+        ..chat
+    })
+    .unwrap();
+    assert!(
+        !plain.contains("\"purpose\"") && !plain.contains("\"mail\":"),
+        "{plain}"
+    );
 }

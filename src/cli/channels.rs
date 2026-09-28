@@ -1,12 +1,13 @@
-//! `scv channels`: sign chat accounts in, enable or disable them under the
-//! daemon, and remove them.
+//! `scv channels`: sign chat accounts and mailboxes in, enable or disable
+//! them under the daemon, and remove them.
 
 use anyhow::{Context, Result, bail};
 use scv_channels::Channel as _;
+use scv_channels::email::{self, Email};
 use scv_channels::feishu::{self, Feishu};
 use scv_channels::wechat::{self, WeChat};
 use scv_client::Layout;
-use scv_protocol::{ComponentHealth, DaemonCommand, RemoteTools, Senders};
+use scv_protocol::{ComponentHealth, DaemonCommand, Purpose, RemoteTools, Senders};
 use std::path::Path;
 
 use super::args::{ChannelArg, ChannelsCommand};
@@ -22,7 +23,13 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
             login_url,
             app_id,
             owner_open_id,
+            imap_host,
+            imap_port,
+            user,
         } => {
+            if channel != ChannelArg::Email && imap_host.is_some() {
+                bail!("--imap-host, --imap-port, and --user are email options");
+            }
             match channel {
                 ChannelArg::Wechat => {
                     if app_id.is_some() {
@@ -57,6 +64,32 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
                     };
                     Feishu::login(layout, &account, login).await?;
                 }
+                ChannelArg::Email => {
+                    if login_url.is_some() || app_id.is_some() {
+                        bail!("--login-url, --app-id, and --owner-open-id are chat options");
+                    }
+                    let (Some(host), Some(username)) = (imap_host, user) else {
+                        bail!("email sign-in needs --imap-host and --user");
+                    };
+                    // Never an argument: argv is visible to every local user.
+                    let password =
+                        read_secret("Mailbox password or authorization code (input hidden)")?;
+                    Email::login(
+                        layout,
+                        &account,
+                        email::Login {
+                            host,
+                            port: imap_port,
+                            username,
+                            password: password.into(),
+                        },
+                    )
+                    .await?;
+                    println!(
+                        "Mailbox signed in; SCV only reads it. Add [channels.email.{account}.mail] \
+                         with notify.route naming a mail chat before it runs; see `scv config show`."
+                    );
+                }
             }
             reload_after_login(layout).await
         }
@@ -66,14 +99,18 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
             workspace,
             remote_tools,
             senders,
+            purpose,
         } => {
             channel_run(
                 layout,
                 channel,
                 &account,
                 &workspace,
-                remote_tools.map(Into::into),
-                senders.map(Into::into),
+                Grants {
+                    remote_tools: remote_tools.map(Into::into),
+                    senders: senders.map(Into::into),
+                    purpose: purpose.map(Into::into),
+                },
             )
             .await
         }
@@ -87,6 +124,7 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
                     workspace: None,
                     remote_tools: None,
                     senders: None,
+                    purpose: None,
                 },
             )
             .await?;
@@ -109,9 +147,24 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
                 "{} account stopped; local credentials and delivery state removed.",
                 channel.title()
             );
+            if channel == ChannelArg::Email {
+                println!("Its mail state and reports waiting to be sent were removed too.");
+            } else {
+                println!(
+                    "If it was a mail chat, the platform still keeps the chat's history; sign \
+                     in a new app before using it as an ordinary chat."
+                );
+            }
             Ok(())
         }
     }
+}
+
+/// What `scv channels run` may change besides enablement.
+struct Grants {
+    remote_tools: Option<RemoteTools>,
+    senders: Option<Senders>,
+    purpose: Option<Purpose>,
 }
 
 async fn channel_run(
@@ -119,19 +172,36 @@ async fn channel_run(
     channel: ChannelArg,
     account: &str,
     workspace: &Path,
-    remote_tools: Option<RemoteTools>,
-    senders: Option<Senders>,
+    grants: Grants,
 ) -> Result<()> {
-    let workspace = std::fs::canonicalize(workspace).context("resolve channel workspace")?;
+    let Grants {
+        remote_tools,
+        senders,
+        purpose,
+    } = grants;
+    let workspace = if channel == ChannelArg::Email {
+        // A mailbox answers nobody, holds no tools, and has no workspace.
+        if remote_tools == Some(RemoteTools::Owner)
+            || senders == Some(Senders::Anyone)
+            || purpose.is_some()
+        {
+            bail!("an email account takes no --remote-tools owner, --senders anyone, or --purpose");
+        }
+        None
+    } else {
+        let workspace = std::fs::canonicalize(workspace).context("resolve channel workspace")?;
+        Some(workspace.display().to_string())
+    };
     let status = control(
         layout,
         DaemonCommand::ChannelSet {
             channel: channel.name().into(),
             account: account.into(),
             enabled: true,
-            workspace: Some(workspace.display().to_string()),
+            workspace,
             remote_tools,
             senders,
+            purpose,
         },
     )
     .await?;
@@ -144,6 +214,17 @@ async fn channel_run(
         .components
         .iter()
         .find(|health| health.channel == channel.name() && health.account == account);
+    match (purpose, health.and_then(|health| health.purpose)) {
+        (Some(Purpose::Mail), Some(Purpose::Mail)) => println!(
+            "Purpose: a mail chat. It carries only the email accounts' reports; no model ever \
+             answers in it, and SCV keeps no chat log of it."
+        ),
+        (Some(Purpose::Mail), None) => println!(
+            "Warning: the running daemon predates --purpose and did not save it; restart it \
+             into this release and run this again."
+        ),
+        _ => {}
+    }
     if remote_tools == Some(RemoteTools::Owner) {
         // Report what the daemon applied: credentials without an owner ID
         // grant tools to nobody.

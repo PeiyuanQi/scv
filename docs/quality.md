@@ -204,9 +204,44 @@ Daemon and component changes require focused coverage for:
 - TUI reconnect creating a fresh session without history restoration or
   automatic replay of submitted work.
 
+Mail changes require focused coverage for:
+
+- quarantine: a canary in every mail field (display name, subject, body,
+  attachment name, and the model's summary) reaching the mail chat and
+  nothing else: not the logs at `TRACE`, daemon status, `scv config show`,
+  or any file at rest once the report is delivered;
+- mail chats: no daemon session or turn, only fixed replies, quotes,
+  forwards, and files never read as commands, no chat log, the sticky
+  marker, an account with ordinary chat state or a chat log (or one that
+  cannot be read) refused without a change or a delivery, SCV's notices and
+  questions refused, keyed notices stored once, and refusals recorded and
+  never held;
+- the IMAP command guard refusing every mailbox-changing command and
+  non-peek fetch before writing a byte, and the adapter's parsing of real
+  and hostile responses against a scripted server, oversized metadata cut to
+  its bounds among them;
+- a refused sign-in whose server echoes the password, in its text or as a
+  response code, around a Unicode line separator: neither the error nor the
+  logs repeat any of it;
+- the triage session's shape (`no_tools`, no channel, the fixed frame as the
+  whole system prompt, the empty working directory), tool and approval events
+  ending it, and only the answer's three fields read;
+- rules, identity, age, the hourly and daily budgets, the prompt's size
+  bound, and failures each deciding a message deterministically, with a
+  reused `Message-ID` and same-second, same-size messages without one never
+  taken for mail already decided;
+- the digest plan's limits under random arrivals, rendering adversarial text
+  onto prefixed lines, route failover to mail chats only, and retries;
+- the ledger's claims moving with the cursor in one write, a failed write
+  changing nothing, a stalled write holding up no reader or shutdown and
+  keeping the run lock until it lands, the state-file quota, the queue
+  bound, retention, a janitor that removes only its own account's
+  temporaries and counts mail when free space cannot be told, and `0600`
+  files in `0700` directories.
+
 Use fake components, local protocol peers, and fake HTTP services for these
-checks. Correctness tests must not contact WeChat, Feishu, or a live model
-provider.
+checks. Correctness tests must not contact WeChat, Feishu, a mail server, or a
+live model provider.
 
 ## Required checks
 
@@ -223,7 +258,8 @@ Run `cargo-deny` locally when installed; CI requires it. This document defines
 required coverage and checks, not verification results for a particular change.
 
 CI runs formatting, strict Clippy (also for `scv-channels` with each channel
-feature alone and with none), workspace tests/builds, and `cargo-deny`.
+feature alone, `email` with `feishu`, and none), the `scv-channels` tests
+with `email` alone, workspace tests/builds, and `cargo-deny`.
 Tests also run on macOS and under the declared Rust 1.88 MSRV. The tagged-release
 workflow builds release archives and smoke-tests them on their native Linux and
 macOS runners.

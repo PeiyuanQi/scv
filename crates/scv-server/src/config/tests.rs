@@ -63,7 +63,10 @@ fn channel_accounts_are_user_only_and_validated() {
     );
     assert!(with("feishu", "team-2", None).validate().is_ok());
     let unknown = with("irc", "default", None).validate().unwrap_err();
-    assert!(unknown.to_string().contains("wechat, feishu"), "{unknown}");
+    assert!(
+        unknown.to_string().contains("wechat, feishu, email"),
+        "{unknown}"
+    );
     assert!(with("wechat", "a.b", None).validate().is_err());
     assert!(with("wechat", "default", Some("work")).validate().is_err());
     let parsed: Config =
@@ -74,6 +77,47 @@ fn channel_accounts_are_user_only_and_validated() {
         scv_protocol::RemoteTools::Owner
     );
     assert!(toml::from_str::<Config>("[channels.wechat.default]\nenabeld = true\n").is_err());
+}
+
+#[test]
+fn mail_accounts_and_mail_chats_are_kept_apart() {
+    let parse = |text: &str| {
+        toml::from_str::<Config>(text)
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .and_then(|config| config.validate())
+    };
+    // A broken mail table stays opaque here: only its account fails, when
+    // it starts, and every other session still loads.
+    assert!(
+        parse(
+            "[channels.email.default.mail]
+max_body_kib = \"lots\"
+typo = 1
+"
+        )
+        .is_ok()
+    );
+    assert!(parse("[channels.feishu.mail]\npurpose = \"mail\"\n").is_ok());
+    assert!(
+        parse(
+            "[notify]\nowner = [\"feishu:default\"]\n[channels.feishu.mail]\npurpose = \"mail\"\n"
+        )
+        .is_ok()
+    );
+    for bad in [
+        "[channels.feishu.mail]\npurpose = \"mail\"\nremote_tools = \"owner\"\n",
+        "[channels.feishu.mail]\npurpose = \"mail\"\nsenders = \"anyone\"\n",
+        "[channels.feishu.mail]\npurpose = \"email\"\n",
+        "[channels.feishu.default.mail]\nmailbox = \"INBOX\"\n",
+        "[channels.email.default]\npurpose = \"mail\"\n",
+        "[channels.email.default]\nremote_tools = \"owner\"\n",
+        "[channels.email.default]\nsenders = \"anyone\"\n",
+        "[channels.email.default]\nworkspace = \"/srv/work\"\n",
+        "[notify]\nowner = [\"email:default\"]\n",
+        "[notify]\nowner = [\"feishu:mail\"]\n[channels.feishu.mail]\npurpose = \"mail\"\n",
+    ] {
+        assert!(parse(bad).is_err(), "{bad}");
+    }
 }
 
 #[test]

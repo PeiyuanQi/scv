@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use scv_channels::state::{self, AccountSettings};
 use scv_channels::{Accounts, ChannelCredentials, ChannelKind};
 use scv_protocol::{
-    ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, RemoteTools, Senders,
+    ComponentHealth, ComponentState, DaemonCommand, DaemonStatus, Purpose, RemoteTools, Senders,
 };
 use std::{
     collections::BTreeMap,
@@ -322,6 +322,10 @@ impl Components {
 
     pub(crate) fn status(&self) -> DaemonStatus {
         let mut components = self.supervisor.health();
+        // Email accounts publish counts only: never mail text.
+        for health in &mut components {
+            health.mail = self.hub.mail_counts(&health.id);
+        }
         components.extend(self.inactive.values().cloned());
         components.sort_by(|a, b| a.id.cmp(&b.id));
         DaemonStatus {
@@ -412,13 +416,25 @@ impl Components {
             if tools {
                 health.remote_tools = RemoteTools::Owner;
             }
-            health.senders = Some(settings.senders);
+            health.senders = channel.is_chat().then_some(settings.senders);
+            if settings.purpose == Purpose::Mail {
+                health.purpose = Some(Purpose::Mail);
+            }
+            if let Some(refusal) = refusal(channel, &settings) {
+                health.state = ComponentState::Failed;
+                health.error = Some(refusal.into());
+                self.inactive.insert(id.clone(), health);
+                self.desired.remove(&id);
+                continue;
+            }
             if settings.enabled {
                 let workspace = settings
                     .workspace
                     .clone()
                     .unwrap_or_else(|| self.workspace.clone());
-                if !workspace.is_absolute() || !workspace.is_dir() {
+                // A mailbox has no workspace: its triage sessions run in
+                // their own empty directory.
+                if channel.is_chat() && (!workspace.is_absolute() || !workspace.is_dir()) {
                     health.state = ComponentState::Failed;
                     health.error =
                         Some("Component workspace must be an existing absolute directory".into());
@@ -487,9 +503,13 @@ impl Components {
                 workspace,
                 remote_tools,
                 senders,
+                purpose,
             } => {
                 let channel = ChannelKind::parse(&channel)?;
                 state::validate_name(&account)?;
+                if !channel.is_chat() && (workspace.is_some() || purpose.is_some()) {
+                    bail!("A mailbox has no workspace or purpose");
+                }
                 let workspace = match workspace {
                     Some(path) => {
                         let path = PathBuf::from(path);
@@ -515,6 +535,12 @@ impl Components {
                     }
                     if let Some(senders) = senders {
                         settings.senders = senders;
+                    }
+                    if let Some(purpose) = purpose {
+                        settings.purpose = purpose;
+                    }
+                    if let Some(refusal) = refusal(channel, &settings) {
+                        bail!("{refusal}");
                     }
                     accounts.save_settings(&account, &settings)
                 })
@@ -585,6 +611,27 @@ fn is_busy(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
 }
 
+/// Why an account's settings cannot run, whatever else they say. A mailbox
+/// answers nobody and holds no tools, and a mail chat carries mail, so no
+/// model may answer in it: neither may be opened to other senders or given
+/// tools.
+fn refusal(channel: ChannelKind, settings: &AccountSettings) -> Option<&'static str> {
+    let open = settings.remote_tools == RemoteTools::Owner || settings.senders == Senders::Anyone;
+    if !channel.is_chat() {
+        if open {
+            return Some("An email account takes no remote tools and answers nobody");
+        }
+        if settings.purpose != Purpose::Chat {
+            return Some("An email account has no purpose; set it on the mail chat");
+        }
+    } else if settings.purpose == Purpose::Mail && open {
+        return Some(
+            "A mail chat answers only its owner and never holds tools: set remote_tools =              \"none\" and senders = \"owner\"",
+        );
+    }
+    None
+}
+
 /// Only the authenticated account owner may receive tools. Credentials without
 /// a known owner ID grant tools to nobody, even when the setting asks for it.
 fn tool_owner(credentials: &ChannelCredentials, settings: &AccountSettings) -> Option<String> {
@@ -617,6 +664,8 @@ fn initial_health(
         restarts: 0,
         remote_tools: RemoteTools::None,
         senders: None,
+        purpose: None,
+        mail: None,
     }
 }
 

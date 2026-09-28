@@ -137,6 +137,7 @@ impl Server {
                 channel: channel.map(str::to_owned),
                 auto_approve: channel.map(|_| true),
                 chat: None,
+                system_prompt: None,
             })
             .await;
         loop {

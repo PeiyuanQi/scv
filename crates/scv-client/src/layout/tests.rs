@@ -16,6 +16,7 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
         layout.conversations(),
         layout.imports(),
         layout.channel_state("feishu"),
+        layout.mail_state("default"),
         layout.config_lock(),
         layout.outbox(),
         layout.update_plan(),

@@ -416,3 +416,37 @@ async fn questions_that_cannot_be_asked_are_refused() {
     cancel.cancel();
     eventually(|| bridge_of_bob.asking("owner").is_none()).await;
 }
+
+#[tokio::test]
+async fn a_mail_chat_is_never_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&Layout::new(home.path())));
+    let hub = Hub::new(None);
+    // Even named as the only notify target, a running mail chat is skipped:
+    // it carries mail alone, and its owner's words there never answer.
+    let link = Link::new(Arc::clone(&hub), "feishu:mail", Some("ou-owner".into()));
+    let (_mail, mut notices) = link.register_as(scv_protocol::Purpose::Mail);
+    let (confirmer, _cancel) = confirmer(&hub, &registry, &["feishu:mail"]);
+    let components = components(&hub, &confirmer);
+    let refused = control(
+        &components,
+        &registry,
+        DaemonCommand::ConfirmAsk {
+            question: "Publish?".into(),
+            parent: None,
+            timeout_seconds: None,
+        },
+    )
+    .await;
+    assert!(
+        refused.as_ref().unwrap_err().contains("no owner chat"),
+        "{refused:?}"
+    );
+    assert!(notices.try_recv().is_err());
+    assert!(hub.ask("q", "feishu:mail", "ou-owner").is_some());
+    assert_eq!(
+        hub.send_question("q", "feishu:mail", "ou-owner", "Publish?")
+            .await,
+        Err(scv_channels::hub::NotifyError::WrongPurpose)
+    );
+}

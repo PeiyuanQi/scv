@@ -749,3 +749,38 @@ fn session_activity_counts_turns_until_the_session_ends() {
     drop(tracker);
     assert!(!session_busy("session-activity-test"));
 }
+
+#[tokio::test]
+async fn notices_never_go_to_a_mail_chat_or_a_mailbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let hub = Hub::new(Some(directory.path().join("last-owner.json")));
+    let (notifier, health) = notifier(
+        &hub,
+        Some(vec![
+            "feishu:mail".into(),
+            "email:default".into(),
+            "wechat:default".into(),
+        ]),
+    );
+    // A mail chat on the notify list, as a hand-edited configuration could
+    // name one: the hub refuses it anyway, and the notifier skips it.
+    let link = Link::new(Arc::clone(&hub), "feishu:mail", Some("ou-owner".into()));
+    let (_mail, mut mail_notices) = link.register_as(scv_protocol::Purpose::Mail);
+    let (_wechat, wechat) = bridge(&hub, "wechat:default", "wx-owner");
+    *health.lock().unwrap() = states(&[
+        ("feishu:mail", ComponentState::Connected),
+        ("email:default", ComponentState::Connected),
+        ("wechat:default", ComponentState::Connected),
+    ]);
+    let went = notifier
+        .deliver(None, "updated", None, &CancellationToken::new())
+        .await;
+    assert_eq!(went.as_deref(), Some("wechat:default"));
+    assert_eq!(wechat.lock().unwrap().len(), 1);
+    assert!(mail_notices.try_recv().is_err());
+    assert_eq!(
+        hub.notify("feishu:mail", "ou-owner", "updated").await,
+        Err(scv_channels::hub::NotifyError::WrongPurpose)
+    );
+    assert_eq!(channel_title("email:default"), "Email");
+}

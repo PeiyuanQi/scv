@@ -64,7 +64,7 @@ dbg_macro = "deny"
 todo = "deny"
 
 [workspace.package]
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -80,6 +80,7 @@ clap = { version = "4.5.47", features = ["derive", "env"] }
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 criterion = "0.5.1"
 dirs = "6.0.0"
+encoding_rs = "0.8.35"
 futures-util = "0.3.31"
 html2text = "0.17.1"
 libc = "0.2.175"
@@ -87,6 +88,7 @@ md-5 = "0.10.6"
 prost = "0.14.4"
 qrcode = { version = "0.14.1", default-features = false }
 ratatui = "0.29.0"
+rustls = { version = "0.23.31", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
@@ -96,21 +98,23 @@ tempfile = "3.21.0"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.16", features = ["rt"] }
+tokio-rustls = { version = "0.26.2", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "0.9.5"
 toml_edit = "0.23"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+webpki-roots = "1.0.2"
 which = "8.0.0"
 
-scv-core = { version = "=0.3.4", path = "crates/scv-core" }
-scv-client = { version = "=0.3.4", path = "crates/scv-client" }
-scv-channels = { version = "=0.3.4", path = "crates/scv-channels" }
-scv-protocol = { version = "=0.3.4", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "=0.3.4", path = "crates/scv-provider-openai" }
-scv-server = { version = "=0.3.4", path = "crates/scv-server" }
-scv-tools = { version = "=0.3.4", path = "crates/scv-tools" }
-scv-tui = { version = "=0.3.4", path = "crates/scv-tui" }
+scv-core = { version = "=0.3.5", path = "crates/scv-core" }
+scv-client = { version = "=0.3.5", path = "crates/scv-client" }
+scv-channels = { version = "=0.3.5", path = "crates/scv-channels" }
+scv-protocol = { version = "=0.3.5", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.3.5", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.3.5", path = "crates/scv-server" }
+scv-tools = { version = "=0.3.5", path = "crates/scv-tools" }
+scv-tui = { version = "=0.3.5", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true

@@ -36,7 +36,7 @@ use crate::{
         build::build_session,
         next_seq,
         turn::{ActiveTurn, TurnDone, TurnStarter, shutdown_active_turn},
-        valid_channel_name,
+        valid_channel_name, valid_system_prompt,
     },
 };
 
@@ -165,6 +165,7 @@ struct SessionStartRequest {
     channel: Option<String>,
     auto_approve: Option<bool>,
     chat: Option<scv_protocol::ChatLog>,
+    system_prompt: Option<String>,
 }
 
 /// One connection's state: its session, the turn it runs, and where its
@@ -322,6 +323,7 @@ impl Connection {
                 channel,
                 auto_approve,
                 chat,
+                system_prompt,
             } => {
                 let request = SessionStartRequest {
                     cwd,
@@ -333,6 +335,7 @@ impl Connection {
                     channel,
                     auto_approve,
                     chat,
+                    system_prompt,
                 };
                 self.session_start(request_id, request).await?;
             }
@@ -545,18 +548,36 @@ impl Connection {
                 path
             }
         };
+        let defaults = &self.instance.overrides;
+        let no_tools = request.no_tools.unwrap_or(defaults.no_tools);
+        if let Some(prompt) = &request.system_prompt {
+            // A replaced prompt drops the tool guidance and policy text a
+            // tool session relies on, so only tool-free sessions may ask.
+            let refusal = if !no_tools {
+                Some("system_prompt requires no_tools")
+            } else if !valid_system_prompt(prompt) {
+                Some("system_prompt must be at most 16 KiB of text")
+            } else {
+                None
+            };
+            if let Some(refusal) = refusal {
+                self.reject(&request_id, ErrorCode::InvalidRequest, refusal)
+                    .await?;
+                return Ok(());
+            }
+        }
         let client = SessionClient {
             channel: request.channel,
             auto_approve: request.auto_approve.unwrap_or(false),
             chat,
+            system_prompt: request.system_prompt,
         };
-        let defaults = &self.instance.overrides;
         let overrides = ConfigOverrides {
             provider: request.provider.or_else(|| defaults.provider.clone()),
             model: request.model.or_else(|| defaults.model.clone()),
             base_url: request.base_url.or_else(|| defaults.base_url.clone()),
             approval_policy: defaults.approval_policy,
-            no_tools: request.no_tools.unwrap_or(defaults.no_tools),
+            no_tools,
             config_file: defaults.config_file.clone(),
         };
         let built = build_session(

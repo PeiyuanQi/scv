@@ -1185,6 +1185,9 @@ workspace-root project skill of the same name does not, and is not listed:
 it is meant for agents working in that project, not for SCV's main agent.
 Built-in skills do not count toward `skills.max_skills`. They are listed only
 in sessions that offer the `agent` tool.
+A tool-free session, which cannot call `read_skill`, discovers and lists no
+skills at all, so a model reading a chat stranger's message or a mail does
+not learn what the owner has installed.
 Tool-enabled sessions also map workspace project skills (`.agents/skills` and
 `.claude/skills` of the workspace and its child projects) under
 `<project>:<name>`, listed separately with the instruction to delegate to that

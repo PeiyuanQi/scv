@@ -99,6 +99,8 @@ struct Bench {
     owner: Option<&'static str>,
     /// Whose messages the account answers: anyone, unless a test says so.
     senders: state::Senders,
+    /// What the account carries: an ordinary chat unless a test says so.
+    purpose: state::Purpose,
 }
 
 /// The test's side: the fake daemon, and the platform's two directions.
@@ -132,6 +134,7 @@ impl Bench {
             transport,
             owner: None,
             senders: state::Senders::Anyone,
+            purpose: state::Purpose::Chat,
         };
         (bench, Peer { daemon, push, sent })
     }
@@ -142,6 +145,16 @@ impl Bench {
         let bench = Self {
             owner: Some(owner),
             senders: state::Senders::Owner,
+            ..bench
+        };
+        (bench, peer)
+    }
+
+    /// A mail chat owned by `owner`.
+    fn mail_chat(owner: &'static str) -> (Self, Peer) {
+        let (bench, peer) = Self::owned_by(owner);
+        let bench = Self {
+            purpose: state::Purpose::Mail,
             ..bench
         };
         (bench, peer)
@@ -174,6 +187,7 @@ impl Bench {
                 owner: self.owner,
                 tool_owner: None,
                 senders: self.senders,
+                purpose: self.purpose,
                 media,
                 log: crate::chatlog::LogOptions::test(self.directory.path(), "test"),
                 link,
@@ -998,4 +1012,335 @@ async fn replies_written_while_recovering_from_a_crash_are_logged() {
         logged(&owner_log(&bench, "owner")),
         [vec![(history::Role::System, FAILURE_REPLY.to_owned())]]
     );
+}
+
+/// A mail chat linked to a fresh hub as `fake:mail`.
+fn mail_bench() -> (Bench, Peer, Arc<hub::Hub>, hub::Link) {
+    let (bench, peer) = Bench::mail_chat("owner");
+    let hub = hub::Hub::new(None);
+    let link = hub::Link::new(Arc::clone(&hub), "fake:mail", Some("owner".into()));
+    (bench, peer, hub, link)
+}
+
+/// Run the bridge until it stops by itself, as a refused start does.
+async fn run_to_end(bench: &Bench, purpose: state::Purpose) -> Result<()> {
+    let media = MediaOptions::new(
+        &Layout::new(bench.directory.path()),
+        "test",
+        "default",
+        MediaSettings::default(),
+    );
+    let link = hub::Link::detached();
+    let run = serve(
+        &bench.transport,
+        BridgeRun {
+            account: "default",
+            workspace: bench.directory.path(),
+            socket: &bench.socket,
+            owner: bench.owner,
+            tool_owner: None,
+            senders: bench.senders,
+            purpose,
+            media,
+            log: crate::chatlog::LogOptions::test(bench.directory.path(), "test"),
+            link: &link,
+            report: &|_| {},
+        },
+        &bench.store,
+        |_| Ok(true),
+    );
+    match tokio::time::timeout(Duration::from_millis(500), run).await {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
+}
+
+#[tokio::test]
+async fn a_mail_chat_answers_its_owner_with_fixed_replies_and_never_runs_a_model() {
+    let (bench, mut peer, hub, link) = mail_bench();
+    let mut quoted = Message::text("m3", "owner", "approve Q7M2KD", "re-m3", None);
+    quoted.quoted = true;
+    let group = Message::text("m5", "owner", "mail status", "re-m5", Some("g1"));
+    peer.push(vec![
+        message("m1", "owner", "hello"),
+        message("m2", "owner", "mail status"),
+        Inbound::Text(quoted),
+        message("m4", "owner", "approve Q7M2KD"),
+        Inbound::Text(group),
+        message("m6", "stranger", "mail status"),
+    ]);
+    bench
+        .run_linked(&link, async {
+            let expected = [
+                ("re-m1", mail_chat::HELP_REPLY),
+                ("re-m2", mail_chat::NO_ACCOUNTS_REPLY),
+                ("re-m3", mail_chat::HELP_REPLY),
+                ("re-m4", mail_chat::LATER_REPLY),
+            ];
+            for (reply_to, text) in expected {
+                assert_eq!(
+                    peer.sent().await,
+                    Sent {
+                        to: "owner".into(),
+                        reply_to: reply_to.into(),
+                        text: text.into(),
+                    }
+                );
+            }
+            eventually(|| bench.state().seen.len() == 6).await;
+            assert!(peer.sent.try_recv().is_err(), "nothing else was sent");
+            // No daemon session was ever opened, and writing here never
+            // makes this the owner's last chat.
+            let connected =
+                tokio::time::timeout(Duration::from_millis(100), peer.daemon.accept()).await;
+            assert!(connected.is_err(), "a mail chat opened a session");
+            assert_eq!(hub.last_owner(), None);
+            assert_eq!(hub.purpose("fake:mail"), Some(state::Purpose::Mail));
+        })
+        .await;
+    // It keeps no chat log, and it is marked a mail chat for good.
+    assert!(!bench.directory.path().join("history").exists());
+    assert!(bench.state().mail_chat);
+}
+
+#[tokio::test]
+async fn mail_status_counts_the_email_accounts_reporting_here() {
+    let (bench, mut peer, hub, link) = mail_bench();
+    let registration = hub.register_mail("email:default", vec!["fake:mail".into()]);
+    registration.set_counts(scv_protocol::MailCounts {
+        seen_today: 3,
+        token_budget: 0,
+        ..Default::default()
+    });
+    let _elsewhere = hub.register_mail("email:other", vec!["fake:other".into()]);
+    peer.push(vec![message("m1", "owner", "mail status")]);
+    bench
+        .run_linked(&link, async {
+            let text = peer.sent().await.text;
+            assert!(text.starts_with("email:default: 3 new today"), "{text}");
+            assert!(!text.contains("email:other"), "{text}");
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_mail_chat_stores_each_keyed_notice_once_and_records_its_delivery() {
+    let (bench, mut peer, hub, link) = mail_bench();
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.is_mail_chat("fake:mail")).await;
+            // SCV's own notices and questions never go to a mail chat.
+            assert_eq!(
+                hub.notify("fake:mail", "owner", "SCV updated").await,
+                Err(hub::NotifyError::WrongPurpose)
+            );
+            assert!(hub.ask("q1", "fake:mail", "owner").is_some());
+            assert_eq!(
+                hub.send_question("q1", "fake:mail", "owner", "Publish?")
+                    .await,
+                Err(hub::NotifyError::WrongPurpose)
+            );
+            let text = "Mail · default · 1 new\n│ Subject: hi";
+            hub.notify_keyed("fake:mail", "owner", text, "mail:e1:batch:1")
+                .await
+                .unwrap();
+            // Mail text goes out as written: never marked as SCV's words.
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: String::new(),
+                    text: text.into(),
+                }
+            );
+            eventually(|| {
+                matches!(
+                    hub.keyed_outcome("fake:mail", "mail:e1:batch:1"),
+                    Some(hub::KeyedOutcome::Delivered { .. })
+                )
+            })
+            .await;
+            // Handed over again, as after a lost acknowledgement: stored once.
+            hub.notify_keyed("fake:mail", "owner", text, "mail:e1:batch:1")
+                .await
+                .unwrap();
+            assert_eq!(hub.keyed_outcome("fake:mail", "other"), None);
+            eventually(|| bench.state().pending.is_empty()).await;
+            assert!(peer.sent.try_recv().is_err(), "a key was sent twice");
+            let saved = bench.state();
+            assert_eq!(saved.recent_keys.len(), 1);
+            assert!(matches!(
+                saved.recent_keys[0].outcome,
+                hub::KeyedOutcome::Delivered { .. }
+            ));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_refused_mail_notice_is_recorded_and_never_held_for_later() {
+    let (bench, _peer, hub, link) = mail_bench();
+    bench
+        .transport
+        .refuse
+        .lock()
+        .unwrap()
+        .push("refused digest".into());
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.is_mail_chat("fake:mail")).await;
+            hub.notify_keyed("fake:mail", "owner", "refused digest", "k1")
+                .await
+                .unwrap();
+            eventually(|| hub.keyed_outcome("fake:mail", "k1") == Some(hub::KeyedOutcome::Refused))
+                .await;
+            eventually(|| bench.state().pending.is_empty()).await;
+            assert!(bench.state().held.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_ordinary_chat_takes_no_mail_notice() {
+    let (bench, _peer) = Bench::owned_by("owner");
+    let hub = hub::Hub::new(None);
+    let link = hub::Link::new(Arc::clone(&hub), "fake:default", Some("owner".into()));
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.owner("fake:default").is_some()).await;
+            assert_eq!(
+                hub.notify_keyed("fake:default", "owner", "mail text", "k1")
+                    .await,
+                Err(hub::NotifyError::WrongPurpose)
+            );
+            assert!(bench.state().pending.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_mail_chat_reloads_how_its_notices_went_into_the_hub() {
+    let (bench, _peer, hub, link) = mail_bench();
+    let mut saved = state::BridgeState {
+        mail_chat: true,
+        ..Default::default()
+    };
+    saved.recent_keys.push(state::RecentKey {
+        key: "k1".into(),
+        outcome: hub::KeyedOutcome::Delivered { at_ms: 5 },
+        stored_at: unix_now(),
+    });
+    bench.store.save_state("default", &saved).unwrap();
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.keyed_outcome("fake:mail", "k1").is_some()).await;
+            assert_eq!(
+                hub.keyed_outcome("fake:mail", "k1"),
+                Some(hub::KeyedOutcome::Delivered { at_ms: 5 })
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_chat_that_carried_mail_never_runs_as_an_ordinary_chat() {
+    let (bench, _peer) = Bench::mail_chat("owner");
+    run_to_end(&bench, state::Purpose::Mail).await.unwrap();
+    assert!(bench.state().mail_chat);
+    let error = run_to_end(&bench, state::Purpose::Chat)
+        .await
+        .expect_err("a marked mail chat must not start as a chat");
+    assert!(
+        error.to_string().contains("has carried SCV mail"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn an_account_that_ran_as_an_ordinary_chat_cannot_become_a_mail_chat() {
+    const REPORT: &str = "BACKGROUND REPORT from an ordinary session";
+    let fills: [fn(&mut state::BridgeState); 6] = [
+        |state| {
+            state
+                .pending
+                .push(new_pending("", "owner", "", REPORT, MAX_REPLY_BYTES));
+        },
+        |state| {
+            state.held.push(state::HeldReply {
+                key: "owner".into(),
+                to_user_id: "owner".into(),
+                reply: REPORT.into(),
+                held_at: 1,
+            });
+        },
+        |state| {
+            state.in_flight.push(state::InFlight {
+                message_id: "m1".into(),
+                to_user_id: "owner".into(),
+                context_token: String::new(),
+                key: "owner".into(),
+            });
+        },
+        |state| {
+            state.jobs.push(state::RunningJob {
+                to_user_id: "owner".into(),
+                job: "job-1".into(),
+                tool: "agent".into(),
+                agent: "codex".into(),
+                task: REPORT.into(),
+                started_at: 1,
+            });
+        },
+        |state| state.cursor = "c1".into(),
+        |state| state.seen.push("m1".into()),
+    ];
+    for fill in fills {
+        let (bench, mut peer) = Bench::mail_chat("owner");
+        let mut saved = bench.state();
+        fill(&mut saved);
+        bench.store.save_state("default", &saved).unwrap();
+        let before = serde_json::to_string(&bench.state()).unwrap();
+        let error = run_to_end(&bench, state::Purpose::Mail)
+            .await
+            .expect_err("an ordinary chat's state must not become a mail chat's");
+        assert!(
+            error.to_string().contains("run as an ordinary chat"),
+            "{error}"
+        );
+        assert!(!bench.state().mail_chat);
+        assert_eq!(
+            serde_json::to_string(&bench.state()).unwrap(),
+            before,
+            "the state is left as it was"
+        );
+        assert!(peer.sent.try_recv().is_err(), "nothing was delivered");
+    }
+}
+
+#[tokio::test]
+async fn a_chat_log_that_cannot_be_read_keeps_an_account_from_becoming_a_mail_chat() {
+    let (bench, mut peer) = Bench::mail_chat("owner");
+    // A file where the log's directory belongs cannot be listed.
+    let history = bench.directory.path().join("history/test/default");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::write(&history, "not a directory").unwrap();
+    let error = run_to_end(&bench, state::Purpose::Mail)
+        .await
+        .expect_err("an unreadable log must not count as none");
+    assert!(error.to_string().contains("could not check"), "{error}");
+    assert!(!bench.state().mail_chat);
+    assert!(peer.sent.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn an_account_with_a_chat_log_cannot_become_a_mail_chat() {
+    let (bench, _peer) = Bench::mail_chat("owner");
+    let history = bench.directory.path().join("history/test/default/abc");
+    std::fs::create_dir_all(&history).unwrap();
+    let error = run_to_end(&bench, state::Purpose::Mail)
+        .await
+        .expect_err("a logged account must not become a mail chat");
+    assert!(error.to_string().contains("has a chat log"), "{error}");
+    assert!(!bench.state().mail_chat);
+    assert!(history.exists(), "nothing of the person's is removed");
 }

@@ -26,6 +26,9 @@ interactive starts ask whether to continue and non-interactive starts fail.
 - Channel tokens, Feishu app secrets, and delivery state are secrets. Inbound
   sender IDs, cursors, and message content are untrusted remote input and are
   kept out of logs.
+- Mail is untrusted remote input that arrives without anyone asking: every
+  header, body, and attachment name, and everything a model writes about it.
+  It is quarantined as described under [Mail](#mail).
 - Project configuration cannot select the provider endpoint, credential
   variable, user skill root, or native-agent executable/arguments. Those values
   require a user, explicit-config, environment, or CLI layer.
@@ -457,6 +460,94 @@ are joined before shutdown completes. Periodic reconciliation observes
 cancellation separately from socket acceptance, and the component management
 lock is released before response writes so a slow reader cannot hold it.
 All future long-running integrations must use this same lifecycle.
+
+## Mail
+
+An email account reads a mailbox so the owner hears about new mail. Mail is
+a zero-click prompt-injection surface, so its text may exist only in these
+places:
+
+- a tool-free daemon session that the email account opens for one message
+  and closes after one turn, with no channel, in the account's empty private
+  directory, and with a fixed frame as its whole system prompt
+  (`session.start` `system_prompt`, allowed only with `no_tools: true`), and
+  the model provider that session calls;
+- the account's state file, in queued reports and the one message being
+  handed over, bounded by `max_queue`, 1.5 KiB per report, and
+  `retention.max_state_kib`;
+- a mail chat's outbox, until the platform takes the message, and the mail
+  chat on the platform.
+
+It never reaches another session, a delegated agent, a tool, the logs, daemon
+status, `scv` output, SCV's own notices or questions, a chat log, or any chat
+account whose `purpose` is not `mail`. Four places enforce the route: the hub
+queues quarantined notices only to running mail chats, and SCV's own notices
+and questions never to one; the bridge refuses a quarantined notice unless it
+is a mail chat, and an ordinary notice if it is one; the email account skips
+any route the hub reports as an ordinary chat; and a mail chat is marked for
+good in its delivery state, so it refuses to start as an ordinary chat until
+logout. The reverse holds too: an account that has run as an ordinary chat,
+or has a chat log, or one that cannot be read, refuses to become a mail chat,
+so no reply, report, or job result of an ordinary session is ever delivered
+into one. A mail chat runs no model turn at all, keeps no chat log, answers its
+owner only with SCV's fixed replies, and never reads a message that quotes
+or forwards another as a command, so quoting a report cannot put mail in
+front of a model.
+
+The triage model gets no tools, no skills, and none of the owner's
+configured system prompt. Every metadata field is cut to a fixed bound as it
+is read, and a turn whose frame and message would pass 128 KiB is never
+started, so a hostile mailbox cannot grow a prompt or the state without
+limit. It sees one message, between delimiter lines that
+carry a random nonce, and answers with one JSON object; code reads only
+`notify`, `urgent`, and the summary lines, so the model chooses no target,
+recipient, folder, or action, and a sender cannot steer another message's
+report. Any tool or approval event in a triage session ends it. What the
+model or a sender wrote reaches the owner only on lines prefixed `│ `, with
+control, bidi, zero-width, and tag characters removed and links shown by
+their host; an HTML link shows where it really goes. SCV's own lines carry
+only its words, counts, times, and addresses that are plain `local@domain`.
+Every report says the sender is not verified, and a `Reply-To` that differs
+from the sender is pointed out.
+
+This release cannot change a mailbox or send mail. The IMAP client offers
+only read commands and reads content only with `BODY.PEEK`, and under it a
+command guard checks every command whole, before any byte is written,
+against a read-only allowlist; a refused command fails the connection and is
+logged by its verb only. No SMTP, draft, move, flag, or delete code exists,
+and `mail.actions` is refused. The account connects over implicit TLS only,
+verified against the Mozilla root store.
+
+Mail text is never written to disk as raw message bytes; attachments are
+never downloaded. The account logs counts, message numbers, and IMAP verbs,
+never an address, subject, body, or summary, and its status carries counts
+only. The mailbox password or authorization code is read from a hidden
+prompt or stdin, never an argument, stored with mode `0600`, and never shown.
+Errors from the mail server, a refused sign-in's included, carry only its
+status and a response code from the standard set, never its text, which a
+hostile server could fill with the credential it was just sent or with a
+line that fakes a log entry.
+
+A sender chooses a message's `Message-ID`, so it never suppresses mail: only
+the same stored message listed again (same mailbox, `Message-ID`, received
+time, size, sender, and subject) is taken for one already decided. When the
+disk's free space cannot be told, new mail is counted rather than written
+about, as when it is below `retention.min_free_mib`.
+
+Residual risks:
+
+- Same-user code is trusted: any process running as the user can read the
+  mailbox credential, which for IMAP providers such as QQ and 163 is as
+  powerful as the password, and can edit the account's state. A dedicated
+  mailbox limits what a leaked credential can do.
+- Triage sends the headers and a cleaned body of up to `max_body_kib` of each
+  triaged message to the configured model provider; `send_body = false`
+  keeps bodies back, and rules can keep a message from any model.
+- A report can still mislead: a summary is a model's reading of a message
+  that may be phishing, and a sender's display name is shown as written.
+- The owner can copy mail text into a tool-enabled chat by hand, and a
+  platform keeps a mail chat's history after logout, so signing the same app
+  in again as an ordinary chat could let its old reports be quoted.
 
 ## Responsible operation
 

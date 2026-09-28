@@ -39,7 +39,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.4"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.5"}}
 ```
 
 ### `daemon.control`
@@ -53,20 +53,21 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d3","command":{"action":"channel_set","channel":"wechat","account":"default","enabled":true,"workspace":"/workspace/project","remote_tools":"owner"}}
 {"type":"daemon.control","request_id":"d4","command":{"action":"channel_set","channel":"wechat","account":"default","enabled":false,"workspace":null}}
 {"type":"daemon.control","request_id":"d10","command":{"action":"channel_set","channel":"feishu","account":"default","enabled":true,"workspace":null,"senders":"anyone"}}
+{"type":"daemon.control","request_id":"d12","command":{"action":"channel_set","channel":"feishu","account":"mail","enabled":true,"workspace":null,"purpose":"mail"}}
 {"type":"daemon.control","request_id":"d5","command":{"action":"channel_logout","channel":"wechat","account":"default"}}
 {"type":"daemon.control","request_id":"d6","command":{"action":"delegations","all":false}}
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 {"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
-{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.4 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.5 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
 {"type":"daemon.control","request_id":"d11","command":{"action":"confirm_status","id":"5f0c9a1e2b3d"}}
 ```
 
 `status` reads live daemon health. `reload` reconciles saved accounts and
 settings immediately; periodic reconciliation also runs every two seconds.
 `channel_set` persists a channel account's enablement and an optional existing
-absolute workspace; `channel` names the channel (`wechat` or `feishu`), and an
-unknown one is a `component_error`;
+absolute workspace; `channel` names the channel (`wechat`, `feishu`, or
+`email`), and an unknown one is a `component_error`;
 an omitted or null workspace leaves the saved workspace unchanged. The optional
 `remote_tools` (`none` or `owner`) likewise persists only when present, as
 does the optional `senders` (`owner` or `anyone`), whose messages the account
@@ -74,7 +75,16 @@ answers. Component status reports the effective `remote_tools`, which is
 `owner` only when the account also has a known owner ID; older clients may omit
 the field. It reports `senders` as set (an `owner` account without a known
 owner ID answers nobody). Daemons before 0.3.0 answer anyone, omit it from
-status, and ignore it in `channel_set`. Without a
+status, and ignore it in `channel_set`. The optional `purpose` (`chat` or
+`mail`) persists what a chat account carries; a mail chat refuses
+`remote_tools = "owner"` and `senders = "anyone"`, and an email account takes
+no workspace, purpose, owner tools, or other senders, each a
+`component_error`. Status reports `purpose: "mail"` for a mail chat and omits
+it otherwise; an email account's status carries `mail`, counts only: mail
+claimed, reports queued, mail seen, triaged, and reported today, tokens used
+today and the daily budget, digests sent in the last day, and the last check
+(`last_check_unix_seconds`). It never holds an address, subject, or other mail
+text. Daemons before mail omit both fields and ignore `purpose`. Without a
 saved workspace, the account uses the daemon workspace. Replacements stop and
 join the old instance first. `channel_logout` persists disablement and joins
 before removing credentials, delivery state, and settings. Successful actions
@@ -182,9 +192,20 @@ session with the log's open episode, and a session with tools offers
 account owner's direct chat. It is additive too: a server that predates it
 ignores it.
 
+`system_prompt` is optional and allowed only together with `no_tools: true`:
+the client's whole system prompt, at most 16 KiB of text with no control
+characters but line breaks and tabs. The server then sends exactly that
+prompt, and none of its own: not `agent.system_prompt`, the working
+directory, project instructions, skills, or the chat channel section. Any
+other use is refused with `invalid_request` (`system_prompt requires
+no_tools`). Mail triage sends its fixed frame this way, so nothing of the
+owner's own configuration reaches a model reading untrusted mail (see
+[Email](channels.md#email)). It is additive and keeps protocol version 3.
+
 ```json
 {"type":"session.start","request_id":"2","cwd":"/workspace/project"}
 {"type":"session.start","request_id":"channel-session","cwd":"/workspace","no_tools":false,"channel":"WeChat","auto_approve":true,"chat":{"channel":"wechat","account":"default","conversation":"3fa9c2d17e5b8a04"}}
+{"type":"session.start","request_id":"mail-session","cwd":"/home/u/.scv/state/mail/default/empty","no_tools":true,"auto_approve":false,"system_prompt":"You triage email for the owner of the mailbox \"default\". …"}
 ```
 
 ### `turn.start`
@@ -261,16 +282,16 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.4"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.5"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.4","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.4","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
-{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.4","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.5","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.5","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.5","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.

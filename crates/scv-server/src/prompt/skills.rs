@@ -48,6 +48,18 @@ pub(crate) fn discover_skills(
 ) -> Result<DiscoveredSkills> {
     let mut skills = SkillMap::new();
     let mut roots = Vec::new();
+    // A tool-free session cannot call read_skill, so it lists no skills: a
+    // listing would only tell a model reading untrusted text (a chat
+    // stranger, a mail) what the owner has installed.
+    if !tools {
+        return Ok(DiscoveredSkills {
+            map: skills,
+            roots,
+            listing: String::new(),
+            builtin_listing: String::new(),
+            project_listing: String::new(),
+        });
+    }
     let project_root = workspace.join(&config.skills.project_dir);
     for (root, must_be_workspace) in [(&project_root, true), (&config.skills.user_dir, false)] {
         if !root.is_dir() {
