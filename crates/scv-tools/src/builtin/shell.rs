@@ -85,6 +85,7 @@ impl Tool for BashTool {
                 cwd: context.workspace,
                 environment: Vec::new(),
                 sanitize_scv_environment: false,
+                clear_environment: false,
                 timeout: requested,
                 output_limit: self.output_limit,
             },

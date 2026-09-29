@@ -9,6 +9,12 @@ use clap::Parser as _;
 fn main() -> Result<()> {
     let cli = cli::args::Cli::parse();
     let cwd = std::env::current_dir()?;
+    let read_only = matches!(
+        cli.command,
+        Some(cli::args::Command::Agents {
+            command: cli::args::AgentsCommand::Doctor { .. },
+        })
+    );
     // SAFETY: nothing but this thread exists yet. The tokio runtime is built
     // below, after the instance is selected, and no child process has been
     // started, so no one can read the environment while it is being set.
@@ -17,6 +23,7 @@ fn main() -> Result<()> {
             cli.scv_home.as_deref(),
             cli.config_path.as_deref(),
             &cwd,
+            !read_only,
         )?;
     }
     // The one place the instance is read from the environment; everything

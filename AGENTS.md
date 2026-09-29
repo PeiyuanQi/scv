@@ -114,6 +114,10 @@
   with a scratch `<dir>` so the real `~/.scv` stays untouched
   (`CONTRIBUTING.md`, "Local development").
 - Local TUI: run `cargo run --bin scv -- --scv-home <dir>` in another terminal.
+- Project Rust preflight (no model, daemon, or installation):
+  `cargo run --bin scv -- --scv-home <dir> agents doctor --workspace /absolute/path/to/project`.
+  The command diagnoses its own launch environment, which may differ from a
+  running daemon's; see `docs/tools.md`, "Project Rust environment".
 - Tests: `cargo test --workspace --locked`.
 - Format: `cargo fmt --check`.
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`.

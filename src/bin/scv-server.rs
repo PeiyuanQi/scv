@@ -39,7 +39,12 @@ fn main() -> Result<()> {
     // below, after the instance is selected, and no child process has been
     // started, so no one can read the environment while it is being set.
     unsafe {
-        common::apply_process_config(cli.scv_home.as_deref(), cli.config_path.as_deref(), &cwd)?;
+        common::apply_process_config(
+            cli.scv_home.as_deref(),
+            cli.config_path.as_deref(),
+            &cwd,
+            true,
+        )?;
     }
     let layout = scv_client::Layout::from_env()?;
     let config_file = cli

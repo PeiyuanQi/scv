@@ -282,6 +282,14 @@ impl ChannelArg {
 
 #[derive(Subcommand)]
 pub(crate) enum AgentsCommand {
+    /// Check the project Rust environment for a delegated agent without
+    /// calling a model, installing tools, or contacting the daemon.
+    Doctor {
+        #[arg(value_parser = agent_names(), default_value = "codex")]
+        agent: String,
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        workspace: PathBuf,
+    },
     /// Sign an agent in inside SCV's agent home: the agent's own login, or
     /// a key prompt for agents that use an API key.
     Login {

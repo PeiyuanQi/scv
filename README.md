@@ -132,7 +132,15 @@ scv agents login claude          # once per agent, in SCV's private home
 scv agents login codex
 scv agents status
 scv agents check                 # version, models, and one short call each
+scv agents doctor --workspace .   # offline project Rust/toolchain diagnostics
 ```
+
+Delegated coding agents resolve installed Rust tools for the selected project
+before they start, even when the daemon's PATH only finds an older system
+Rust. Toolchain files and Cargo's Rust requirements are checked; unavailable
+or incompatible tools produce a diagnostic. The agents keep private homes
+and Cargo state. See [project Rust environments](docs/tools.md#project-rust-environment)
+for selection rules and limits.
 
 ### Everyday commands
 

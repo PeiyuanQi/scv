@@ -4,7 +4,7 @@ use super::*;
 use crate::delegate::records::DelegationRegistry;
 
 /// A live `sh -c script` recorded under a fresh registry in `home`.
-fn spawn(home: &std::path::Path, script: &str) -> (Arc<DelegationRegistry>, Arc<LiveChild>) {
+async fn spawn(home: &std::path::Path, script: &str) -> (Arc<DelegationRegistry>, Arc<LiveChild>) {
     let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(home)));
     let pending = registry.begin("fake", "session", home, Some(("fake-1", 1)));
     let child = LiveChild::spawn(
@@ -16,7 +16,9 @@ fn spawn(home: &std::path::Path, script: &str) -> (Arc<DelegationRegistry>, Arc<
             max_line_bytes: 1024,
         },
         Some((Arc::clone(&registry), pending)),
+        tokio_util::sync::CancellationToken::new(),
     )
+    .await
     .unwrap();
     (registry, child)
 }
@@ -48,7 +50,7 @@ async fn settles(registry: &DelegationRegistry, child: &LiveChild) {
 async fn a_child_exiting_between_turns_is_collected_and_forgotten() {
     let home = tempfile::tempdir().unwrap();
     // Idle between turns: nothing reads its output when it exits.
-    let (registry, child) = spawn(home.path(), "sleep 0.2");
+    let (registry, child) = spawn(home.path(), "sleep 0.2").await;
     assert!(child.is_running());
     assert_eq!(registry.list(true).len(), 1);
     settles(&registry, &child).await;
@@ -61,7 +63,7 @@ async fn a_child_exiting_between_turns_is_collected_and_forgotten() {
 #[tokio::test]
 async fn killing_an_idle_child_frees_it_at_once() {
     let home = tempfile::tempdir().unwrap();
-    let (registry, child) = spawn(home.path(), "exec sleep 30");
+    let (registry, child) = spawn(home.path(), "exec sleep 30").await;
     let handle = registry.list(true)[0].record.handle.clone();
     registry.kill(&handle).await.unwrap();
     settles(&registry, &child).await;
@@ -71,7 +73,7 @@ async fn killing_an_idle_child_frees_it_at_once() {
 async fn close_stops_a_running_child_and_its_record() {
     let home = tempfile::tempdir().unwrap();
     // Ignores the closed input, so the group kill ends it.
-    let (registry, child) = spawn(home.path(), "trap '' TERM; sleep 30");
+    let (registry, child) = spawn(home.path(), "trap '' TERM; sleep 30").await;
     child.close().await;
     assert!(!child.is_running());
     assert!(registry.list(true).is_empty());
@@ -81,7 +83,7 @@ async fn close_stops_a_running_child_and_its_record() {
 #[tokio::test]
 async fn a_child_is_recorded_idle_between_turns_and_at_work_during_one() {
     let home = tempfile::tempdir().unwrap();
-    let (registry, child) = spawn(home.path(), "exec sleep 30");
+    let (registry, child) = spawn(home.path(), "exec sleep 30").await;
     let entry = || {
         let mut entries = registry.list(true);
         assert_eq!(entries.len(), 1);

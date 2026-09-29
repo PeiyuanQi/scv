@@ -98,7 +98,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.5` and exact workspace dependency pins.
+`0.3.6` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -598,6 +598,17 @@ Native agent adapters receive a derived private home under
 `<instance>/agents/<name>`. Codex receives the matching `CODEX_HOME`; SCV
 also removes SCV selector variables from the child environment. This prevents
 an SCV adapter from reusing or changing the user's normal Codex configuration.
+
+`scv-tools::project_environment` owns project Rust discovery and bounded
+installed-tool probes. Native CLI launches and the shared ACP/nested-SCV
+live-child launcher apply its environment after adapter isolation. The CLI's
+`scv agents doctor --workspace <path>` calls the same resolver without a model
+or daemon. Rustup owns toolchain-file interpretation and override precedence;
+SCV validates the compiler and Cargo against the project's declared minimum.
+The child shares installed rustup tools but keeps Cargo state under its private
+home. See [Project Rust environment](tools.md#project-rust-environment) for
+selection rules and limits. No crate dependency or service lifecycle changes
+are needed for this launch preflight.
 
 The built-in provider uses the OpenAI-compatible `/responses` endpoint and
 function-tool schema. It assembles streamed tool-call arguments and validates
