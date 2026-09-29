@@ -51,6 +51,8 @@ pub(crate) struct ProcessSpec {
     pub(crate) args: Vec<OsString>,
     pub(crate) cwd: PathBuf,
     pub(crate) environment: Vec<(OsString, OsString)>,
+    /// Use only the supplied environment, as for reproducible tool probes.
+    pub(crate) clear_environment: bool,
     /// Strip inherited agent credentials and state locations first
     /// ([`apply_agent_environment`]), as for a delegated agent CLI.
     pub(crate) sanitize_scv_environment: bool,
@@ -108,6 +110,9 @@ pub(crate) async fn execute_process(
 
 pub(crate) fn spawn_process(spec: &ProcessSpec) -> Result<tokio::process::Child, ToolError> {
     let mut command = Command::new(&spec.executable);
+    if spec.clear_environment {
+        command.env_clear();
+    }
     if spec.sanitize_scv_environment {
         apply_agent_environment(command.as_std_mut(), &spec.environment);
     } else {

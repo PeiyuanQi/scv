@@ -431,6 +431,73 @@ structured result described below. Adapter execution has delegate risk because
 the child agent may independently read, write, run commands, access inherited
 credentials, or ask its own model provider.
 
+### Project Rust environment
+
+Before starting a native CLI, ACP server, or nested SCV, the shared
+`scv-tools::project_environment` preflight resolves Rust for that run's
+canonical `cwd`. It searches ancestors for the nearest Cargo manifest and
+toolchain file (`rust-toolchain` takes precedence over `rust-toolchain.toml`
+in the same directory, as in rustup). Without either file, it leaves the
+environment unchanged and requires no Rust installation.
+
+Cargo's `package.rust-version` and edition provide the minimum version.
+Workspace inheritance is resolved from `workspace.package`, including
+`package.workspace` paths; a virtual workspace uses its common requirements.
+Rust versions are compared numerically, without an SCV-specific minimum or
+a hardcoded stable version. Unknown editions and malformed or unresolved
+requirements fail with a diagnostic. Manifest reads are capped at 1 MiB.
+
+SCV searches for rustup in the launch environment's `CARGO_HOME/bin`, then
+the original `HOME/.cargo/bin`, then `PATH`, so a user service's short PATH
+does not hide it. It retains the launch environment's `RUSTUP_HOME`, or
+derives it from the original home, before relocating the agent's home.
+Rustup itself interprets toolchain files, including channels, dated nightly
+releases and path toolchains, and applies its normal
+[override precedence](https://rust-lang.github.io/rustup/overrides.html).
+An explicit `RUSTUP_TOOLCHAIN`, directory override, or project pin that is
+missing or too old fails preflight; SCV does not substitute system Rust.
+If only the rustup default is too old, SCV selects the newest compatible
+installed stable/versioned toolchain by measured compiler version. Without
+rustup or an explicit selection, system tools are accepted only when both
+`rustc --version` and `cargo --version` meet the project minimum.
+
+For a Rust project the child receives the resolved toolchain's bin directory
+first on `PATH`, followed by rustup's bin directory and the existing PATH.
+`RUSTC` and, when installed, `RUSTDOC` identify the selected tools explicitly.
+`CARGO_HOME` is `<agent-home>/.cargo`: the user's Cargo configuration, registry
+credential files and caches are not reused. `RUSTUP_HOME` shares installed tools;
+the private `HOME`, XDG directories, and native-agent state remain private.
+No files, user-service drop-ins, or rustup defaults are rewritten. Probes
+disable automatic installation with `RUSTUP_AUTO_INSTALL=0`, never pass
+`--install`, and have bounded output, cancellation, and a 20-second total
+process budget (at most five seconds per probe).
+
+Check the same resolver without calling a model or starting a daemon:
+
+```bash
+scv agents doctor --workspace /absolute/path/to/project
+scv agents doctor claude --workspace /absolute/path/to/project
+```
+
+The optional agent defaults to `codex`. Doctor needs no installed agent or
+sign-in, prints the detected requirements, selected executable paths and
+versions, and Rust environment additions, and exits nonzero on failure. It
+does not create agent homes. It inspects its own launch environment; a daemon
+started with different environment variables may resolve differently.
+
+Preflight runs once per child launch. Start a new ACP/nested-SCV conversation
+after changing requirements; native CLI turns resolve again. The selected
+bin directory applies for the lifetime of the child, including commands it
+runs after changing directories. To select a different toolchain explicitly,
+use `rustup run <toolchain> ...` and override `RUSTC`/`RUSTDOC` accordingly;
+direct Cargo binaries do not implement rustup's `cargo +toolchain` shorthand.
+This is a launch check, not a build: it does not enumerate every workspace
+member or dependency's MSRV, resolve Cargo configuration or compiler wrappers,
+or verify optional components/targets beyond the installed compiler and Cargo.
+Cargo still diagnoses those during the build. Missing required tools must be
+installed explicitly before retrying. As with delegated execution itself,
+running doctor on a project trusts its selected tool executables.
+
 The default invocation contracts are:
 
 | Agent | Invocation |

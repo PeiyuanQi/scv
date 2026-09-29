@@ -243,6 +243,15 @@ Use fake components, local protocol peers, and fake HTTP services for these
 checks. Correctness tests must not contact WeChat, Feishu, a mail server, or a
 live model provider.
 
+Project Rust environment coverage uses fake rustup/compiler executables to
+verify discovery under a restricted service PATH, private Cargo/native-agent
+state, Cargo workspace inheritance and edition requirements, numeric version
+selection, unavailable or obsolete explicit toolchains, custom install homes,
+bounded/cancellable probes, and native/live child environment injection.
+Non-Rust projects need no Rust tools. Black-box doctor tests verify failure
+status and diagnostics for obsolete tools, and no model calls or instance
+files even when no agent is installed.
+
 ## Required checks
 
 ```bash

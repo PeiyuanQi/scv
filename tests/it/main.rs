@@ -15,6 +15,7 @@ mod delegation;
 mod feature_flow;
 mod guard;
 mod mail;
+mod project_environment;
 mod restart;
 mod server;
 mod support;

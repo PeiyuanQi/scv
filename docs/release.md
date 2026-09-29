@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.5`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.5` pins.
+The current workspace release is `0.3.6`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.6` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,15 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.6
+
+`0.3.6` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3.
+Delegated native, ACP, and nested-SCV coding agents now resolve an installed
+Rust toolchain for the selected project before launch, while keeping Cargo and
+agent state private. `scv agents doctor` exposes the same offline preflight
+diagnostics without starting a daemon or model call. See [Project Rust
+environment](tools.md#project-rust-environment).
 
 ## Upgrading to 0.3.5
 

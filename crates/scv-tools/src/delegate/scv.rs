@@ -385,7 +385,9 @@ impl ScvAgentTool {
                 max_line_bytes: MAX_FRAME_BYTES,
             },
             registration,
-        )?;
+            cancellation.clone(),
+        )
+        .await?;
         let handshake = async {
             live.send(&ClientMessage::initialize("scv-agent-init", "scv-agent"))
                 .await?;

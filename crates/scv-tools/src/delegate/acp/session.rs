@@ -156,7 +156,9 @@ impl AcpAgentTool {
                 max_line_bytes: MAX_LINE_BYTES,
             },
             registration,
+            cancellation.clone(),
         )
+        .await
         .map_err(|error| error.message)?;
         let rpc = Rpc {
             live,

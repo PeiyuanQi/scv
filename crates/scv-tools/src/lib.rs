@@ -28,6 +28,7 @@ mod builtin;
 mod config;
 mod delegate;
 mod process;
+pub mod project_environment;
 mod registry;
 mod sync;
 

@@ -77,7 +77,17 @@ the child environment SCV's selector variables, every variable ending in
 `_API_KEY`, and the credential, endpoint, and state variables that any adapter
 declares (such as `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
 `OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, and `PI_*`), so no agent inherits the
-user's or another agent's credentials. Agents sign in only through
+user's or another agent's credentials. For Rust projects, launch preflight
+shares the original `RUSTUP_HOME` installation and prepends verified tool
+directories to `PATH`, but places `CARGO_HOME` inside the private agent home
+so it does not reuse the user's Cargo config or registry credential files.
+The selected compiler and Cargo are executed for version checks after tool
+approval; the offline `scv agents doctor` command explicitly performs the same
+check. Toolchain files and selected executables must therefore be trusted,
+as with delegated commands. SCV does not install tools or change rustup or
+service configuration during preflight. See
+[Project Rust environment](tools.md#project-rust-environment) for its scope.
+Agents sign in only through
 `scv agents login`, which runs the agent's own sign-in in that private home or,
 for DeepSeek Harness and pi endpoints, reads an API key without echo (or from
 stdin) and writes it into the agent's own credential file with mode `0600`;

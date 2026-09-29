@@ -26,6 +26,22 @@ pub(crate) async fn agents(
     use adapters::{Login, Logout, Status};
     let user_config = || user_config(layout, overrides);
     match command {
+        AgentsCommand::Doctor { agent, workspace } => {
+            // Rust resolution only needs the adapter's private HOME; loading
+            // configuration would unnecessarily create the instance directory.
+            let environment = vec![("HOME".into(), layout.agent_home(&agent).into())];
+            let result = scv_tools::project_environment::resolve(&workspace, &environment, async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await?;
+            println!(
+                "{agent} project environment (this process; the daemon may inherit different settings):"
+            );
+            for line in result.diagnostics {
+                println!("  {line}");
+            }
+            Ok(())
+        }
         AgentsCommand::Login {
             agent,
             openai_compatible,

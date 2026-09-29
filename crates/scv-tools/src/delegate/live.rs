@@ -109,10 +109,28 @@ impl LiveChild {
     /// Start the child in its own process group with the agent environment,
     /// recording it under `registration` when given. Recording never fails
     /// the start: an unrecorded child is still tagged for later sweeps.
-    pub(crate) fn spawn(
-        spec: LiveSpec,
+    pub(crate) async fn spawn(
+        mut spec: LiveSpec,
         registration: Option<(Arc<DelegationRegistry>, PendingDelegation)>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<Arc<Self>, ToolError> {
+        let project = crate::project_environment::resolve(
+            &spec.cwd,
+            &spec.environment,
+            cancellation.clone().cancelled_owned(),
+        )
+        .await
+        .map_err(|error| {
+            if cancellation.is_cancelled() {
+                ToolError::cancelled("Rust preflight cancelled")
+            } else {
+                ToolError::unavailable(format!("{error:#}"))
+            }
+        })?;
+        if cancellation.is_cancelled() {
+            return Err(ToolError::cancelled("agent launch cancelled"));
+        }
+        spec.environment.extend(project.environment);
         let mut command = Command::new(&spec.executable);
         apply_agent_environment(command.as_std_mut(), &spec.environment);
         command

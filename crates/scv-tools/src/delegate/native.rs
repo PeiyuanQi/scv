@@ -346,6 +346,7 @@ impl Backend for NativeAgentTool {
                 args: process_args,
                 cwd,
                 environment,
+                clear_environment: false,
                 sanitize_scv_environment: true,
                 timeout: requested,
                 output_limit: self.output_limit,
@@ -415,12 +416,29 @@ struct AgentRun {
 /// stderr keeps only its tail, and the run is recorded in the delegation
 /// registry while it lasts.
 async fn execute_agent_process(
-    spec: ProcessSpec,
+    mut spec: ProcessSpec,
     stream: AgentStream,
     registration: Option<(Arc<DelegationRegistry>, records::PendingDelegation)>,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentRun, ToolError> {
     let deadline = Instant::now() + spec.timeout;
+    let project = crate::project_environment::resolve(
+        &spec.cwd,
+        &spec.environment,
+        cancellation.clone().cancelled_owned(),
+    )
+    .await
+    .map_err(|error| {
+        if cancellation.is_cancelled() {
+            ToolError::cancelled("Rust preflight cancelled")
+        } else {
+            ToolError::unavailable(format!("{error:#}"))
+        }
+    })?;
+    if cancellation.is_cancelled() {
+        return Err(ToolError::cancelled("agent launch cancelled"));
+    }
+    spec.environment.extend(project.environment);
     let mut child = spawn_process(&spec)?;
     let pid = child_pid(&child)?;
     // Bookkeeping must not fail the delegation: an unrecorded run is still

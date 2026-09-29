@@ -26,7 +26,7 @@ impl From<ApprovalArg> for ApprovalPolicy {
     }
 }
 
-/// Select this process's SCV instance: export `SCV_HOME` (created and made
+/// Select this process's SCV instance: export `SCV_HOME` (optionally created and made
 /// absolute) and `SCV_CONFIG` (made absolute) for the libraries and every
 /// child process to read.
 ///
@@ -39,11 +39,18 @@ pub(crate) unsafe fn apply_process_config(
     home: Option<&Path>,
     config: Option<&Path>,
     cwd: &Path,
+    create_home: bool,
 ) -> Result<()> {
     if let Some(home) = home {
         let home = absolute_path(home, cwd);
-        std::fs::create_dir_all(&home).context("create SCV instance home")?;
-        let home = std::fs::canonicalize(home).context("resolve SCV instance home")?;
+        if create_home {
+            std::fs::create_dir_all(&home).context("create SCV instance home")?;
+        }
+        let home = match std::fs::canonicalize(&home) {
+            Ok(home) => home,
+            Err(error) if !create_home && error.kind() == std::io::ErrorKind::NotFound => home,
+            Err(error) => return Err(error).context("resolve SCV instance home"),
+        };
         // SAFETY: the caller guarantees the process is still single-threaded.
         unsafe { std::env::set_var("SCV_HOME", home) };
     }
