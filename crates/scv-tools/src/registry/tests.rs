@@ -13,7 +13,7 @@ use crate::{
 
 fn delegation_context(home: &Path) -> DelegationContext {
     DelegationContext {
-        registry: Arc::new(DelegationRegistry::new(&scv_client::Layout::new(home))),
+        registry: Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(home))),
         session: "session-1".into(),
         depth: 0,
     }
@@ -21,6 +21,11 @@ fn delegation_context(home: &Path) -> DelegationContext {
 
 #[test]
 fn uninstalled_agents_are_not_offered() {
+    let home = tempfile::tempdir().unwrap();
+    let config = ToolsConfig {
+        delegation: Some(delegation_context(home.path())),
+        ..ToolsConfig::default()
+    };
     let adapter = |command: &str| AgentAdapterConfig {
         command: command.into(),
         args: Vec::new(),
@@ -41,7 +46,7 @@ fn uninstalled_agents_are_not_offered() {
         options_file: None,
     };
     let registry = builtin_registry(
-        ToolsConfig::default(),
+        config.clone(),
         SkillMap::new(),
         Vec::new(),
         1024,
@@ -57,7 +62,7 @@ fn uninstalled_agents_are_not_offered() {
     assert_eq!(crate::offered_agents(&registry), ["present"]);
     // No agent installed: no agent tool and no job tools.
     let registry = builtin_registry(
-        ToolsConfig::default(),
+        config,
         SkillMap::new(),
         Vec::new(),
         1024,
@@ -165,6 +170,7 @@ fn installed(model_args: bool) -> AgentAdapterConfig {
 
 #[test]
 fn one_agent_tool_offers_every_installed_agent_with_the_preferred_one_as_default() {
+    let home = tempfile::tempdir().unwrap();
     let agents = || {
         HashMap::from([
             ("claude".to_owned(), installed(true)),
@@ -176,6 +182,7 @@ fn one_agent_tool_offers_every_installed_agent_with_the_preferred_one_as_default
             ToolsConfig {
                 prefer: prefer.iter().map(|name| (*name).to_owned()).collect(),
                 max_background,
+                delegation: Some(delegation_context(home.path())),
                 ..ToolsConfig::default()
             },
             SkillMap::new(),
@@ -250,6 +257,7 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
         builtin_registry(
             ToolsConfig {
                 max_background: 0,
+                delegation: Some(delegation_context(dir.path())),
                 ..ToolsConfig::default()
             },
             SkillMap::new(),

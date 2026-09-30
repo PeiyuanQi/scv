@@ -22,9 +22,14 @@ async fn wait_for<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> O
     }
 }
 
-fn is_gone(pid: i32) -> Option<()> {
-    // SAFETY: signal 0 only checks that the process exists.
-    (unsafe { libc::kill(pid, 0) } != 0).then_some(())
+fn process_identity(pid: i32) -> Option<crate::delegation::ProcessIdentity> {
+    u32::try_from(pid)
+        .ok()
+        .and_then(crate::delegation::ProcessIdentity::of)
+}
+
+fn is_gone(identity: &crate::delegation::ProcessIdentity) -> Option<()> {
+    (!identity.is_alive()).then_some(())
 }
 
 #[tokio::test]
@@ -108,31 +113,39 @@ async fn background_descendant_cannot_hold_output_pipes_open() {
         max_timeout: SHELL_STARTUP,
         output_limit: 100,
     };
-    let output = tool
-        .execute(
-            json!({"command":"sleep 60 & echo $! > background.pid; exit 0"}),
-            ToolContext::new(root.clone(), tokio_util::sync::CancellationToken::new()),
+    let pid_path = root.join("background.pid");
+    let command_root = root.clone();
+    let execution = tokio::spawn(async move {
+        tool.execute(
+            json!({"command":"sleep 60 & echo $! > background.pid; while [ ! -e release ]; do sleep 0.01; done; touch exited; exit 0"}),
+            ToolContext::new(command_root, tokio_util::sync::CancellationToken::new()),
         )
         .await
-        .unwrap();
+    });
+    let identity = wait_for(SHELL_STARTUP, || {
+        std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .and_then(process_identity)
+    })
+    .await
+    .expect("command did not report its descendant identity");
+    std::fs::write(root.join("release"), "").unwrap();
+    let output = execution.await.unwrap().unwrap();
     let returned = std::time::SystemTime::now();
     assert!(!output.is_error());
     // Time from the shell's last write, which excludes its startup.
-    let exited = std::fs::metadata(root.join("background.pid"))
+    let exited = std::fs::metadata(root.join("exited"))
         .unwrap()
         .modified()
         .unwrap();
     assert!(returned.duration_since(exited).unwrap_or_default() < Duration::from_secs(3));
-    let pid: i32 = std::fs::read_to_string(root.join("background.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     assert!(
-        wait_for(Duration::from_secs(5), || is_gone(pid))
+        wait_for(Duration::from_secs(5), || is_gone(&identity))
             .await
             .is_some(),
-        "background descendant {pid} survived tool completion"
+        "background descendant {:?} survived tool completion",
+        identity.pid
     );
 }
 
@@ -163,15 +176,17 @@ async fn cancellation_kills_a_term_ignoring_descendant() {
     })
     .await
     .expect("command did not report its descendant pid");
+    let identity = process_identity(pid).expect("descendant exited before its identity was read");
     let started = std::time::Instant::now();
     cancel.cancel();
     let error = execution.await.unwrap().unwrap_err();
     assert!(error.to_string().contains("cancelled"));
     assert!(started.elapsed() < Duration::from_secs(3));
     assert!(
-        wait_for(Duration::from_secs(5), || is_gone(pid))
+        wait_for(Duration::from_secs(5), || is_gone(&identity))
             .await
             .is_some(),
-        "TERM-ignoring descendant {pid} survived cancellation"
+        "TERM-ignoring descendant {:?} survived cancellation",
+        identity.pid
     );
 }

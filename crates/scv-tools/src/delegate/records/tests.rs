@@ -4,7 +4,7 @@ use super::*;
 use std::os::unix::{fs::PermissionsExt as _, process::CommandExt as _};
 
 fn registry(home: &Path) -> Arc<DelegationRegistry> {
-    Arc::new(DelegationRegistry::new(&Layout::new(home)))
+    Arc::new(DelegationRegistry::for_test(&Layout::new(home)))
 }
 
 /// Spawn `sh -c script` in its own process group with `environment`.
@@ -30,12 +30,27 @@ async fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
     false
 }
 
+#[tokio::test]
+async fn an_unreaped_child_is_not_alive() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let identity = ProcessIdentity::of(child.id()).unwrap();
+    assert!(identity.is_alive());
+    child.kill().unwrap();
+    // Do not collect the child until its zombie state has been observed.
+    let stopped = wait_for(|| !identity.is_alive()).await;
+    child.wait().unwrap();
+    assert!(stopped, "an exited child must not count as running");
+}
+
 /// The instance ID is part of every `SCV_PARENT` tag, so orphan detection
 /// and planned restarts recognize records of the same instance only while it
 /// stays exactly this hash of the instance home.
 #[test]
 fn the_instance_id_is_a_stable_hash_of_the_home() {
-    let registry = DelegationRegistry::new(&Layout::new(Path::new("/srv/scv")));
+    let registry = DelegationRegistry::for_test(&Layout::new(Path::new("/srv/scv")));
     assert_eq!(registry.instance(), "8973cbc5");
     assert_eq!(
         registry.record_dir(),
@@ -61,7 +76,7 @@ fn chains_match_only_their_own_handle() {
 #[test]
 fn a_chain_names_the_run_this_process_started() {
     let home = tempfile::tempdir().unwrap();
-    let registry = DelegationRegistry::new(&Layout::new(home.path()));
+    let registry = DelegationRegistry::for_test(&Layout::new(home.path()));
     let mut agent = std::process::Command::new("sleep")
         .arg("30")
         .process_group(0)
@@ -121,7 +136,7 @@ fn a_chain_names_the_run_this_process_started() {
 #[test]
 fn a_declared_client_depth_raises_the_recorded_depth() {
     let home = tempfile::tempdir().unwrap();
-    let registry = DelegationRegistry::new(&Layout::new(home.path()));
+    let registry = DelegationRegistry::for_test(&Layout::new(home.path()));
     let pending = registry.begin_at(2, "codex", "session", home.path(), None);
     assert_eq!(pending.depth, 3);
     assert!(
@@ -135,7 +150,7 @@ fn a_declared_client_depth_raises_the_recorded_depth() {
 #[test]
 fn nested_tags_extend_the_chain_and_depth() {
     let home = tempfile::tempdir().unwrap();
-    let mut registry = DelegationRegistry::new(&Layout::new(home.path()));
+    let mut registry = DelegationRegistry::for_test(&Layout::new(home.path()));
     registry.chain = Some("aaaa/s0/codex-111111".into());
     registry.depth = 1;
     let pending = registry.begin("claude", "s1", home.path(), Some(("claude-1", 2)));
@@ -289,7 +304,7 @@ async fn an_abandoned_run_is_cleaned_up_when_its_guard_drops() {
 #[test]
 fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
     let home = tempfile::tempdir().unwrap();
-    let registry = DelegationRegistry::new(&Layout::new(home.path()));
+    let registry = DelegationRegistry::for_test(&Layout::new(home.path()));
     let dir = registry.record_dir().to_owned();
     let record = DelegationRecord {
         handle: "codex-abcdef".into(),

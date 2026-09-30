@@ -41,7 +41,14 @@ const ZOMBIE_MIN_AGE: Duration = Duration::from_secs(10);
 
 /// Delegation depth of the current process: 0 unless an SCV started it.
 pub fn current_depth() -> u32 {
-    scv_client::inherited_delegation_depth().unwrap_or(0)
+    #[cfg(test)]
+    {
+        0
+    }
+    #[cfg(not(test))]
+    {
+        scv_client::inherited_delegation_depth().unwrap_or(0)
+    }
 }
 
 /// A process, identified by PID plus start time so a reused PID never matches.
@@ -70,7 +77,7 @@ impl ProcessIdentity {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Self::of(self.pid) == Some(*self)
+            Self::of(self.pid) == Some(*self) && !process_is_zombie(self.pid)
         }
     }
 }
@@ -196,10 +203,30 @@ impl DelegationRegistry {
             instance,
             owner: ProcessIdentity::current(),
             depth: current_depth(),
-            chain: std::env::var(PARENT_VARIABLE)
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
+            chain: {
+                #[cfg(test)]
+                {
+                    None
+                }
+                #[cfg(not(test))]
+                {
+                    std::env::var(PARENT_VARIABLE)
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                }
+            },
             inner: Mutex::new(Inner::default()),
+        }
+    }
+
+    /// A unit-test fixture whose caller is independent of the test runner.
+    /// Production construction always reads the inherited depth and chain.
+    #[cfg(test)]
+    pub(crate) fn for_test(layout: &Layout) -> Self {
+        Self {
+            depth: 0,
+            chain: None,
+            ..Self::new(layout)
         }
     }
 
@@ -850,6 +877,20 @@ fn process_start_time(pid: u32) -> Option<u64> {
         )
     };
     (written == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_is_zombie(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim_start()
+                .starts_with('Z')
+        })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

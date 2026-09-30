@@ -546,7 +546,7 @@ fn conversing_agent(
 
 fn delegation_context(home: &Path) -> DelegationContext {
     DelegationContext {
-        registry: Arc::new(DelegationRegistry::new(&scv_client::Layout::new(home))),
+        registry: Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(home))),
         session: "session-1".into(),
         depth: 0,
     }
