@@ -794,7 +794,8 @@ Every delegated process gets `SCV_PARENT=<instance>/<session>/<handle>`
 both. While it runs, SCV records it in `$SCV_HOME/state/delegations/<handle>.json`
 (mode `0600`, directories `0700`, written atomically): handle, agent, parent
 session, `cwd`, depth, and the PID plus start time of both the agent and the
-SCV process that owns it, so a reused PID never matches. A run that serves a
+SCV process that owns it, so a reused PID never matches. Process liveness
+checks use that identity and treat an exited zombie as stopped. A run that serves a
 conversation also records the conversation and its current turn, and a live
 agent (a nested SCV or an ACP agent) that waits between turns records when
 its last turn ended (`idle_since_unix`), until its next turn starts. A nested

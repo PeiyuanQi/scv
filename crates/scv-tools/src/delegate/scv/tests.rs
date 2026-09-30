@@ -149,7 +149,7 @@ async fn conversations_continue_on_one_child_with_progress_and_records() {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let script = fake_scv(dir.path(), "echo");
-    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+    let registry = Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(
         home.path(),
     )));
     let delegation = DelegationContext {
@@ -238,7 +238,7 @@ async fn a_childs_own_background_job_keeps_it_at_work_until_reported() {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let script = fake_scv(dir.path(), "background");
-    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+    let registry = Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(
         home.path(),
     )));
     let delegation = DelegationContext {
@@ -591,7 +591,7 @@ fn the_registry_offers_scv_only_below_the_depth_limit() {
     for (depth, offered) in [(0, true), (1, true), (2, false)] {
         let config = crate::ToolsConfig {
             delegation: Some(DelegationContext {
-                registry: Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+                registry: Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(
                     home.path(),
                 ))),
                 session: "s".into(),

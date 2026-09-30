@@ -298,6 +298,12 @@ finds both by path and the source file holds only the implementation:
 `#[tokio::test]` in any other source file fails it, and so does a test file
 that its parent module never declares (such a file would never run).
 
+Delegation unit fixtures construct an explicitly isolated registry; the
+production depth reader and registry constructor still read inherited SCV
+selectors in every build. Subprocess integration tests link the production
+library and verify inherited depth, client-declared depth, the delegation
+limit, and parent-chain propagation without changing the runner's environment.
+
 Run one crate's unit tests with `cargo test -p <crate> [<name filter>]`, the
 `scv` binary's with `cargo test -p scv-cli --bin scv`, and the black-box tests
 of one area with `cargo test -p scv-cli --test it <module>::` (such as
