@@ -57,6 +57,10 @@ pub struct ProviderConfig {
     /// for a model without vision; SCV also stops for the session after the
     /// provider rejects an image.
     pub(crate) image_input: bool,
+    /// The reasoning effort SCV's own requests ask this provider's model for
+    /// (Responses `reasoning.effort`), such as `high`. Unset, requests name
+    /// none and the model uses its default.
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -117,6 +121,7 @@ impl Default for ProviderConfig {
             timeout_seconds: 600,
             headers: HashMap::new(),
             image_input: true,
+            reasoning_effort: None,
         }
     }
 }

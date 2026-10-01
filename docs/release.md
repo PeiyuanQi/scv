@@ -69,10 +69,17 @@ so a planned restart from `0.3.7` checks the new release and can roll it back.
   `[agents.dsh] model`, `effort`, and `hard_task_effort` apply to it. Run once
   per turn it still takes neither. ACP option values listed in groups are
   read too. See [Model and effort values](tools.md#model-and-effort-values).
+- **SCV's own reasoning effort.** A provider profile's `reasoning_effort`,
+  such as `"high"`, goes with every request as the Responses
+  `reasoning.effort`, and the system prompt states it. Without it requests
+  are unchanged. See [Reasoning effort](configuration.md#reasoning-effort).
 - **State stays readable both ways.** The Feishu checkpoint gains per-thread
   times and a running job its thread, both of which `0.3.7` ignores. After
   going back to `0.3.7`, a reply still waiting to go into a thread is refused
   by Feishu and held, and a thread's message is answered in its chat.
+- `0.3.7` rejects `reasoning_effort` in a provider table, so with one in
+  `config.toml` it cannot start, and an automatic rollback would fail too.
+  Remove it before going back to `0.3.7`.
 
 What changes for code that embeds SCV's crates:
 
@@ -81,6 +88,8 @@ What changes for code that embeds SCV's crates:
   `scv_tools::adapters::AcpLaunch` the same field, so code that builds an
   `AcpAgentLaunch` with a struct literal sets it: `false` keeps the earlier
   behavior.
+- `OpenAiProvider::with_reasoning_effort` asks for an effort on every
+  request, and `ProviderConfig` carries `reasoning_effort`.
 
 ## Upgrading to 0.3.7
 

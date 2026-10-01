@@ -621,14 +621,19 @@ the final JSON before returning a call to the loop. Requests are stateless: each
 one replays the conversation, with every earlier tool call sent as a
 `function_call` item before its `function_call_output`. A call whose turn was
 cancelled before it returned is closed with a failed output, so the replayed
-history always pairs calls with results as the API requires. Function tools are
+history always pairs calls with results as the API requires. Reasoning items a
+reasoning model returns are neither kept nor replayed, so after a tool call it
+reasons afresh from the visible conversation; the API recommends replaying
+them for quality and token use but does not require it. Function tools are
 sent with `strict: false`: SCV schemas leave optional fields out of `required`,
 and strict mode, the Responses default, would make the model fill every one of
 them, such as an unrequested `model` or `effort` for a delegated agent.
 
-The base URL, API-key environment variable, model, and timeout are
-configuration. API keys are read from the environment and never accepted in
-project configuration.
+The base URL, API-key environment variable, model, timeout, and an optional
+reasoning effort are configuration. The effort goes with every request as the
+Responses `reasoning.effort`; without one, requests carry no `reasoning`
+object and the model uses its default. API keys are read from the environment
+and never accepted in project configuration.
 
 The core `Provider` trait does not expose HTTP types. Native Anthropic,
 Responses API, local-model, streaming, and subscription-auth providers can be

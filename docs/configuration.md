@@ -158,6 +158,7 @@ api_key = "sk-your-key"
 api_key_env = "OPENAI_API_KEY" # optional fallback
 timeout_seconds = 600
 image_input = true # show attached images to the model
+# reasoning_effort = "high" # with a reasoning model; omitted, its default
 
 [providers.custom]
 kind = "openai-compatible"
@@ -419,6 +420,42 @@ Proxies in front of providers commonly close idle keep-alive connections after
 a minute or so, and a request written to a connection that is already closed
 fails before any response. Retiring connections sooner makes that rare, and
 the retry above covers the rest.
+
+### Reasoning effort
+
+`reasoning_effort` in a provider profile, or in `[provider]` when no profiles
+are used, sets how much SCV's own model reasons before it answers:
+
+```toml
+[providers.openai]
+model = "gpt-6-sol"
+reasoning_effort = "high"
+```
+
+SCV sends it with every request through that provider as the Responses API's
+`reasoning.effort` (Chat Completions calls the same setting
+`reasoning_effort`), in every kind of session, mail triage included. The
+system prompt SCV builds tells the model the effort it runs at, and that the
+`agent` tool's `effort` sets only a delegated agent's. Unset, the default,
+requests carry no `reasoning` object and the model uses its own default, so
+leave it out for models and endpoints without reasoning effort.
+
+OpenAI documents `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
+`max`; each model accepts a subset, and an OpenAI-compatible endpoint may take
+others. SCV checks only the form (1-32 letters, digits, `-`, or `_`, starting
+with a letter or digit), in every profile, and passes the value on. A model
+that does not take it fails the turn with the provider's own error, such as
+HTTP 400, rather than running at an effort nobody chose; the request is not
+retried without it.
+
+The effort belongs to its profile. `--provider` selects another profile with
+its own effort or none; `--model`, `SCV_MODEL`, and a client's model override
+keep the profile's effort, so choose a profile without one for a model that
+has none. With profiles in use, an effort in `[provider]` itself could never
+apply and is a startup error. Project configuration cannot set it, and
+`scv config show` prints it with the provider in effect. A delegated agent's
+effort is separate: the `agent` tool's `effort` argument or
+`[agents.<name>] effort` (see [Choosing an agent](tools.md#choosing-an-agent)).
 
 ### Agent permissions
 

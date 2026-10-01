@@ -1218,3 +1218,126 @@ async fn a_tool_free_session_may_replace_the_whole_system_prompt() {
     );
     let _ = timeout(Duration::from_secs(3), child.wait()).await;
 }
+
+/// The provider in effect asks for its configured reasoning effort as the
+/// Responses `reasoning.effort`, and the system prompt states it; a profile
+/// without one sends no `reasoning` object, as before the setting existed.
+#[tokio::test]
+async fn the_configured_reasoning_effort_reaches_the_provider_and_the_prompt() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let reply = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+        );
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            bodies.push(read_json_body(&mut stream));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        bodies
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    crate::support::write_private(
+        &home.path().join("config.toml"),
+        &format!(
+            "[provider]\nactive = \"sol\"\n\n[providers.sol]\nkind = \"openai-compatible\"\nmodel = \"gpt-6-sol\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\nreasoning_effort = \"high\"\n\n[providers.plain]\nkind = \"openai-compatible\"\nmodel = \"plain-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n"
+        ),
+    );
+    for profile in [None, Some("plain")] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_scv-server"))
+            .isolated(home.path())
+            .arg("--stdio")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        send(
+            &mut input,
+            &ClientMessage::Initialize {
+                request_id: "init".into(),
+                protocol_version: PROTOCOL_VERSION,
+                client: PeerInfo {
+                    name: "integration-test".into(),
+                    version: "0".into(),
+                },
+            },
+        )
+        .await;
+        send(
+            &mut input,
+            &ClientMessage::SessionStart {
+                request_id: "session".into(),
+                cwd: workspace.path().display().to_string(),
+                provider: profile.map(str::to_owned),
+                model: None,
+                base_url: None,
+                no_tools: None,
+                delegation_depth: None,
+                channel: None,
+                auto_approve: None,
+                chat: None,
+                system_prompt: None,
+            },
+        )
+        .await;
+        let session_id = loop {
+            match next_event(&mut lines).await {
+                ServerEvent::SessionStarted { session_id, .. } => break session_id,
+                ServerEvent::Error { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        };
+        send(
+            &mut input,
+            &ClientMessage::TurnStart {
+                request_id: "turn".into(),
+                session_id,
+                prompt: "think hard".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+        loop {
+            match next_event(&mut lines).await {
+                ServerEvent::TurnCompleted { .. } => break,
+                ServerEvent::TurnFailed { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        input.shutdown().await.unwrap();
+        drop(input);
+        assert!(
+            timeout(Duration::from_secs(3), child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+    }
+    let bodies = provider.join().unwrap();
+    let instructions = |body: &serde_json::Value| body["instructions"].as_str().unwrap().to_owned();
+    assert_eq!(bodies[0]["model"], "gpt-6-sol");
+    assert_eq!(bodies[0]["reasoning"], serde_json::json!({"effort":"high"}));
+    assert!(
+        instructions(&bodies[0]).contains(
+            "You run on model gpt-6-sol at reasoning effort high, as SCV's provider \
+             configuration sets it."
+        ),
+        "{}",
+        instructions(&bodies[0])
+    );
+    assert_eq!(bodies[1]["model"], "plain-model");
+    assert!(bodies[1].get("reasoning").is_none(), "{}", bodies[1]);
+    assert!(!instructions(&bodies[1]).contains("reasoning effort"));
+}

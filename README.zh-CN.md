@@ -202,6 +202,7 @@ kind = "openai-compatible"
 model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-your-key"
+# reasoning_effort = "high"   # 推理模型适用：SCV 自身模型的推理强度
 
 [tools]
 approval_policy = "on-risk"   # 读取直接运行；写入、shell 和智能体先询问

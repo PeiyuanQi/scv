@@ -222,6 +222,32 @@ async fn a_rejected_image_is_described_instead_and_the_request_repeated() {
     }
 }
 
+/// An effort the user chose is never dropped behind their back: an endpoint
+/// that rejects it fails the turn with its own message, once.
+#[tokio::test]
+async fn a_rejected_reasoning_effort_is_reported_without_a_retry() {
+    let (base, count) = serve(vec![status(
+        "400 Bad Request",
+        "",
+        r#"{"error":{"message":"Unsupported parameter: 'reasoning.effort' is not supported with this model.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_parameter"}}"#,
+    )])
+    .await;
+    let provider = provider(base, 2, FAST).with_reasoning_effort("high");
+    let (result, text) = run(&provider, CancellationToken::new()).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.kind, ProviderErrorKind::Provider);
+    assert!(
+        error.message.contains("HTTP 400")
+            && error
+                .message
+                .contains("'reasoning.effort' is not supported with this model"),
+        "{}",
+        error.message
+    );
+    assert!(text.is_empty());
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn an_overload_is_retried_and_the_second_attempt_succeeds() {
     let (base, count) = serve(vec![sse(&event(OVERLOADED)), hello()]).await;

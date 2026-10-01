@@ -118,9 +118,15 @@ pub(crate) fn render(
                 || "[provider]".to_owned(),
                 |name| format!("profile {name:?}"),
             );
+            let effort = provider
+                .reasoning_effort
+                .as_ref()
+                .map_or_else(String::new, |effort| {
+                    format!(", reasoning effort {effort:?}")
+                });
             writeln!(
                 out,
-                "  In effect: {name}, model {:?} at {:?} ({} API), key from {key}",
+                "  In effect: {name}, model {:?}{effort} at {:?} ({} API), key from {key}",
                 provider.model, provider.base_url, provider.wire_api
             )?;
         }

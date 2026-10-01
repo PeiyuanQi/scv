@@ -1,5 +1,6 @@
-//! The session's system prompt: the configured base, project instructions,
-//! skills, how to delegate, and the chat channel it answers on.
+//! The session's system prompt: the configured base, the model's reasoning
+//! effort, project instructions, skills, how to delegate, and the chat
+//! channel it answers on.
 
 pub(crate) mod skills;
 
@@ -41,6 +42,19 @@ pub(crate) fn build_system_prompt(
         "\nCurrent working directory: {}\n",
         workspace.display()
     ));
+    if let Some(effort) = &config.provider.reasoning_effort {
+        // The agent tool takes an effort too; keep the model from mistaking
+        // a delegated agent's setting for its own.
+        prompt.push_str(&format!(
+            "You run on model {} at reasoning effort {effort}, as SCV's provider \
+             configuration sets it.",
+            config.provider.model
+        ));
+        if !context.agents.is_empty() {
+            prompt.push_str(" The effort you pass to the agent tool sets only that agent's.");
+        }
+        prompt.push('\n');
+    }
     let agents_path = workspace.join("AGENTS.md");
     if agents_path.is_file() {
         let canonical = std::fs::canonicalize(&agents_path).context("resolve project AGENTS.md")?;

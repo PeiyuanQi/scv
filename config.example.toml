@@ -8,6 +8,9 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-your-key"
 api_key_env = "OPENAI_API_KEY"
 timeout_seconds = 600
+# With a reasoning model, how hard SCV's own model thinks: sent as the
+# Responses `reasoning.effort`, such as "low", "medium", "high", or "xhigh".
+# reasoning_effort = "high"
 
 [providers.local]
 kind = "openai-compatible"

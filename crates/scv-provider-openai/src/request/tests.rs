@@ -147,6 +147,36 @@ fn hosted_web_search_is_offered_beside_function_tools() {
     assert_eq!(body["tools"], json!([{"type":"web_search"}]));
 }
 
+#[test]
+fn reasoning_effort_is_sent_only_when_configured() {
+    let provider = || {
+        OpenAiProvider::new(
+            "model".into(),
+            "http://127.0.0.1:9/v1".into(),
+            "key".into(),
+            Duration::from_secs(1),
+            ProviderLimits::default(),
+            std::collections::HashMap::default(),
+        )
+        .unwrap()
+    };
+    let request = ProviderRequest {
+        system_prompt: "system".into(),
+        messages: vec![user("hi")],
+        tools: Vec::new(),
+    };
+    // Unset, the request names no effort, as endpoints without reasoning
+    // effort require.
+    let (body, _) = provider().request_body(&request);
+    assert!(body.get("reasoning").is_none(), "{body}");
+    let (body, _) = provider()
+        .with_reasoning_effort("high")
+        .request_body(&request);
+    assert_eq!(body["reasoning"], json!({"effort":"high"}));
+    assert_eq!(body["model"], "model");
+    assert_eq!(body["instructions"], "system");
+}
+
 struct Collect(std::sync::Mutex<String>);
 
 #[async_trait]

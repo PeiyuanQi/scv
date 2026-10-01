@@ -221,6 +221,7 @@ kind = "openai-compatible"
 model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-your-key"
+# reasoning_effort = "high"   # with a reasoning model: how hard SCV's own model thinks
 
 [tools]
 approval_policy = "on-risk"   # reads run; writes, shell, and agents ask first

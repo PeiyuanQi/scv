@@ -219,3 +219,33 @@ fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
         assert!(!valid_channel_name(bad), "{bad:?}");
     }
 }
+
+#[test]
+fn the_prompt_states_the_models_own_reasoning_effort_when_one_is_set() {
+    let context = |agents| PromptContext {
+        agents,
+        background: true,
+        channel: None,
+        chat_history: false,
+    };
+    let mut config = Config::default();
+    let prompt = prompt_for(&config, &context(&[]));
+    assert!(!prompt.contains("reasoning effort"), "{prompt}");
+
+    config.provider.model = "gpt-6-sol".into();
+    config.provider.reasoning_effort = Some("high".into());
+    let own = "You run on model gpt-6-sol at reasoning effort high, as SCV's provider \
+               configuration sets it.";
+    let prompt = prompt_for(&config, &context(&[]));
+    assert!(prompt.contains(&format!("{own}\n")), "{prompt}");
+    assert!(!prompt.contains("agent tool"), "{prompt}");
+    // With agents, the agent tool's effort is told apart from the model's.
+    let agents = ["codex".to_owned()];
+    let prompt = prompt_for(&config, &context(&agents));
+    assert!(
+        prompt.contains(&format!(
+            "{own} The effort you pass to the agent tool sets only that agent's.\n"
+        )),
+        "{prompt}"
+    );
+}
