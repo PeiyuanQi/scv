@@ -166,6 +166,9 @@ pub struct AcpAgentLaunch {
     /// `transport = "acp"`: never fall back to one CLI process per turn, so
     /// the agent is not offered while its ACP server is missing.
     pub required: bool,
+    /// The server takes `model` and `effort` as session config options even
+    /// where the CLI takes neither as an argument (DeepSeek Harness).
+    pub session_options: bool,
 }
 
 /// Where a skill's text comes from.

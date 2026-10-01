@@ -63,10 +63,24 @@ so a planned restart from `0.3.7` checks the new release and can roll it back.
   own, and their background reports go into the thread. Questions and
   notices still go to the direct chat itself. See
   [Feishu threads](channels.md#feishu-threads).
+- **DeepSeek Harness takes `model` and `effort` over ACP.** Its ACP server
+  lists every configured provider's models as `["provider","model"]` and its
+  reasoning efforts; SCV now lists and takes them (as `provider/model`), so
+  `[agents.dsh] model`, `effort`, and `hard_task_effort` apply to it. Run once
+  per turn it still takes neither. ACP option values listed in groups are
+  read too. See [Model and effort values](tools.md#model-and-effort-values).
 - **State stays readable both ways.** The Feishu checkpoint gains per-thread
   times and a running job its thread, both of which `0.3.7` ignores. After
   going back to `0.3.7`, a reply still waiting to go into a thread is refused
   by Feishu and held, and a thread's message is answered in its chat.
+
+What changes for code that embeds SCV's crates:
+
+- `scv_tools::AcpAgentLaunch` gains `session_options` (the ACP server takes
+  `model` and `effort` as session options where the CLI takes neither), and
+  `scv_tools::adapters::AcpLaunch` the same field, so code that builds an
+  `AcpAgentLaunch` with a struct literal sets it: `false` keeps the earlier
+  behavior.
 
 ## Upgrading to 0.3.7
 

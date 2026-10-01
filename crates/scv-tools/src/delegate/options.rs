@@ -8,6 +8,11 @@
 //! that save, with the same ACP server installed, lists the values in the
 //! `agent` tool's description and refuses a model the list lacks before a
 //! run starts. `scv agents check` refreshes the file on demand.
+//!
+//! A select option lists its values flat or in groups. SCV shows each value
+//! as the agent spells it, except one that is a JSON array of strings, such
+//! as DeepSeek Harness's `["provider","model"]` pairs, which it shows and
+//! takes as those strings joined by `/` ([`select_values`]).
 
 use std::{
     path::{Path, PathBuf},
@@ -126,14 +131,11 @@ impl AgentOptions {
 }
 
 fn choice(option: &Value, valid: fn(&str) -> bool) -> Option<Choice> {
-    let values: Vec<String> = option
-        .get("options")?
-        .as_array()?
-        .iter()
-        .filter_map(|value| value.get("value")?.as_str())
-        .filter(|value| valid(value))
+    let values: Vec<String> = select_values(option)
+        .into_iter()
+        .map(|value| value.shown)
+        .filter(|shown| valid(shown))
         .take(MAX_VALUES)
-        .map(str::to_owned)
         .collect();
     if values.is_empty() {
         return None;
@@ -141,9 +143,53 @@ fn choice(option: &Value, valid: fn(&str) -> bool) -> Option<Choice> {
     let current = option
         .get("currentValue")
         .and_then(Value::as_str)
-        .filter(|value| valid(value))
-        .map(str::to_owned);
+        .map(shown)
+        .filter(|value| valid(value));
     Some(Choice { values, current })
+}
+
+/// One value of an ACP select config option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectValue {
+    /// How SCV shows it, and takes it as `model` or `effort`.
+    pub(crate) shown: String,
+    /// The agent's own value, which `session/set_config_option` sends.
+    pub(crate) value: String,
+}
+
+/// The values of an ACP select config option, listed flat or in groups
+/// (each group's own `options` hold its values).
+pub(crate) fn select_values(option: &Value) -> Vec<SelectValue> {
+    let entries = option.get("options").and_then(Value::as_array);
+    let mut values = Vec::new();
+    for entry in entries.into_iter().flatten() {
+        match entry.get("options").and_then(Value::as_array) {
+            Some(group) => values.extend(group.iter().filter_map(select_value)),
+            None => values.extend(select_value(entry)),
+        }
+    }
+    values
+}
+
+fn select_value(entry: &Value) -> Option<SelectValue> {
+    let value = entry.get("value")?.as_str()?;
+    Some(SelectValue {
+        shown: shown(value),
+        value: value.to_owned(),
+    })
+}
+
+/// How SCV shows an agent's select value: a JSON array of strings, such as
+/// DeepSeek Harness's `["provider","model"]`, as the strings joined by `/`,
+/// since a model name cannot hold quotes or commas; any other value as it
+/// is.
+fn shown(value: &str) -> String {
+    match serde_json::from_str::<Vec<String>>(value) {
+        Ok(parts) if !parts.is_empty() && parts.iter().all(|part| !part.is_empty()) => {
+            parts.join("/")
+        }
+        _ => value.to_owned(),
+    }
 }
 
 /// Which ACP server the values came from. A different install, or the same

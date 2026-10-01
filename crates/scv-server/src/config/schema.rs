@@ -426,6 +426,21 @@ impl AdapterConfig {
             hard_task_effort: self.hard_task_effort.clone(),
         }
     }
+
+    /// The ACP server this agent runs on, when `descriptor` has one and the
+    /// transport allows it: `acp`, or `auto` with the built-in command. A
+    /// custom `command` points SCV at a specific CLI, which the ACP server
+    /// would not run.
+    pub(crate) fn acp_launch(
+        &self,
+        descriptor: &scv_tools::adapters::AdapterDescriptor,
+    ) -> Option<scv_tools::adapters::AcpLaunch> {
+        descriptor.acp.filter(|_| match self.transport {
+            AgentTransport::Acp => true,
+            AgentTransport::Resume => false,
+            AgentTransport::Auto => self.command == descriptor.command,
+        })
+    }
 }
 
 /// How SCV talks to a delegated agent that has an ACP server.

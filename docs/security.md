@@ -129,7 +129,9 @@ saves at most 64 per option, only values that could be one argument (model
 values under the `model` rules, effort values of letters, digits, `-`, and
 `_` that start with a letter or digit), in a private file under `state/agent-options/`, and checks them again
 when it reads that file back. A value only ever becomes the single argument of
-`session/set_config_option`, never shell text. `scv agents check` prints what
+`session/set_config_option`, never shell text; for a value SCV lists in its
+own `provider/model` spelling, that argument is the agent's own value from the
+same session. `scv agents check` prints what
 agents reply on one line without control characters.
 
 ### Delegated runs
