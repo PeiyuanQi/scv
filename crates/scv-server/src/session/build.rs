@@ -94,6 +94,9 @@ pub(crate) async fn build_session(
             .collect(),
     )?
     .with_image_input(provider_config.image_input);
+    if let Some(effort) = &provider_config.reasoning_effort {
+        provider = provider.with_reasoning_effort(effort.clone());
+    }
     if !no_tools && config.hosted_web_search() {
         provider = provider.with_web_search();
     }

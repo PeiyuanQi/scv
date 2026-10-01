@@ -241,6 +241,7 @@ impl Config {
                 "provider model and base_url must be non-empty; configure api_key or api_key_env"
             );
         }
+        self.validate_reasoning_efforts()?;
         for (channel, accounts) in &self.channels {
             let known: Vec<&str> = scv_channels::ChannelKind::ALL
                 .iter()
@@ -477,6 +478,33 @@ impl Config {
 }
 
 impl Config {
+    /// Every profile's `reasoning_effort`, not only the active one's, so a
+    /// mistake shows before the profile is selected. Which values a model
+    /// accepts is its endpoint's to check, since the set changes with models;
+    /// here only the form is.
+    fn validate_reasoning_efforts(&self) -> Result<()> {
+        let mut profiles: Vec<(String, &super::ProviderConfig)> = self
+            .providers
+            .iter()
+            .map(|(name, profile)| (format!("providers.{name}"), profile))
+            .collect();
+        profiles.sort_by(|left, right| left.0.cmp(&right.0));
+        // The provider in effect, which may also come from a profile above.
+        profiles.push(("provider".into(), &self.provider));
+        for (table, profile) in profiles {
+            if let Some(effort) = &profile.reasoning_effort
+                && !scv_tools::valid_effort(effort)
+            {
+                bail!(
+                    "{table}.reasoning_effort must be 1-32 letters, digits, '-', or '_', \
+                     starting with a letter or digit, such as none, minimal, low, medium, \
+                     high, xhigh, or max as the model supports"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn validate_web(&self) -> Result<()> {
         let web = &self.web;
         if web.fetch_max_bytes > 64 * 1024 * 1024 {

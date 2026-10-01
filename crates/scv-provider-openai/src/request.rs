@@ -107,6 +107,9 @@ pub struct OpenAiProvider {
     /// Whether images in user messages are sent as image input. Cleared for
     /// the provider's lifetime once the endpoint rejects an image.
     image_input: AtomicBool,
+    /// The Responses `reasoning.effort` every request asks for; `None` sends
+    /// no `reasoning` object, so the model uses its default.
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -141,6 +144,7 @@ impl OpenAiProvider {
             headers,
             hosted_tools: Vec::new(),
             image_input: AtomicBool::new(true),
+            reasoning_effort: None,
         })
     }
 
@@ -160,6 +164,17 @@ impl OpenAiProvider {
         self
     }
 
+    /// Asks the model to reason at `effort` on every request, as the
+    /// Responses `reasoning.effort` (such as `low` or `high`). Which values a
+    /// model accepts is the endpoint's to check: one without reasoning effort,
+    /// or without that value, rejects the request. Left unset, requests carry
+    /// no `reasoning` object and the model uses its own default.
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
+    }
+
     /// The request, and whether it carries image input.
     fn request_body(&self, request: &ProviderRequest) -> (Value, bool) {
         let images = self.image_input.load(Ordering::Relaxed);
@@ -171,6 +186,9 @@ impl OpenAiProvider {
         let mut body = json!({"model": self.model, "instructions": request.system_prompt, "input": input, "stream": true});
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning"] = json!({"effort": effort});
         }
         (body, shown > 0)
     }

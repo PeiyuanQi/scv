@@ -1119,7 +1119,8 @@ provider, and a default that points at it.
 SCV's own active provider: `$SCV_HOME/agents/scv/config.toml` (mode `0600`,
 written atomically) gets `[provider] active = "scv"` and a `[providers.scv]`
 profile with the same kind, wire API, model, base URL, timeout, and headers,
-plus `[web] search = "provider"` when SCV's own config uses hosted search. The
+plus `[web] search = "provider"` when SCV's own config uses hosted search;
+the provider's `reasoning_effort` is SCV's own and is not copied. The
 key is resolved at import time from `api_key` or the `api_key_env` variable
 and stored in that file, because delegated agents never inherit key
 variables; it is never printed. Other settings already in that file are kept,

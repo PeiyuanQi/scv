@@ -919,3 +919,100 @@ fn configuration_loads_from_the_layout_it_is_given() {
         default_policy
     );
 }
+
+#[test]
+fn reasoning_efforts_are_checked_in_every_profile_and_only_for_form() {
+    let mut config = Config::default();
+    assert_eq!(config.provider.reasoning_effort, None);
+    // Values a model may accept, including ones SCV has not heard of.
+    for good in ["none", "high", "xhigh", "max", "ultra-2"] {
+        config.provider.reasoning_effort = Some(good.into());
+        assert!(config.validate().is_ok(), "{good:?}");
+    }
+    let too_long = "x".repeat(33);
+    for bad in ["", "-high", "very high", "high\n", "\"high\"", &too_long] {
+        let mut config = Config::default();
+        config.provider.reasoning_effort = Some(bad.to_owned());
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.starts_with("provider.reasoning_effort must be") && error.contains("high"),
+            "{bad:?}: {error}"
+        );
+    }
+    // A profile not in effect is checked too, named as the file names it.
+    let mut config = Config::default();
+    config.providers.insert(
+        "spare".into(),
+        ProviderConfig {
+            reasoning_effort: Some("x y".into()),
+            ..ProviderConfig::default()
+        },
+    );
+    let error = config.validate().unwrap_err().to_string();
+    assert!(
+        error.starts_with("providers.spare.reasoning_effort must be"),
+        "{error}"
+    );
+    // A project may not choose the provider's effort.
+    let project: toml::Value =
+        toml::from_str("[providers.openai]\nreasoning_effort = \"max\"\n").unwrap();
+    assert!(validate_project_keys(&project).is_err());
+}
+
+#[test]
+fn the_provider_in_effect_brings_its_own_reasoning_effort() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path());
+    let write = |text: &str| {
+        std::fs::write(layout.config(), text).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(layout.config(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    let profiles = "[providers.sol]\nmodel = \"gpt-6-sol\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"OPENAI_API_KEY\"\nreasoning_effort = \"high\"\n\n[providers.local]\nmodel = \"llama3.1\"\nbase_url = \"http://localhost:11434/v1\"\napi_key = \"local\"\n";
+    write(&format!("[provider]\nactive = \"sol\"\n\n{profiles}"));
+    let load = |overrides: ConfigOverrides| Config::load(&layout, workspace.path(), overrides);
+    let config = load(ConfigOverrides::default()).unwrap();
+    assert_eq!(config.provider.model, "gpt-6-sol");
+    assert_eq!(config.provider.reasoning_effort.as_deref(), Some("high"));
+    // The effort belongs to the profile: a model override keeps it, and
+    // another profile without one sends none.
+    let overridden = load(ConfigOverrides {
+        model: Some("gpt-6-luna".into()),
+        ..ConfigOverrides::default()
+    })
+    .unwrap();
+    assert_eq!(
+        overridden.provider.reasoning_effort.as_deref(),
+        Some("high")
+    );
+    let local = load(ConfigOverrides {
+        provider: Some("local".into()),
+        ..ConfigOverrides::default()
+    })
+    .unwrap();
+    assert_eq!(local.provider.model, "llama3.1");
+    assert_eq!(local.provider.reasoning_effort, None);
+    let settings =
+        Config::settings_with_origins(&layout, None, &ConfigOverrides::default()).unwrap();
+    let effort = settings
+        .iter()
+        .find(|setting| setting.key == "providers.sol.reasoning_effort")
+        .unwrap();
+    assert_eq!(
+        (effort.value.as_str(), effort.origin.as_str()),
+        ("\"high\"", "config.toml")
+    );
+
+    // A selected profile replaces `[provider]` whole, so an effort written
+    // there is refused rather than dropped.
+    write(&format!(
+        "[provider]\nactive = \"sol\"\nreasoning_effort = \"max\"\n\n{profiles}"
+    ));
+    let error = load(ConfigOverrides::default()).unwrap_err().to_string();
+    assert!(error.contains("set it in [providers.sol]"), "{error}");
+    // Without profiles, `[provider]` is the provider and carries it.
+    write("[provider]\nmodel = \"gpt-6-sol\"\nreasoning_effort = \"xhigh\"\n");
+    let config = load(ConfigOverrides::default()).unwrap();
+    assert_eq!(config.provider.reasoning_effort.as_deref(), Some("xhigh"));
+}

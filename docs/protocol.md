@@ -197,7 +197,8 @@ ignores it.
 the client's whole system prompt, at most 16 KiB of text with no control
 characters but line breaks and tabs. The server then sends exactly that
 prompt, and none of its own: not `agent.system_prompt`, the working
-directory, project instructions, skills, or the chat channel section. Any
+directory, the model's reasoning effort, project instructions, skills, or the
+chat channel section. Any
 other use is refused with `invalid_request` (`system_prompt requires
 no_tools`). Mail triage sends its fixed frame this way, so nothing of the
 owner's own configuration reaches a model reading untrusted mail (see

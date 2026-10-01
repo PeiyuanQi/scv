@@ -392,7 +392,7 @@ fn config_show_names_each_setting_origin_and_hides_secrets() {
     let workspace = tempfile::tempdir().unwrap();
     write_private(
         &home.path().join("config.toml"),
-        "[provider]\nactive = \"relay\"\n\n[providers.relay]\nkind = \"openai-compatible\"\nmodel = \"file-model\"\nbase_url = \"https://relay.invalid/v1\"\napi_key = \"sk-test-secret\"\nheaders = { Authorization = \"Bearer test-header-secret\" }\n\n[tools]\ncommand_timeout_seconds = 900\n",
+        "[provider]\nactive = \"relay\"\n\n[providers.relay]\nkind = \"openai-compatible\"\nmodel = \"file-model\"\nbase_url = \"https://relay.invalid/v1\"\napi_key = \"sk-test-secret\"\nheaders = { Authorization = \"Bearer test-header-secret\" }\nreasoning_effort = \"high\"\n\n[tools]\ncommand_timeout_seconds = 900\n",
     );
     std::fs::create_dir(workspace.path().join(".scv")).unwrap();
     std::fs::write(
@@ -420,7 +420,8 @@ fn config_show_names_each_setting_origin_and_hides_secrets() {
         "providers.relay.api_key = <hidden>  [config.toml]",
         "providers.relay.headers.Authorization = <hidden>  [config.toml]",
         "tools.command_timeout_seconds = 300  [project .scv/config.toml]",
-        "In effect: profile \"relay\", model \"env-model\"",
+        "providers.relay.reasoning_effort = \"high\"  [config.toml]",
+        "In effect: profile \"relay\", model \"env-model\", reasoning effort \"high\" at \"https://relay.invalid/v1\"",
         "left by an older SCV layout",
     ] {
         assert!(

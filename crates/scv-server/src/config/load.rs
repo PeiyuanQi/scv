@@ -59,11 +59,19 @@ impl Config {
             .as_deref()
             .or(self.provider.active.as_deref())
         {
-            return self
-                .providers
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("active provider profile {name:?} was not found"));
+            let profile =
+                self.providers.get(name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("active provider profile {name:?} was not found")
+                })?;
+            // The profile replaces `[provider]` whole, so an effort set there
+            // would be dropped without a word.
+            if self.provider.reasoning_effort.is_some() {
+                bail!(
+                    "provider.reasoning_effort has no effect while profile {name:?} is \
+                     active; set it in [providers.{name}]"
+                );
+            }
+            return Ok(profile);
         }
         Ok(self.provider.clone())
     }
