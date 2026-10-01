@@ -249,6 +249,7 @@ fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
             full_mode: None,
             environment: Vec::new(),
             required: false,
+            session_options: false,
         });
         adapter.options_file = Some(file.clone());
         adapter

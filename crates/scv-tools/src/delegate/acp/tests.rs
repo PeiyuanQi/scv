@@ -94,6 +94,7 @@ fn acp_tool(
             full_mode: full_mode.map(str::to_owned),
             environment: Vec::new(),
             required: false,
+            session_options: false,
         },
         Some(script.to_owned()),
         Timeouts {
@@ -586,6 +587,7 @@ async fn the_launch_environment_reaches_the_acp_server() {
                 full_mode: None,
                 environment,
                 required: false,
+                session_options: false,
             },
             Some(script.clone()),
             Timeouts {
@@ -676,6 +678,7 @@ fn the_registry_prefers_an_installed_acp_server() {
             full_mode: None,
             environment: Vec::new(),
             required,
+            session_options: false,
         });
         adapter
     };
@@ -840,6 +843,7 @@ async fn the_user_s_defaults_start_a_conversation_that_then_keeps_its_settings()
         full_mode: None,
         environment: Vec::new(),
         required: false,
+        session_options: false,
     });
     // Built as a session builds it, so the registry decides how the
     // defaults apply to this backend.
@@ -901,6 +905,7 @@ async fn a_session_saves_what_the_agent_offers_and_later_calls_are_checked_befor
                 full_mode: None,
                 environment: Vec::new(),
                 required: false,
+                session_options: false,
             },
             Some(script.clone()),
             Timeouts {
@@ -961,6 +966,7 @@ async fn a_session_saves_what_the_agent_offers_and_later_calls_are_checked_befor
             full_mode: None,
             environment: Vec::new(),
             required: false,
+            session_options: false,
         },
         Some(script.clone()),
         Timeouts {
@@ -1026,6 +1032,7 @@ async fn a_check_call_returns_only_once_its_agent_and_what_it_started_are_gone()
         full_mode: None,
         environment: Vec::new(),
         required: false,
+        session_options: false,
     });
     let records = Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(
         dir.path().join("home"),
@@ -1079,4 +1086,123 @@ async fn a_check_call_returns_only_once_its_agent_and_what_it_started_are_gone()
     )
     .unwrap();
     assert_eq!(saved.model.unwrap().values, ["m1", "m2"]);
+}
+
+/// An agent configured like DeepSeek Harness: its CLI takes no model or
+/// effort, but its ACP server takes both as session options, and the user's
+/// defaults are a gateway model and effort `high`.
+fn dsh_like(script: &Path, acp: bool) -> AgentAdapterConfig {
+    let mut config = adapter(false);
+    config.defaults = AgentDefaults {
+        model: Some("xubao/glm-5.3".into()),
+        effort: Some("high".into()),
+        hard_task_effort: Some("max".into()),
+    };
+    config.acp = acp.then(|| AcpAgentLaunch {
+        command: script.display().to_string(),
+        args: Vec::new(),
+        full_mode: None,
+        environment: Vec::new(),
+        required: true,
+        session_options: true,
+    });
+    config
+}
+
+#[tokio::test]
+async fn an_agent_taking_session_options_gets_provider_model_values_in_its_own_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "grouped");
+    let registry = crate::builtin_registry(
+        crate::ToolsConfig {
+            max_background: 0,
+            prefer: vec!["dsh".into()],
+            ..crate::ToolsConfig::default()
+        },
+        crate::SkillMap::new(),
+        Vec::new(),
+        1024,
+        [("dsh".to_owned(), dsh_like(&script, true))],
+    )
+    .unwrap();
+    let agent = registry.get("agent").unwrap();
+    let call = |arguments: Value| agent.execute(arguments, context(dir.path(), None));
+    let set = |dir: &Path| {
+        calls(dir)
+            .lines()
+            .filter(|line| line.starts_with("model=") || line.starts_with("reasoning_effort="))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // The defaults go out as the agent spells them, model first: choosing a
+    // model resets the effort.
+    let first = call(json!({"prompt":"hello"})).await.unwrap();
+    assert_eq!(json(&first)["status"], "completed", "{}", first.content);
+    assert_eq!(
+        set(dir.path()),
+        [r#"model=["xubao","glm-5.3"]"#, "reasoning_effort=high"]
+    );
+    // A call may name another listed model, as shown or as the agent's own
+    // value.
+    call(json!({"prompt":"hello","model":"deepseek-official/deepseek-v4-flash","effort":"max"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        set(dir.path())[2..],
+        [
+            r#"model=["deepseek-official","deepseek-v4-flash"]"#.to_owned(),
+            "reasoning_effort=max".to_owned()
+        ]
+    );
+    // A model the agent does not list fails, naming what it lists as shown.
+    let refused = call(json!({"prompt":"hello","model":"glm-5.3"})).await;
+    let message = match refused {
+        Ok(output) => output.content,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        message.contains("deepseek-official/deepseek-v4-flash, xubao/glm-5.3"),
+        "{message}"
+    );
+}
+
+#[test]
+fn without_its_acp_server_such_an_agent_takes_no_model_or_effort() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "grouped");
+    let accepts = |acp: bool| {
+        let config = dsh_like(&script, acp);
+        match config.acp.clone() {
+            Some(launch) => AcpAgentTool::new(
+                "dsh".into(),
+                &config,
+                launch,
+                Some(script.clone()),
+                Timeouts {
+                    default: Duration::from_secs(20),
+                    max: Duration::from_secs(30),
+                },
+                1024,
+                None,
+                store(Duration::from_secs(60)),
+            )
+            .accepts(),
+            None => crate::delegate::native::NativeAgentTool::new(
+                "dsh".into(),
+                config,
+                Timeouts {
+                    default: Duration::from_secs(20),
+                    max: Duration::from_secs(30),
+                },
+                1024,
+                None,
+                store(Duration::from_secs(60)),
+            )
+            .accepts(),
+        }
+    };
+    let over_acp = accepts(true);
+    assert!(over_acp.model && over_acp.effort);
+    let once_per_turn = accepts(false);
+    assert!(!once_per_turn.model && !once_per_turn.effort);
 }

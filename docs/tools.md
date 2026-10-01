@@ -365,13 +365,13 @@ takes it:
 
 | Option | Taken by |
 | --- | --- |
-| `model` | Agents whose adapter maps it to arguments (`model_args`: Claude Code, Codex, Grok Build, and pi, on either transport), and the nested SCV, for a new conversation |
-| `effort` | Agents whose adapter maps it to arguments (`effort_args`: Claude Code, Codex, Grok Build, and pi); not the nested SCV |
+| `model` | Agents whose adapter maps it to arguments (`model_args`: Claude Code, Codex, Grok Build, and pi, on either transport), DeepSeek Harness over ACP, and the nested SCV, for a new conversation |
+| `effort` | Agents whose adapter maps it to arguments (`effort_args`: Claude Code, Codex, Grok Build, and pi), and DeepSeek Harness over ACP; not the nested SCV |
 | `session` | Agents that can continue a conversation: Claude Code, Codex, and pi in one process per turn, every agent over ACP, and the nested SCV |
 
 A call that passes one of them to an agent that does not take it fails before
-anything launches, naming the agents that do: `dsh does not take model; these
-agents do: claude, grok, scv. Omit model, or call one of them`. SCV runs these
+anything launches, naming the agents that do: `scv does not take effort; these
+agents do: claude, codex. Omit effort, or call one of them`. SCV runs these
 checks when it assesses the call's risk, before any approval, so a refused call
 is never put to the user.
 
@@ -389,7 +389,8 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 Each agent's line lists the values its ACP server offers, or names the model
 family its CLI takes (Claude aliases such as `sonnet` for `claude`, OpenAI
 model IDs for `codex`, Grok model IDs for `grok`, pi model patterns or
-`provider/id` for `pi`). The `model` and `effort` descriptions tell the model
+`provider/id` for `pi`, and for `dsh`, `provider/model` as its ACP server
+lists them). The `model` and `effort` descriptions tell the model
 to set them when the user asks, and `effort` also to the line's hard-task
 effort for a hard task; an omitted value runs with the user's default the
 line gives, or else the agent's own. A blank `agent`, `cwd`, `session`,
@@ -509,8 +510,10 @@ The default invocation contracts are:
 | `dsh` | `dsh --profile headless <prompt>` |
 | `pi` | `pi -p --mode json [--model <model>] [--thinking <effort>] <prompt>` |
 
-Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness takes its
-model from its profile, so `dsh` takes no `model` or `effort`.
+Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness run once
+per turn takes its model and effort from its profile, so it takes neither
+`model` nor `effort` then; over ACP (the default once `dsh` is installed) it
+takes both (see [Agent Client Protocol transport](#agent-client-protocol-transport)).
 `permissions = "full"` switches follow the fixed arguments, before the output
 format arguments.
 
@@ -531,7 +534,11 @@ updates, so SCV reads them from the agent instead of shipping a list. Each
 time SCV opens an ACP session, the server's `session/new` result lists its
 `configOptions`. SCV saves the `model` option and the effort option
 (`effort`, `reasoning_effort`, or `thought_level`), each with its values and
-current value. The file is `$SCV_HOME/state/agent-options/<agent>.json`
+current value. A server may list an option's values flat or in groups; SCV
+takes all of them. A value that is a JSON array of strings, as DeepSeek
+Harness's `["provider","model"]` model values, is listed and taken as the
+strings joined by `/`, such as `xubao/glm-5.3`, since a model name cannot hold
+quotes or commas; SCV then sends the agent its own spelling of the value. The file is `$SCV_HOME/state/agent-options/<agent>.json`
 (mode `0600`). It records when it was saved and the server's resolved file,
 size, and modification time. SCV keeps at most 64 values per option, and
 only values it can pass as one argument: model values follow the `model`
@@ -963,9 +970,11 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   session on the same server. A conversation keeps its `cwd`, runs one turn at
   a time, and follows `agent.max_conversations` and
   `agent.conversation_idle_seconds`.
-- `model` and `effort`, for an agent whose adapter offers them (so not
-  DeepSeek Harness), become `session/set_config_option` on the session's
-  `model` and `effort`/`reasoning_effort` options, at any turn. The user's
+- `model` and `effort`, for an agent whose adapter offers them (DeepSeek
+  Harness offers both over ACP only, since its headless CLI takes neither),
+  become `session/set_config_option` on the session's `model` and
+  `effort`/`reasoning_effort` options, at any turn, the model first, since
+  choosing a model may reset its effort. The user's
   defaults are set this way when a conversation starts; a later turn sets
   only what it names, so the session keeps the rest. A value the
   agent does not offer fails the call with the offered list and keeps the
@@ -1075,6 +1084,18 @@ version; 0.1.5-rc.2 fails at startup with "cannot create effect on inactive
 context" because its sandbox plugin requires a different Cordis framework
 version than the one it installs. Signed out, it fails with `MISSING_CREDENTIAL`,
 and a `dsh` result names `scv agents login dsh`.
+
+DeepSeek Harness reaches other providers, such as an OpenAI-compatible
+gateway, through its own routes: `providers` of its `@deepseek-ai/dsh-llm-pi-ai`
+plugin in a patch file in its private home
+(`$SCV_HOME/agents/dsh/.dsh/cordis.patch.yml`), each with the name of a key
+in its credential file (`apiKeyEnv`), its protocol (`api`), `baseURL`, and
+`models`. Its ACP server then lists those models too, as `<route>/<model>`,
+for `[agents.dsh] model` and the `agent` tool's `model`. Version 0.1.7-rc.1
+sends a header named `session_id` on a route that speaks the Responses API
+(`openai-responses`) and lets no route turn it off, so a gateway whose front
+end refuses header names with an underscore fails every such request (behind
+Cloudflare, with HTTP 520).
 
 pi's own `/login` covers its built-in providers. For any OpenAI-compatible
 endpoint, `scv agents login pi --openai-compatible` asks for the base URL, the

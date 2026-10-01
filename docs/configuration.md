@@ -263,6 +263,9 @@ args = ["--profile", "headless"]
 prompt_args = []
 model_args = []
 effort_args = []
+# Over ACP only, as `scv agents check dsh` lists them:
+# model = "deepseek-official/deepseek-v4-pro"
+# effort = "high"
 
 [agents.grok]
 command = "grok"

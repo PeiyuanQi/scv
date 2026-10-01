@@ -14,6 +14,12 @@ def chunk(session, text):
     update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
 OPTIONS = [{"id": "model", "options": [{"value": "m1"}, {"value": "m2"}]},
            {"id": "reasoning_effort", "options": [{"value": "low"}, {"value": "high"}]}]
+if MODE == "grouped":
+    # DeepSeek Harness: models grouped by provider as ["provider","model"].
+    OPTIONS = [{"id": "model", "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]", "options": [
+                   {"group": "deepseek-official", "options": [{"value": "[\"deepseek-official\",\"deepseek-v4-flash\"]"}]},
+                   {"group": "xubao", "options": [{"value": "[\"xubao\",\"glm-5.3\"]"}]}]},
+               {"id": "reasoning_effort", "currentValue": "high", "options": [{"value": "off"}, {"value": "low"}, {"value": "high"}, {"value": "max"}]}]
 memory, pending, refusals, sessions = "", None, [], 0
 for line in sys.stdin:
     message = json.loads(line)

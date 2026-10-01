@@ -20,7 +20,7 @@ use crate::{
         agent::AGENT_TOOL,
         conversation::TurnGuard,
         live::{LiveChild, LiveSpec},
-        options::{self, AgentOptions, EFFORT_OPTIONS, Listed},
+        options::{self, AgentOptions, EFFORT_OPTIONS, Listed, SelectValue},
         output::{AgentResult, AgentUsage, RunStatus, add_sign_in_hint},
         progress::redact,
         records,
@@ -50,8 +50,8 @@ pub(super) struct AcpChild {
     pub(super) rpc: Rpc,
     pub(super) session_id: String,
     /// The session's config options (`model`, `effort`, ...) and their
-    /// allowed values; an empty list accepts any value.
-    pub(super) options: StdMutex<HashMap<String, Vec<String>>>,
+    /// allowed values; an empty list accepts any value as given.
+    pub(super) options: StdMutex<HashMap<String, Vec<SelectValue>>>,
 }
 
 impl AcpChild {
@@ -62,24 +62,14 @@ impl AcpChild {
     }
 }
 
-pub(super) fn parse_config_options(result: &Value) -> Option<HashMap<String, Vec<String>>> {
+pub(super) fn parse_config_options(result: &Value) -> Option<HashMap<String, Vec<SelectValue>>> {
     let options = result.get("configOptions")?.as_array()?;
     Some(
         options
             .iter()
             .filter_map(|option| {
                 let id = option.get("id")?.as_str()?.to_owned();
-                let values = option
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(|value| value.get("value")?.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some((id, values))
+                Some((id, options::select_values(option)))
             })
             .collect(),
     )
@@ -295,7 +285,7 @@ impl AcpAgentTool {
                 .await
         } else if lock(&child.options)
             .get("mode")
-            .is_some_and(|values| values.iter().any(|value| value == mode))
+            .is_some_and(|values| values.iter().any(|value| value.value == mode))
         {
             child
                 .rpc
@@ -351,13 +341,25 @@ impl AcpAgentTool {
                     self.name
                 ));
             };
-            if !values.is_empty() && !values.iter().any(|allowed| allowed == value) {
-                return Err(format!(
-                    "{label} {value:?} is not offered by {}; choose one of: {}",
-                    self.name,
-                    values.join(", ")
-                ));
-            }
+            // The value as shown, or the agent's own spelling of it.
+            let listed = values
+                .iter()
+                .find(|allowed| allowed.shown == value || allowed.value == value);
+            let value = match listed {
+                Some(allowed) => allowed.value.clone(),
+                None if values.is_empty() => value.to_owned(),
+                None => {
+                    let shown: Vec<&str> = values
+                        .iter()
+                        .map(|allowed| allowed.shown.as_str())
+                        .collect();
+                    return Err(format!(
+                        "{label} {value:?} is not offered by {}; choose one of: {}",
+                        self.name,
+                        shown.join(", ")
+                    ));
+                }
+            };
             match child
                 .rpc
                 .call(

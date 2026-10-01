@@ -201,16 +201,8 @@ impl Config {
                         resume: descriptor.resume,
                         home: Some(adapter_home),
                         transport: descriptor.transport,
-                        acp: descriptor
-                            .acp
-                            .filter(|_| match config.transport {
-                                AgentTransport::Acp => true,
-                                AgentTransport::Resume => false,
-                                // A custom `command` points SCV at a specific
-                                // CLI, which the ACP server would not run.
-                                AgentTransport::Auto => config.command == descriptor.command,
-                            })
-                            .map(|launch| scv_tools::AcpAgentLaunch {
+                        acp: config.acp_launch(descriptor).map(|launch| {
+                            scv_tools::AcpAgentLaunch {
                                 command: launch.command.to_owned(),
                                 args: scv_tools::adapters::acp_args(&launch, full),
                                 full_mode: launch.full_mode.filter(|_| full).map(str::to_owned),
@@ -223,7 +215,9 @@ impl Config {
                                     })
                                     .collect(),
                                 required: config.transport == AgentTransport::Acp,
-                            }),
+                                session_options: launch.session_options,
+                            }
+                        }),
                         use_for: config.use_for.clone(),
                         defaults: config.defaults(),
                         options_file: Some(self.layout().agent_options(name)),

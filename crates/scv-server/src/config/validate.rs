@@ -291,12 +291,30 @@ impl Config {
                      {MAX_USE_FOR_BYTES} bytes"
                 );
             }
+            // DeepSeek Harness takes a model and effort only from its ACP
+            // server, so only a transport that runs that server allows them.
+            let descriptor = scv_tools::adapters::adapter(agent);
+            let session_options = descriptor
+                .and_then(|descriptor| descriptor.acp)
+                .is_some_and(|launch| launch.session_options);
+            let over_acp = descriptor
+                .and_then(|descriptor| adapter.acp_launch(descriptor))
+                .is_some_and(|launch| launch.session_options);
+            let only_over_acp = if session_options {
+                " here; it takes one only over ACP (transport \"auto\" with its own command, \
+                 or \"acp\")"
+            } else {
+                ""
+            };
             if let Some(model) = &adapter.model {
                 if !scv_tools::valid_model_name(model) {
                     bail!("agents.{agent}.model is not a valid model name");
                 }
-                if adapter.model_args.is_empty() && agent != "scv" {
-                    bail!("agents.{agent}.model is set but {agent} does not offer model selection");
+                if adapter.model_args.is_empty() && agent != "scv" && !over_acp {
+                    bail!(
+                        "agents.{agent}.model is set but {agent} does not offer model \
+                         selection{only_over_acp}"
+                    );
                 }
             }
             for (field, effort) in [
@@ -314,9 +332,10 @@ impl Config {
                         scv_tools::AGENT_EFFORTS.join(", ")
                     );
                 }
-                if adapter.effort_args.is_empty() {
+                if adapter.effort_args.is_empty() && !over_acp {
                     bail!(
-                        "agents.{agent}.{field} is set but {agent} does not offer effort selection"
+                        "agents.{agent}.{field} is set but {agent} does not offer effort \
+                         selection{only_over_acp}"
                     );
                 }
             }

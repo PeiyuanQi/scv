@@ -92,6 +92,11 @@ pub struct AcpLaunch {
     /// Environment for the ACP server under `permissions = "full"`, for
     /// settings the server reads only from its environment.
     pub full_environment: &'static [(&'static str, &'static str)],
+    /// The server takes `model` and `effort` as session config options even
+    /// though the CLI run once per turn takes neither as an argument, as
+    /// DeepSeek Harness's does. Other agents take them over ACP where their
+    /// CLI takes them as arguments.
+    pub session_options: bool,
 }
 
 /// Expand `launch.args` for the configured permission level.
@@ -328,6 +333,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_args: &[],
             full_mode: Some("bypassPermissions"),
             full_environment: &[],
+            session_options: false,
         }),
     },
     AdapterDescriptor {
@@ -389,6 +395,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_args: &[],
             full_mode: Some("agent-full-access"),
             full_environment: &[("CODEX_CONFIG", r#"{"web_search":"live"}"#)],
+            session_options: false,
         }),
     },
     AdapterDescriptor {
@@ -430,6 +437,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_args: &["--always-approve"],
             full_mode: None,
             full_environment: &[],
+            session_options: false,
         }),
     },
     AdapterDescriptor {
@@ -441,7 +449,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         prompt_args: &[],
         model_args: &[],
         effort_args: &[],
-        model_hint: "Model ID in the form this agent's CLI accepts.",
+        model_hint: "provider/model as its ACP server lists them, such as deepseek-official/deepseek-v4-pro.",
         home_environment: &[("DSH_HOME", ".dsh")],
         fixed_environment: &[],
         removed_environment: &["DSH_*", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"],
@@ -460,13 +468,16 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         credential_files: &[".dsh/.credentials.yaml"],
         transport: Transport::Process,
         // Native: the shipped `acp` profile. `permissions = "full"` is the
-        // `DSH_PERMISSION_MODE` variable above.
+        // `DSH_PERMISSION_MODE` variable above. Its sessions offer `model`
+        // (every configured provider's models, as `["provider","model"]`)
+        // and `reasoning_effort`, which the headless profile cannot take.
         acp: Some(AcpLaunch {
             command: "dsh",
             args: &["--profile", "acp"],
             full_args: &[],
             full_mode: None,
             full_environment: &[],
+            session_options: true,
         }),
     },
     AdapterDescriptor {

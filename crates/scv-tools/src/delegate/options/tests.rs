@@ -129,3 +129,59 @@ fn a_saved_file_is_checked_again_when_read() {
     std::fs::write(&file, "not json").unwrap();
     assert_eq!(read_saved(&file, "claude"), None, "malformed");
 }
+
+/// A `session/new` result as DeepSeek Harness 0.1.7-rc.1 sends it, with a
+/// gateway route beside the official one: models grouped by provider, each
+/// value a JSON `["provider","model"]` pair.
+fn dsh_session() -> Value {
+    json!({
+        "sessionId": "s1",
+        "configOptions": [
+            {"id": "model", "name": "Model", "category": "model", "type": "select",
+             "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+             "options": [
+                {"group": "deepseek-official", "name": "DeepSeek", "options": [
+                    {"value": "[\"deepseek-official\",\"deepseek-v4-flash\"]", "name": "deepseek-v4-flash"},
+                    {"value": "[\"deepseek-official\",\"deepseek-v4-pro\"]", "name": "DeepSeek-V4-Pro"}
+                ]},
+                {"group": "xubao", "name": "Xubao", "options": [
+                    {"value": "[\"xubao\",\"glm-5.3\"]", "name": "GLM 5.3 (Xubao)"}
+                ]}
+             ]},
+            {"id": "reasoning_effort", "name": "Reasoning effort", "category": "thought_level",
+             "type": "select", "currentValue": "high", "options": [
+                {"value": "off"}, {"value": "low"}, {"value": "high"}, {"value": "max"}
+            ]}
+        ]
+    })
+}
+
+#[test]
+fn grouped_values_and_provider_model_pairs_are_listed_as_provider_slash_model() {
+    let options = AgentOptions::from_acp(&dsh_session()).unwrap();
+    let model = options.model.unwrap();
+    assert_eq!(
+        model.values,
+        [
+            "deepseek-official/deepseek-v4-flash",
+            "deepseek-official/deepseek-v4-pro",
+            "xubao/glm-5.3"
+        ]
+    );
+    assert_eq!(
+        model.named_default(),
+        Some("deepseek-official/deepseek-v4-flash")
+    );
+    assert_eq!(
+        options.effort.unwrap().shown(),
+        ["off", "low", "high", "max"]
+    );
+    // Each shown value keeps the agent's own spelling to send.
+    let values = select_values(&dsh_session()["configOptions"][0]);
+    assert_eq!(values[2].shown, "xubao/glm-5.3");
+    assert_eq!(values[2].value, r#"["xubao","glm-5.3"]"#);
+    // Anything else is shown as the agent spells it.
+    for plain in ["opus[1m]", "[]", "[\"\"]", "[1,2]", "not json ["] {
+        assert_eq!(shown(plain), plain);
+    }
+}

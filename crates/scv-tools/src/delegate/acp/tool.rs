@@ -77,6 +77,7 @@ impl AcpAgentTool {
             .and_then(|(file, executable)| {
                 options::load(file, &name, executable, SystemTime::now())
             });
+        let session_options = launch.session_options;
         Self {
             name,
             launch,
@@ -84,8 +85,8 @@ impl AcpAgentTool {
             environment: adapter.environment.clone(),
             full: adapter.full_permission_args.is_some(),
             accepts: Accepts {
-                model: !adapter.model_args.is_empty(),
-                effort: !adapter.effort_args.is_empty(),
+                model: !adapter.model_args.is_empty() || session_options,
+                effort: !adapter.effort_args.is_empty() || session_options,
                 session: true,
             },
             timeouts,

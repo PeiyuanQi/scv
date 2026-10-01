@@ -304,8 +304,7 @@ fn agent_choice_settings_are_validated_and_user_only() {
         ("claude", Some("@file"), None),
         ("claude", None, Some("very high")),
         ("claude", None, Some("--high")),
-        ("dsh", Some("deepseek-chat"), None),
-        ("dsh", None, Some("high")),
+        ("dsh", Some("two words"), None),
     ] {
         let mut config = Config::default();
         config.agents.0.get_mut(agent).unwrap().model = model.map(str::to_owned);
@@ -335,6 +334,39 @@ fn agent_choice_settings_are_validated_and_user_only() {
     }
     let project: toml::Value = toml::from_str("[agent]\nprefer = [\"pi\"]\n").unwrap();
     assert!(validate_project_keys(&project).is_err());
+}
+
+#[test]
+fn deepseek_harness_takes_a_model_and_effort_only_over_acp() {
+    let with = |transport: AgentTransport, command: &str| {
+        let mut config = Config::default();
+        let dsh = config.agents.0.get_mut("dsh").unwrap();
+        dsh.model = Some("xubao/glm-5.3".into());
+        dsh.effort = Some("high".into());
+        dsh.hard_task_effort = Some("max".into());
+        dsh.transport = transport;
+        dsh.command = command.into();
+        config
+    };
+    // Its ACP server takes both, as `auto` runs it with its own command.
+    let config = with(AgentTransport::Auto, "dsh");
+    config.validate().unwrap();
+    let dsh = &config.adapters()["dsh"];
+    assert!(dsh.acp.as_ref().is_some_and(|acp| acp.session_options));
+    assert_eq!(dsh.defaults.model.as_deref(), Some("xubao/glm-5.3"));
+    with(AgentTransport::Acp, "dsh").validate().unwrap();
+    // Its CLI run once per turn takes neither.
+    for config in [
+        with(AgentTransport::Resume, "dsh"),
+        with(AgentTransport::Auto, "/opt/dsh/bin/dsh"),
+    ] {
+        let message = config.validate().unwrap_err().to_string();
+        assert!(
+            message.starts_with("agents.dsh.model is set but dsh does not offer model selection")
+                && message.contains("only over ACP"),
+            "{message}"
+        );
+    }
 }
 
 #[test]
@@ -649,6 +681,15 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
     assert_eq!(launch(&defaults, "codex").unwrap().command, "codex-acp");
     assert_eq!(launch(&defaults, "grok").unwrap().args, ["agent", "stdio"]);
     assert_eq!(launch(&defaults, "dsh").unwrap().args, ["--profile", "acp"]);
+    // Only DeepSeek Harness's server takes model and effort that its CLI
+    // does not; the others take them where their CLI does.
+    for agent in ["claude", "codex", "grok", "dsh"] {
+        assert_eq!(
+            launch(&defaults, agent).unwrap().session_options,
+            agent == "dsh",
+            "{agent}"
+        );
+    }
     assert!(launch(&defaults, "pi").is_none());
     assert!(launch(&defaults, "scv").is_none());
 
