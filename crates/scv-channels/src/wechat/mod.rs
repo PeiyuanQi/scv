@@ -409,6 +409,7 @@ fn inbound(msg: &Value) -> Option<Inbound> {
         reference: None,
         sent_ms: sent_ms(msg),
         quoted: quotes,
+        thread: None,
     }))
 }
 

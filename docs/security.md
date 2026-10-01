@@ -338,7 +338,9 @@ send messages from it can read and change files, run commands, and launch
 delegated agents without confirmation. Other senders (on an account that
 answers anyone), the owner's messages in
 group chats, and accounts without a known owner ID stay tool-free; group
-conversations never share the owner's direct-chat session. Logout clears the
+conversations never share the owner's direct-chat session. A Feishu thread
+runs on a session of its own with its chat's authority: the owner's tools in
+a thread of their direct chat, none in a group's thread. Logout clears the
 grant before deleting credentials. Owner replies are ordinary assistant output and may quote
 tool results the model chose to include; bridge failure details remain
 sanitized. Bridge failures produce short sanitized
@@ -379,7 +381,9 @@ This prevents pending replies from leaking into a different account or origin.
 Notices the daemon sends on its own (update outcomes, jobs a restart stopped,
 restarts after an unexpected stop, accounts that stay disconnected) go only
 to an account owner's direct chat: the chat that asked, the `[notify]`
-accounts' owners, or the chat the owner last wrote from. Their text is
+accounts' owners, or the chat the owner last wrote from. Work started in a
+Feishu thread counts as its direct chat's, except that the jobs a restart
+stopped are listed in the thread that started them. Their text is
 composed by SCV, not the model, and names versions, commits, job handles, and
 the first line of each stopped job's delegated prompt; the restart plan and
 the owner's last chat are private files under `$SCV_HOME/state`. On WeChat
@@ -435,13 +439,15 @@ deduplicated like any batch. A reply the platform refuses is held in the private
 state file, bounded and for at most 7 days, and delivered only with the next
 reply to the same conversation; its content never enters logs.
 
-The account owner's direct chat is kept in the chat log under
+The account owner's direct chat, and each Feishu thread in it as a
+conversation of its own, is kept in the chat log under
 `$SCV_HOME/history/<channel>/<account>/<conversation>/` (files `0600`,
 directories `0700`), for up to 120 years: the owner's messages, what they
-quoted, the paths of files they sent, the model's answers, and SCV's own
-messages in that chat. Tool calls and their output, other senders, and group
-chats are not logged; the conversation directory is a digest, so no sender ID
-becomes a path. Anyone who can read the instance home can read the log, like
+quoted (in a thread, also the message the thread is on), the paths of files
+they sent, the model's answers, and SCV's own messages in that chat. Tool
+calls and their output, other senders, and group chats, their threads
+included, are not logged; the conversation directory is a digest, so no
+sender or thread ID becomes a path. Anyone who can read the instance home can read the log, like
 the rest of it, so back it up and delete it as the personal data it is.
 `session.start` names a log only by plain path parts (`chat`), which the
 server resolves under its own history directory, never a path a client

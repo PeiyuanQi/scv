@@ -327,8 +327,9 @@ Checked live with the owner on 2026-09-24:
   but the chat's message list returns them, which is why catch-up exists.
 - The app is also subscribed to `im.message.message_read_v1`, which SCV
   acknowledges and ignores.
-- Not yet checked: group chats, and company tenants whose administrators must
-  approve apps.
+- Not yet checked: group chats, threads (built to Feishu's documentation;
+  see [Feishu threads](#feishu-threads)), and company tenants whose
+  administrators must approve apps.
 
 **Sign-in by scan.** `scv channels login feishu` runs the device flow that
 Lark's own CLI uses. It posts forms to
@@ -376,17 +377,25 @@ header, and a `{"code":200}` payload, only when the bridge asks for the next
 batch, which it does after the event's claim and checkpoint are durable.
 
 **Catch-up.** Feishu does not redeliver messages sent while SCV was
-disconnected. The checkpoint records, for up to 64 chats, whether each is a
-group and the newest message time handed to the bridge. On every connection,
-before reading the socket, SCV lists each of the 32 most recently active
-chats' messages since that time, reaching back at most 24 hours, through
-`GET /open-apis/im/v1/messages` (`container_id_type=chat`, oldest first, up to
-four pages of 50), and hands them over like socket events. The bot's own and
-other apps' messages and deleted ones are skipped. A chat whose history Feishu
-refuses is skipped with a warning; a transport failure fails the catch-up so
-it runs again. Deduplication by message ID drops anything already claimed or
-answered, including a late socket redelivery. Messages from chats SCV has not
-yet seen are not caught up.
+disconnected. The checkpoint records, for up to 64 chats and, apart, up to 64
+threads, whether each is in a group and the newest message time handed to the
+bridge; a thread's message moves only its thread's time, and makes its chat
+known. On every connection, before reading the socket, SCV lists each of the
+32 most recently active chats' messages since that time, reaching back at
+most 24 hours, through `GET /open-apis/im/v1/messages`
+(`container_id_type=chat`, oldest first, up to four pages of 50). A chat's
+history holds only the roots of its threads, not their replies, so SCV then
+lists each of the 32 most recently active threads it knows, and each new one
+whose root the chats just listed (`container_id_type=thread`, which takes no
+time range: newest first, up to four pages of 50, stopping at the thread's
+time or 24 hours back), and hands everything over like socket events, oldest
+first within each chat and thread and each message once. The bot's own and
+other apps' messages and deleted ones are skipped. A chat or thread whose
+history Feishu refuses is skipped with a warning; a transport failure fails
+the catch-up so it runs again. Deduplication by message ID drops anything
+already claimed or answered, including a late socket redelivery. Messages from
+chats SCV has not yet seen, and from threads it has not seen that began on an
+older message, are not caught up.
 
 **Messages.** Every kind of user message is answered, from whoever the
 account answers (see [Sessions and safety](#sessions-and-safety)), except
@@ -399,6 +408,7 @@ one paragraph per line. In a group (any `chat_type` other than `p2p`) the bot an
 only messages that mention it, identified by its own `open_id` from
 `/open-apis/bot/v3/info`; without that ID, group messages go unanswered.
 Mention placeholders become `@name`, and the bot's own mention is dropped.
+A message in a thread follows [Feishu threads](#feishu-threads).
 
 **Sending.** Calls use a tenant token cached until ten minutes before it
 expires and dropped whenever Feishu reports it invalid. A reply goes to
@@ -407,15 +417,63 @@ nothing, such as a background report, goes to
 `POST /open-apis/im/v1/messages?receive_id_type=open_id`. Both send `text`
 with the part's stable client ID as `uuid`, which Feishu uses to deliver a
 resent part once within an hour. Feishu has no single-reply limit, so every
-part of a long answer replies to its message. `<at` in outgoing text gets a
+part of a long answer replies to its message. A reply in a thread, and a
+message into one, adds `reply_in_thread: true` (see
+[Feishu threads](#feishu-threads)). `<at` in outgoing text gets a
 zero-width space, so model output can never mention anyone, including `@all`.
 Transport failures, HTTP 5xx, 408, and 429, invalid-token codes, and rate-limit
 codes (99991400, 230020, 11232, 11233) retry with the same `uuid`; any other
 error code is a final refusal, logged by code only, and the reply is held as
 for WeChat.
 
-**Untested:** group chats, and sign-in from company accounts whose
+**Untested:** group chats, threads, and sign-in from company accounts whose
 administrators must approve apps.
+
+### Feishu threads
+
+A Feishu thread (话题) is a conversation of its own, as a session of the main
+SCV. Feishu marks a message in a thread with the thread's `thread_id`
+(`omt_…`), in socket events and in history alike; a message without one is in
+the chat itself, even when it replies to another (`parent_id`). Inside a
+thread, `root_id` and `parent_id` both point at the thread's root, the message
+the thread is on, so neither counts as a quote there. Checked against Feishu's
+documentation (receive, reply, list, and get message, and the thread guide,
+read on 2026-09-30), not yet live.
+
+- **Its own session.** Each thread has its own daemon session, queue, held
+  replies, media directory, and chat log, beside its chat's: a thread in a
+  direct chat is that sender's, and in a group, each sender's own within it.
+  Its first turn on a new session starts with the root, fetched as for a quote
+  and shown as `[Thread on: <text>]` (with its files), since that session
+  never saw it; the root of a thread is not repeated on later turns. A thread
+  counts toward the account's 32 live sessions and limits like any other
+  conversation.
+- **Its chat's authority.** A thread keeps its chat's rules: the owner's
+  remote tools in a thread of their direct chat, none in a group's thread,
+  where the bot answers only messages that mention it, as elsewhere in the
+  group.
+- **Answered inside it.** Replies to a message in a thread, and messages that
+  answer nothing there (a thread session's background reports, and the list
+  of its jobs a restart stopped), go to
+  `POST /open-apis/im/v1/messages/{message_id}/reply` with
+  `reply_in_thread: true`: to the message itself, or for a message that
+  answers nothing, to the thread's root, which posts into the thread.
+  Feishu has no API that sends to a thread by its ID. Where Feishu answers
+  that the chat takes no reply in a thread (230071) or that the message
+  cannot have one (230072), the same part replies in the chat instead, with
+  the same `uuid`. The bridge keeps the choice in the reply handle it stores
+  with the message (`thread:` and the message ID, beside the bare ID of a
+  reply in the chat), so a reply that waits across a restart still goes into
+  its thread. A release before threads would send such a stored reply to a
+  message ID Feishu refuses, which it holds.
+- **The direct chat stays the owner's chat.** Questions to the owner and
+  SCV's notices, the update announcement included, go to the direct chat
+  itself, never a thread, also when the work that asks started in a thread;
+  only an answer written in the direct chat itself counts, and the owner's
+  `yes` in a thread is an ordinary message. A planned restart waits for owner
+  work in threads as in the direct chat.
+- **`/new` in a thread** starts that thread over and ends its log episode;
+  the direct chat and other threads are untouched.
 
 ## Media
 
@@ -545,8 +603,8 @@ messages are only marked seen. Files download through
 Feishu reports errors as JSON, sometimes with status 200, which SCV treats as
 failures.
 
-A reply to an earlier message (`parent_id`) fetches that message through
-`GET /open-apis/im/v1/messages/{parent_id}` and shows it as
+A reply to an earlier message (`parent_id`, outside a thread) fetches that
+message through `GET /open-apis/im/v1/messages/{parent_id}` and shows it as
 `[Quoting: <text>]` (or `an image`, `a file`, …), with its files. A forwarded
 bundle fetches `GET /open-apis/im/v1/messages/{message_id}`, whose items after
 the bundle itself name it in `upper_message_id`: up to 50 of them, and 16 KiB
@@ -566,10 +624,11 @@ model sees `[… download failed]`.
 
 ## Chat history
 
-The account owner's direct chat on each account is logged, so a conversation
-carries on when its daemon session ends and the model can look further back
-when the owner refers to something older. Other senders and group chats,
-including the owner's messages in a group, are not logged.
+The account owner's direct chat on each account is logged, and each Feishu
+thread in it as a conversation of its own, so a conversation carries on when
+its daemon session ends and the model can look further back when the owner
+refers to something older. Other senders and group chats, including the
+owner's messages in a group and its threads, are not logged.
 
 **What is recorded.** Each record is one JSON line holding Unix milliseconds,
 the host's local time (`2026-09-26 14:04:05 -07:00`), and who wrote it:
@@ -597,7 +656,8 @@ named in the host's local time after its first message: the calendar year,
 the Monday-to-Sunday week, and the time, such as
 `2026/2026-09-21_2026-09-27/2026-09-26T14-04-05.jsonl` (`-2` and up for a
 second episode started in the same second). The conversation directory is the
-same digest the media directory uses, so sender IDs never become paths. Files
+same digest the media directory uses, so sender and thread IDs never become
+paths; a thread's directory is a digest of its own key. Files
 are mode `0600` and directories `0700`. The daemon uses the time zone it
 started with, so after the host's zone changes a restart picks up the new one.
 Years older than 120 are removed, checked when the account starts and hourly.
@@ -619,7 +679,9 @@ episodes decide only what a new session starts with.
 [`chat_history`](tools.md#chat-history-chat_history), which searches, lists,
 and reads the log, and [`chat_keep`](tools.md#keeping-chat-files-chat_keep),
 which keeps a file the owner sent; its system prompt tells the model to look
-things up rather than guess or ask the owner to repeat them.
+things up rather than guess or ask the owner to repeat them. Each reads its
+own conversation: a thread's session its thread, the direct chat's session
+the direct chat.
 
 **`/new`.** A message that is exactly `/new` (in any case, with no files and
 quoting nothing) starts a fresh conversation without a turn. In order with the
@@ -661,11 +723,13 @@ has seen the job's result: in a report turn, or through a later
 starts a turn reporting it (`turn.started` with an `origin`), the bridge
 answers that turn's approval requests like the owner's own, collects its
 answer, and sends it to the owner as an unprompted message (for Feishu, a
-message to the owner's `open_id`): recorded as a pending delivery before
-sending, retried with the same client ID, and moved to the held-reply store if
-the platform refuses it outright. A report that finishes
-during one of the owner's turns follows that turn's reply. Only direct chats
-receive reports; group and non-owner sessions have no tools.
+message to the owner's `open_id`, or for a thread's session, a message into
+that thread; see [Feishu threads](#feishu-threads)): recorded as a pending
+delivery before sending, retried with the same client ID, and moved to the
+held-reply store if the platform refuses it outright. A report that finishes
+during one of the owner's turns follows that turn's reply. Only direct chats,
+and threads in them, receive reports; group and non-owner sessions have no
+tools.
 
 This is what lets the owner keep chatting while work runs: an owner session
 starts with `auto_approve: true`, so the background agents it starts get the
@@ -681,14 +745,17 @@ which would cancel the jobs; the owner still gets the failure reply.
 The bridge keeps reading a report turn that starts during one of the owner's
 turns and finishes after it, so its answer goes out without waiting for the
 owner's next message. It also records each running job in the account's
-delivery state (`jobs`: the chat, job handle, delegating tool, the agent that
-runs it, and the task the daemon named, the first line of the delegated
-prompt) until the job is reported or its session closes. A job saved by SCV
-0.3.0 names its agent only in the tool (`agent_codex`), and one saved now
-still carries the tool, so either release reads the other's state.
+delivery state (`jobs`: the chat, and for a thread's session the thread's
+key and handle, job handle, delegating tool, the agent that runs it, and the
+task the daemon named, the first line of the delegated prompt) until the job
+is reported or its session closes. A job saved by SCV 0.3.0 names its agent
+only in the tool (`agent_codex`), and one saved now still carries the tool,
+so either release reads the other's state; a release before threads reads a
+thread's job as its direct chat's.
 A restart ends every session and so every job: on the account's next run, each
-chat whose jobs were recorded gets one message listing the jobs that stopped,
-each with its agent, such as `- job-1 (codex): Land the fix`.
+chat, and each thread, whose jobs were recorded gets one message listing the
+jobs that stopped, each with its agent, such as `- job-1 (codex): Land the
+fix`.
 
 ## Restarts and notices
 
@@ -781,8 +848,8 @@ restart) is dropped from the outbox unsent. iLink can drop an unprompted
 message silently (see [WeChat iLink contract](#wechat-ilink-contract)); such
 a question looks delivered and simply goes unanswered.
 
-Once the question is open, the owner's next direct message in that chat that
-is an explicit answer, and that the platform says was sent no earlier than the
+Once the question is open, the owner's next direct message in that chat
+itself (not a thread in it) that is an explicit answer, and that the platform says was sent no earlier than the
 question's delivery, decides it. The platform's time is Feishu's message
 `create_time` or iLink's `create_time_ms`, compared with this host's clock when
 the platform accepted the question. A message written earlier, such as one
@@ -838,7 +905,9 @@ only local CLI or daemon control (or an edit of `config.toml`) can change:
 
 Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A
 group message (a non-empty WeChat `group_id`, or a Feishu chat other than
-`p2p`) uses a separate session per group and sender, so group members never see the sender's direct-chat history. Sessions
+`p2p`) uses a separate session per group and sender, so group members never see the sender's direct-chat history.
+A message in a Feishu thread uses a session of its own for that thread,
+inside its chat's (see [Feishu threads](#feishu-threads)). Sessions
 idle for 30 minutes after their last turn ends are dropped (the owner's next
 one carries on from the [chat history](#chat-history)), and at most 32
 sessions are live; a new conversation closes the least recently used idle one
@@ -899,7 +968,7 @@ their CLIs signed in for SCV first; see `scv agents login` in the
 The bridge never invokes `scv exec --yes`.
 
 Credentials are stored at `$SCV_HOME/credentials/<channel>/<account>.json`;
-the checkpoint (WeChat's cursor, Feishu's per-chat times) and message IDs,
+the checkpoint (WeChat's cursor, Feishu's per-chat and per-thread times) and message IDs,
 in-flight claims, pending replies, and held replies are stored at
 `$SCV_HOME/state/channels/<channel>/<account>.json`. Claims and pending replies keep the
 single-object form older bridges wrote while at most one of each exists, and
@@ -913,8 +982,9 @@ The shared bridge in `scv-channels` owns durable state, claims, sender
 sessions, held replies, media fetching, storage, and retention, and delivery
 retries; its `wechat` module owns iLink authentication, polling, message
 parsing, the CDN's encryption, and sending; its `feishu` module owns Feishu
-sign-in, the long connection, catch-up, message parsing, resources, uploads,
-and sending. `scv-server::components` owns lifecycle and
+sign-in, the long connection, catch-up, message parsing (including which
+messages are in a thread, and the reply handles that keep replies there),
+resources, uploads, and sending. `scv-server::components` owns lifecycle and
 health. Account selection uses `--account` (default `default`), not project
 configuration. The [quality contract](quality.md) defines local-only verification.
 
@@ -941,8 +1011,10 @@ A mail chat:
   action commands (`approve`, `deny`, `批准`, `拒绝`, and `mail reply`,
   `trash`, `spam`, `compose`, `revise`) are recognised only to answer "Mail
   actions are not available in this release; nothing was done." A message
-  that quotes or forwards another (WeChat `ref_msg`, Feishu `parent_id` or a
-  forwarded bundle) or carries files is never read as a command;
+  that quotes or forwards another (WeChat `ref_msg`, Feishu `parent_id`
+  outside a thread, or a forwarded bundle) or carries files is never read as
+  a command; a message in a thread, whose root is not put into its text, is
+  read like any other;
 - drops everyone else's messages, and group messages, the owner's included,
   as an owner-only account does;
 - is never chat-logged, so mail never reaches `history/`;

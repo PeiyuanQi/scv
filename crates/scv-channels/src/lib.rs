@@ -235,6 +235,10 @@ pub(crate) struct Batch {
 }
 
 /// One received message with an ID.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a batch holds at most a few hundred and lives only until its claims are saved"
+)]
 pub(crate) enum Inbound {
     /// Not something to answer (a system message, or missing a field a
     /// reply needs); it is only recorded as seen.
@@ -275,9 +279,29 @@ pub(crate) struct Message {
     /// a question reached the chat can answer it.
     pub(crate) sent_ms: Option<u64>,
     /// It quotes or forwards another message (WeChat `ref_msg`, Feishu
-    /// `parent_id` or a forwarded bundle), whose text a transport may have
-    /// put into `text`. A mail chat never reads such a message as a command.
+    /// `parent_id` outside a thread, or a forwarded bundle), whose text a
+    /// transport may have put into `text`. A mail chat never reads such a
+    /// message as a command.
     pub(crate) quoted: bool,
+    /// The thread within its chat it was sent in, such as a Feishu thread
+    /// (话题); `None` for a message in the chat itself.
+    pub(crate) thread: Option<Thread>,
+}
+
+/// A thread within a chat: a conversation of its own, with its own daemon
+/// session, queue, held replies, and chat log, inside the chat's authority
+/// (a thread in the owner's direct chat is the owner's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Thread {
+    /// Names the thread, unique within the account.
+    pub(crate) id: String,
+    /// The transport's handle for posting into the thread without answering
+    /// a particular message, such as a background report.
+    pub(crate) reply_to: String,
+    /// The message the thread is on, for the transport to resolve as context
+    /// when the thread's session starts, which has not seen it; `None` when
+    /// this message starts the thread itself.
+    pub(crate) origin: Option<String>,
 }
 
 impl Message {
@@ -300,6 +324,7 @@ impl Message {
             reference: None,
             sent_ms: None,
             quoted: false,
+            thread: None,
         }
     }
 }
@@ -525,8 +550,8 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         transport.system_label(),
     )?;
     if let Some(log) = &log {
-        for (key, text) in recovered {
-            if log.logs(&key) {
+        for (key, peer, text) in recovered {
+            if let Some(log) = log.conversation(&key, &peer) {
                 log.system(&text);
             }
         }
@@ -635,6 +660,8 @@ struct Job {
     text: String,
     media: Vec<Media>,
     reference: Option<String>,
+    /// The message its thread is on, shown when the thread's session starts.
+    origin: Option<String>,
     /// The conversation, which names the directory its files go to.
     key: String,
     limit: Duration,
@@ -660,7 +687,7 @@ struct Refusal {
 }
 
 /// A conversation's media and chat log directory name: a digest of its
-/// key, so sender and group IDs never become paths.
+/// key, so sender, group, and thread IDs never become paths.
 fn conversation_dir(key: &str) -> String {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(key.as_bytes());
@@ -676,14 +703,28 @@ enum Step {
     Retry,
 }
 
-/// A new conversation: whether its sender is the owner, who receives its
-/// unprompted reports, its queue, and its `watching` flag.
+/// A new conversation: whether its sender is the owner, where its
+/// unprompted reports go, its queue, and its `watching` flag.
 type Starter = mpsc::UnboundedSender<(
     bool,
-    Option<String>,
+    Option<Recipient>,
     mpsc::UnboundedReceiver<Job>,
     Arc<AtomicBool>,
 )>;
+
+/// Where a direct chat's conversation sends what answers no message, such as
+/// a background report: the chat's partner, in the direct chat itself or in
+/// one of its threads. Groups receive no such messages.
+#[derive(Debug, Clone)]
+struct Recipient {
+    /// The chat partner.
+    peer: String,
+    /// The conversation's key: the partner's ID, or a thread's key.
+    key: String,
+    /// The transport's handle for posting into the thread; empty for the
+    /// direct chat itself.
+    reply_to: String,
+}
 
 struct Bridge<'a, C, T> {
     transport: &'a T,
@@ -720,9 +761,13 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         system_text(self.transport.system_label(), text)
     }
 
-    /// The chat log, when the conversation keyed `key` is the one it records.
-    fn log_for(&self, key: &str) -> Option<&chatlog::ChatLog> {
-        self.log.as_ref().filter(|log| log.logs(key))
+    /// The chat log of the conversation keyed `key`, whose sender is `peer`,
+    /// when it is one the log records: the owner's direct chat or a thread
+    /// in it.
+    fn log_for(&self, key: &str, peer: &str) -> Option<chatlog::Logged<'_>> {
+        self.log
+            .as_ref()
+            .and_then(|log| log.conversation(key, peer))
     }
 
     /// Save state, waiting out a daemon command's short transaction.
@@ -739,25 +784,35 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         if result.is_ok()
             && let Some(owner) = self.tool_owner
         {
+            // The owner's direct chat and its threads.
             let claims = state
                 .in_flight
                 .iter()
-                .filter(|claim| conversation_key(&claim.key, &claim.to_user_id) == owner)
+                .filter(|claim| {
+                    claim.to_user_id == owner
+                        && intake::chat_of(conversation_key(&claim.key, &claim.to_user_id)) == owner
+                })
                 .count();
             self.registration.set_owner_claims(claims);
         }
         result
     }
 
-    /// Keep the durable record of `recipient`'s running background jobs in
-    /// step with its session, saving only when it changed.
-    async fn record_jobs(&self, recipient: &str, session: Option<&session::Session>) -> Result<()> {
+    /// Keep the durable record of `recipient`'s conversation's running
+    /// background jobs in step with its session, saving only when it changed.
+    async fn record_jobs(
+        &self,
+        recipient: &Recipient,
+        session: Option<&session::Session>,
+    ) -> Result<()> {
         let current = session.map(session::Session::jobs).unwrap_or_default();
         let mut state = self.state.lock().await;
+        let ours =
+            |job: &state::RunningJob| conversation_key(&job.key, &job.to_user_id) == recipient.key;
         let recorded: Vec<&str> = state
             .jobs
             .iter()
-            .filter(|job| job.to_user_id == recipient)
+            .filter(|job| ours(job))
             .map(|job| job.job.as_str())
             .collect();
         if recorded.len() == current.len()
@@ -773,10 +828,17 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             let started_at = state
                 .jobs
                 .iter()
-                .find(|recorded| recorded.to_user_id == recipient && recorded.job == job)
+                .find(|recorded| ours(recorded) && recorded.job == job)
                 .map_or(now, |recorded| recorded.started_at);
             kept.push(state::RunningJob {
-                to_user_id: recipient.to_owned(),
+                to_user_id: recipient.peer.clone(),
+                // The direct chat itself keeps the form older releases wrote.
+                key: if recipient.key == recipient.peer {
+                    String::new()
+                } else {
+                    recipient.key.clone()
+                },
+                reply_to: recipient.reply_to.clone(),
                 job,
                 tool: info.tool,
                 agent: info.agent,
@@ -784,7 +846,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 started_at,
             });
         }
-        state.jobs.retain(|job| job.to_user_id != recipient);
+        state.jobs.retain(|job| !ours(job));
         state.jobs.extend(kept);
         self.save(&state).await
     }
@@ -908,7 +970,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             // A fixed notice instead of a turn: sent like any reply, but
             // never held if the platform refuses it.
             Err(notice) => {
-                if let Some(log) = self.log_for(&key) {
+                if let Some(log) = self.log_for(&key, &message.sender) {
                     log.record(owner_entry(message));
                     log.system(notice);
                 }
@@ -945,6 +1007,10 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             text: message.text.clone(),
             media: message.media.clone(),
             reference: message.reference.clone(),
+            origin: message
+                .thread
+                .as_ref()
+                .and_then(|thread| thread.origin.clone()),
             key: key.clone(),
             limit,
             new: asks_for_new(message),
@@ -964,8 +1030,17 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 }
             } else {
                 let (jobs, queue) = mpsc::unbounded_channel();
-                // Only a direct chat can receive unprompted background reports.
-                let recipient = message.group.is_none().then(|| message.sender.clone());
+                // Only a direct chat, or a thread in one, can receive
+                // unprompted background reports.
+                let recipient = message.group.is_none().then(|| Recipient {
+                    peer: message.sender.clone(),
+                    key: key.clone(),
+                    reply_to: message
+                        .thread
+                        .as_ref()
+                        .map(|thread| thread.reply_to.clone())
+                        .unwrap_or_default(),
+                });
                 let watching = Arc::new(AtomicBool::new(false));
                 start
                     .send((owner, recipient, queue, Arc::clone(&watching)))
@@ -1044,7 +1119,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         let message = sender.message;
         self.registration.owner_wrote(&message.sender);
         let text = if yes { ANSWERED_YES } else { ANSWERED_NO };
-        if let Some(log) = self.log_for(&sender.key) {
+        if let Some(log) = self.log_for(&sender.key, &message.sender) {
             log.record(owner_entry(message));
             log.system(text);
         }
@@ -1073,7 +1148,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     async fn converse(
         &self,
         owner: bool,
-        recipient: Option<String>,
+        recipient: Option<Recipient>,
         mut jobs: mpsc::UnboundedReceiver<Job>,
         watching_flag: Arc<AtomicBool>,
     ) -> Result<()> {
@@ -1085,9 +1160,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         let mut session: Option<session::Session> = None;
         // The daemon sees which session a direct chat runs on and its
         // unreported background work, so a planned restart can wait for it.
+        // A thread's session counts as its direct chat's: that is where the
+        // daemon asks questions and announces updates for work it started.
         let tracker = recipient
-            .as_deref()
-            .map(|peer| self.registration.conversation(peer));
+            .as_ref()
+            .map(|recipient| self.registration.conversation(&recipient.peer));
         loop {
             if let Some(recipient) = &recipient {
                 self.record_jobs(recipient, session.as_ref()).await?;
@@ -1155,9 +1232,12 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 }
                 Next::Job(Some(job)) => job,
             };
-            let log = recipient.as_deref().and_then(|peer| self.log_for(peer));
+            let log = recipient
+                .as_ref()
+                .and_then(|recipient| self.log_for(&recipient.key, &recipient.peer));
+            let log = log.as_ref();
             let response = if job.new {
-                self.start_over(&mut session, log, recipient.as_deref())
+                self.start_over(&mut session, log, recipient.as_ref())
                     .await?
             } else {
                 let _turn = self
@@ -1169,7 +1249,10 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 // after the session starts, which reloads the log without it.
                 let recorded = AtomicBool::new(false);
                 let result = tokio::time::timeout(job.limit, async {
-                    let prepared = match self.prepare(&job, owner).await {
+                    // A thread's first turn on a new session also shows the
+                    // message the thread is on, which that session never saw.
+                    let fresh = session.is_none();
+                    let prepared = match self.prepare(&job, owner, fresh).await {
                         Ok(prepared) => prepared,
                         // Nothing the model could use: tell the sender why.
                         Err(refusal) => return Ok(session::Response::System(refusal)),
@@ -1183,7 +1266,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                             self.workspace,
                             owner,
                             Some(self.transport.channel()),
-                            log.map(chatlog::ChatLog::reference),
+                            log.map(chatlog::Logged::reference),
                         )
                         .await
                         .map(|connected| session = Some(connected))
@@ -1291,8 +1374,8 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     async fn start_over(
         &self,
         session: &mut Option<session::Session>,
-        log: Option<&chatlog::ChatLog>,
-        recipient: Option<&str>,
+        log: Option<&chatlog::Logged<'_>>,
+        recipient: Option<&Recipient>,
     ) -> Result<session::Response> {
         let mut fresh = true;
         if let Some(current) = session.as_mut() {
@@ -1337,29 +1420,45 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     }
 
     /// Fetch what a message refers to and the files it carries, as a turn's
-    /// text and attachments. When nothing usable is left, the error is a
-    /// short reply for the sender instead of a turn.
-    async fn prepare(&self, job: &Job, owner: bool) -> std::result::Result<Prepared, String> {
-        let mut context = String::new();
+    /// text and attachments, and on a `fresh` session, the message its
+    /// thread is on. When nothing usable is left, the error is a short reply
+    /// for the sender instead of a turn.
+    async fn prepare(
+        &self,
+        job: &Job,
+        owner: bool,
+        fresh: bool,
+    ) -> std::result::Result<Prepared, String> {
         let mut media = job.media.clone();
-        if let Some(reference) = &job.reference {
-            match tokio::time::timeout(
-                RESOLVE_TIMEOUT,
-                self.transport.resolve(&job.message_id, reference),
-            )
-            .await
-            {
-                Ok(Ok(resolved)) => {
-                    context = resolved.context;
-                    media.extend(resolved.media);
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!(error = %error, "could not resolve a message reference");
-                    context = "[The message this refers to could not be loaded.]".into();
-                }
-                Err(_) => context = "[The message this refers to could not be loaded.]".into(),
+        let origin = match job.origin.as_ref().filter(|_| fresh) {
+            Some(origin) => {
+                self.resolve(
+                    job,
+                    origin,
+                    "[The message this thread is on could not be loaded.]",
+                    &mut media,
+                )
+                .await
             }
-        }
+            None => String::new(),
+        };
+        let quoted = match &job.reference {
+            Some(reference) => {
+                self.resolve(
+                    job,
+                    reference,
+                    "[The message this refers to could not be loaded.]",
+                    &mut media,
+                )
+                .await
+            }
+            None => String::new(),
+        };
+        let context = [origin.trim(), quoted.trim()]
+            .into_iter()
+            .filter(|context| !context.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let mut notes = Vec::new();
         let mut attachments = Vec::new();
         let mut refusals = Vec::new();
@@ -1401,8 +1500,9 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             }
             text.push_str(note);
         }
+        // The thread's origin alone gives a turn nothing to answer.
         if job.text.trim().is_empty()
-            && context.trim().is_empty()
+            && quoted.trim().is_empty()
             && attachments.is_empty()
             && !heard
         {
@@ -1417,6 +1517,34 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             quote: context.trim().to_owned(),
             notes,
         })
+    }
+
+    /// What `reference` of `job`'s message resolves to, as text before the
+    /// message, adding its files to `media`; `unavailable` when it cannot be
+    /// loaded in time.
+    async fn resolve(
+        &self,
+        job: &Job,
+        reference: &str,
+        unavailable: &str,
+        media: &mut Vec<Media>,
+    ) -> String {
+        match tokio::time::timeout(
+            RESOLVE_TIMEOUT,
+            self.transport.resolve(&job.message_id, reference),
+        )
+        .await
+        {
+            Ok(Ok(resolved)) => {
+                media.extend(resolved.media);
+                resolved.context
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "could not resolve a message reference");
+                unavailable.to_owned()
+            }
+            Err(_) => unavailable.to_owned(),
+        }
     }
 
     /// Download one file under the sender's limits and save it privately.
@@ -1609,15 +1737,26 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
 
     /// Queue a message to `recipient` that answers no inbound message, such
     /// as a finished background job's report. It is sent without a reply
-    /// handle, durably and with stable client IDs like any reply.
-    async fn queue_unprompted(&self, recipient: &str, report: session::Response) -> Result<()> {
-        if let Some(log) = self.log_for(recipient) {
-            log_response(log, &report, true);
+    /// handle, or into its thread, durably and with stable client IDs like
+    /// any reply.
+    async fn queue_unprompted(
+        &self,
+        recipient: &Recipient,
+        report: session::Response,
+    ) -> Result<()> {
+        if let Some(log) = self.log_for(&recipient.key, &recipient.peer) {
+            log_response(&log, &report, true);
         }
         let (text, files) = self.render(report);
         let mut state = self.state.lock().await;
-        let mut pending = new_pending("", recipient, "", &text, MAX_REPLY_BYTES);
-        pending.key = recipient.to_owned();
+        let mut pending = new_pending(
+            "",
+            &recipient.peer,
+            &recipient.reply_to,
+            &text,
+            MAX_REPLY_BYTES,
+        );
+        pending.key.clone_from(&recipient.key);
         pending.files = files;
         state.pending.push(pending);
         self.save(&state).await?;
@@ -1656,7 +1795,8 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         if let Some(key) = notice.key.clone() {
             return self.store_mail_notice(state, notice, key).await;
         }
-        if let Some(log) = self.log_for(&notice.to) {
+        // Notices go to the direct chat itself.
+        if let Some(log) = self.log_for(&notice.to, &notice.to) {
             log.system(&notice.text);
         }
         let text = self.system(&notice.text);
@@ -1908,7 +2048,7 @@ fn owner_entry(message: &Message) -> history::Entry {
 
 /// Record what a chat is sent for a turn or a report: the model's answer
 /// with the names of the files it sends, or SCV's own words.
-fn log_response(log: &chatlog::ChatLog, response: &session::Response, report: bool) {
+fn log_response(log: &chatlog::Logged<'_>, response: &session::Response, report: bool) {
     match response {
         session::Response::Model(reply)
             if reply.text.trim().is_empty() && reply.files.is_empty() =>
@@ -2094,10 +2234,11 @@ pub(crate) fn recover_interrupted<C: state::Credentials>(
 /// Turn every claim an interrupted run left into a failure reply, durably;
 /// interrupted work is never resubmitted. After a planned `restart`, claims
 /// get [`restarted_reply`] instead of [`FAILURE_REPLY`].
-/// Each direct chat whose background jobs the previous run left running is
-/// told which stopped. Both are SCV's own words, marked with the transport's
-/// `system_label` by [`system_text`]. Everything is saved in one write.
-/// Returns what was queued, as each conversation's key and SCV's unmarked
+/// Each direct chat, or thread in one, whose background jobs the previous
+/// run left running is told which stopped, in that thread. Both are SCV's
+/// own words, marked with the transport's `system_label` by
+/// [`system_text`]. Everything is saved in one write. Returns what was
+/// queued, as each conversation's key, its chat partner, and SCV's unmarked
 /// words, for the chat log.
 pub(crate) fn recover_interrupted_after<C: state::Credentials>(
     store: &state::Store<C>,
@@ -2105,7 +2246,7 @@ pub(crate) fn recover_interrupted_after<C: state::Credentials>(
     state: &mut state::BridgeState,
     restart: Option<&hub::Restart>,
     system_label: &str,
-) -> Result<Vec<(String, String)>> {
+) -> Result<Vec<(String, String, String)>> {
     let mut queued = Vec::new();
     if state.in_flight.is_empty() && state.jobs.is_empty() {
         return Ok(queued);
@@ -2116,30 +2257,44 @@ pub(crate) fn recover_interrupted_after<C: state::Credentials>(
     for claim in std::mem::take(&mut state.in_flight) {
         queued.push((
             conversation_key(&claim.key, &claim.to_user_id).to_owned(),
+            claim.to_user_id.clone(),
             plain.clone(),
         ));
         let pending = compose_pending(state, &claim, &reply, now);
         state.pending.push(pending);
     }
+    fn conversation(job: &state::RunningJob) -> &str {
+        conversation_key(&job.key, &job.to_user_id)
+    }
     let jobs = std::mem::take(&mut state.jobs);
-    let mut recipients: Vec<&str> = Vec::new();
+    let mut conversations: Vec<&state::RunningJob> = Vec::new();
     for job in &jobs {
-        if !recipients.contains(&job.to_user_id.as_str()) {
-            recipients.push(&job.to_user_id);
+        if !conversations
+            .iter()
+            .any(|first| conversation(first) == conversation(job))
+        {
+            conversations.push(job);
         }
     }
-    for recipient in recipients {
+    for first in conversations {
+        let key = conversation(first);
         let stopped: Vec<_> = jobs
             .iter()
-            .filter(|job| job.to_user_id == recipient)
+            .filter(|job| conversation(job) == key)
             .cloned()
             .collect();
         let plain = stopped_jobs_notice(restart, &stopped);
         let notice = system_text(system_label, &plain);
-        let mut pending = new_pending("", recipient, "", &notice, MAX_REPLY_BYTES);
-        pending.key = recipient.to_owned();
+        let mut pending = new_pending(
+            "",
+            &first.to_user_id,
+            &first.reply_to,
+            &notice,
+            MAX_REPLY_BYTES,
+        );
+        pending.key = key.to_owned();
         state.pending.push(pending);
-        queued.push((recipient.to_owned(), plain));
+        queued.push((key.to_owned(), first.to_user_id.clone(), plain));
     }
     store.save_state(account, state)?;
     Ok(queued)

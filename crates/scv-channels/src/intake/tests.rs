@@ -162,6 +162,71 @@ fn only_the_owners_direct_chat_gets_tools_and_the_owner_limit() {
     );
 }
 
+/// `text`, sent in thread `thread`.
+fn threaded(id: &str, sender: &str, group: Option<&str>, thread: &str) -> Inbound {
+    let mut message = Message::text(id, sender, "hello", "context", group);
+    message.thread = Some(crate::Thread {
+        id: thread.into(),
+        reply_to: format!("into-{thread}"),
+        origin: None,
+    });
+    Inbound::Text(message)
+}
+
+#[test]
+fn a_thread_is_a_conversation_of_its_own_with_its_chats_authority() {
+    let state = state::BridgeState::default();
+    let conversations = HashMap::new();
+    let granted = tool_owner("owner");
+    let intake = Intake {
+        owner: Some("owner"),
+        tool_owner: Some(&granted),
+        ..quiet(&state, &conversations)
+    };
+    let turn = |inbound: &Inbound| match classify(inbound, &intake) {
+        Verdict::Turn { sender, owner, .. } => (sender.key, sender.owner_chat, owner),
+        other => panic!("expected a turn, got {other:?}"),
+    };
+    // The owner's thread in their direct chat keeps the owner's tools.
+    let (key, owner_chat, tools) = turn(&threaded("m1", "owner", None, "omt_1"));
+    assert_eq!(key, "owner\0thread\0omt_1");
+    assert!(owner_chat && tools);
+    assert_eq!(chat_of(&key), "owner");
+    // A thread in a group is the sender's own there, without tools.
+    let (key, owner_chat, tools) = turn(&threaded("m2", "owner", Some("group"), "omt_2"));
+    assert_eq!(key, "group\0owner\0thread\0omt_2");
+    assert!(!owner_chat && !tools);
+    assert_eq!(chat_of(&key), "group\0owner");
+    // Another sender's thread is theirs.
+    let (key, _, tools) = turn(&threaded("m3", "other", None, "omt_1"));
+    assert_eq!(key, "other\0thread\0omt_1");
+    assert!(!tools);
+    // Keys outside threads are their own chats.
+    assert_eq!(chat_of("owner"), "owner");
+    assert_eq!(chat_of("group\0owner"), "group\0owner");
+}
+
+#[test]
+fn a_thread_has_its_own_queue_limit() {
+    let full: Vec<_> = (0..MAX_QUEUED_PER_CONVERSATION)
+        .map(|index| claim(&format!("c{index}"), "sender"))
+        .collect();
+    let state = state::BridgeState {
+        in_flight: full,
+        ..Default::default()
+    };
+    let conversations = HashMap::new();
+    let intake = quiet(&state, &conversations);
+    assert!(matches!(
+        classify(&text("m1", "sender", None), &intake),
+        Verdict::Busy(_)
+    ));
+    assert!(matches!(
+        classify(&threaded("m2", "sender", None, "omt_1"), &intake),
+        Verdict::Turn { .. }
+    ));
+}
+
 #[test]
 fn the_account_owner_is_known_without_the_tool_grant() {
     let state = state::BridgeState::default();

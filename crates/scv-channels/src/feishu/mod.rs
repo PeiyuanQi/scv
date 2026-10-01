@@ -3,9 +3,10 @@
 //!
 //! Feishu pushes events over a WebSocket and does not redeliver messages
 //! sent while SCV was disconnected. So each connection starts by listing the
-//! history of every chat the checkpoint knows since its newest message, and
-//! socket events are acknowledged only once the bridge has made their claims
-//! durable, which is when it asks for the next batch.
+//! history of every chat and thread the checkpoint knows since its newest
+//! message, and socket events are acknowledged only once the bridge has made
+//! their claims durable, which is when it asks for the next batch. A thread
+//! (话题) is a conversation of its own, answered inside the thread.
 
 #![forbid(unsafe_code)]
 
@@ -28,7 +29,7 @@ mod inbound;
 mod login;
 mod socket;
 
-use api::{Api, Endpoints, Refusal, Resource, UploadKind};
+use api::{Api, Container, Endpoints, Refusal, Resource, UploadKind};
 pub(crate) use credentials::Store;
 pub use credentials::{Account, Brand};
 use inbound::{Checkpoint, Event, Received};
@@ -115,8 +116,10 @@ const GATHER: Duration = Duration::from_millis(50);
 const MAX_BATCH: usize = 256;
 /// Catch-up reaches back at most this far, whatever the checkpoint says.
 const CATCH_UP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
-/// Chats listed, and pages of 50 messages per chat, in one catch-up.
+/// Chats and threads listed, and pages of 50 messages per chat or thread,
+/// in one catch-up.
 const CATCH_UP_CHATS: usize = 32;
+const CATCH_UP_THREADS: usize = 32;
 const CATCH_UP_PAGES: usize = 4;
 /// Messages taken from one forwarded bundle.
 const MAX_FORWARDED: usize = 50;
@@ -156,32 +159,29 @@ impl OpenPlatform {
         })
     }
 
-    /// Messages each known chat received since its checkpoint, oldest first
-    /// per chat. A chat whose history Feishu refuses is skipped; a transport
-    /// failure fails the catch-up so it runs again.
+    /// Messages each known chat and thread received since its checkpoint,
+    /// oldest first per chat and thread, each once. A chat's history holds
+    /// only the roots of its threads, so each known thread, and each new one
+    /// whose root the chats listed, is listed too. One whose history Feishu
+    /// refuses is skipped; a transport failure fails the catch-up so it runs
+    /// again.
     async fn catch_up(&self, checkpoint: &Checkpoint, bot: Option<&str>) -> Result<Vec<Received>> {
         let now = unix_seconds();
         let floor = now.saturating_sub(CATCH_UP_WINDOW.as_secs());
-        let mut chats: Vec<_> = checkpoint.chats.iter().collect();
-        chats.sort_by_key(|(_, mark)| std::cmp::Reverse(mark.last_ms));
         let mut found = Vec::new();
-        for (chat, mark) in chats.into_iter().take(CATCH_UP_CHATS) {
+        for (chat, mark) in most_recent(&checkpoint.chats, CATCH_UP_CHATS) {
             let start = (mark.last_ms / 1000).max(floor);
             let mut page = None;
             for _ in 0..CATCH_UP_PAGES {
-                let listed = match self
-                    .api
-                    .history(chat, start, now + 1, page.as_deref())
-                    .await
-                {
-                    Ok(listed) => listed,
-                    Err(error) => match error.downcast_ref::<Refusal>() {
-                        Some(refusal) => {
-                            tracing::warn!("Feishu catch-up skipped a chat: {refusal}");
-                            break;
-                        }
-                        None => return Err(error),
-                    },
+                let container = Container::Chat {
+                    id: chat,
+                    start,
+                    end: now + 1,
+                };
+                let Some(listed) =
+                    skip_refused(self.api.history(container, page.as_deref()).await)?
+                else {
+                    break;
                 };
                 found.extend(
                     listed
@@ -196,8 +196,85 @@ impl OpenPlatform {
                 }
             }
         }
+        let mut threads = checkpoint.threads.clone();
+        for received in &found {
+            if let Some(thread) = &received.thread_id {
+                threads.entry(thread.clone()).or_insert(inbound::ChatMark {
+                    group: received.group,
+                    last_ms: received.created_ms,
+                });
+            }
+        }
+        for (thread, mark) in most_recent(&threads, CATCH_UP_THREADS) {
+            let since = mark.last_ms.max(floor * 1000);
+            let mut newest_first = Vec::new();
+            let mut page = None;
+            'pages: for _ in 0..CATCH_UP_PAGES {
+                let listed = skip_refused(
+                    self.api
+                        .history(Container::Thread(thread), page.as_deref())
+                        .await,
+                )?;
+                let Some(listed) = listed else { break };
+                for item in listed.items {
+                    if created_ms(&item) < since {
+                        break 'pages;
+                    }
+                    newest_first.push(item);
+                }
+                match listed.next {
+                    Some(next) => page = Some(next),
+                    None => break,
+                }
+            }
+            found.extend(
+                newest_first
+                    .iter()
+                    .rev()
+                    .filter_map(|item| inbound::parse_history(item, mark.group, bot)),
+            );
+        }
+        let mut handed = std::collections::HashSet::new();
+        found.retain(|received| handed.insert(received.inbound.id().to_owned()));
         Ok(found)
     }
+}
+
+/// The `count` most recently active of `marks`, newest first.
+fn most_recent(
+    marks: &std::collections::BTreeMap<String, inbound::ChatMark>,
+    count: usize,
+) -> Vec<(&str, inbound::ChatMark)> {
+    let mut marks: Vec<_> = marks
+        .iter()
+        .map(|(key, mark)| (key.as_str(), *mark))
+        .collect();
+    marks.sort_by_key(|(_, mark)| std::cmp::Reverse(mark.last_ms));
+    marks.truncate(count);
+    marks
+}
+
+/// A history page, or `None` with a warning when Feishu refused the listing,
+/// as it does for a chat or thread the bot may no longer read.
+fn skip_refused(listed: Result<api::HistoryPage>) -> Result<Option<api::HistoryPage>> {
+    match listed {
+        Ok(listed) => Ok(Some(listed)),
+        Err(error) => match error.downcast_ref::<Refusal>() {
+            Some(refusal) => {
+                tracing::warn!("Feishu catch-up skipped a chat or thread: {refusal}");
+                Ok(None)
+            }
+            None => Err(error),
+        },
+    }
+}
+
+/// A history item's creation time in Unix milliseconds; 0 when missing.
+fn created_ms(item: &serde_json::Value) -> u64 {
+    item.get("create_time")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|time| time.parse().ok())
+        .unwrap_or(0)
 }
 
 #[async_trait]
@@ -338,14 +415,19 @@ impl Transport for OpenPlatform {
         Ok(Downloaded { bytes, mime })
     }
 
-    /// Fetch the message a reply quotes, and the messages a forwarded bundle
-    /// holds, as text before the message and their files.
+    /// Fetch the message a thread is on, the message a reply quotes, and the
+    /// messages a forwarded bundle holds, as text before the message and
+    /// their files.
     async fn resolve(&self, message_id: &str, reference: &str) -> Result<Resolved> {
         let reference: inbound::Reference =
             serde_json::from_str(reference).map_err(|_| anyhow!("bad message reference"))?;
         let mut resolved = Resolved::default();
-        if let Some(parent) = &reference.parent {
-            let items = self.api.message(parent).await?;
+        for (id, label) in [
+            (&reference.root, "Thread on"),
+            (&reference.parent, "Quoting"),
+        ] {
+            let Some(id) = id else { continue };
+            let items = self.api.message(id).await?;
             if let Some((text, media)) = items.first().and_then(item_content) {
                 let text = match (text.is_empty(), media.first()) {
                     (false, _) => text,
@@ -357,7 +439,12 @@ impl Transport for OpenPlatform {
                     },
                     (true, None) => "a message".into(),
                 };
-                resolved.context = format!("[Quoting: {}]", bounded(&text, MAX_CONTEXT_BYTES));
+                if !resolved.context.is_empty() {
+                    resolved.context.push_str("\n\n");
+                }
+                resolved
+                    .context
+                    .push_str(&format!("[{label}: {}]", bounded(&text, MAX_CONTEXT_BYTES)));
                 resolved.media.extend(media);
             }
         }

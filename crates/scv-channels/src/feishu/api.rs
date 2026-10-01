@@ -19,6 +19,27 @@ const TOKEN_CODES: [i64; 4] = [99991661, 99991663, 99991664, 99991668];
 const RATE_CODES: [i64; 4] = [99991400, 230020, 11232, 11233];
 /// The app lacks a permission scope; adding it needs the developer console.
 pub(crate) const SCOPE_CODE: i64 = 99991672;
+/// The chat does not take replies in threads (230071), or the message
+/// cannot have one (230072, a forwarded bundle): reply in the chat instead.
+const NO_THREAD_CODES: [i64; 2] = [230071, 230072];
+/// Starts a reply handle that answers its message inside the message's
+/// thread; any other handle is the bare message ID.
+const THREAD_HANDLE: &str = "thread:";
+
+/// The reply handle that answers `message_id` inside its thread, or opens a
+/// thread on it.
+pub(crate) fn thread_reply(message_id: &str) -> String {
+    format!("{THREAD_HANDLE}{message_id}")
+}
+
+/// The message a reply handle answers, and whether the reply goes into its
+/// thread.
+fn reply_target(handle: &str) -> (&str, bool) {
+    match handle.strip_prefix(THREAD_HANDLE) {
+        Some(message_id) => (message_id, true),
+        None => (handle, false),
+    }
+}
 /// How long downloading or uploading one file may take.
 const FILE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -334,7 +355,10 @@ impl Api {
     }
 
     /// Send one message of `msg_type`, such as `image` or `file`, as
-    /// [`Api::send_text`] does text.
+    /// [`Api::send_text`] does text. A reply handle made by
+    /// [`thread_reply`] replies with `reply_in_thread`, which keeps the reply
+    /// in the message's thread; where Feishu takes no reply in a thread, it
+    /// replies in the chat instead.
     pub(crate) async fn send_message(
         &self,
         to: &str,
@@ -348,24 +372,42 @@ impl Api {
             "content": content.to_string(),
             "uuid": uuid,
         });
-        let result = if reply_to.is_empty() {
+        if reply_to.is_empty() {
             let mut body = body;
             body["receive_id"] = to.into();
-            self.call(move |client, open| {
-                client
-                    .post(format!("{open}/open-apis/im/v1/messages"))
-                    .query(&[("receive_id_type", "open_id")])
-                    .json(&body)
-            })
-            .await
-        } else {
-            let path = format!(
-                "/open-apis/im/v1/messages/{}/reply",
-                encode_segment(reply_to)
-            );
-            self.call(move |client, open| client.post(format!("{open}{path}")).json(&body))
-                .await
-        };
+            let result = self
+                .call(move |client, open| {
+                    client
+                        .post(format!("{open}/open-apis/im/v1/messages"))
+                        .query(&[("receive_id_type", "open_id")])
+                        .json(&body)
+                })
+                .await;
+            return classify(result);
+        }
+        let (message_id, in_thread) = reply_target(reply_to);
+        let path = format!(
+            "/open-apis/im/v1/messages/{}/reply",
+            encode_segment(message_id)
+        );
+        if in_thread {
+            let mut threaded = body.clone();
+            threaded["reply_in_thread"] = true.into();
+            let path = path.clone();
+            let result = self
+                .call(move |client, open| client.post(format!("{open}{path}")).json(&threaded))
+                .await;
+            let refused_thread = result.as_ref().is_ok_and(|(_, value)| {
+                code(value).is_some_and(|code| NO_THREAD_CODES.contains(&code))
+            });
+            if !refused_thread {
+                return classify(result);
+            }
+            tracing::warn!("Feishu takes no reply in this thread; replying in the chat");
+        }
+        let result = self
+            .call(move |client, open| client.post(format!("{open}{path}")).json(&body))
+            .await;
         classify(result)
     }
 
@@ -509,23 +551,30 @@ impl Api {
         }
     }
 
-    /// One page of a chat's messages created from `start` to `end`, in
-    /// Unix seconds, oldest first.
+    /// One page of a chat's or a thread's messages: for a chat, those
+    /// created from `start` to `end` in Unix seconds, oldest first, which
+    /// leave out the replies in its threads; for a thread, which Feishu
+    /// lists by no time range, all of them, newest first.
     pub(crate) async fn history(
         &self,
-        chat_id: &str,
-        start: u64,
-        end: u64,
+        container: Container<'_>,
         page: Option<&str>,
     ) -> Result<HistoryPage> {
-        let mut query = vec![
-            ("container_id_type", "chat".to_owned()),
-            ("container_id", chat_id.to_owned()),
-            ("start_time", start.to_string()),
-            ("end_time", end.to_string()),
-            ("sort_type", "ByCreateTimeAsc".into()),
-            ("page_size", "50".into()),
-        ];
+        let mut query = match container {
+            Container::Chat { id, start, end } => vec![
+                ("container_id_type", "chat".to_owned()),
+                ("container_id", id.to_owned()),
+                ("start_time", start.to_string()),
+                ("end_time", end.to_string()),
+                ("sort_type", "ByCreateTimeAsc".into()),
+            ],
+            Container::Thread(id) => vec![
+                ("container_id_type", "thread".to_owned()),
+                ("container_id", id.to_owned()),
+                ("sort_type", "ByCreateTimeDesc".into()),
+            ],
+        };
+        query.push(("page_size", "50".into()));
         if let Some(page) = page {
             query.push(("page_token", page.to_owned()));
         }
@@ -583,6 +632,15 @@ impl Api {
             .map(Duration::from_secs);
         Ok((self.endpoints.check_socket_url(url)?, ping))
     }
+}
+
+/// Whose history [`Api::history`] lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Container<'a> {
+    /// A chat's own messages from `start` to `end`, in Unix seconds.
+    Chat { id: &'a str, start: u64, end: u64 },
+    /// A thread's messages, by its `thread_id`.
+    Thread(&'a str),
 }
 
 /// What an upload is for: a picture, or a file of Feishu's `file_type`

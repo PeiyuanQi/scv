@@ -37,7 +37,8 @@ reads the photos, files, and videos you send, and sends files back. Long work
 runs in the background while you keep chatting; results and yes/no questions
 arrive as messages. SCV keeps a log of your chat, so a conversation carries on
 across restarts and it can look back when you mention something older; `/new`
-starts a fresh one.
+starts a fresh one. On Feishu, a thread is a conversation of its own: SCV
+answers inside the thread, on a session of its own.
 
 ### One agent, many agents
 
