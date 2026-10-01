@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.7`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.7` pins.
+The current workspace release is `0.3.8`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.8` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,22 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.8
+
+`0.3.8` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.7` checks the new release and can roll it back.
+
+- **Feishu threads.** A message in a Feishu thread (话题) is answered inside
+  the thread, on a daemon session of its own with its chat's authority; the
+  owner's threads in their direct chat are logged as conversations of their
+  own, and their background reports go into the thread. Questions and
+  notices still go to the direct chat itself. See
+  [Feishu threads](channels.md#feishu-threads).
+- **State stays readable both ways.** The Feishu checkpoint gains per-thread
+  times and a running job its thread, both of which `0.3.7` ignores. After
+  going back to `0.3.7`, a reply still waiting to go into a thread is refused
+  by Feishu and held, and a thread's message is answered in its chat.
 
 ## Upgrading to 0.3.7
 

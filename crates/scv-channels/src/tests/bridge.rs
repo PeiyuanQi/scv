@@ -87,6 +87,14 @@ impl Transport for FakeTransport {
         *self.downloads.lock().unwrap() += 1;
         bail!("the fake platform serves no files")
     }
+
+    /// A reference resolves to itself, in brackets.
+    async fn resolve(&self, _message_id: &str, reference: &str) -> Result<Resolved> {
+        Ok(Resolved {
+            context: format!("[{reference}]"),
+            media: Vec::new(),
+        })
+    }
 }
 
 /// One account's bridge under test: its store and the transport it runs.
@@ -101,6 +109,8 @@ struct Bench {
     senders: state::Senders,
     /// What the account carries: an ordinary chat unless a test says so.
     purpose: state::Purpose,
+    /// The owner holds remote tools; off unless a test says so.
+    tools: bool,
 }
 
 /// The test's side: the fake daemon, and the platform's two directions.
@@ -135,6 +145,7 @@ impl Bench {
             owner: None,
             senders: state::Senders::Anyone,
             purpose: state::Purpose::Chat,
+            tools: false,
         };
         (bench, Peer { daemon, push, sent })
     }
@@ -185,7 +196,10 @@ impl Bench {
                 workspace: self.directory.path(),
                 socket: &self.socket,
                 owner: self.owner,
-                tool_owner: None,
+                tool_owner: self.owner.filter(|_| self.tools).map(|owner| ToolOwner {
+                    user_id: owner.into(),
+                    turn_timeout: OWNER_TURN_TIMEOUT,
+                }),
                 senders: self.senders,
                 purpose: self.purpose,
                 media,
@@ -1284,6 +1298,8 @@ async fn an_account_that_ran_as_an_ordinary_chat_cannot_become_a_mail_chat() {
         |state| {
             state.jobs.push(state::RunningJob {
                 to_user_id: "owner".into(),
+                key: String::new(),
+                reply_to: String::new(),
                 job: "job-1".into(),
                 tool: "agent".into(),
                 agent: "codex".into(),
@@ -1343,4 +1359,291 @@ async fn an_account_with_a_chat_log_cannot_become_a_mail_chat() {
     assert!(error.to_string().contains("has a chat log"), "{error}");
     assert!(!bench.state().mail_chat);
     assert!(history.exists(), "nothing of the person's is removed");
+}
+
+/// A message of `sender`'s in thread `thread`, which is on the message
+/// `origin` names when it is set. Its reply handle answers it inside the
+/// thread, and the thread's own handle posts into it.
+fn in_thread(id: &str, sender: &str, text: &str, thread: &str, origin: Option<&str>) -> Inbound {
+    let Inbound::Text(mut message) = message(id, sender, text) else {
+        unreachable!()
+    };
+    message.reply_to = format!("thread-re-{id}");
+    message.thread = Some(Thread {
+        id: thread.into(),
+        reply_to: format!("into-{thread}"),
+        origin: origin.map(str::to_owned),
+    });
+    Inbound::Text(message)
+}
+
+/// The owner's turn whose call starts background job `job`, answered with
+/// `reply`.
+async fn start_background_job(side: &mut BufReader<UnixStream>, job: &str, reply: &str) {
+    let output =
+        json!({"job":job,"agent":"codex","status":"running","background":true}).to_string();
+    let started =
+        json!({"job":job,"tool":"agent","agent":"codex","status":"running","task":"Land it"});
+    send_frame(side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent","success":true,"output":output,"truncated":false,"jobs":[started]})).await;
+    finish_turn(side, reply).await;
+}
+
+#[tokio::test]
+async fn a_thread_runs_on_its_own_session_and_its_answers_and_reports_stay_in_it() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let thread_key = "owner\0thread\0omt_1";
+    peer.push(vec![message("m1", "owner", "hello")]);
+    bench
+        .run(async {
+            let (mut direct, start) = accept_session_start(&peer.daemon).await;
+            assert_eq!(start["chat"]["conversation"], conversation_dir("owner"));
+            assert_eq!(next_turn(&mut direct).await, "hello");
+            finish_turn(&mut direct, "hi").await;
+            assert_eq!(peer.sent().await.reply_to, "re-m1");
+
+            // A thread gets a session of its own, logged on its own, whose
+            // first turn also shows the message the thread is on.
+            peer.push(vec![in_thread(
+                "t1",
+                "owner",
+                "expand on that",
+                "omt_1",
+                Some("root-m0"),
+            )]);
+            let (mut threaded, start) = accept_session_start(&peer.daemon).await;
+            assert_eq!(start["chat"]["conversation"], conversation_dir(thread_key));
+            assert_eq!(
+                next_turn(&mut threaded).await,
+                "[root-m0]\n\nexpand on that"
+            );
+            assert_eq!(bench.state().in_flight[0].key, thread_key);
+            start_background_job(&mut threaded, "job-1", "Started job-1.").await;
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: "thread-re-t1".into(),
+                    text: "Started job-1.".into(),
+                }
+            );
+            // The job is recorded as the thread's, with the handle into it.
+            eventually(|| {
+                bench.state().jobs.iter().any(|job| {
+                    job.job == "job-1" && job.key == thread_key && job.reply_to == "into-omt_1"
+                })
+            })
+            .await;
+
+            // The thread's next message runs on the same session, without
+            // the thread's origin again; the direct chat keeps its own.
+            peer.push(vec![in_thread(
+                "t2",
+                "owner",
+                "and then?",
+                "omt_1",
+                Some("root-m0"),
+            )]);
+            assert_eq!(next_turn(&mut threaded).await, "and then?");
+            finish_turn(&mut threaded, "then this").await;
+            assert_eq!(peer.sent().await.reply_to, "thread-re-t2");
+            peer.push(vec![message("m2", "owner", "back here")]);
+            assert_eq!(next_turn(&mut direct).await, "back here");
+            finish_turn(&mut direct, "welcome back").await;
+            assert_eq!(peer.sent().await.reply_to, "re-m2");
+
+            // The job's report goes into the thread, answering nothing there.
+            let origin = json!({"kind":"background","jobs":["job-1"]});
+            send_frame(&mut threaded, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+            send_frame(&mut threaded, json!({"type":"assistant.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":11,"content":"job-1 is done"})).await;
+            send_frame(&mut threaded, json!({"type":"turn.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":12,"steps":1,"usage":{},"origin":origin})).await;
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: "into-omt_1".into(),
+                    text: "job-1 is done".into(),
+                }
+            );
+            eventually(|| {
+                let saved = bench.state();
+                saved.jobs.is_empty() && saved.pending.is_empty()
+            })
+            .await;
+        })
+        .await;
+    let owner = |text: &str| (history::Role::Owner, text.to_owned());
+    let scv = |text: &str| (history::Role::Scv, text.to_owned());
+    assert_eq!(
+        logged(&owner_log(&bench, "owner")),
+        [vec![
+            owner("hello"),
+            scv("hi"),
+            owner("back here"),
+            scv("welcome back")
+        ]]
+    );
+    assert_eq!(
+        logged(&owner_log(&bench, thread_key)),
+        [vec![
+            owner("expand on that"),
+            scv("Started job-1."),
+            owner("and then?"),
+            scv("then this"),
+            scv("job-1 is done"),
+        ]]
+    );
+}
+
+#[tokio::test]
+async fn new_in_a_thread_starts_that_thread_over_and_leaves_the_direct_chat_alone() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let thread_key = "owner\0thread\0omt_1";
+    peer.push(vec![in_thread("t1", "owner", "first", "omt_1", None)]);
+    bench
+        .run(async {
+            let mut threaded = accept_session(&peer.daemon).await;
+            // A message that starts its thread has no origin to show.
+            assert_eq!(next_turn(&mut threaded).await, "first");
+            finish_turn(&mut threaded, "one").await;
+            peer.sent().await;
+            peer.push(vec![in_thread("t2", "owner", "/new", "omt_1", None)]);
+            let clear = next_frame(&mut threaded).await;
+            assert_eq!(clear["type"], "session.clear");
+            send_frame(&mut threaded, json!({"type":"session.cleared","request_id":clear["request_id"],"session_id":"s","seq":4})).await;
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: "thread-re-t2".into(),
+                    text: NEW_LOGGED_REPLY.into(),
+                }
+            );
+        })
+        .await;
+    let (episodes, _) = history::episodes(&owner_log(&bench, thread_key), None, None, 5).unwrap();
+    assert!(episodes[0].ended);
+    assert!(!owner_log(&bench, "owner").exists());
+}
+
+#[tokio::test]
+async fn a_yes_in_a_thread_runs_a_turn_and_leaves_the_question_waiting() {
+    let (bench, mut peer, hub, link) = asked_bench();
+    bench
+        .run_linked(&link, async {
+            let answered = ask(&hub, "q1", "Publish?").await;
+            assert_eq!(peer.sent().await.reply_to, "", "asked in the direct chat");
+            delivered(&bench).await;
+            peer.push(vec![in_thread("t1", "owner", "yes", "omt_1", None)]);
+            let mut threaded = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut threaded).await, "yes");
+            finish_turn(&mut threaded, "yes to what?").await;
+            assert_eq!(peer.sent().await.reply_to, "thread-re-t1");
+            peer.push(vec![message("m1", "owner", "yes")]);
+            assert_eq!(peer.sent().await.text, ANSWERED_YES);
+            assert_eq!(answered.await, Ok(true));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_group_thread_is_its_senders_own_conversation_and_is_not_logged() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let Inbound::Text(mut group_thread) = in_thread("g1", "owner", "hi all", "omt_9", None) else {
+        unreachable!()
+    };
+    group_thread.group = Some("group".into());
+    peer.push(vec![Inbound::Text(group_thread)]);
+    bench
+        .run(async {
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            assert!(start.get("chat").is_none(), "{start}");
+            assert_eq!(
+                bench.state().in_flight[0].key,
+                "group\0owner\0thread\0omt_9"
+            );
+            assert_eq!(next_turn(&mut side).await, "hi all");
+            finish_turn(&mut side, "hello").await;
+            assert_eq!(peer.sent().await.reply_to, "thread-re-g1");
+        })
+        .await;
+    assert!(!bench.directory.path().join("history").exists());
+}
+
+#[tokio::test]
+async fn an_owners_thread_is_owner_work_of_their_direct_chat_in_the_hub() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let bench = Bench {
+        tools: true,
+        ..bench
+    };
+    let hub = hub::Hub::new(None);
+    let link = hub::Link::new(Arc::clone(&hub), "fake:default", Some("owner".into()));
+    bench
+        .run_linked(&link, async {
+            eventually(|| hub.owner("fake:default").is_some()).await;
+            peer.push(vec![in_thread("t1", "owner", "land it", "omt_1", None)]);
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            assert_eq!(
+                start["no_tools"], false,
+                "the owner's tools hold in the thread"
+            );
+            assert_eq!(next_turn(&mut side).await, "land it");
+            // A planned restart waits for it, as for the direct chat.
+            assert_eq!(hub.owner_claims(), 1);
+            assert_eq!(hub.last_owner().unwrap().peer, "owner");
+            start_background_job(&mut side, "job-1", "Started job-1.").await;
+            assert_eq!(peer.sent().await.reply_to, "thread-re-t1");
+            eventually(|| hub.owner_claims() == 0 && hub.session_work("s") == 1).await;
+            // Work the thread started asks and announces in the direct chat.
+            assert_eq!(
+                hub.origin("s"),
+                Some(hub::Origin {
+                    component: "fake:default".into(),
+                    peer: "owner".into(),
+                })
+            );
+            hub.notify("fake:default", "owner", "SCV updated.")
+                .await
+                .unwrap();
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: String::new(),
+                    text: "SCV updated.".into(),
+                }
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_threads_origin_alone_is_not_enough_for_a_turn() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let Inbound::Text(mut photo) = in_thread("t1", "owner", "", "omt_1", Some("root-m0")) else {
+        unreachable!()
+    };
+    photo.media.push(Media {
+        kind: MediaKind::Image,
+        name: "cat.jpg".into(),
+        size: Some(10),
+        mime: None,
+        transcript: None,
+        source: "cat".into(),
+    });
+    peer.push(vec![Inbound::Text(photo)]);
+    bench
+        .run(async {
+            // The photo does not come in, so the sender is told why in the
+            // thread, and no session starts.
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: "thread-re-t1".into(),
+                    text: "SCV could not download that image. Please send it again.".into(),
+                }
+            );
+        })
+        .await;
 }

@@ -210,6 +210,8 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
     let store = test_store(directory.path());
     let job = |to: &str, job: &str, agent: &str, task: &str| state::RunningJob {
         to_user_id: to.into(),
+        key: String::new(),
+        reply_to: String::new(),
         job: job.into(),
         tool: "agent".into(),
         agent: agent.into(),
@@ -268,6 +270,84 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
 }
 
 #[test]
+fn recovery_tells_a_thread_which_of_its_jobs_stopped_inside_the_thread() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = test_store(directory.path());
+    let job = |key: &str, reply_to: &str, job: &str| state::RunningJob {
+        to_user_id: "owner".into(),
+        key: key.into(),
+        reply_to: reply_to.into(),
+        job: job.into(),
+        tool: "agent".into(),
+        agent: "codex".into(),
+        task: String::new(),
+        started_at: 1,
+    };
+    let thread = "owner\0thread\0omt_1";
+    let mut saved = state::BridgeState {
+        jobs: vec![
+            job("", "", "job-1"),
+            job(thread, "into-omt_1", "job-2"),
+            job(thread, "into-omt_1", "job-3"),
+        ],
+        ..Default::default()
+    };
+    let queued = recover_interrupted(&store, "default", &mut saved);
+    queued.unwrap();
+    let restarted = store.load_state("default").unwrap();
+    let notices: Vec<_> = restarted
+        .pending
+        .iter()
+        .map(|pending| {
+            (
+                pending.key.as_str(),
+                pending.context_token.as_str(),
+                pending.reply.lines().nth(1).unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [
+            ("owner", "", "- job-1 (codex)"),
+            (thread, "into-omt_1", "- job-2 (codex)"),
+        ]
+    );
+    assert!(restarted.pending[1].reply.contains("- job-3 (codex)"));
+    assert!(restarted.pending.iter().all(|p| p.to_user_id == "owner"));
+}
+
+#[test]
+fn a_recovered_thread_claim_is_answered_inside_its_thread() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = test_store(directory.path());
+    let thread = "owner\0thread\0omt_1";
+    let mut saved = state::BridgeState {
+        in_flight: vec![state::InFlight {
+            message_id: "t1".into(),
+            to_user_id: "owner".into(),
+            context_token: "thread:t1".into(),
+            key: thread.into(),
+        }],
+        ..Default::default()
+    };
+    let queued = recover_interrupted_after(&store, "default", &mut saved, None, "").unwrap();
+    assert_eq!(
+        queued,
+        [(
+            thread.to_owned(),
+            "owner".to_owned(),
+            FAILURE_REPLY.to_owned()
+        )]
+    );
+    let pending = &store.load_state("default").unwrap().pending[0];
+    assert_eq!(
+        (pending.key.as_str(), pending.context_token.as_str()),
+        (thread, "thread:t1")
+    );
+}
+
+#[test]
 fn after_a_planned_restart_claims_are_told_why() {
     let directory = tempfile::tempdir().unwrap();
     let store = test_store(directory.path());
@@ -311,6 +391,8 @@ fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_label()
         }],
         jobs: vec![state::RunningJob {
             to_user_id: "alice".into(),
+            key: String::new(),
+            reply_to: String::new(),
             job: "job-1".into(),
             tool: "agent".into(),
             agent: "codex".into(),

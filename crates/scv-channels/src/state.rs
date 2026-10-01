@@ -231,11 +231,21 @@ impl BridgeState {
     }
 }
 
-/// A background job a direct chat's session started and has not reported.
+/// A background job a direct chat's session, or the session of a thread in
+/// one, started and has not reported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RunningJob {
     /// The chat partner it reports to.
     pub(crate) to_user_id: String,
+    /// The conversation whose session runs it; empty, as releases before
+    /// threads saved it, for the direct chat with `to_user_id`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) key: String,
+    /// The transport's handle for posting into the conversation's thread;
+    /// empty for the direct chat itself. Older releases ignore both fields
+    /// and tell the direct chat.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) reply_to: String,
     /// The session's job handle, such as `job-1`.
     pub(crate) job: String,
     /// The delegating tool: `agent`, or `agent_codex` as SCV 0.3.0, which

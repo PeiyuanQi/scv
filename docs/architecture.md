@@ -61,9 +61,10 @@ SCV provides:
   each new message with deterministic rules and, within a token budget, one
   tool-free model turn, and reports to a *mail chat*, a chat account set
   apart so that no model ever answers in it;
-- a chat log of each account owner's direct chat, from which a new session
-  carries on the open episode and which the model can search, with the files
-  the owner keeps and a free-disk-space floor;
+- a chat log of each account owner's direct chat, and of each Feishu thread
+  in it, from which a new session carries on the open episode and which the
+  model can search, with the files the owner keeps and a free-disk-space
+  floor;
 - interactive approval for tools with filesystem, shell, subprocess, or
   network side effects;
 - planned restarts into a newly installed release, with a binary rollback;
@@ -98,7 +99,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.7` and exact workspace dependency pins.
+`0.3.8` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -163,7 +164,7 @@ What lives where in the largest crates:
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
 | | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
-| | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state (a `Store` generic over the account's state type), what the daemon shares with running bridges, chat media, and logging the owner's direct chat |
+| | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state (a `Store` generic over the account's state type), what the daemon shares with running bridges, chat media, and logging the owner's direct chat and its threads |
 | | `mail_chat.rs` | A mail chat's fixed replies to its owner (`mail status`, `mail help`) |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
 | | `wechat/` | WeChat login, polling `getupdates`, and sending (`mod.rs`); iLink requests (`ilink.rs`); credentials (`credentials.rs`); CDN files, AES-encrypted both ways (`cdn.rs`) |
@@ -204,7 +205,10 @@ Feishu's acknowledges a batch when the bridge asks for the next one, which it
 does only after the batch's claims and checkpoint are durable. The shared
 bridge does the rest for every channel. It speaks the versioned protocol over
 the daemon socket, using one long-lived session per remote sender (and per
-group and sender in group chats). An account answers only its authenticated
+group and sender in group chats), and one per thread within either when the
+platform has threads, as Feishu does. A thread keeps its chat's authority, is
+answered inside the thread, and counts as its direct chat's for the hub. An
+account answers only its authenticated
 owner unless its `senders = "anyone"` setting opens it to every sender. Sessions
 are tool-free unless the account's `remote_tools = "owner"` setting grants the
 authenticated owner's direct chats full, auto-approved tools.
@@ -335,7 +339,8 @@ when SCV delegated the flow.
    fails it (`question_undelivered`), and text whose question no longer
    waits is dropped unsent.
 4. The bridge's `classify` returns `Verdict::Answer` for the owner's explicit
-   yes or no in that direct chat, sent (by the platform's message time,
+   yes or no in that direct chat itself, not a thread in it, sent (by the
+   platform's message time,
    `Message::sent_ms`) no earlier than the question's delivery. The bridge
    takes the question from the hub, stores its acknowledgement as the
    message's reply, and only then hands the answer over; no turn starts.

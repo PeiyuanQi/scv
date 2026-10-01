@@ -1911,6 +1911,8 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
                 // As 0.3.0 saved it, with the agent in the tool's name.
                 jobs: vec![crate::state::RunningJob {
                     to_user_id: "sender".into(),
+                    key: String::new(),
+                    reply_to: String::new(),
                     job: "job-2".into(),
                     tool: "agent_claude".into(),
                     agent: String::new(),

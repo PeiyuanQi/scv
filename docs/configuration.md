@@ -54,7 +54,8 @@ six places:
 ├── agents/<name>/     private homes of the delegated agents (claude, codex,
 │                      grok, dsh, pi, scv), with their own sign-ins
 ├── skills/            your SCV skills
-├── history/           the chat log of each account owner's direct chat (0700)
+├── history/           the chat log of each account owner's direct chat, and of
+│                      each Feishu thread in it (0700)
 │   └── <channel>/<account>/<conversation>/
 │       ├── <year>/<Monday>_<Sunday>/<start>.jsonl   one file per episode
 │       └── files/     files the owner kept, unless [history] archive_dir

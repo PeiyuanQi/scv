@@ -155,6 +155,8 @@ fn a_running_job_names_its_agent_and_0_3_0_state_still_reads() {
 
     let job = RunningJob {
         to_user_id: "u".into(),
+        key: String::new(),
+        reply_to: String::new(),
         job: "job-2".into(),
         tool: "agent".into(),
         agent: "claude".into(),

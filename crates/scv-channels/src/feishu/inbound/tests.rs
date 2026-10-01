@@ -314,6 +314,7 @@ fn checkpoint_keeps_the_newest_time_per_chat_within_bounds() {
         checkpoint.observe(&Received {
             inbound: Inbound::Ignored { id: "m".into() },
             chat_id: format!("oc_{index}"),
+            thread_id: None,
             group: false,
             created_ms: 1000 + index as u64,
         });
@@ -327,6 +328,7 @@ fn checkpoint_keeps_the_newest_time_per_chat_within_bounds() {
     checkpoint.observe(&Received {
         inbound: Inbound::Ignored { id: "m".into() },
         chat_id: "oc_10".into(),
+        thread_id: None,
         group: false,
         created_ms: 1,
     });
@@ -364,4 +366,155 @@ fn a_voice_message_gets_the_voice_reply_because_feishu_sends_no_transcript() {
     };
     assert_eq!(sender.message.reply_to, "om_1");
     assert!(sender.owner_chat);
+}
+
+/// `payload`'s message with `fields` set, as Feishu marks replies and
+/// thread messages.
+fn with(payload: &[u8], fields: Value) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(payload).unwrap();
+    for (key, field) in fields.as_object().unwrap() {
+        value["event"]["message"][key] = field.clone();
+    }
+    value.to_string().into_bytes()
+}
+
+#[test]
+fn a_thread_message_belongs_to_its_thread_and_is_answered_inside_it() {
+    // Inside a thread both `root_id` and `parent_id` point at its root.
+    let payload = with(
+        &event("p2p", "text", json!({"text": "and then?"}), json!([])),
+        json!({"thread_id": "omt_1", "root_id": "om_root", "parent_id": "om_root"}),
+    );
+    let Some(Event::Message(received)) = parse_event(&payload, Some(BOT)) else {
+        panic!("expected a message")
+    };
+    assert_eq!(received.thread_id.as_deref(), Some("omt_1"));
+    let Inbound::Text(message) = received.inbound else {
+        panic!("expected text")
+    };
+    assert_eq!(message.reply_to, "thread:om_1");
+    // The root is what the thread is on, not a quote.
+    assert_eq!(message.reference, None);
+    assert!(!message.quoted);
+    let thread = message.thread.unwrap();
+    assert_eq!(thread.id, "omt_1");
+    assert_eq!(thread.reply_to, "thread:om_root");
+    let origin: Reference = serde_json::from_str(thread.origin.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        origin,
+        Reference {
+            root: Some("om_root".into()),
+            ..Reference::default()
+        }
+    );
+}
+
+#[test]
+fn a_reply_outside_a_thread_quotes_and_answers_in_the_chat() {
+    // An ordinary reply chain names its parent and root but no thread.
+    let payload = with(
+        &event("p2p", "text", json!({"text": "why?"}), json!([])),
+        json!({"root_id": "om_root", "parent_id": "om_parent"}),
+    );
+    let message = answer(parse_event(&payload, Some(BOT)));
+    assert_eq!(message.thread, None);
+    assert_eq!(message.reply_to, "om_1");
+    let reference: Reference = serde_json::from_str(message.reference.as_deref().unwrap()).unwrap();
+    assert_eq!(reference.parent.as_deref(), Some("om_parent"));
+    assert_eq!(reference.root, None);
+    assert!(message.quoted);
+}
+
+#[test]
+fn a_threads_root_starts_it_and_has_no_origin_to_show() {
+    // A topic group's post, or a root listed once its thread began.
+    let payload = with(
+        &event(
+            "group",
+            "text",
+            json!({"text": "@_user_1 topic"}),
+            json!([
+                {"key": "@_user_1", "id": {"open_id": BOT}, "name": "SCV"},
+            ]),
+        ),
+        json!({"thread_id": "omt_2"}),
+    );
+    let message = answer(parse_event(&payload, Some(BOT)));
+    let thread = message.thread.unwrap();
+    assert_eq!(thread.reply_to, "thread:om_1");
+    assert_eq!(thread.origin, None);
+    assert_eq!(message.group.as_deref(), Some("oc_1"));
+    // A thread message in a group that does not mention the bot is only
+    // seen, but still marks its thread for catch-up.
+    let unmentioned = with(
+        &event("group", "text", json!({"text": "hi"}), json!([])),
+        json!({"thread_id": "omt_2", "root_id": "om_root", "parent_id": "om_root"}),
+    );
+    let Some(Event::Message(received)) = parse_event(&unmentioned, Some(BOT)) else {
+        panic!("expected a message")
+    };
+    assert!(matches!(received.inbound, Inbound::Ignored { .. }));
+    assert_eq!(received.thread_id.as_deref(), Some("omt_2"));
+    // A thread ID Feishu could not have sent is not a thread.
+    let bad = with(
+        &event("p2p", "text", json!({"text": "hi"}), json!([])),
+        json!({"thread_id": "omt\u{0}x"}),
+    );
+    assert_eq!(answer(parse_event(&bad, Some(BOT))).thread, None);
+}
+
+#[test]
+fn history_items_keep_their_thread() {
+    let item = json!({
+        "message_id": "om_2", "chat_id": "oc_1", "msg_type": "text",
+        "create_time": "1790221416232", "thread_id": "omt_1",
+        "root_id": "om_root", "parent_id": "om_root",
+        "sender": {"id": "ou_user", "id_type": "open_id", "sender_type": "user"},
+        "body": {"content": json!({"text": "later"}).to_string()},
+    });
+    let received = parse_history(&item, false, Some(BOT)).unwrap();
+    assert_eq!(received.thread_id.as_deref(), Some("omt_1"));
+    let Inbound::Text(message) = received.inbound else {
+        panic!("expected text")
+    };
+    assert_eq!(message.reply_to, "thread:om_2");
+    assert_eq!(message.thread.unwrap().reply_to, "thread:om_root");
+}
+
+#[test]
+fn thread_messages_move_their_threads_mark_and_make_the_chat_known() {
+    let received = |chat: &str, thread: Option<&str>, created_ms: u64| Received {
+        inbound: Inbound::Ignored { id: "m".into() },
+        chat_id: chat.into(),
+        thread_id: thread.map(str::to_owned),
+        group: false,
+        created_ms,
+    };
+    let mut checkpoint = Checkpoint::parse("");
+    checkpoint.observe(&received("oc_1", None, 100));
+    checkpoint.observe(&received("oc_1", Some("omt_1"), 500));
+    // The chat's own mark moves only with its own messages.
+    assert_eq!(checkpoint.chats["oc_1"].last_ms, 100);
+    assert_eq!(checkpoint.threads["omt_1"].last_ms, 500);
+    checkpoint.observe(&received("oc_1", Some("omt_1"), 400));
+    assert_eq!(checkpoint.threads["omt_1"].last_ms, 500);
+    // A thread in a chat not seen before makes the chat known from then on.
+    checkpoint.observe(&received("oc_2", Some("omt_2"), 700));
+    assert_eq!(checkpoint.chats["oc_2"].last_ms, 700);
+    for index in 0..(MAX_THREADS + 3) {
+        checkpoint.observe(&received(
+            "oc_1",
+            Some(&format!("omt_x{index}")),
+            1000 + index as u64,
+        ));
+    }
+    assert_eq!(checkpoint.threads.len(), MAX_THREADS);
+    assert!(!checkpoint.threads.contains_key("omt_1"));
+    assert!(Checkpoint::parse(&checkpoint.to_json()) == checkpoint);
+    // A checkpoint from before threads reads as one without any, and one
+    // without threads writes none, as such releases wrote it.
+    let old = r#"{"chats":{"oc_1":{"group":false,"last_ms":5}}}"#;
+    let parsed = Checkpoint::parse(old);
+    assert!(parsed.threads.is_empty());
+    assert_eq!(parsed.to_json(), old);
 }

@@ -107,9 +107,10 @@ a prompt from mailing out keys by path; it is not a sandbox, and a model with
 
 Offered, with `chat_keep`, only in a tool-enabled session whose client named
 its chat log in `session.start`: an account owner's direct chat on WeChat or
-Feishu (see [Chat history](channels.md#chat-history)). It reads that one
-conversation's log and nothing else, so it is read-only and never asks for
-approval.
+Feishu, or a Feishu thread in it (see [Chat history](channels.md#chat-history)).
+It reads that one conversation's log and nothing else (a thread's session
+reads the thread, the direct chat's session the direct chat), so it is
+read-only and never asks for approval.
 
 - `search` finds messages containing every word of `query`, ignoring case, in
   their text, what they quoted, their files' names, or a voice message's

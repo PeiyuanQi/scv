@@ -14,7 +14,7 @@ fn the_host_offset_is_a_real_zone_offset() {
 }
 
 #[test]
-fn only_the_owners_direct_chat_is_logged() {
+fn only_the_owners_direct_chat_and_its_threads_are_logged() {
     let home = tempfile::tempdir().unwrap();
     let log = ChatLog::new(
         LogOptions {
@@ -26,24 +26,67 @@ fn only_the_owners_direct_chat_is_logged() {
         "owner@im.wechat",
     )
     .unwrap();
-    assert!(log.logs("owner@im.wechat"));
-    assert!(!log.logs("someone"));
-    assert!(!log.logs("group\0owner@im.wechat"));
-    let reference = log.reference();
+    let owner = "owner@im.wechat";
+    let thread = format!("{owner}\0thread\0omt_1");
+    assert!(log.conversation(owner, owner).is_some());
+    assert!(log.conversation(&thread, owner).is_some());
+    assert!(log.conversation("someone", "someone").is_none());
+    // The owner's messages in a group, and in a thread there, are not logged.
+    assert!(log.conversation("group\0owner@im.wechat", owner).is_none());
+    let group_thread = "group\0owner@im.wechat\0thread\0omt_2";
+    assert!(log.conversation(group_thread, owner).is_none());
+    // A sender is checked, not just the key: someone whose ID merely starts
+    // like the owner's thread is not the owner.
+    assert!(log.conversation(&thread, &thread).is_none());
+
+    let direct = log.conversation(owner, owner).unwrap();
+    let reference = direct.reference();
     assert_eq!(reference.channel, "wechat");
+    assert_eq!(reference.conversation, crate::conversation_dir(owner));
+    direct.system("SCV restarted.");
+    direct.end();
+    // A thread is a conversation of its own, in a directory of its own.
+    let threaded = log.conversation(&thread, owner).unwrap();
     assert_eq!(
-        reference.conversation,
-        crate::conversation_dir("owner@im.wechat")
+        threaded.reference().conversation,
+        crate::conversation_dir(&thread)
     );
-    log.system("SCV restarted.");
-    log.end();
+    threaded.system("In the thread.");
+    let episodes = |conversation: &str| {
+        let dir = home.path().join("wechat/default").join(conversation);
+        history::episodes(&dir, None, None, 5).unwrap().0
+    };
+    let direct_episodes = episodes(&reference.conversation);
+    assert_eq!(direct_episodes.len(), 1);
+    assert!(direct_episodes[0].ended);
+    let thread_episodes = episodes(&crate::conversation_dir(&thread));
+    assert_eq!(thread_episodes.len(), 1);
+    assert!(!thread_episodes[0].ended);
+}
+
+#[test]
+fn a_log_remembers_a_bounded_number_of_conversations() {
+    let home = tempfile::tempdir().unwrap();
+    let log = ChatLog::new(LogOptions::test(home.path(), "feishu"), "ou_owner").unwrap();
+    log.conversation("ou_owner", "ou_owner")
+        .unwrap()
+        .system("direct");
+    for index in 0..(MAX_REMEMBERED + 3) {
+        let key = format!("ou_owner\0thread\0omt_{index}");
+        log.conversation(&key, "ou_owner").unwrap().system("thread");
+    }
+    assert!(log.logs.lock().unwrap().len() <= MAX_REMEMBERED);
+    assert!(log.logs.lock().unwrap().contains_key("ou_owner"));
+    // A forgotten conversation finds its open episode again.
+    let first = "ou_owner\0thread\0omt_0";
+    log.conversation(first, "ou_owner").unwrap().system("again");
     let dir = home
         .path()
-        .join("wechat/default")
-        .join(&reference.conversation);
+        .join("history/feishu/default")
+        .join(crate::conversation_dir(first));
     let (episodes, _) = history::episodes(&dir, None, None, 5).unwrap();
     assert_eq!(episodes.len(), 1);
-    assert!(episodes[0].ended);
+    assert_eq!(episodes[0].messages, 2);
 }
 
 #[test]

@@ -1,7 +1,10 @@
 //! The bridge's side of the chat log (see [`scv_client::history`]): the
-//! account owner's direct chat is recorded, in the host's local time, and
-//! the owner's sessions name it so the server can reload its open episode.
+//! account owner's direct chat, and each thread in it, is recorded as a
+//! conversation of its own, in the host's local time, and the owner's
+//! sessions name their conversation's log so the server can reload its open
+//! episode.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -10,6 +13,10 @@ use scv_client::history::{self, Entry, FileRef, LocalTime, Log, Role};
 
 /// Logs are kept at most this many years.
 const KEEP_YEARS: i64 = 120;
+/// Conversations whose newest episode the log remembers at once. Past it,
+/// it forgets all but the direct chat's, and the others find theirs again
+/// on their next record.
+const MAX_REMEMBERED: usize = 64;
 
 /// Where an account's chat log lives and how its episodes are cut.
 #[derive(Debug, Clone)]
@@ -36,44 +43,72 @@ impl LogOptions {
     }
 }
 
-/// The owner's direct chat on one account.
+/// The owner's chats on one account: their direct chat and each thread in
+/// it.
 pub(crate) struct ChatLog {
     options: LogOptions,
     /// The owner's sender ID, which keys their direct chat.
     owner: String,
-    conversation: String,
-    log: Mutex<Log>,
+    /// The conversations recorded lately, by key, each knowing its newest
+    /// episode.
+    logs: Mutex<HashMap<String, Log>>,
 }
 
 impl ChatLog {
-    /// The log of `owner`'s direct chat; `None`, with a warning, when the
+    /// The log of `owner`'s chats; `None`, with a warning, when the
     /// account's name is too long to name the log in `session.start`.
     pub(crate) fn new(options: LogOptions, owner: &str) -> Option<Self> {
+        // Every conversation's directory is a digest of the same length, so
+        // the direct chat's stands for all of them.
         let conversation = crate::conversation_dir(owner);
         if history::conversation_path(options.channel, &options.account, &conversation).is_none() {
             tracing::warn!("the account's name is too long for a chat log; its chat is not logged");
             return None;
         }
-        let log = Log::new(options.root.join(&conversation), options.gap);
         Some(Self {
             options,
             owner: owner.to_owned(),
-            conversation,
-            log: Mutex::new(log),
+            logs: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Whether the conversation keyed `key` is the one recorded.
-    pub(crate) fn logs(&self, key: &str) -> bool {
-        key == self.owner
+    /// The conversation keyed `key`, with the sender `peer`, when it is one
+    /// recorded: the owner's direct chat or a thread in it. Groups, the
+    /// owner's own messages there included, and other senders are not.
+    pub(crate) fn conversation(&self, key: &str, peer: &str) -> Option<Logged<'_>> {
+        (peer == self.owner && crate::intake::chat_of(key) == self.owner).then(|| Logged {
+            log: self,
+            key: key.to_owned(),
+            dir: crate::conversation_dir(key),
+        })
     }
 
+    /// Remove years past the retention, in every conversation.
+    pub(crate) fn prune(&self) {
+        let (_, local) = local_now();
+        let removed = history::prune_years(&self.options.root, local.year() - KEEP_YEARS);
+        if removed > 0 {
+            tracing::info!(removed, "removed chat log years past their retention");
+        }
+    }
+}
+
+/// One recorded conversation: the owner's direct chat, or a thread in it.
+pub(crate) struct Logged<'a> {
+    log: &'a ChatLog,
+    key: String,
+    /// The directory it is kept in: a digest of `key`, which the media
+    /// directory shares, so sender and thread IDs never become paths.
+    dir: String,
+}
+
+impl Logged<'_> {
     /// The log as `session.start` names it.
     pub(crate) fn reference(&self) -> scv_protocol::ChatLog {
         scv_protocol::ChatLog {
-            channel: self.options.channel.to_owned(),
-            account: self.options.account.clone(),
-            conversation: self.conversation.clone(),
+            channel: self.log.options.channel.to_owned(),
+            account: self.log.options.account.clone(),
+            conversation: self.dir.clone(),
         }
     }
 
@@ -82,12 +117,7 @@ impl ChatLog {
     pub(crate) fn record(&self, mut entry: Entry) {
         let (at, local) = local_now();
         entry.at = at;
-        let result = self
-            .log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .append(entry, &local);
-        if let Err(error) = result {
+        if let Err(error) = self.with_log(|log| log.append(entry, &local)) {
             tracing::warn!(error = %error, "could not write to the chat log");
         }
     }
@@ -104,23 +134,20 @@ impl ChatLog {
     /// End the open episode (`/new`).
     pub(crate) fn end(&self) {
         let (at, local) = local_now();
-        let result = self
-            .log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .end(at, &local);
-        if let Err(error) = result {
+        if let Err(error) = self.with_log(|log| log.end(at, &local)) {
             tracing::warn!(error = %error, "could not end an episode of the chat log");
         }
     }
 
-    /// Remove years past the retention.
-    pub(crate) fn prune(&self) {
-        let (_, local) = local_now();
-        let removed = history::prune_years(&self.options.root, local.year() - KEEP_YEARS);
-        if removed > 0 {
-            tracing::info!(removed, "removed chat log years past their retention");
+    fn with_log<T>(&self, write: impl FnOnce(&mut Log) -> T) -> T {
+        let mut logs = self.log.logs.lock().unwrap_or_else(PoisonError::into_inner);
+        if logs.len() >= MAX_REMEMBERED && !logs.contains_key(&self.key) {
+            logs.retain(|key, _| *key == self.log.owner);
         }
+        let log = logs.entry(self.key.clone()).or_insert_with(|| {
+            Log::new(self.log.options.root.join(&self.dir), self.log.options.gap)
+        });
+        write(log)
     }
 }
 

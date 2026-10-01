@@ -1,8 +1,14 @@
 //! Turning Feishu messages, from socket events or chat history, into the
 //! bridge's inbound messages, and the checkpoint that drives catch-up.
+//!
+//! A message Feishu places in a thread (话题) names it in `thread_id`, and
+//! becomes a message of that thread: its own conversation, answered inside
+//! the thread with `reply_in_thread`. Inside a thread `parent_id` and
+//! `root_id` both point at the thread's root, which is what the thread is
+//! on, not a quote.
 
-use crate::feishu::api::Resource;
-use crate::{Inbound, Media, MediaKind, Message};
+use crate::feishu::api::{Resource, thread_reply};
+use crate::{Inbound, Media, MediaKind, Message, Thread};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -13,11 +19,15 @@ const MAX_CARD_CHARS: usize = 2000;
 const MAX_ID_BYTES: usize = 256;
 /// Chats the checkpoint remembers for catch-up, most recently active first.
 pub(crate) const MAX_CHATS: usize = 64;
+/// Threads the checkpoint remembers for catch-up, likewise.
+pub(crate) const MAX_THREADS: usize = 64;
 
 /// A received message and where it belongs in the checkpoint.
 pub(crate) struct Received {
     pub(crate) inbound: Inbound,
     pub(crate) chat_id: String,
+    /// The thread it was sent in, if any.
+    pub(crate) thread_id: Option<String>,
     pub(crate) group: bool,
     /// Creation time in Unix milliseconds.
     pub(crate) created_ms: u64,
@@ -155,9 +165,11 @@ fn received(
         .and_then(|time| time.parse().ok())
         .unwrap_or(0);
     let group = chat_type != Some("p2p");
+    let thread_id = str_field(message, "thread_id").filter(|thread| valid_id(thread));
     let ignored = || Received {
         inbound: Inbound::Ignored { id: id.to_owned() },
         chat_id: chat_id.to_owned(),
+        thread_id: thread_id.map(str::to_owned),
         group,
         created_ms,
     };
@@ -176,11 +188,33 @@ fn received(
         return Some(ignored());
     };
     let text = replace_mentions(&parsed.text, mentions, bot_open_id);
-    let parent = str_field(message, "parent_id").filter(|parent| valid_id(parent));
+    // The root of the message's thread, unless it is the root itself (as a
+    // topic group's posts are, and a root listed after its thread began).
+    let root = thread_id
+        .and(str_field(message, "root_id"))
+        .filter(|root| valid_id(root) && *root != id);
+    // Inside a thread the parent is the root, which the thread is on; only
+    // a parent other than that would be a quote.
+    let parent = str_field(message, "parent_id")
+        .filter(|parent| valid_id(parent))
+        .filter(|parent| thread_id.is_none() || Some(*parent) != root);
+    let thread = thread_id.map(|thread_id| Thread {
+        id: thread_id.to_owned(),
+        // Posting into the thread answers its root inside it.
+        reply_to: thread_reply(root.unwrap_or(id)),
+        origin: root.map(|root| {
+            serde_json::to_string(&Reference {
+                root: Some(root.to_owned()),
+                ..Reference::default()
+            })
+            .unwrap_or_default()
+        }),
+    });
     let reference = (parent.is_some() || parsed.forward).then(|| {
         serde_json::to_string(&Reference {
             parent: parent.map(str::to_owned),
             forward: parsed.forward,
+            root: None,
         })
         .unwrap_or_default()
     });
@@ -192,27 +226,37 @@ fn received(
             id: id.to_owned(),
             sender: sender.to_owned(),
             text: text.trim().to_owned(),
-            reply_to: id.to_owned(),
+            // A message in a thread is answered inside it.
+            reply_to: if thread.is_some() {
+                thread_reply(id)
+            } else {
+                id.to_owned()
+            },
             group: group.then(|| chat_id.to_owned()),
             media: parsed.media,
             quoted: reference.is_some(),
             reference,
             sent_ms: (created_ms > 0).then_some(created_ms),
+            thread,
         }),
         chat_id: chat_id.to_owned(),
+        thread_id: thread_id.map(str::to_owned),
         group,
         created_ms,
     })
 }
 
 /// What a message refers to, resolved before its turn: the message it
-/// quotes, and for a forwarded bundle the messages inside it.
+/// quotes, for a forwarded bundle the messages inside it, and for a
+/// thread's origin the root the thread is on.
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Reference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) forward: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) root: Option<String>,
 }
 
 /// A message's content as the bridge takes it: text, including markers for
@@ -438,12 +482,18 @@ fn post(id: &str, content: &Value) -> (String, Vec<Media>) {
     (lines.join("\n"), media)
 }
 
-/// What the transport has received, per chat: the newest creation time it
-/// handed to the bridge. Catch-up lists each chat's history from there.
+/// What the transport has received, per chat and per thread: the newest
+/// creation time it handed to the bridge. Catch-up lists each one's history
+/// from there. A chat's history leaves out the replies in its threads,
+/// which is why threads have marks of their own.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Checkpoint {
+    /// By chat, for the messages in the chat itself.
     #[serde(default)]
     pub(crate) chats: BTreeMap<String, ChatMark>,
+    /// By thread. Releases before threads ignore it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) threads: BTreeMap<String, ChatMark>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,29 +515,50 @@ impl Checkpoint {
         })
     }
 
+    /// Note that `received` was handed to the bridge. A thread's message
+    /// moves its thread's mark, and makes its chat known from then on
+    /// without moving the chat's mark, which the chat's own messages move.
     pub(crate) fn observe(&mut self, received: &Received) {
-        let mark = self
-            .chats
-            .entry(received.chat_id.clone())
-            .or_insert(ChatMark {
-                group: received.group,
-                last_ms: 0,
-            });
-        mark.last_ms = mark.last_ms.max(received.created_ms);
-        if self.chats.len() > MAX_CHATS {
-            let oldest = self
-                .chats
-                .iter()
-                .min_by_key(|(_, mark)| mark.last_ms)
-                .map(|(chat, _)| chat.clone());
-            if let Some(oldest) = oldest {
-                self.chats.remove(&oldest);
+        let fresh = ChatMark {
+            group: received.group,
+            last_ms: received.created_ms,
+        };
+        match &received.thread_id {
+            Some(thread) => {
+                self.chats.entry(received.chat_id.clone()).or_insert(fresh);
+                advance(&mut self.threads, thread, fresh, MAX_THREADS);
             }
+            None => advance(&mut self.chats, &received.chat_id, fresh, MAX_CHATS),
         }
+        bound(&mut self.chats, MAX_CHATS);
     }
 
     pub(crate) fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// Move `key`'s mark in `marks` up to `seen`, adding it when new, and keep
+/// at most `max` marks.
+fn advance(marks: &mut BTreeMap<String, ChatMark>, key: &str, seen: ChatMark, max: usize) {
+    let mark = marks
+        .entry(key.to_owned())
+        .or_insert(ChatMark { last_ms: 0, ..seen });
+    mark.last_ms = mark.last_ms.max(seen.last_ms);
+    bound(marks, max);
+}
+
+/// Forget the least recently active marks beyond `max`.
+fn bound(marks: &mut BTreeMap<String, ChatMark>, max: usize) {
+    while marks.len() > max {
+        let oldest = marks
+            .iter()
+            .min_by_key(|(_, mark)| mark.last_ms)
+            .map(|(key, _)| key.clone());
+        match oldest {
+            Some(oldest) => marks.remove(&oldest),
+            None => break,
+        };
     }
 }
 

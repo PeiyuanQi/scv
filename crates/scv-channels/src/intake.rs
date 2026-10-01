@@ -46,12 +46,39 @@ pub(crate) struct Intake<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Sender<'m> {
     pub(crate) message: &'m Message,
-    /// Its conversation: the sender's direct chat, or the sender within a
-    /// group.
+    /// Its conversation ([`conversation_of`]).
     pub(crate) key: String,
-    /// The account owner wrote in a direct chat, with or without remote
-    /// tools.
+    /// The account owner wrote in a direct chat, or a thread in it, with or
+    /// without remote tools.
     pub(crate) owner_chat: bool,
+}
+
+/// Separates a thread from its chat in a conversation key. IDs that
+/// transports accept for threads hold no control character, so it cannot
+/// occur inside one.
+const THREAD_MARK: &str = "\0thread\0";
+
+/// The conversation `message` belongs to: the sender's direct chat (its key
+/// is the sender's ID), or the sender within a group, and within either, a
+/// thread as a conversation of its own.
+pub(crate) fn conversation_of(message: &Message) -> String {
+    let sender = &message.sender;
+    let chat = message
+        .group
+        .as_ref()
+        .map_or_else(|| sender.clone(), |group| format!("{group}\0{sender}"));
+    match &message.thread {
+        Some(thread) => format!("{chat}{THREAD_MARK}{}", thread.id),
+        None => chat,
+    }
+}
+
+/// The chat a conversation is in: `key` itself, or for a thread, the key of
+/// its chat. A direct chat's key is its partner's ID, so with a sender that
+/// is known to be `peer`, `chat_of(key) == peer` means the direct chat with
+/// `peer` or a thread in it.
+pub(crate) fn chat_of(key: &str) -> &str {
+    key.split_once(THREAD_MARK).map_or(key, |(chat, _)| chat)
 }
 
 /// What to do with one received message.
@@ -118,10 +145,9 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         return Verdict::Stranger;
     }
     let direct = message.group.is_none();
-    let key = message
-        .group
-        .as_ref()
-        .map_or_else(|| sender.to_owned(), |group| format!("{group}\0{sender}"));
+    let key = conversation_of(message);
+    // A thread inherits its chat's authority: the owner's tools in a thread
+    // of their direct chat, none in a group's.
     let tools = direct && tool_owner.is_some_and(|tool_owner| tool_owner.user_id == sender);
     let limit = match tool_owner {
         Some(tool_owner) if tools => tool_owner.turn_timeout,
@@ -132,12 +158,14 @@ pub(crate) fn classify<'m>(inbound: &'m Inbound, intake: &Intake<'_>) -> Verdict
         key,
         owner_chat: direct && owner == Some(sender),
     };
-    // Only the owner answers, in their direct chat and in plain words, with
-    // a message the platform says was sent after the question reached them:
+    // Only the owner answers, in their direct chat itself (where the
+    // question was sent, not a thread in it) and in plain words, with a
+    // message the platform says was sent after the question reached them:
     // an earlier one, such as a catch-up replay, was meant for something
     // else. Any other message runs as usual and the question keeps waiting.
     if let Some(asked_ms) = question
         && from.owner_chat
+        && message.thread.is_none()
         && message.media.is_empty()
         && message.sent_ms.is_some_and(|sent_ms| sent_ms >= asked_ms)
         && let Some(yes) = answer(&message.text)

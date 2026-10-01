@@ -386,6 +386,7 @@ async fn catch_up_then_socket_events_acknowledged_only_after_the_next_receive() 
             },
         )]
         .into(),
+        ..Checkpoint::default()
     };
     // One message arrived while SCV was away; an older one is already seen.
     fake.script(
@@ -474,6 +475,7 @@ async fn a_dropped_socket_reconnects_and_catches_up_again() {
             },
         )]
         .into(),
+        ..Checkpoint::default()
     }
     .to_json();
     transport.receive(&checkpoint).await.unwrap();
@@ -630,6 +632,7 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
             },
         )]
         .into(),
+        ..Checkpoint::default()
     }
     .to_json();
     store.save_state("default", &saved).unwrap();
@@ -720,6 +723,7 @@ async fn full_bridge_answers_the_owners_voice_message_with_the_voice_reply() {
             },
         )]
         .into(),
+        ..Checkpoint::default()
     }
     .to_json();
     store.save_state("default", &saved).unwrap();
@@ -822,6 +826,7 @@ async fn full_bridge_never_takes_a_caught_up_yes_from_before_the_question_as_its
             },
         )]
         .into(),
+        ..Checkpoint::default()
     }
     .to_json();
     store.save_state("default", &saved).unwrap();
@@ -1272,4 +1277,254 @@ async fn files_upload_then_go_out_as_image_or_file_messages() {
         transport.send_file(&file, &|_| {}).await.unwrap(),
         SendOutcome::Rejected
     );
+}
+
+/// A history item in `thread`, whose root is `root` unless it is the root.
+fn thread_item(id: &str, text: &str, created_ms: u64, thread: &str, root: Option<&str>) -> Value {
+    let mut item = history_item(id, text, created_ms);
+    item["thread_id"] = json!(thread);
+    if let Some(root) = root {
+        item["root_id"] = json!(root);
+        item["parent_id"] = json!(root);
+    }
+    item
+}
+
+#[tokio::test]
+async fn replies_in_a_thread_stay_in_it_and_go_to_the_chat_where_threads_are_refused() {
+    let mut fake = Fake::start().await;
+    let transport = fake.transport();
+    let part = |reply_to: &'static str, client_id: &'static str| Outbound {
+        to: "ou_owner",
+        reply_to,
+        part: 0,
+        text: "in the thread",
+        client_id,
+    };
+    let sent = transport
+        .send(&part("thread:om_1", "uuid-1"), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(sent, SendOutcome::Delivered);
+    let reply = fake.request("/open-apis/im/v1/messages/om_1/reply").await;
+    assert_eq!(reply.body["reply_in_thread"], true);
+    assert_eq!(reply.body["uuid"], "uuid-1");
+    // A reply in the chat says nothing about threads.
+    transport
+        .send(&part("om_2", "uuid-2"), &|_| {})
+        .await
+        .unwrap();
+    let plain = fake.request("/open-apis/im/v1/messages/om_2/reply").await;
+    assert!(
+        plain.body.get("reply_in_thread").is_none(),
+        "{}",
+        plain.body
+    );
+    // Where the chat takes no reply in a thread, the same part replies in
+    // the chat, with the same uuid.
+    fake.script(
+        "/open-apis/im/v1/messages/om_3/reply",
+        400,
+        json!({"code": 230071, "msg": "not supported"}),
+    );
+    let sent = transport
+        .send(&part("thread:om_3", "uuid-3"), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(sent, SendOutcome::Delivered);
+    let first = fake.request("/open-apis/im/v1/messages/om_3/reply").await;
+    let second = fake.request("/open-apis/im/v1/messages/om_3/reply").await;
+    assert_eq!(first.body["reply_in_thread"], true);
+    assert!(second.body.get("reply_in_thread").is_none());
+    assert_eq!(second.body["uuid"], "uuid-3");
+    // Any other refusal stays final.
+    fake.script(
+        "/open-apis/im/v1/messages/om_4/reply",
+        400,
+        json!({"code": 230019, "msg": "the topic does not exist"}),
+    );
+    let sent = transport
+        .send(&part("thread:om_4", "uuid-4"), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(sent, SendOutcome::Rejected);
+}
+
+#[tokio::test]
+async fn catch_up_lists_known_and_new_threads_and_hands_each_message_over_once() {
+    let mut fake = Fake::start().await;
+    let transport = fake.transport();
+    let last = now_ms() - 60_000;
+    let mark = |last_ms| inbound::ChatMark {
+        group: false,
+        last_ms,
+    };
+    let checkpoint = Checkpoint {
+        chats: [("oc_dm".to_owned(), mark(last))].into(),
+        threads: [("omt_known".to_owned(), mark(last))].into(),
+    };
+    // The chat lists its own messages and the root of a thread that began
+    // while SCV was away; replies in threads are not in it.
+    fake.script(
+        "/open-apis/im/v1/messages?container_id_type=chat",
+        200,
+        json!({"code": 0, "data": {"has_more": false, "items": [
+            thread_item("om_root", "new topic", last + 1_000, "omt_new", None),
+            history_item("om_main", "in the chat", last + 2_000),
+        ]}}),
+    );
+    // Threads list newest first; listing stops at what was handed over.
+    fake.script(
+        "/open-apis/im/v1/messages?container_id_type=thread&container_id=omt_new",
+        200,
+        json!({"code": 0, "data": {"has_more": false, "items": [
+            thread_item("om_n2", "about the topic", last + 4_000, "omt_new", Some("om_root")),
+            thread_item("om_root", "new topic", last + 1_000, "omt_new", None),
+        ]}}),
+    );
+    fake.script(
+        "/open-apis/im/v1/messages?container_id_type=thread&container_id=omt_known",
+        200,
+        json!({"code": 0, "data": {"has_more": true, "page_token": "p2", "items": [
+            thread_item("om_k3", "third", last + 3_000, "omt_known", Some("om_k")),
+            thread_item("om_k2", "second", last + 1_500, "omt_known", Some("om_k")),
+            thread_item("om_k1", "handled", last - 1, "omt_known", Some("om_k")),
+        ]}}),
+    );
+    let batch = transport.receive(&checkpoint.to_json()).await.unwrap();
+    let ids: Vec<_> = texts(&batch).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(ids, ["om_root", "om_main", "om_n2", "om_k2", "om_k3"]);
+    let Inbound::Text(root) = &batch.messages[0] else {
+        panic!("expected text")
+    };
+    assert_eq!(root.thread.as_ref().unwrap().id, "omt_new");
+    let saved = Checkpoint::parse(batch.checkpoint.as_deref().unwrap());
+    assert_eq!(saved.chats["oc_dm"].last_ms, last + 2_000);
+    assert_eq!(saved.threads["omt_new"].last_ms, last + 4_000);
+    assert_eq!(saved.threads["omt_known"].last_ms, last + 3_000);
+
+    let chat = fake.request("/open-apis/im/v1/messages?").await;
+    assert!(
+        chat.route.contains("container_id_type=chat"),
+        "{}",
+        chat.route
+    );
+    let new = fake.request("/open-apis/im/v1/messages?").await;
+    assert!(new.route.contains("container_id=omt_new"), "{}", new.route);
+    assert!(new.route.contains("sort_type=ByCreateTimeDesc"));
+    assert!(!new.route.contains("start_time"), "threads list by no time");
+    let known = fake.request("/open-apis/im/v1/messages?").await;
+    assert!(known.route.contains("container_id=omt_known"));
+    assert!(!known.route.contains("page_token"));
+    // The page reached what was handed over, so its next page is not asked.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            fake.request("/open-apis/im/v1/messages?")
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_threads_origin_resolves_to_its_root() {
+    let fake = Fake::start().await;
+    let transport = fake.transport();
+    fake.script(
+        "/open-apis/im/v1/messages/om_root",
+        200,
+        json!({"code": 0, "data": {"items": [
+            {"message_id": "om_root", "msg_type": "text", "thread_id": "omt_1",
+             "body": {"content": json!({"text": "Here is the plan."}).to_string()}},
+        ]}}),
+    );
+    let origin = transport
+        .resolve("om_1", r#"{"root":"om_root"}"#)
+        .await
+        .unwrap();
+    assert_eq!(origin.context, "[Thread on: Here is the plan.]");
+}
+
+#[tokio::test]
+async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
+    let mut fake = Fake::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = credentials::Store::new(
+        &scv_client::Layout::new(directory.path()),
+        crate::feishu::CHANNEL,
+    );
+    store.save_account("default", &account()).unwrap();
+    let last = now_ms() - 60_000;
+    let mut saved = store.load_state("default").unwrap();
+    let mark = inbound::ChatMark {
+        group: false,
+        last_ms: last,
+    };
+    saved.cursor = Checkpoint {
+        chats: [("oc_dm".to_owned(), mark)].into(),
+        threads: [("omt_1".to_owned(), mark)].into(),
+    }
+    .to_json();
+    store.save_state("default", &saved).unwrap();
+    fake.script(
+        "/open-apis/im/v1/messages?container_id_type=thread",
+        200,
+        json!({"code": 0, "data": {"has_more": false, "items": [
+            thread_item("om_t", "status?", last + 1_000, "omt_1", Some("om_root")),
+        ]}}),
+    );
+    let transport = fake.transport();
+    // No daemon listens here, so the turn fails and the bridge answers with
+    // its failure reply, inside the thread.
+    let socket = directory.path().join("missing.sock");
+    let media = crate::MediaOptions::new(
+        &scv_client::Layout::new(directory.path()),
+        "feishu",
+        "default",
+        crate::media::MediaSettings::default(),
+    );
+    let detached = crate::hub::Link::detached();
+    let run = crate::serve(
+        &transport,
+        crate::BridgeRun {
+            account: "default",
+            workspace: directory.path(),
+            socket: &socket,
+            owner: None,
+            tool_owner: None,
+            senders: crate::state::Senders::Anyone,
+            purpose: crate::state::Purpose::Chat,
+            media,
+            log: crate::chatlog::LogOptions::test(directory.path(), "feishu"),
+            link: &detached,
+            report: &|_| {},
+        },
+        &store,
+        |credentials| Ok(credentials == &account()),
+    );
+    let peer = async {
+        let reply = fake.request("/open-apis/im/v1/messages/om_t/reply").await;
+        assert_eq!(reply.body["reply_in_thread"], true);
+        let content: Value = serde_json::from_str(reply.body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["text"], crate::FAILURE_REPLY);
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let state = store.load_state("default").unwrap();
+                if state.pending.is_empty() && state.seen.iter().any(|id| id == "om_t") {
+                    let checkpoint = Checkpoint::parse(&state.cursor);
+                    assert_eq!(checkpoint.threads["omt_1"].last_ms, last + 1_000);
+                    assert_eq!(checkpoint.chats["oc_dm"].last_ms, last);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    };
+    tokio::select! {
+        result = run => panic!("the bridge stopped: {result:?}"),
+        () = peer => {}
+    }
 }
