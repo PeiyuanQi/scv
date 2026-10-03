@@ -14,6 +14,10 @@ use crate::{
 /// A `type` this client does not know parses as [`ServerEvent::Unknown`], so
 /// a newer server can add events without breaking older clients; a client
 /// ignores them.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "preserve the established wire event shape without boxing every status frame"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ServerEvent {

@@ -488,6 +488,10 @@ impl Connection {
                 self.reject(&request_id, ErrorCode::ConfirmError, &message)
                     .await?;
             }
+            Err(ControlFailure::Project(message)) => {
+                self.reject(&request_id, ErrorCode::ComponentError, &message)
+                    .await?;
+            }
             Err(ControlFailure::Component) => {
                 self.reject(
                     &request_id,

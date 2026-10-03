@@ -26,7 +26,9 @@ pub use client::{ChatLog, ClientMessage};
 pub use daemon::{
     ComponentHealth, ComponentState, ConfirmInfo, ConfirmState, DEFAULT_CONFIRM_SECONDS,
     DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary, MAX_CONFIRM_SECONDS,
-    MailCounts, Purpose, RemoteTools, RestartInfo, Senders,
+    MailCounts, ProjectEvent, ProjectPhase, ProjectReport, ProjectResponse, ProjectRun,
+    ProjectRunStatus, ProjectStatus, ProjectSummary, ProjectTask, ProjectTaskStatus, Purpose,
+    RemoteTools, RestartInfo, Senders,
 };
 pub use error::{ErrorCode, ToolErrorKind};
 pub use frame::{Frame, FrameDecoder, Overflow, Step, encode_frame, trim_line};

@@ -39,7 +39,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.9"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.10"}}
 ```
 
 ### `daemon.control`
@@ -59,8 +59,11 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 {"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
-{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.9 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.10 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
 {"type":"daemon.control","request_id":"d11","command":{"action":"confirm_status","id":"5f0c9a1e2b3d"}}
+{"type":"daemon.control","request_id":"p1","command":{"action":"project_create","name":"release","workspace":"/workspace/project"}}
+{"type":"daemon.control","request_id":"p2","command":{"action":"project_tasks","project":"release"}}
+{"type":"daemon.control","request_id":"p3","command":{"action":"project_heartbeat","project":"release","task":"…","run":"…"}}
 ```
 
 `status` reads live daemon health. `reload` reconciles saved accounts and
@@ -284,16 +287,16 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.9"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.10"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.9","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.9","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
-{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.9","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.10","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.10","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.10","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -340,6 +343,20 @@ validated `getupdates` response; for Feishu, a connected long connection that
 finished its catch-up or a wait for events without error. The state
 fingerprint, bearer token, app secret, and delivery state are private storage
 fields, not health fields.
+
+Project actions are opt-in and additive to ordinary delegation actions.
+`project_create` requires an existing absolute workspace and creates an
+owner-authorized ledger. `project_task_add` records dependencies and a retry
+budget; `project_run_start`, `project_run_progress`, `project_run_finish`, and
+`project_heartbeat` record supervised evidence. `project_status`,
+`project_tasks`, `project_events`, and `project_report` read the reducer without
+contacting a model. Project responses are returned in the additive `project`
+field of `daemon.status`. The daemon's `project:orchestrator` component marks
+running work stale after five minutes without a heartbeat. It does not infer
+completion from prose and does not replace the existing one-off delegation
+flow. `project_events` returns the retained event tail; after a private
+snapshot compacts older events, `compacted_before` names the highest omitted
+sequence and the report remains the authoritative current state.
 
 ### Turn and assistant output
 

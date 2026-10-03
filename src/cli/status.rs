@@ -32,6 +32,7 @@ pub(crate) async fn show_status(
     let matching: Vec<_> = status
         .components
         .iter()
+        .filter(|h| h.channel != "project")
         .filter(|h| channel.is_none_or(|name| h.channel == name))
         .filter(|h| account.is_none_or(|name| h.account == name))
         .collect();

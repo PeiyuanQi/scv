@@ -111,7 +111,7 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
         instance.clone(),
         std::env::current_dir()?,
         Arc::clone(&hub),
-    )));
+    )?));
     let registry = instance_delegations(layout);
     // Descendants a delegated agent leaves behind reparent to the daemon, not init.
     if !delegations::become_child_subreaper() {

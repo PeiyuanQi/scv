@@ -159,8 +159,21 @@ for selection rules and limits.
 | `scv channels login`, `run`, `stop`, `status`, `logout` | Manage chat accounts (`wechat`, `feishu`, `lark`) and read-only mailboxes (`email`) |
 | `scv agents login`, `status`, `check`, `ps`, `kill` | Sign agents in, check them, and list or stop their runs |
 | `scv confirm "…"` | Ask the owner yes or no in chat; exits 0 only on yes |
+| `scv project create`, `status`, `tasks`, `report` | Opt into a durable project ledger and inspect its evidence |
+| `scv project add-task`, `update-task`, `run-start`, `run-progress`, `run-finish`, `heartbeat`, `events` | Drive or inspect project tasks and supervised run heartbeats |
 | `scv config show` | Every path and setting in effect, secrets hidden |
 | `scv update` | Install the latest release and restart the daemon |
+
+Project orchestration is optional and independent of one-off `agent` calls.
+Create a project explicitly with an existing absolute workspace; the daemon
+then persists an append-only event log under `$SCV_HOME/state/projects/` and
+starts its supervised project orchestrator. Add tasks with dependencies, record
+the agent run IDs and heartbeats, and use `scv project report` to inspect only
+observed state. The daemon compacts the event tail into a private snapshot as
+it grows; `project events` reports when older sequences have been compacted.
+Missing heartbeats make a run and its task stale after five minutes; the
+orchestrator never infers progress from agent prose or starts an agent without
+an explicit run command.
 
 ## What it looks like
 

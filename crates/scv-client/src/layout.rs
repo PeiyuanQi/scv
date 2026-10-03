@@ -150,6 +150,11 @@ impl Layout {
         self.home.join("state")
     }
 
+    /// The durable project ledger event log and reducer state directory.
+    pub fn projects(&self) -> PathBuf {
+        self.state().join("projects")
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.state().join("server.sock")
     }

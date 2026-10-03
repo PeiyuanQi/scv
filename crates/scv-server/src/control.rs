@@ -19,6 +19,8 @@ pub(crate) enum ControlFailure {
     /// A question the daemon could not ask, or does not know; the message is
     /// safe to show.
     Confirm(String),
+    /// A project ledger request the operator can correct.
+    Project(String),
     Component,
 }
 
@@ -87,12 +89,19 @@ pub(crate) async fn daemon_control(
         }
         _ => None,
     };
+    let project_command = is_project_command(&command);
     let mut status = components
         .lock()
         .await
         .control(command)
         .await
-        .map_err(|_| ControlFailure::Component)?;
+        .map_err(|error| {
+            if project_command {
+                ControlFailure::Project(format!("{error:#}"))
+            } else {
+                ControlFailure::Component
+            }
+        })?;
     let running = registry.list(false);
     // Idle as `scv agents ps` shows it: a live agent between turns, unless
     // a nested SCV's own background jobs keep it at work.
@@ -135,6 +144,23 @@ pub(crate) async fn daemon_control(
     status.restart = restarter.and_then(|restarter| restarter.info());
     status.confirm = confirm;
     Ok(status)
+}
+
+fn is_project_command(command: &DaemonCommand) -> bool {
+    matches!(
+        command,
+        DaemonCommand::ProjectCreate { .. }
+            | DaemonCommand::ProjectStatus { .. }
+            | DaemonCommand::ProjectEvents { .. }
+            | DaemonCommand::ProjectTasks { .. }
+            | DaemonCommand::ProjectReport { .. }
+            | DaemonCommand::ProjectTaskAdd { .. }
+            | DaemonCommand::ProjectTaskUpdate { .. }
+            | DaemonCommand::ProjectRunStart { .. }
+            | DaemonCommand::ProjectRunProgress { .. }
+            | DaemonCommand::ProjectRunFinish { .. }
+            | DaemonCommand::ProjectHeartbeat { .. }
+    )
 }
 
 const ONLY_THE_DAEMON_ASKS: &str = "only the SCV daemon can ask the owner";

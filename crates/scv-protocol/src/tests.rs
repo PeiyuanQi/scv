@@ -170,6 +170,43 @@ fn restart_requests_and_scheduled_restarts_round_trip() {
 }
 
 #[test]
+fn project_commands_and_responses_round_trip() {
+    let command = DaemonCommand::ProjectTaskAdd {
+        project: "release".into(),
+        title: "verify".into(),
+        depends_on: vec!["build".into()],
+        max_retries: 2,
+    };
+    let wire = serde_json::to_string(&command).unwrap();
+    assert!(wire.contains(r#""action":"project_task_add""#), "{wire}");
+    assert_eq!(
+        serde_json::from_str::<DaemonCommand>(&wire).unwrap(),
+        command
+    );
+
+    let response = ProjectResponse::RunStarted {
+        project: ProjectSummary {
+            id: "p".into(),
+            name: "release".into(),
+            workspace: "/workspace/project".into(),
+            phase: ProjectPhase::Implementation,
+            status: ProjectStatus::Active,
+            created_unix_seconds: 1,
+            updated_unix_seconds: 2,
+            task_count: 1,
+            completed_tasks: 0,
+            last_heartbeat_unix_seconds: Some(2),
+        },
+        run_id: "r".into(),
+    };
+    assert_eq!(
+        serde_json::from_str::<ProjectResponse>(&serde_json::to_string(&response).unwrap())
+            .unwrap(),
+        response
+    );
+}
+
+#[test]
 fn owner_questions_and_their_state_round_trip() {
     let ask = DaemonCommand::ConfirmAsk {
         question: "Publish SCV 0.3.0?".into(),

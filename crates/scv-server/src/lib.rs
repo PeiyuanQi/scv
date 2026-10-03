@@ -21,6 +21,7 @@ mod daemon;
 mod disk;
 mod events;
 mod outbound;
+mod project;
 mod prompt;
 mod restart;
 mod session;

@@ -101,7 +101,8 @@ fn components(hub: &Arc<Hub>, confirmer: &Arc<Confirmer>) -> Arc<AsyncMutex<Comp
         crate::test_support::test_instance("/unused"),
         PathBuf::from("/"),
         Arc::clone(hub),
-    );
+    )
+    .unwrap();
     components.set_confirmer(Arc::clone(confirmer));
     Arc::new(AsyncMutex::new(components))
 }

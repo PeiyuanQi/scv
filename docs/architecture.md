@@ -84,11 +84,11 @@ The repository is one Cargo workspace with these packages:
 | Package | Responsibility |
 | --- | --- |
 | `scv-protocol` | Wire messages, the protocol version, and the bounded line framing (`FrameDecoder`) every connection uses. It contains no runtime policy and does no I/O. |
-| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket among them, and the instance's service unit name), the chat log (`history`: its episode files, writer, and readers), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`, whose temporary files are named for their target), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
+| `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket and project ledger among them, and the instance's service unit name), the chat log (`history`: its episode files, writer, and readers), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`, whose temporary files are named for their target), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
-| `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
+| `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, event serialization, and the optional durable project ledger/orchestrator. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), `slack` (tokens entered by hand, Socket Mode events with catch-up from conversation history, sending, files both ways, and its credentials), and `email` (read-only mail triage: the provider-neutral mail core and the IMAP adapter). |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
@@ -99,7 +99,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.9` and exact workspace dependency pins.
+`0.3.10` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -148,6 +148,7 @@ What lives where in the largest crates:
 | | `approval.rs`, `events.rs` | Approval gates, and `CoreEvent` to `ServerEvent` |
 | | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
 | | `components.rs` | `Component`, `HealthReporter`, `Supervisor`, and the channel accounts they run |
+| | `project.rs` | The owner-created append-only project event ledger, reducer, task/run evidence, and supervised heartbeat reconciler |
 | | `restart.rs` | [Planned restarts](#planned-restarts), the watchdog, and the notifier that finds the owner's chat |
 | | `confirm.rs` | [Questions to the owner](#questions-to-the-owner) (`scv confirm`) |
 | | `attachments.rs` | Files attached to a turn, such as chat media |

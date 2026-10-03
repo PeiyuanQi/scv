@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.9`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.9` pins.
+The current workspace release is `0.3.10`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.10` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,17 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.10
+
+`0.3.10` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.9` checks the new release and can roll it back.
+
+- **Optional project ledger/orchestrator.** `scv project create` explicitly
+  opts an existing workspace into a durable append-only project ledger. Tasks,
+  dependencies, supervised run heartbeats, retry budgets, stale detection,
+  and evidence reports are available through the daemon control protocol and
+  CLI. Existing one-off delegation commands continue to work independently.
 
 ## Upgrading to 0.3.9
 

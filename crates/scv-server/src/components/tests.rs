@@ -324,7 +324,8 @@ async fn status_shows_an_email_accounts_counts_and_nothing_else() {
         crate::test_support::test_instance("/unused"),
         std::path::PathBuf::from("/"),
         Arc::clone(&hub),
-    );
+    )
+    .unwrap();
     let registration = hub.register_mail("email:default", vec!["feishu:mail".into()]);
     registration.set_counts(scv_protocol::MailCounts {
         queued: 3,
@@ -334,6 +335,30 @@ async fn status_shows_an_email_accounts_counts_and_nothing_else() {
     drop(registration);
     assert_eq!(hub.mail_counts("email:default"), None);
     assert!(components.status().components.is_empty());
+}
+
+#[tokio::test]
+async fn creating_a_project_starts_the_supervised_orchestrator() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut components = Components::new(
+        crate::test_support::test_instance(home.path()),
+        workspace.path().to_path_buf(),
+    );
+    let status = components
+        .control(DaemonCommand::ProjectCreate {
+            name: "orchestrated".into(),
+            workspace: workspace.path().display().to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        status
+            .components
+            .iter()
+            .any(|component| component.id == "project:orchestrator")
+    );
+    components.shutdown().await;
 }
 
 #[test]

@@ -132,6 +132,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: AgentsCommand,
     },
+    /// Create and inspect durable owner-authorized projects.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
     /// Print this binary's version and config layout as JSON; the daemon
     /// runs it on a newly installed release before restarting into it.
     #[command(hide = true)]
@@ -142,6 +147,71 @@ pub(crate) enum Command {
     RestartWatchdog {
         #[arg(long, value_name = "PATH")]
         plan: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProjectCommand {
+    /// Explicitly create a project ledger.
+    Create {
+        name: String,
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        workspace: PathBuf,
+    },
+    /// Show reducer state for a project name or ID.
+    Status { project: String },
+    /// Show durable events, optionally after a sequence number.
+    Events {
+        project: String,
+        #[arg(long)]
+        after: Option<u64>,
+    },
+    /// Show current tasks and observed progress.
+    Tasks { project: String },
+    /// Generate a report from observed ledger evidence.
+    Report { project: String },
+    /// Add a task to a project.
+    AddTask {
+        project: String,
+        title: String,
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        max_retries: u32,
+    },
+    /// Record a task state transition.
+    UpdateTask {
+        project: String,
+        task: String,
+        status: String,
+        #[arg(long)]
+        progress: Option<String>,
+    },
+    /// Record an observed run start.
+    RunStart {
+        project: String,
+        task: String,
+        agent: String,
+    },
+    /// Record an observed run heartbeat/progress.
+    RunProgress {
+        project: String,
+        run: String,
+        progress: String,
+    },
+    /// Record an observed run terminal state.
+    RunFinish {
+        project: String,
+        run: String,
+        status: String,
+    },
+    /// Record a project/task/run heartbeat.
+    Heartbeat {
+        project: String,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        run: Option<String>,
     },
 }
 

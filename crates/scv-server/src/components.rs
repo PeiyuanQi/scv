@@ -1,6 +1,6 @@
 //! Server-owned lifecycle for every long-running integration.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use scv_channels::state::{self, AccountSettings};
 use scv_channels::{Accounts, ChannelCredentials, ChannelKind};
@@ -281,20 +281,26 @@ pub(crate) struct Components {
     restarter: Option<Arc<crate::restart::Restarter>>,
     /// Asks the owner yes/no questions; set only in the socket daemon.
     confirmer: Option<Arc<crate::confirm::Confirmer>>,
+    ledger: Arc<Mutex<crate::project::ProjectLedger>>,
 }
 
 impl Components {
     #[cfg(test)]
     pub(crate) fn new(instance: Instance, workspace: PathBuf) -> Self {
         Self::with_hub(instance, workspace, scv_channels::hub::Hub::new(None))
+            .expect("test project ledger should open")
     }
 
     pub(crate) fn with_hub(
         instance: Instance,
         workspace: PathBuf,
         hub: Arc<scv_channels::hub::Hub>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let ledger =
+            crate::project::ProjectLedger::open(&instance.layout).context("open project ledger")?;
+        let has_projects = ledger.has_projects();
+        let ledger = Arc::new(Mutex::new(ledger));
+        let mut components = Self {
             supervisor: Supervisor::default(),
             desired: BTreeMap::new(),
             inactive: BTreeMap::new(),
@@ -303,7 +309,12 @@ impl Components {
             hub,
             restarter: None,
             confirmer: None,
+            ledger,
+        };
+        if has_projects {
+            components.ensure_project_orchestrator();
         }
+        Ok(components)
     }
 
     /// One channel's saved accounts in the daemon's instance.
@@ -342,6 +353,7 @@ impl Components {
             delegations: scv_protocol::DelegationSummary::default(),
             restart: None,
             confirm: None,
+            project: None,
         }
     }
 
@@ -494,6 +506,27 @@ impl Components {
 
     pub(crate) async fn control(&mut self, command: DaemonCommand) -> Result<DaemonStatus> {
         match command {
+            command @ (DaemonCommand::ProjectCreate { .. }
+            | DaemonCommand::ProjectStatus { .. }
+            | DaemonCommand::ProjectEvents { .. }
+            | DaemonCommand::ProjectTasks { .. }
+            | DaemonCommand::ProjectReport { .. }
+            | DaemonCommand::ProjectTaskAdd { .. }
+            | DaemonCommand::ProjectTaskUpdate { .. }
+            | DaemonCommand::ProjectRunStart { .. }
+            | DaemonCommand::ProjectRunProgress { .. }
+            | DaemonCommand::ProjectRunFinish { .. }
+            | DaemonCommand::ProjectHeartbeat { .. }) => {
+                let response = self
+                    .ledger
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .execute(command)?;
+                self.ensure_project_orchestrator();
+                let mut status = self.status();
+                status.project = Some(response);
+                return Ok(status);
+            }
             // Delegations, restarts, and questions belong to the connection
             // handler, which adds them.
             DaemonCommand::Status
@@ -581,6 +614,52 @@ impl Components {
 
     pub(crate) async fn shutdown(&mut self) {
         self.supervisor.shutdown().await;
+    }
+
+    fn ensure_project_orchestrator(&mut self) {
+        if self
+            .supervisor
+            .health()
+            .iter()
+            .any(|health| health.id == "project:orchestrator")
+        {
+            return;
+        }
+        self.supervisor.start(
+            Arc::new(ProjectOrchestrator {
+                ledger: Arc::clone(&self.ledger),
+            }),
+            project_health(),
+        );
+    }
+}
+
+struct ProjectOrchestrator {
+    ledger: Arc<Mutex<crate::project::ProjectLedger>>,
+}
+
+#[async_trait]
+impl Component for ProjectOrchestrator {
+    async fn run(&self, cancellation: CancellationToken, health: HealthReporter) -> Result<()> {
+        let mut interval = tokio::time::interval(crate::project::ORCHESTRATOR_INTERVAL);
+        loop {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Ok(()),
+                _ = interval.tick() => {
+                    let result = self.ledger.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .reconcile_stale(now());
+                    match result {
+                        Ok(()) => health.contact(true),
+                        Err(error) => {
+                            tracing::warn!(error = format!("{error:#}"), "project ledger reconciliation failed");
+                            health.contact(false);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -674,6 +753,32 @@ fn initial_health(
         purpose: None,
         mail: None,
     }
+}
+
+fn project_health() -> ComponentHealth {
+    ComponentHealth {
+        id: "project:orchestrator".into(),
+        channel: "project".into(),
+        account: "orchestrator".into(),
+        bot_id: None,
+        user_id: None,
+        enabled: true,
+        state: ComponentState::Starting,
+        last_success_unix_seconds: None,
+        error: None,
+        restarts: 0,
+        remote_tools: RemoteTools::None,
+        senders: None,
+        purpose: None,
+        mail: None,
+    }
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]

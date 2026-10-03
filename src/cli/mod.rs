@@ -8,6 +8,7 @@ pub(crate) mod common;
 pub(crate) mod config;
 pub(crate) mod confirm;
 pub(crate) mod daemon;
+pub(crate) mod project;
 pub(crate) mod prompt;
 pub(crate) mod service;
 pub(crate) mod status;
@@ -115,6 +116,7 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf, layout: Layout) -> Result<()> {
         Command::Update { index_url } => update::update_cli(&layout, &overrides, &cwd, index_url),
         Command::Channels { command } => channels::channels(&layout, command).await,
         Command::Agents { command } => agents::agents(&layout, &overrides, command).await,
+        Command::Project { command } => project::run(&layout, command, &cwd).await,
         Command::BuildInfo => {
             println!("{}", serde_json::to_string(&scv_server::build_info())?);
             Ok(())

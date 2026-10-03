@@ -144,6 +144,241 @@ pub struct DaemonStatus {
     /// The question a `confirm_ask` or `confirm_status` request is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm: Option<ConfirmInfo>,
+    /// The response to a project ledger command, when one was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectResponse>,
+}
+
+/// The lifecycle phase observed for a durable project.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectPhase {
+    /// The project has been created and is being understood.
+    Discovery,
+    /// Tasks and dependencies are being prepared.
+    Planning,
+    /// One or more implementation tasks are running.
+    Implementation,
+    /// Work is being checked or has failed a run.
+    Verification,
+    /// Work is ready for staging.
+    Staging,
+    /// Work has been released to production.
+    Production,
+    /// The project is being reported or closed.
+    Reporting,
+}
+
+/// The reducer's current project status.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatus {
+    /// The orchestrator can make progress.
+    Active,
+    /// No task can currently make progress.
+    Blocked,
+    /// An owner decision is required.
+    WaitingApproval,
+    /// Every task has completed successfully.
+    Completed,
+    /// A task exhausted its retry budget or a run failed permanently.
+    Failed,
+    /// The project was intentionally retired.
+    Archived,
+}
+
+/// A task's observed state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectTaskStatus {
+    /// Waiting for dependencies.
+    Pending,
+    /// Eligible to start.
+    Ready,
+    /// Owned by a currently running agent.
+    Running,
+    /// Waiting on an external condition.
+    Blocked,
+    /// Finished successfully.
+    Done,
+    /// Failed permanently.
+    Failed,
+    /// Its owner stopped reporting heartbeats.
+    Stale,
+}
+
+/// A delegated run's observed state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRunStatus {
+    /// The delegated run is still executing.
+    Running,
+    /// The run finished successfully.
+    Succeeded,
+    /// The run finished with an error.
+    Failed,
+    /// The run was intentionally cancelled.
+    Cancelled,
+    /// The run stopped reporting heartbeats.
+    Stale,
+}
+
+/// A compact project record suitable for status output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectSummary {
+    /// Stable project identifier.
+    pub id: String,
+    /// Owner-visible project name.
+    pub name: String,
+    /// Absolute workspace directory.
+    pub workspace: String,
+    /// Current lifecycle phase.
+    pub phase: ProjectPhase,
+    /// Current reducer status.
+    pub status: ProjectStatus,
+    /// Creation time in Unix seconds.
+    pub created_unix_seconds: u64,
+    /// Last reducer update in Unix seconds.
+    pub updated_unix_seconds: u64,
+    /// Number of tasks in the project.
+    pub task_count: u64,
+    /// Number of tasks in the done state.
+    pub completed_tasks: u64,
+    /// Last task or run heartbeat, when one exists.
+    pub last_heartbeat_unix_seconds: Option<u64>,
+}
+
+/// A project task and its dependency/progress evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectTask {
+    /// Stable task identifier.
+    pub id: String,
+    /// Owner-visible task title.
+    pub title: String,
+    /// Current task state.
+    pub status: ProjectTaskStatus,
+    /// Task identifiers that must complete first.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Number of failed attempts.
+    pub retries: u32,
+    /// Maximum failed attempts before the task is permanently failed.
+    pub max_retries: u32,
+    /// The current run, when the task is running.
+    pub run_id: Option<String>,
+    /// Latest observed progress text.
+    pub progress: Option<String>,
+    /// Last heartbeat in Unix seconds.
+    pub last_heartbeat_unix_seconds: Option<u64>,
+}
+
+/// A run tracked by the project ledger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectRun {
+    /// Stable run identifier.
+    pub id: String,
+    /// Task owned by this run.
+    pub task_id: String,
+    /// Agent adapter that owns the run.
+    pub agent: String,
+    /// Current run state.
+    pub status: ProjectRunStatus,
+    /// One-based attempt number.
+    pub attempt: u32,
+    /// Start time in Unix seconds.
+    pub started_unix_seconds: u64,
+    /// Last observed update in Unix seconds.
+    pub updated_unix_seconds: u64,
+    /// Latest observed progress text.
+    pub progress: Option<String>,
+}
+
+/// One durable event, exposed for audit and recovery inspection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectEvent {
+    /// Monotonic event sequence within the instance ledger.
+    pub sequence: u64,
+    /// Project that owns the event.
+    pub project_id: String,
+    /// Reducer event kind.
+    pub kind: String,
+    /// Event time in Unix seconds.
+    pub timestamp_unix_seconds: u64,
+    /// Event-specific evidence.
+    pub data: serde_json::Value,
+}
+
+/// A report generated from observed ledger state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectReport {
+    /// Current project summary.
+    pub project: ProjectSummary,
+    /// Current task records.
+    pub tasks: Vec<ProjectTask>,
+    /// Current run records.
+    pub runs: Vec<ProjectRun>,
+    /// Report generation time in Unix seconds.
+    pub generated_unix_seconds: u64,
+    /// Human-readable evidence notes.
+    pub evidence: Vec<String>,
+}
+
+/// Payload returned by a project command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectResponse {
+    /// A project was created.
+    Created {
+        /// Created project summary.
+        project: ProjectSummary,
+    },
+    /// A project status was requested.
+    Status {
+        /// Current project summary.
+        project: ProjectSummary,
+    },
+    /// Project events were requested.
+    Events {
+        /// Project identifier.
+        project_id: String,
+        /// Highest sequence included in a compacted snapshot, when older
+        /// events are no longer retained in the live tail.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compacted_before: Option<u64>,
+        /// Matching events.
+        events: Vec<ProjectEvent>,
+    },
+    /// Project tasks were requested.
+    Tasks {
+        /// Project identifier.
+        project_id: String,
+        /// Current tasks.
+        tasks: Vec<ProjectTask>,
+    },
+    /// A report was generated.
+    Report {
+        /// Generated report.
+        report: ProjectReport,
+    },
+    /// A project changed.
+    Updated {
+        /// Current project summary.
+        project: ProjectSummary,
+    },
+    /// A task was created.
+    TaskAdded {
+        /// Current project summary.
+        project: ProjectSummary,
+        /// New task identifier.
+        task_id: String,
+    },
+    /// A run was started.
+    RunStarted {
+        /// Current project summary.
+        project: ProjectSummary,
+        /// New run identifier.
+        run_id: String,
+    },
 }
 
 /// How long a question to the owner waits for an answer unless the asker
@@ -358,5 +593,92 @@ pub enum DaemonCommand {
     ConfirmStatus {
         /// The ID `confirm_ask` returned.
         id: String,
+    },
+    /// Explicitly create an owner-authorized durable project.
+    ProjectCreate {
+        /// Owner-visible project name.
+        name: String,
+        /// Absolute workspace directory.
+        workspace: String,
+    },
+    /// Read a project's reducer state without contacting an agent.
+    ProjectStatus {
+        /// Project name or identifier.
+        project: String,
+    },
+    /// Read the append-only event history after an optional sequence.
+    ProjectEvents {
+        /// Project name or identifier.
+        project: String,
+        /// Return events after this sequence.
+        after: Option<u64>,
+    },
+    /// Read current tasks and observed progress.
+    ProjectTasks {
+        /// Project name or identifier.
+        project: String,
+    },
+    /// Build a report from ledger evidence.
+    ProjectReport {
+        /// Project name or identifier.
+        project: String,
+    },
+    /// Add a task to an explicitly created project.
+    ProjectTaskAdd {
+        /// Project name or identifier.
+        project: String,
+        /// Owner-visible task title.
+        title: String,
+        /// Task identifiers that must be done first.
+        depends_on: Vec<String>,
+        /// Maximum failed attempts before permanent failure.
+        max_retries: u32,
+    },
+    /// Record an observed task state/progress update.
+    ProjectTaskUpdate {
+        /// Project name or identifier.
+        project: String,
+        /// Task identifier.
+        task: String,
+        /// New task state.
+        status: ProjectTaskStatus,
+        /// Optional progress text.
+        progress: Option<String>,
+    },
+    /// Record a supervised agent run starting.
+    ProjectRunStart {
+        /// Project name or identifier.
+        project: String,
+        /// Task identifier.
+        task: String,
+        /// Agent adapter name.
+        agent: String,
+    },
+    /// Record observed progress from a run heartbeat.
+    ProjectRunProgress {
+        /// Project name or identifier.
+        project: String,
+        /// Run identifier.
+        run: String,
+        /// Progress text.
+        progress: String,
+    },
+    /// Record an observed terminal run state.
+    ProjectRunFinish {
+        /// Project name or identifier.
+        project: String,
+        /// Run identifier.
+        run: String,
+        /// Terminal run state.
+        status: ProjectRunStatus,
+    },
+    /// Record a heartbeat for a project task/run.
+    ProjectHeartbeat {
+        /// Project name or identifier.
+        project: String,
+        /// Optional task identifier.
+        task: Option<String>,
+        /// Optional run identifier.
+        run: Option<String>,
     },
 }
