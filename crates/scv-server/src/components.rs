@@ -49,7 +49,14 @@ impl HealthReporter {
         } else {
             ComponentState::Disconnected
         };
-        health.error = (!connected).then(|| "Component contact failed".into());
+        // Slack's cause can be a setting only its app's owner can change.
+        health.error = (!connected).then(|| {
+            if health.channel == scv_channels::slack::CHANNEL {
+                scv_channels::slack::CONTACT_NOTE.into()
+            } else {
+                "Component contact failed".into()
+            }
+        });
         if connected {
             health.last_success_unix_seconds = Some(
                 SystemTime::now()

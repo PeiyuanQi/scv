@@ -4,18 +4,20 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Chat and mail channels for the SCV daemon: the shared bridge, the WeChat and Feishu/Lark transports, and read-only mail triage"
+description = "Chat and mail channels for the SCV daemon: WeChat, Feishu/Lark, Slack, and read-only mail triage"
 repository.workspace = true
 
 [lints]
 workspace = true
 
 [features]
-default = ["wechat", "feishu", "email"]
+default = ["wechat", "feishu", "slack", "email"]
 # WeChat through a ClawBot (iLink) bot.
 wechat = ["dep:aes", "dep:md-5", "dep:base64", "dep:reqwest"]
 # Feishu and Lark through a bot app on the event long connection.
 feishu = ["dep:prost", "dep:qrcode", "dep:reqwest", "dep:tokio-tungstenite", "futures-util/sink"]
+# Slack through the Events API over Socket Mode.
+slack = ["dep:reqwest", "dep:tokio-tungstenite", "futures-util/sink"]
 # Read-only mail triage: an IMAP mailbox reported to a mail chat.
 email = ["dep:encoding_rs", "dep:html2text", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots", "dep:base64"]
 

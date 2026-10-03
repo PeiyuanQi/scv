@@ -116,9 +116,9 @@ pub(crate) enum Command {
         #[arg(long, value_name = "URL")]
         index_url: Option<String>,
     },
-    /// Connect chat channels (WeChat, Feishu/Lark) and mailboxes (email) to
-    /// this SCV instance: sign accounts in, run them under the daemon, and
-    /// check their connections.
+    /// Connect chat channels (WeChat, Feishu/Lark, Slack) and mailboxes
+    /// (email) to this SCV instance: sign accounts in, run them under the
+    /// daemon, and check their connections.
     Channels {
         #[command(subcommand)]
         command: ChannelsCommand,
@@ -197,6 +197,11 @@ pub(crate) enum ChannelsCommand {
         /// Email: the mailbox's user name, usually its address.
         #[arg(long, value_name = "NAME", requires = "imap_host")]
         user: Option<String>,
+        /// Slack: the owner's member ID (U… or W…), the only sender remote
+        /// tools can reach. Without it nobody gets tools, and an account that
+        /// answers only its owner answers nobody.
+        #[arg(long, value_name = "MEMBER_ID")]
+        slack_owner_user_id: Option<String>,
     },
     /// Enable a signed-in account under the SCV daemon.
     Run {
@@ -255,6 +260,8 @@ pub(crate) enum ChannelArg {
     Wechat,
     /// Feishu, through a bot app.
     Feishu,
+    /// Slack, through a bot app using Socket Mode.
+    Slack,
     /// Lark, Feishu's international edition: the `feishu` channel.
     Lark,
     /// A mailbox over IMAP, read-only, reported to a mail chat.
@@ -266,6 +273,7 @@ impl ChannelArg {
         match self {
             Self::Wechat => scv_channels::wechat::CHANNEL,
             Self::Feishu | Self::Lark => scv_channels::feishu::CHANNEL,
+            Self::Slack => scv_channels::slack::CHANNEL,
             Self::Email => scv_channels::email::CHANNEL,
         }
     }
@@ -275,6 +283,7 @@ impl ChannelArg {
             Self::Wechat => "WeChat",
             Self::Feishu => "Feishu",
             Self::Lark => "Lark",
+            Self::Slack => "Slack",
             Self::Email => "Email",
         }
     }

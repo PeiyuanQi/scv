@@ -1,15 +1,18 @@
 # SCV Channels
 
 SCV's chat channels and the bridge they share. Each channel is a module behind
-a Cargo feature of the same name, both on by default:
+a Cargo feature of the same name, all on by default:
 
 - `wechat`: WeChat through a ClawBot (iLink) bot: QR sign-in, long-polled
   `getupdates`, replies, and files on the AES-encrypted CDN;
 - `feishu`: Feishu and Lark through a bot app: sign-in by QR scan (which
   creates the app) or with an existing app, the event long connection with
-  catch-up from chat history, replies, and files.
+  catch-up from chat history, replies, and files;
+- `slack`: Slack through a bot app set up by hand: sign-in with its bot and
+  app-level tokens, Socket Mode events with catch-up from conversation
+  history, replies, and files.
 
-A channel implements `Channel` (`WeChat`, `Feishu`): signing an account in
+A channel implements `Channel` (`WeChat`, `Feishu`, `Slack`): signing an account in
 under a `Layout`, what its credentials say (owner, bot, platform name), and
 running it. The daemon reaches channels only through `ChannelKind` (`ALL`,
 `name`, `parse`, `accounts`), `ChannelCredentials`, `Accounts` (one channel's

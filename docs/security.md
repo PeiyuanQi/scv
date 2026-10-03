@@ -23,7 +23,8 @@ interactive starts ask whether to continue and non-interactive starts fail.
   state remain within that profile; custom homes do not fall back to `~/.scv`.
 - Provider credentials are secrets. They remain server-side and are sent only
   to the configured provider endpoint, never to the TUI.
-- Channel tokens, Feishu app secrets, and delivery state are secrets. Inbound
+- Channel tokens, Feishu app secrets, Slack bot and app-level tokens, and
+  delivery state are secrets. Inbound
   sender IDs, cursors, and message content are untrusted remote input and are
   kept out of logs.
 - Mail is untrusted remote input that arrives without anyone asking: every
@@ -269,7 +270,7 @@ not mean silently execute them.
 
 Outbound network clients include the configured model provider, the WeChat
 channel's iLink adapter, the Feishu channel's Open Platform and long-connection
-clients, and the web tools (`web_fetch` and a configured search
+clients, the Slack channel's Web API and Socket Mode clients, and the web tools (`web_fetch` and a configured search
 backend). The updater delegates registry downloads to Cargo. Project
 configuration cannot provide inline credentials or redirect these authorities.
 
@@ -295,6 +296,17 @@ set to answer anyone, and remote sessions are tool-free unless the account
 grants its owner tools; see [Supervised remote bridge](#supervised-remote-bridge). Remote
 messages cannot bypass server policy.
 
+The opt-in Slack channel is outbound only too: HTTPS to `slack.com/api`
+without following redirects, files downloaded and uploaded only on HTTPS
+`slack.com` hosts, and one Socket Mode WebSocket whose URL must be `wss` on a
+`slack.com` host on port 443, checked before dialing. Responses are capped at
+4 MiB and socket frames at 1 MiB. The bot token goes only to Slack's hosts and
+the app-level token only to `apps.connections.open`; neither, nor the socket
+URL's ticket, reaches logs, errors, or status, and of Slack's own error text
+only an error code that is a plain identifier is kept. Both tokens are entered
+by hand, never as arguments, and checked against the workspace, bot, and app
+before they are saved; events from another workspace or app are ignored.
+
 Protocol lines, tool arguments, tool output, and provider responses are size
 bounded. Malformed messages fail closed. Diagnostics are separated from the
 protocol stream and redact authorization headers and credential values.
@@ -318,8 +330,9 @@ configuration and `SCV_CONFIG` cannot choose bridge accounts, workspaces, or
 remote authority.
 
 By default an account answers only its authenticated owner (the iLink
-`user_id` from QR login, or the Feishu `open_id` of the app's creator, or the
-one named with `--owner-open-id`), and an account with no known owner answers
+`user_id` from QR login, the Feishu `open_id` of the app's creator or the one
+named with `--owner-open-id`, or the Slack member ID named with
+`--slack-owner-user-id`), and an account with no known owner answers
 nobody. Anyone else's message is dropped before anything acts on it: no
 reply, no download, no daemon session, and no model turn, so other senders
 can neither spend the owner's model quota nor put content in front of the
@@ -340,8 +353,8 @@ send messages from it can read and change files, run commands, and launch
 delegated agents without confirmation. Other senders (on an account that
 answers anyone), the owner's messages in
 group chats, and accounts without a known owner ID stay tool-free; group
-conversations never share the owner's direct-chat session. A Feishu thread
-runs on a session of its own with its chat's authority: the owner's tools in
+conversations never share the owner's direct-chat session. A Feishu or Slack
+thread runs on a session of its own with its chat's authority: the owner's tools in
 a thread of their direct chat, none in a group's thread. Logout clears the
 grant before deleting credentials. Owner replies are ordinary assistant output and may quote
 tool results the model chose to include; bridge failure details remain
@@ -352,8 +365,9 @@ with sanitized errors and successful-contact timestamps, never bearer tokens.
 Saved credentials alone do not establish connectivity.
 
 Files chat users send are untrusted input. The bridge downloads them only
-from the platform (HTTPS on the WeChat CDN's `qq.com` hosts, or the Feishu
-resource API on the brand's own host), within per-account size limits, and
+from the platform (HTTPS on the WeChat CDN's `qq.com` hosts, the Feishu
+resource API on the brand's own host, or Slack's `slack.com` file hosts),
+within per-account size limits, and
 from senders other than the owner, whom only an account that answers anyone
 hears, only images; it saves them with mode `0600`
 under `$SCV_HOME/state/media` behind random prefixes and sanitized names,
@@ -373,7 +387,8 @@ isolating anything; see [tools](tools.md#sending-files-to-a-chat-chat_attach).
 Delivery state is bound to a SHA-256 fingerprint of the account's identity:
 for WeChat the normalized API origin and authenticated bot/user IDs, for
 Feishu the brand, app ID, and owner `open_id` (a rotated app secret keeps the
-binding). Known-identity token rotation preserves state;
+binding), for Slack the workspace, app, bot, and owner member IDs (new tokens
+for the same app keep it). Known-identity token rotation preserves state;
 credentials without both IDs use a conservative token-based fingerprint.
 Legacy unbound state is bound before first use. A mismatch prevents polling,
 recovery, and delivery. Login refuses identity/origin replacement, including
@@ -384,7 +399,7 @@ Notices the daemon sends on its own (update outcomes, jobs a restart stopped,
 restarts after an unexpected stop, accounts that stay disconnected) go only
 to an account owner's direct chat: the chat that asked, the `[notify]`
 accounts' owners, or the chat the owner last wrote from. Work started in a
-Feishu thread counts as its direct chat's, except that the jobs a restart
+Feishu or Slack thread counts as its direct chat's, except that the jobs a restart
 stopped are listed in the thread that started them. Their text is
 composed by SCV, not the model, and names versions, commits, job handles, and
 the first line of each stopped job's delegated prompt; the restart plan and
@@ -418,8 +433,13 @@ agent running as the user could still publish without asking.
 
 Feishu text turns `<at user_id=…>` into mentions, including `@all`, so SCV
 breaks every `<at` in outgoing text with a zero-width space: model output, which
-a group member can influence, never notifies anyone. In groups the bot answers
-only messages that mention it, and those sessions stay tool-free.
+a group member can influence, never notifies anyone. Slack's `<!channel>`,
+`<!here>`, and `<@…>` markup notifies people too, so SCV escapes `&`, `<`, and
+`>` in outgoing Slack text and posts with `parse=none`, `link_names=false`, and
+no unfurling. In groups the bot answers only messages that mention it, and
+those sessions stay tool-free; on Slack only a direct conversation's own
+messages (`message.im` events, or its history) count as direct messages,
+never a mention.
 
 A lifetime account lock excludes cooperating runners. A separate transaction
 file lock serializes login, settings/state writes, binding, migration, and
@@ -435,13 +455,14 @@ replay interrupted claimed work; pending replies retain their client IDs
 across retries. This protects against duplicate execution without promising
 exactly-once delivery by the remote service. Conversations run concurrently,
 at most four turns at a time and each conversation in order, and their
-sessions never share history. Feishu socket events are acknowledged only once
+sessions never share history. Feishu and Slack socket events are acknowledged
+only once
 their claims are durable, and the catch-up that follows every reconnection is
 deduplicated like any batch. A reply the platform refuses is held in the private
 state file, bounded and for at most 7 days, and delivered only with the next
 reply to the same conversation; its content never enters logs.
 
-The account owner's direct chat, and each Feishu thread in it as a
+The account owner's direct chat, and each Feishu or Slack thread in it as a
 conversation of its own, is kept in the chat log under
 `$SCV_HOME/history/<channel>/<account>/<conversation>/` (files `0600`,
 directories `0700`), for up to 120 years: the owner's messages, what they

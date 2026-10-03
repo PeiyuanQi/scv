@@ -7,7 +7,7 @@
 **一个智能体，寻遍众智能体；一个智能体，引领众智能体。**
 
 一个快速的原生智能体运行时：住在你的机器上，带领你的编程智能体，<br>
-在终端、飞书和微信里回应你。
+在终端、飞书、Slack 和微信里回应你。
 
 [English](https://github.com/PeiyuanQi/scv/blob/main/README.md) · 简体中文
 
@@ -23,7 +23,7 @@
 ---
 
 SCV 是一个用 Rust 编写的小型智能体运行时。一个常驻的守护进程保管你的会话、
-工具和审批。你可以在终端界面里和它对话，也可以在手机上通过飞书/Lark 或微信和它对话。
+工具和审批。你可以在终端界面里和它对话，也可以在手机上通过飞书/Lark、微信或 Slack 和它对话。
 简单的问题它自己回答。真正的工作，它会找到合适的编程智能体（Claude Code、
 Codex 等），写好任务说明，作为后台任务交给它，完成后发消息告诉你。
 
@@ -33,11 +33,11 @@ Codex 等），写好任务说明，作为后台任务交给它，完成后发�
 
 ### 用手机聊天
 
-扫码即可连接飞书/Lark 或微信。SCV 默认只回复你本人。它能读取你发来的图片、文件和视频，
+扫码即可连接飞书/Lark 或微信，也可以接入你手动创建的 Slack 应用。SCV 默认只回复你本人。它能读取你发来的图片、文件和视频，
 也能把文件发回给你。长时间的工作在后台运行，你可以继续聊天；结果和需要你确认的
 是/否问题会以消息的形式送达。SCV 会记录聊天日志，所以重启后对话还能接着进行；
 你提到更早的事情时，它也能回头去查。发送 `/new` 可以开始一段新对话。
-在飞书里，每个话题都是一段独立的对话：SCV 在话题内回复，并为它单独开一个会话。
+在飞书和 Slack 里，每个话题都是一段独立的对话：SCV 在话题内回复，并为它单独开一个会话。
 
 ### 一个智能体，带领众多智能体
 
@@ -114,6 +114,11 @@ scv channels login feishu        # 扫描二维码（也可以是 lark、wechat�
 scv channels run feishu --workspace ~/code --remote-tools owner
 scv channels status              # Channels: 1 of 1 enabled accounts connected
 ```
+
+Slack 也可以用：先用 SCV 的清单（manifest）手动创建一个开启 Socket Mode 的应用
+（[设置方法](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md#slack-contract)），
+然后运行 `scv channels login slack --slack-owner-user-id U0123456789`，在隐藏输入的
+提示里填入它的 bot token 和 app-level token。
 
 > **`--remote-tools owner` 等于从你的聊天账号获得 shell 权限。** 它会把 SCV
 > 的全部工具开放给你本人的账号，并自动批准审批。不加这个参数时，SCV
@@ -243,7 +248,7 @@ SCV **不是沙箱**：你批准的命令和被委派的智能体以你的用户
 | 指南 | 内容 |
 | --- | --- |
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | crate 划分、智能体循环、计划重启，以及从哪里开始读代码 |
-| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | 飞书/Lark 和微信：登录、媒体、后台汇报、向主人提问 |
+| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | 飞书/Lark、微信和 Slack：登录、媒体、后台汇报、向主人提问 |
 | [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | 内置工具、被委派的智能体及其模型和检查、ACP、后台任务、智能体登录 |
 | [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | 实例目录结构、所有设置、模型提供方、守护进程和通知 |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | 信任边界、审批、远程工具和委派运行 |

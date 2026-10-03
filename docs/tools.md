@@ -61,7 +61,7 @@ keep a tool call alive indefinitely.
 ```
 
 Offered only in a tool-enabled session whose client named a chat `channel`
-in `session.start`: an account owner's WeChat or Feishu session. It sends a
+in `session.start`: an account owner's WeChat, Feishu, or Slack session. It sends a
 file to the user after the reply text: PNG, JPEG, GIF, WebP, and BMP images
 arrive as pictures, video as video where the platform has it, and anything
 else as a file. `path` is absolute or relative to the workspace; `caption` is
@@ -106,8 +106,8 @@ a prompt from mailing out keys by path; it is not a sandbox, and a model with
 ```
 
 Offered, with `chat_keep`, only in a tool-enabled session whose client named
-its chat log in `session.start`: an account owner's direct chat on WeChat or
-Feishu, or a Feishu thread in it (see [Chat history](channels.md#chat-history)).
+its chat log in `session.start`: an account owner's direct chat on WeChat,
+Feishu, or Slack, or a Feishu or Slack thread in it (see [Chat history](channels.md#chat-history)).
 It reads that one conversation's log and nothing else (a thread's session
 reads the thread, the direct chat's session the direct chat), so it is
 read-only and never asks for approval.
@@ -739,7 +739,7 @@ agent, conversation, status, and bounded reply, and asks the model to tell the
 user. That turn's `turn.started` and final event carry
 `"origin":{"kind":"background","jobs":[...]}` (see
 [protocol](protocol.md#server-started-turns)); one turn reports up to four jobs.
-A chat channel (WeChat or Feishu) sends the owner the answer as an unprompted message; `scv exec`
+A chat channel (WeChat, Feishu, or Slack) sends the owner the answer as an unprompted message; `scv exec`
 prints it and stays open until every job it started has been reported; the
 TUI shows it like any turn.
 
@@ -755,7 +755,7 @@ request would get in the foreground:
    owner's session), that approval;
 3. otherwise a denial.
 
-So a WeChat or Feishu owner's background agents get the approvals the owner's
+So a WeChat, Feishu, or Slack owner's background agents get the approvals the owner's
 foreground turns get, while in the TUI, which asks a person, a background
 job's non-read-only requests are denied and it relies on the agent's own
 permissions, such as `permissions = "full"`. Jobs belong to their session:

@@ -26,6 +26,8 @@ timeout_seconds = 600
 # workspace = "/absolute/path/to/workspace"
 # remote_tools = "none" # "owner" gives the account's owner every tool
 # senders = "anyone"    # answer every sender; omitted, only the owner is answered
+# A Slack account's table looks the same: [channels.slack.default]. Its tokens
+# never go in this file; `scv channels login slack` reads them at a prompt.
 
 # Notices nobody asked for (an update started from a terminal, a rollback, a
 # restart after a crash, an account disconnected for ten minutes) go to the

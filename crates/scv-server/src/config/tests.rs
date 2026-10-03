@@ -62,9 +62,10 @@ fn channel_accounts_are_user_only_and_validated() {
             .is_ok()
     );
     assert!(with("feishu", "team-2", None).validate().is_ok());
+    assert!(with("slack", "team-2", None).validate().is_ok());
     let unknown = with("irc", "default", None).validate().unwrap_err();
     assert!(
-        unknown.to_string().contains("wechat, feishu, email"),
+        unknown.to_string().contains("wechat, feishu, slack, email"),
         "{unknown}"
     );
     assert!(with("wechat", "a.b", None).validate().is_err());

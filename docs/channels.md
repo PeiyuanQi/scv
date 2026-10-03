@@ -4,22 +4,26 @@ Status: supported local bridges for the SCV daemon
 
 A channel connects chat accounts to a local workspace. One command manages
 every channel: `scv channels <command> <channel>`. The channels are WeChat,
-through its ClawBot iLink HTTP API, and Feishu with its international edition
+through its ClawBot iLink HTTP API; Feishu with its international edition
 Lark, through a bot app and Feishu's event long connection (`lark` is accepted
-wherever `feishu` is).
+wherever `feishu` is); and Slack, through a bot app the owner sets up by hand
+and Slack's Socket Mode (see [Slack contract](#slack-contract)). Feishu is the
+recommended channel, since its sign-in creates the bot app by QR scan; Slack is
+optional, and nothing of it runs until an account signs in.
 
 The `email` channel is different: it reads a mailbox, answers nobody, and
-reports what arrives to a *mail chat*, a Feishu or WeChat account set apart
-with `purpose = "mail"` that no model ever answers in (see
+reports what arrives to a *mail chat*, a WeChat, Feishu, or Slack account set
+apart with `purpose = "mail"` that no model ever answers in (see
 [Mail chats](#mail-chats) and [Email](#email)).
 
 Each account runs as a supervised component inside the single SCV daemon,
 which remains authoritative for sessions, provider selection, policy, and turn
 execution. `scv-channels` holds the bridge every channel shares and, in a
 module behind a Cargo feature of the same name, each channel's transport
-(`wechat`, `feishu`) and read-only mail triage (`email`), all on by default;
-a transport supplies only receiving and sending. `scv-server` runs accounts through `scv_channels::run`; the crate
-uses `scv-client` and `scv-protocol` and never depends on the server crate.
+(`wechat`, `feishu`, `slack`) and read-only mail triage (`email`), all on by
+default; a transport supplies only receiving and sending. `scv-server` runs
+accounts through `scv_channels::run`; the crate uses `scv-client` and
+`scv-protocol` and never depends on the server crate.
 
 ## User workflow
 
@@ -27,6 +31,7 @@ uses `scv-client` and `scv-protocol` and never depends on the server crate.
 scv channels login wechat [--account NAME] [--login-url URL]
 scv channels login feishu|lark [--account NAME]
 scv channels login feishu|lark --app-id CLI_ID [--owner-open-id OPEN_ID] [--account NAME]
+scv channels login slack [--slack-owner-user-id MEMBER_ID] [--account NAME]
 scv channels login email --imap-host HOST --user NAME [--imap-port 993] [--account NAME]
 scv channels run <channel> --workspace PATH [--account NAME] [--remote-tools none|owner] [--senders owner|anyone] [--purpose chat|mail]
 scv channels run email [--account NAME]
@@ -39,17 +44,19 @@ scv reload
 `--account` defaults to `default`, except for `status`, which lists every
 channel and account unless narrowed. `--login-url` is WeChat's iLink login
 origin (default `https://ilinkai.weixin.qq.com`); `--app-id` and
-`--owner-open-id` are Feishu's; `--imap-host`, `--imap-port`, and `--user`
-are email's; and each channel refuses the others' options. `--purpose` is
-for chat accounts only.
+`--owner-open-id` are Feishu's; `--slack-owner-user-id` is Slack's;
+`--imap-host`, `--imap-port`, and `--user` are email's; and each channel
+refuses the others' options. `--purpose` is for chat accounts only.
 Daemon status names each account `<channel>:<account>`, such as
 `wechat:default` or `feishu:default`, with a `channel` field, the bot's
-identity in `bot_id` (the iLink bot, or the Feishu app ID), and the owner in
-`user_id`.
+identity in `bot_id` (the iLink bot, the Feishu app ID, or the Slack bot's
+member ID), and the owner in `user_id`.
 
-`login` is explicit: it renders the QR code and stores credentials without
-printing the token or secret. For Feishu, the scan creates a bot app in the
-user's own Feishu or Lark account (see [Feishu contract](#feishu-contract)). Saved accounts autostart under the daemon by default;
+`login` is explicit: it renders the QR code, or for Slack reads the tokens,
+and stores credentials without printing the token or secret. For Feishu, the
+scan creates a bot app in the user's own Feishu or Lark account (see
+[Feishu contract](#feishu-contract)); Slack's app is set up by hand (see
+[Slack contract](#slack-contract)). Saved accounts autostart under the daemon by default;
 logging in preserves any saved disabled setting. Changing the account identity
 or API origin requires explicit logout first, including replacing legacy
 credentials whose identity is unknown. Login requests a reload when
@@ -70,8 +77,12 @@ token-revocation operation.
 selected account as an indented JSON object: its identity, enabled setting,
 effective `remote_tools` authority, `senders` setting, health state, restart
 count, sanitized error, and last successful contact: an
-authenticated, validated WeChat `getupdates`, or for Feishu a connected long
-connection that finished its catch-up or its last wait without error. An
+authenticated, validated WeChat `getupdates`, or for Feishu and Slack a
+connected socket that finished its catch-up or its last wait without error.
+A Slack account whose last contact failed shows a fixed error saying to check
+that Socket Mode is on, that both tokens are valid with the right scopes, and
+that HTTPS and WebSocket access to `slack.com` works; the daemon log names the
+actual cause. An
 account that answers only its owner but has no owner ID on record gets a note
 that it answers nobody. `scv
 status` prints the same for every account.
@@ -128,7 +139,8 @@ Those older processes do not honor the account locks.
 account's identity. For WeChat that is the normalized API origin and
 authenticated bot/user IDs; for Feishu it is the brand, the app ID, and the
 owner's `open_id`, so a rotated app secret keeps the state while another app
-or owner needs a logout. Token rotation for the
+or owner needs a logout; for Slack it is the workspace, app, and bot member
+IDs and the owner's member ID, so new tokens for the same app keep the state. Token rotation for the
 same known identity and origin preserves the cursor, pending replies, and
 per-chunk client IDs. If either ID is unavailable, the conservative fingerprint
 also includes the token and available identity fields. Legacy unbound state is
@@ -475,6 +487,143 @@ read on 2026-09-30), not yet live.
 - **`/new` in a thread** starts that thread over and ends its log episode;
   the direct chat and other threads are untouched.
 
+## Slack contract
+
+Built to Slack's documentation (Socket Mode, the Events API, and the Web API
+methods below, read on 2026-10-03), not yet checked live with a workspace.
+
+**Setting up the app.** Slack has no sign-in by scan, so the owner creates
+the app once: at <https://api.slack.com/apps>, *Create New App*, *From a
+manifest*, paste [`slack-app.example.json`](../slack-app.example.json), and
+install the app to the workspace. The manifest turns Socket Mode on and token
+rotation off, opens the App Home's Messages tab, subscribes the bot to
+`message.im` and `app_mention`, and asks for these bot scopes:
+
+- `chat:write` for replies and reports;
+- `im:history` for direct messages, and `app_mentions:read` for mentions in
+  channels;
+- `channels:history` and `groups:history` (and `im:history` again) for
+  catch-up and threads' roots in public and private channels and direct
+  messages;
+- `files:read` and `files:write` for files both ways, and `im:write` for the
+  owner's direct conversation that a file goes to;
+- `users:read` for `bots.info`, which names the bot's app.
+
+Then, under *Basic Information*, generate an app-level token with
+`connections:write`, and invite the bot to each channel whose mentions it
+should answer. The owner's member ID is under *Copy member ID* in the owner's
+Slack profile.
+
+**Sign-in.** `scv channels login slack --slack-owner-user-id U…` reads the
+bot token (`xoxb-`, under *OAuth & Permissions*) and then the app-level token
+(`xapp-`) from hidden prompts or two stdin lines; tokens are never command
+arguments or configuration settings, and SCV never creates, rotates, or
+imports them. Rotating tokens (`xoxe.`) are refused. Before anything is
+written, `auth.test` must accept the bot token and name the workspace, the
+bot's member ID, and its bot ID; `bots.info` must give the bot's app; and
+`apps.connections.open` with the app-level token must give a socket whose
+`hello` names the same app. Any failure saves nothing; a Socket Mode refusal
+says to enable Socket Mode and check `connections:write`. Login then names
+any scope above that the token's `x-oauth-scopes` leaves out, since what needs
+it fails until the app is reinstalled with it. Without an owner ID the account
+grants tools to nobody and, unless it answers anyone, answers nobody; login
+says so.
+
+**Receiving.** Each connection asks `apps.connections.open` (app-level token)
+for a fresh URL, accepted only as `wss` on a `slack.com` host on port 443
+without credentials or a fragment; errors never include it, since it carries
+a ticket. The first frame must be `hello` for the signed-in app. A
+`disconnect` whose reason is `link_disabled`, Socket Mode turned off in the
+app's settings, fails with "Slack Socket Mode disabled (link_disabled).
+Enable Socket Mode in Slack app settings; SCV will retry." A `disconnect`
+asking for a refresh, a close, a failed read or write, malformed JSON, or 45
+seconds without any frame (SCV pings every 15) drops the socket, and the next
+receive, after the bridge's 1 to 60 second backoff, connects again. There is
+no fallback to HTTP event delivery, which would need a public URL. An
+`events_api` envelope whose payload is a message event of this workspace and
+app is handed over as one batch: a direct message (`message` in a `D…`
+conversation with `channel_type` `im`), or in a channel, an `app_mention` that
+names the bot, the only way a channel's messages reach SCV. Its
+acknowledgement (`{"envelope_id": …}`) goes out when the bridge asks for the
+next batch, which it does once the message's claim and checkpoint are durable,
+never after a model turn. Every other envelope, including interactive
+payloads and slash commands, is acknowledged at once and ignored. Slack
+resends an envelope it got no acknowledgement for, and deduplication by
+message ID drops the repeat.
+
+**Catch-up.** Slack retries an unacknowledged event only a few times and
+keeps nothing for an app that stays disconnected. The checkpoint records, for
+up to 64 conversations and, apart, up to 64 threads, whether each is a
+channel and the newest `ts` listed or handed to the bridge. On every
+connection, after the `hello` and before reading events, SCV lists the 16
+most recently active conversations' messages since that `ts`, reaching back
+at most 24 hours, with `conversations.history` (newest first, up to two pages
+of 50). It then lists 16 threads with `conversations.replies` (oldest first,
+up to two pages of 50): first those whose roots the conversations just
+listed with a newer `latest_reply`, newest reply first, then the known ones,
+most recently active first. That is at most 32 calls of each method, within
+the roughly 50 a minute Slack allows an app made for its own workspace.
+Messages are handed over oldest first within each conversation and thread,
+each once; in a channel, only those that mention the bot. Every listed
+message moves its conversation's or thread's mark, so the next catch-up
+starts after it. A listing Slack refuses (the bot left the channel, a scope
+is missing, or a page is over 4 MiB) is skipped with a warning. A rejected
+token fails the catch-up. Any other failure, such as a rate limit, stops it:
+what it found so far is handed over, and the next receive resumes after the
+conversations and threads already listed, waiting out `Retry-After` without
+asking Slack; with nothing found yet, the receive fails and is retried after
+backoff. The socket is kept throughout, and its silence during catch-up does
+not count. Messages from conversations SCV has not yet seen, from threads on
+a root older than the mark, and beyond the pages listed are not caught up.
+
+**Messages.** A message's `ts` is its ID within its conversation: the bridge's
+message ID is `<conversation>:<ts>`, and the `ts` is when it was sent, which
+only [questions to the owner](#questions-to-the-owner) use. Messages from bots
+and apps, SCV's own included, edits, deletions, joins, and every other
+`subtype` but `file_share` are ignored, as is a message with no text, files,
+or shared messages. Slack's `&amp;`, `&lt;`, and `&gt;` are decoded, and the
+bot's own mention (`<@…>`) is dropped; other mentions and links stay in
+Slack's markup. A reply in a thread also sent to its conversation
+(`thread_broadcast`) belongs to the thread. Slack's composer takes a message
+that starts with `/` as a command, so `/new` is sent with a space before it. See
+[Slack media](#slack-media) for files and shared messages.
+
+**Threads.** A message whose `thread_ts` names another message is in that
+message's thread, which works as a [Feishu thread](#feishu-threads) does: its
+own session, queue, held replies, media directory, and chat log; its
+conversation's authority, so only a thread in the owner's direct conversation
+carries the owner's tools; replies, reports, and files inside it
+(`thread_ts`); and on its session's first turn, its root, fetched with
+`conversations.replies` and shown as `[Thread on: <text>]` with its files. A
+root, whose `thread_ts` is its own `ts`, belongs to its conversation.
+Questions to the owner and SCV's notices go to the direct conversation itself,
+never a thread.
+
+**Sending.** A reply goes to `chat.postMessage` (bot token, form-encoded) in
+its conversation, inside its thread when it came from one. A message that
+answers nothing, such as a background report, goes to the owner's member ID,
+which Slack posts in the bot's direct conversation, the App Home's Messages
+tab. `&`, `<`, and `>` are escaped and `parse=none`, `link_names=false`, and
+no unfurling are set, so model output can never mention anyone, including
+`@channel`, or fetch a link preview. Slack has no idempotency key for posts,
+so a part that times out after Slack took it can appear twice. Transport
+failures, HTTP 408, 429 (waiting out `Retry-After`), and 5xx, an error
+without a code, and the errors `internal_error`, `fatal_error`,
+`service_unavailable`, `request_timeout`, and `ratelimited` retry. A rejected
+token (`invalid_auth`, `not_authed`, `token_revoked`, `token_expired`,
+`account_inactive`) retries too, so the reply waits for a new sign-in, and
+SCV asks `auth.test` again, which fails every receive and shows the account
+disconnected until then. Any other error, or another HTTP 4xx, is a final
+refusal, logged with Slack's error code when it is a plain identifier, and
+the reply is held as for WeChat. `not_in_channel`, `channel_not_found`, and
+`is_archived` mean the bot needs inviting.
+
+**Requests.** Web API calls go to `https://slack.com/api` over HTTPS only,
+with a 20-second timeout (120 seconds for a file), no redirects, and
+responses of at most 4 MiB. The bot token goes only to `slack.com` hosts,
+and the app-level token only to `apps.connections.open`. A 429 blocks that
+method until `Retry-After` passes.
+
 ## Media
 
 Chat users can send pictures, voice messages, videos, and files, quote
@@ -622,10 +771,40 @@ scope gets code 99991672; SCV then logs that `im:resource` or `im:message` must
 be added in the app's developer console and a version published, and the
 model sees `[… download failed]`.
 
+### Slack media
+
+A `file_share` message's `files` are downloaded before its turn: `image/*` as
+images, `video/*` as videos, `audio/*` and Slack's audio clips (`subtype`
+`slack_audio`) as voice messages, with Slack's transcript
+(`transcription.preview.content`) when it finished, and anything else as
+files, each with its `name` (else `title`), `mimetype`, and `size`. A file
+Slack offers no download of (deleted, hidden by the plan's history limit,
+stored outside Slack, or shared from another organization) becomes a marker
+in the text, such as `[file plan.pdf: Slack offers no download of it]`. Downloads use
+`url_private_download` (else `url_private`) with the bot token, which needs
+`files:read`, and only from HTTPS `slack.com` hosts, without following
+redirects. Without the scope Slack redirects to or answers with its sign-in
+page, which SCV refuses (unless the file is itself a web page), logging that
+`files:read` is missing; the model sees `[… download failed]`.
+
+A message that shares others (an attachment with `is_share` or
+`is_msg_unfurl`) shows them as `[Quoting: <author>: <text>]` before its text,
+from the attachments Slack sends with the message, at most 16 KiB. Any
+attachment marks the message as quoting, so a [mail chat](#mail-chats) never
+reads it as a command.
+
+To send, SCV asks `files.getUploadURLExternal` for an upload URL with the
+file's name and length, posts the bytes to it (HTTPS on a `slack.com` host,
+no token), and shares the file with `files.completeUploadExternal` in the
+reply's conversation and thread. A file that answers nothing goes to the
+owner's direct conversation, which `conversations.open` gives for the owner's
+member ID. A refusal at either step is final, and other failures retry as for
+text; like a text part, a retried upload can arrive twice.
+
 ## Chat history
 
-The account owner's direct chat on each account is logged, and each Feishu
-thread in it as a conversation of its own, so a conversation carries on when
+The account owner's direct chat on each account is logged, and each Feishu or
+Slack thread in it as a conversation of its own, so a conversation carries on when
 its daemon session ends and the model can look further back when the owner
 refers to something older. Other senders and group chats, including the
 owner's messages in a group and its threads, are not logged.
@@ -723,8 +902,9 @@ has seen the job's result: in a report turn, or through a later
 starts a turn reporting it (`turn.started` with an `origin`), the bridge
 answers that turn's approval requests like the owner's own, collects its
 answer, and sends it to the owner as an unprompted message (for Feishu, a
-message to the owner's `open_id`, or for a thread's session, a message into
-that thread; see [Feishu threads](#feishu-threads)): recorded as a pending
+message to the owner's `open_id`, for Slack, to the owner's member ID, or for
+a thread's session, a message into that thread; see
+[Feishu threads](#feishu-threads)): recorded as a pending
 delivery before sending, retried with the same client ID, and moved to the
 held-reply store if the platform refuses it outright. A report that finishes
 during one of the owner's turns follows that turn's reply. Only direct chats,
@@ -891,8 +1071,8 @@ Whose messages an account answers is a per-account setting, `senders`, that
 only local CLI or daemon control (or an edit of `config.toml`) can change:
 
 - `owner` (default): only the account's authenticated owner, the iLink
-  `user_id` recorded at QR login or the Feishu `open_id` recorded at sign-in,
-  is answered, in direct chats and, when a message mentions the bot, in
+  `user_id` recorded at QR login, the Feishu `open_id` recorded at sign-in, or
+  the Slack member ID given at sign-in, is answered, in direct chats and, when a message mentions the bot, in
   groups. Anyone else's message is dropped silently: no reply or busy notice,
   no download, no daemon session, and no model turn. It is still marked seen
   and checkpointed like any handled message, so it is never replayed, and the
@@ -904,10 +1084,10 @@ only local CLI or daemon control (or an edit of `config.toml`) can change:
   it is the owner holding remote tools (below).
 
 Each direct-chat sender has one long-lived SCV protocol-v3 socket session. A
-group message (a non-empty WeChat `group_id`, or a Feishu chat other than
-`p2p`) uses a separate session per group and sender, so group members never see the sender's direct-chat history.
-A message in a Feishu thread uses a session of its own for that thread,
-inside its chat's (see [Feishu threads](#feishu-threads)). Sessions
+group message (a non-empty WeChat `group_id`, a Feishu chat other than
+`p2p`, or a Slack channel) uses a separate session per group and sender, so group members never see the sender's direct-chat history.
+A message in a Feishu or Slack thread uses a session of its own for that
+thread, inside its chat's (see [Feishu threads](#feishu-threads)). Sessions
 idle for 30 minutes after their last turn ends are dropped (the owner's next
 one carries on from the [chat history](#chat-history)), and at most 32
 sessions are live; a new conversation closes the least recently used idle one
@@ -1012,7 +1192,8 @@ A mail chat:
   `trash`, `spam`, `compose`, `revise`) are recognised only to answer "Mail
   actions are not available in this release; nothing was done." A message
   that quotes or forwards another (WeChat `ref_msg`, Feishu `parent_id`
-  outside a thread, or a forwarded bundle) or carries files is never read as
+  outside a thread, a Slack attachment, or a forwarded bundle) or carries
+  files is never read as
   a command; a message in a thread, whose root is not put into its text, is
   read like any other;
 - drops everyone else's messages, and group messages, the owner's included,

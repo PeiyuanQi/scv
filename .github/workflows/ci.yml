@@ -39,6 +39,7 @@ jobs:
       - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features -- -D warnings
       - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features --features wechat -- -D warnings
       - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features --features feishu -- -D warnings
+      - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features --features slack -- -D warnings
       - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features --features email -- -D warnings
       - run: cargo clippy -p scv-channels --all-targets --locked --no-default-features --features email,feishu -- -D warnings
       - run: cargo test -p scv-channels --lib --locked --no-default-features --features email

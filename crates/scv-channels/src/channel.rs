@@ -53,6 +53,9 @@ pub enum ChannelKind {
     /// Feishu and Lark, through a bot app: `feishu`.
     #[cfg(feature = "feishu")]
     Feishu,
+    /// Slack, through a bot app using Socket Mode.
+    #[cfg(feature = "slack")]
+    Slack,
     /// Mailboxes, read and reported to a mail chat: `email`.
     #[cfg(feature = "email")]
     Email,
@@ -65,6 +68,8 @@ impl ChannelKind {
         Self::Wechat,
         #[cfg(feature = "feishu")]
         Self::Feishu,
+        #[cfg(feature = "slack")]
+        Self::Slack,
         #[cfg(feature = "email")]
         Self::Email,
     ];
@@ -76,6 +81,8 @@ impl ChannelKind {
             Self::Wechat => crate::wechat::CHANNEL,
             #[cfg(feature = "feishu")]
             Self::Feishu => crate::feishu::CHANNEL,
+            #[cfg(feature = "slack")]
+            Self::Slack => crate::slack::CHANNEL,
             #[cfg(feature = "email")]
             Self::Email => crate::email::CHANNEL,
         }
@@ -88,6 +95,8 @@ impl ChannelKind {
             Self::Wechat => "WeChat",
             #[cfg(feature = "feishu")]
             Self::Feishu => "Feishu",
+            #[cfg(feature = "slack")]
+            Self::Slack => "Slack",
             #[cfg(feature = "email")]
             Self::Email => "Email",
         }
@@ -109,6 +118,8 @@ impl ChannelKind {
             Self::Wechat => Accounts::new(self, crate::wechat::Store::new(layout, self.name())),
             #[cfg(feature = "feishu")]
             Self::Feishu => Accounts::new(self, crate::feishu::Store::new(layout, self.name())),
+            #[cfg(feature = "slack")]
+            Self::Slack => Accounts::new(self, crate::slack::Store::new(layout, self.name())),
             #[cfg(feature = "email")]
             Self::Email => Accounts::new(self, crate::email::store(layout)),
         }
@@ -133,6 +144,8 @@ pub enum ChannelCredentials {
     Wechat(crate::wechat::Account),
     #[cfg(feature = "feishu")]
     Feishu(crate::feishu::Account),
+    #[cfg(feature = "slack")]
+    Slack(crate::slack::Account),
     #[cfg(feature = "email")]
     Email(crate::email::Account),
 }
@@ -145,6 +158,8 @@ impl ChannelCredentials {
             Self::Wechat(ref credentials) => crate::wechat::WeChat::owner(credentials),
             #[cfg(feature = "feishu")]
             Self::Feishu(ref credentials) => crate::feishu::Feishu::owner(credentials),
+            #[cfg(feature = "slack")]
+            Self::Slack(ref credentials) => crate::slack::Slack::owner(credentials),
             #[cfg(feature = "email")]
             Self::Email(ref credentials) => crate::email::Email::owner(credentials),
         }
@@ -157,6 +172,8 @@ impl ChannelCredentials {
             Self::Wechat(ref credentials) => crate::wechat::WeChat::bot_id(credentials),
             #[cfg(feature = "feishu")]
             Self::Feishu(ref credentials) => crate::feishu::Feishu::bot_id(credentials),
+            #[cfg(feature = "slack")]
+            Self::Slack(ref credentials) => crate::slack::Slack::bot_id(credentials),
             #[cfg(feature = "email")]
             Self::Email(ref credentials) => crate::email::Email::bot_id(credentials),
         }
@@ -174,6 +191,13 @@ impl From<crate::wechat::Account> for ChannelCredentials {
 impl From<crate::feishu::Account> for ChannelCredentials {
     fn from(credentials: crate::feishu::Account) -> Self {
         Self::Feishu(credentials)
+    }
+}
+
+#[cfg(feature = "slack")]
+impl From<crate::slack::Account> for ChannelCredentials {
+    fn from(credentials: crate::slack::Account) -> Self {
+        Self::Slack(credentials)
     }
 }
 
@@ -399,6 +423,10 @@ pub async fn run(run: AccountRun<'_>) -> Result<()> {
         ChannelCredentials::Feishu(ref credentials) => {
             reported(&run, crate::feishu::Feishu::run(run, credentials).await)
         }
+        #[cfg(feature = "slack")]
+        ChannelCredentials::Slack(ref credentials) => {
+            reported(&run, crate::slack::Slack::run(run, credentials).await)
+        }
         #[cfg(feature = "email")]
         ChannelCredentials::Email(ref credentials) => {
             reported(&run, crate::email::Email::run(run, credentials).await)
@@ -414,5 +442,11 @@ fn reported(run: &AccountRun<'_>, result: Result<()>) -> Result<()> {
     result
 }
 
-#[cfg(all(test, feature = "wechat", feature = "feishu"))]
+#[cfg(all(
+    test,
+    feature = "wechat",
+    feature = "feishu",
+    feature = "slack",
+    feature = "email"
+))]
 mod tests;

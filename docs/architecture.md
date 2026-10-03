@@ -54,15 +54,15 @@ SCV provides:
   `agent_cancel`);
 - a versioned newline-delimited JSON protocol;
 - one Unix-socket daemon that owns agent state and per-connection sessions;
-- a TUI and chat channel bridges (WeChat, Feishu/Lark) that attach to the
+- a TUI and chat channel bridges (WeChat, Feishu/Lark, Slack) that attach to the
   daemon through the same protocol, including media in both directions
   (`chat_attach`);
 - read-only mail triage: an email account watches an IMAP mailbox, decides
   each new message with deterministic rules and, within a token budget, one
   tool-free model turn, and reports to a *mail chat*, a chat account set
   apart so that no model ever answers in it;
-- a chat log of each account owner's direct chat, and of each Feishu thread
-  in it, from which a new session carries on the open episode and which the
+- a chat log of each account owner's direct chat, and of each Feishu or Slack
+  thread in it, from which a new session carries on the open episode and which the
   model can search, with the files the owner keeps and a free-disk-space
   floor;
 - interactive approval for tools with filesystem, shell, subprocess, or
@@ -90,7 +90,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, and event serialization. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
-| `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), and `email` (read-only mail triage: the provider-neutral mail core and the IMAP adapter). |
+| `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), `slack` (tokens entered by hand, Socket Mode events with catch-up from conversation history, sending, files both ways, and its credentials), and `email` (read-only mail triage: the provider-neutral mail core and the IMAP adapter). |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
 The integration dependency chain is
@@ -99,7 +99,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.8` and exact workspace dependency pins.
+`0.3.9` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -169,6 +169,7 @@ What lives where in the largest crates:
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
 | | `wechat/` | WeChat login, polling `getupdates`, and sending (`mod.rs`); iLink requests (`ilink.rs`); credentials (`credentials.rs`); CDN files, AES-encrypted both ways (`cdn.rs`) |
 | | `feishu/` | The Feishu transport (`mod.rs`) and its Open Platform client (`api.rs`); the event long connection, its protobuf frames, and parsing events and catch-up history (`socket.rs`, `frame.rs`, `inbound.rs`); signing in by QR scan or with an existing app (`login.rs`); credentials (`credentials.rs`) |
+| | `slack/` | The Slack transport with its catch-up (`mod.rs`) and its Web API client, including files (`api.rs`); Socket Mode framing and liveness (`socket.rs`); parsing events and history, and the catch-up checkpoint (`inbound.rs`); tokens entered by hand and the installation they belong to (`credentials.rs`) |
 | | `email/` | The email channel and its run (`mod.rs`); the provider-neutral mailbox interface, `MailSource` and `SourceRef` (`source.rs`); the read-only IMAP adapter with its response parser, command guard, and typed client (`imap/`); decoding and cleaning mail text (`parse.rs`, `clean.rs`); rules, the token ladder, and triage turns (`rules.rs`, `worker.rs`, `triage.rs`, `model.rs`); the account's state and its single writer (`ledger.rs`); notification planning, rendering, and delivery (`plan.rs`, `render.rs`, `notify.rs`); retention (`janitor.rs`); settings and credentials (`settings.rs`, `credentials.rs`) |
 | `scv-core` | `message.rs`, `tool.rs` | History messages; the `Tool` trait, its context and output, and `ToolRegistry` |
 | | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` |

@@ -335,3 +335,15 @@ async fn status_shows_an_email_accounts_counts_and_nothing_else() {
     assert_eq!(hub.mail_counts("email:default"), None);
     assert!(components.status().components.is_empty());
 }
+
+#[test]
+fn slack_contact_failure_has_actionable_status_and_success_clears_it() {
+    let health = super::initial_health(scv_channels::ChannelKind::Slack, "test", None, true);
+    let reporter = super::HealthReporter(std::sync::Arc::new(std::sync::Mutex::new(health)));
+    reporter.contact(false);
+    let snapshot = reporter.snapshot();
+    assert_eq!(snapshot.state, scv_protocol::ComponentState::Disconnected);
+    assert!(snapshot.error.unwrap().contains("Socket Mode is on"));
+    reporter.contact(true);
+    assert!(reporter.snapshot().error.is_none());
+}

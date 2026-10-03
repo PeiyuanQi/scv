@@ -27,6 +27,9 @@ unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# This lint was added after the minimum supported Rust toolchain; existing
+# tests intentionally use the direct predicate for these assertions.
+assert_is_empty = "allow"
 # Pedantic lints that do not pay for themselves here.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
@@ -64,7 +67,7 @@ dbg_macro = "deny"
 todo = "deny"
 
 [workspace.package]
-version = "0.3.8"
+version = "0.3.9"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -107,14 +110,14 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 webpki-roots = "1.0.2"
 which = "8.0.0"
 
-scv-core = { version = "=0.3.8", path = "crates/scv-core" }
-scv-client = { version = "=0.3.8", path = "crates/scv-client" }
-scv-channels = { version = "=0.3.8", path = "crates/scv-channels" }
-scv-protocol = { version = "=0.3.8", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "=0.3.8", path = "crates/scv-provider-openai" }
-scv-server = { version = "=0.3.8", path = "crates/scv-server" }
-scv-tools = { version = "=0.3.8", path = "crates/scv-tools" }
-scv-tui = { version = "=0.3.8", path = "crates/scv-tui" }
+scv-core = { version = "=0.3.9", path = "crates/scv-core" }
+scv-client = { version = "=0.3.9", path = "crates/scv-client" }
+scv-channels = { version = "=0.3.9", path = "crates/scv-channels" }
+scv-protocol = { version = "=0.3.9", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.3.9", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.3.9", path = "crates/scv-server" }
+scv-tools = { version = "=0.3.9", path = "crates/scv-tools" }
+scv-tui = { version = "=0.3.9", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true

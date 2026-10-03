@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.8`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.8` pins.
+The current workspace release is `0.3.9`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.9` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,28 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.9
+
+`0.3.9` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.8` checks the new release and can roll it back.
+
+- **Slack.** A new chat channel, `slack`, through a bot app the owner creates
+  from `slack-app.example.json` with Socket Mode on, signed in with
+  `scv channels login slack` and its bot and app-level tokens entered by
+  hand. It answers like Feishu: owner-only by default, files both ways,
+  shared messages and threads' roots as context, threads as conversations of
+  their own, and catch-up from conversation history after a reconnect.
+  Nothing of it runs until an account signs in, and Feishu stays the
+  recommended channel. See [Slack contract](channels.md#slack-contract).
+- `0.3.8` rejects a `[channels.slack.<account>]` table in `config.toml`, which
+  `scv channels run slack` writes, so it cannot start with one, and an
+  automatic rollback would fail too. Remove those tables before going back to
+  `0.3.8`; it ignores Slack's saved credentials and state.
+
+What changes for code that embeds SCV's crates: `scv-channels` gains the
+`slack` feature, on by default, with `ChannelKind::Slack` and
+`ChannelCredentials::Slack`, so an exhaustive `match` on either adds an arm.
 
 ## Upgrading to 0.3.8
 

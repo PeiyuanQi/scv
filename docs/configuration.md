@@ -50,12 +50,13 @@ six places:
 ├── credentials/       sign-ins SCV writes itself (0700)
 │   ├── wechat/<account>.json
 │   ├── feishu/<account>.json
+│   ├── slack/<account>.json
 │   └── email/<account>.json   a mailbox's server, user, and password or code
 ├── agents/<name>/     private homes of the delegated agents (claude, codex,
 │                      grok, dsh, pi, scv), with their own sign-ins
 ├── skills/            your SCV skills
 ├── history/           the chat log of each account owner's direct chat, and of
-│                      each Feishu thread in it (0700)
+│                      each Feishu or Slack thread in it (0700)
 │   └── <channel>/<account>/<conversation>/
 │       ├── <year>/<Monday>_<Sunday>/<start>.jsonl   one file per episode
 │       └── files/     files the owner kept, unless [history] archive_dir
@@ -351,7 +352,7 @@ Both defaults must not exceed the ceiling, and the ceiling is at most 86400
 max_timeout_seconds = 28800
 ```
 
-A channel owner turn (WeChat or Feishu) may run for the ceiling plus five minutes of model time,
+A channel owner turn (WeChat, Feishu, or Slack) may run for the ceiling plus five minutes of model time,
 and never less than 30 minutes, so four hours and five minutes by default; the
 component reads the ceiling from the workspace configuration each time it
 starts. `agent.max_steps` (default 128) bounds model/tool rounds per turn.
@@ -752,7 +753,7 @@ process has died, at startup and every 60 seconds; `scv agents ps` and
 [Tracking and cleanup](tools.md#tracking-and-cleanup).
 
 Channel credentials live in `credentials/<channel>/<account>.json`
-(`<channel>` is `wechat`, `feishu`, or `email`) and durable delivery state in
+(`<channel>` is `wechat`, `feishu`, `slack`, or `email`) and durable delivery state in
 `state/channels/<channel>/<account>.json` under the same root. Each account's
 settings are a table in the instance's `config.toml`:
 
@@ -793,7 +794,10 @@ the key. An explicit workspace must be an existing absolute
 directory. Saved accounts autostart when enabled, but QR login is always
 explicit. Logging in again preserves a saved disabled setting. A Feishu
 account's credentials hold the app ID and secret, its brand (`feishu` or
-`lark`), and the owner's `open_id`; the secret is never printed.
+`lark`), and the owner's `open_id`; a Slack account's hold the bot and
+app-level tokens, the workspace, app, and bot member IDs Slack confirmed at
+sign-in, and the owner's member ID. Neither is ever printed, and Slack's
+tokens are never settings in this file.
 
 Account settings reject unknown keys. The daemon reads credentials and settings
 together under the account transaction lock, on every reconciliation, so an

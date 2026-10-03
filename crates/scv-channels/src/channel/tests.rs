@@ -5,9 +5,10 @@ use super::*;
 #[test]
 fn channels_keep_their_names_and_order() {
     let names: Vec<_> = ChannelKind::ALL.iter().map(|kind| kind.name()).collect();
-    assert_eq!(names, ["wechat", "feishu", "email"]);
+    assert_eq!(names, ["wechat", "feishu", "slack", "email"]);
     assert_eq!(ChannelKind::parse("wechat").unwrap(), ChannelKind::Wechat);
     assert_eq!(ChannelKind::parse("feishu").unwrap(), ChannelKind::Feishu);
+    assert_eq!(ChannelKind::parse("slack").unwrap(), ChannelKind::Slack);
     assert_eq!(ChannelKind::parse("email").unwrap(), ChannelKind::Email);
     assert!(ChannelKind::Feishu.is_chat() && !ChannelKind::Email.is_chat());
     // Lark is a Feishu brand, not a channel.
@@ -17,6 +18,7 @@ fn channels_keep_their_names_and_order() {
     );
     assert_eq!(ChannelKind::Wechat.title(), "WeChat");
     assert_eq!(ChannelKind::Feishu.title(), "Feishu");
+    assert_eq!(ChannelKind::Slack.title(), "Slack");
 }
 
 fn wechat() -> crate::wechat::Account {

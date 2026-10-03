@@ -7,7 +7,7 @@
 **One agent to find them all, one agent to guide them.**
 
 A fast, native agent runtime that lives on your machine,<br>
-leads your coding agents, and answers from your terminal, Feishu, and WeChat.
+leads your coding agents, and answers from your terminal, Feishu, Slack, and WeChat.
 
 English · [简体中文](https://github.com/PeiyuanQi/scv/blob/main/README.zh-CN.md)
 
@@ -24,7 +24,7 @@ English · [简体中文](https://github.com/PeiyuanQi/scv/blob/main/README.zh-C
 
 SCV is a small agent runtime written in Rust. One long-running daemon holds
 your sessions, tools, and approvals, and you talk to it from a terminal UI or
-from Feishu/Lark and WeChat on your phone. It handles quick questions itself,
+from Feishu/Lark, WeChat, or Slack on your phone. It handles quick questions itself,
 finds the right coding agent for real work (Claude Code, Codex, and others),
 briefs it, runs it as a background job, and messages you when it is done.
 
@@ -32,13 +32,14 @@ briefs it, runs it as a background job, and messages you when it is done.
 
 ### Chat from your phone
 
-Scan a QR code to pair Feishu/Lark or WeChat. SCV answers only you by default,
+Scan a QR code to pair Feishu/Lark or WeChat, or connect a Slack app you set up
+by hand. SCV answers only you by default,
 reads the photos, files, and videos you send, and sends files back. Long work
 runs in the background while you keep chatting; results and yes/no questions
 arrive as messages. SCV keeps a log of your chat, so a conversation carries on
 across restarts and it can look back when you mention something older; `/new`
-starts a fresh one. On Feishu, a thread is a conversation of its own: SCV
-answers inside the thread, on a session of its own.
+starts a fresh one. On Feishu and Slack, a thread is a conversation of its
+own: SCV answers inside the thread, on a session of its own.
 
 ### One agent, many agents
 
@@ -120,6 +121,11 @@ scv channels login feishu        # scan the QR code (or: lark, wechat)
 scv channels run feishu --workspace ~/code --remote-tools owner
 scv channels status              # Channels: 1 of 1 enabled accounts connected
 ```
+
+Slack works too, through an app you create once from SCV's manifest with Socket
+Mode on ([setup](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md#slack-contract)).
+`scv channels login slack --slack-owner-user-id U0123456789` then reads its bot
+and app-level tokens at hidden prompts.
 
 > **`--remote-tools owner` equals shell access from your chat account.** It
 > gives your own account every SCV tool, with approvals granted automatically.
@@ -262,7 +268,7 @@ and report vulnerabilities as
 | Guide | What's inside |
 | --- | --- |
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | Crates, the agent loop, planned restarts, and where to start reading the code |
-| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | Feishu/Lark and WeChat: sign-in, media, background reports, questions to the owner; read-only mail triage reported to a mail chat |
+| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | Feishu/Lark, WeChat, and Slack: sign-in, media, background reports, questions to the owner; read-only mail triage reported to a mail chat |
 | [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | Built-in tools, delegated agents, their models and checks, ACP, background jobs, and agent sign-ins |
 | [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | Instance layout, every setting, providers, the daemon, and notices |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | Trust boundaries, approvals, remote tools, and delegated runs |

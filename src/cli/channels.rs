@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use scv_channels::Channel as _;
 use scv_channels::email::{self, Email};
 use scv_channels::feishu::{self, Feishu};
+use scv_channels::slack::{self, Slack};
 use scv_channels::wechat::{self, WeChat};
 use scv_client::Layout;
 use scv_protocol::{ComponentHealth, DaemonCommand, Purpose, RemoteTools, Senders};
@@ -26,7 +27,11 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
             imap_host,
             imap_port,
             user,
+            slack_owner_user_id,
         } => {
+            if channel != ChannelArg::Slack && slack_owner_user_id.is_some() {
+                bail!("--slack-owner-user-id is a Slack option");
+            }
             if channel != ChannelArg::Email && imap_host.is_some() {
                 bail!("--imap-host, --imap-port, and --user are email options");
             }
@@ -63,6 +68,29 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
                         None => feishu::Login::Scan { brand },
                     };
                     Feishu::login(layout, &account, login).await?;
+                }
+                ChannelArg::Slack => {
+                    if login_url.is_some() || app_id.is_some() || owner_open_id.is_some() {
+                        bail!(
+                            "Slack sign-in takes only --slack-owner-user-id; its two tokens are read from hidden prompts or stdin"
+                        );
+                    }
+                    // Never arguments: argv is visible to every local user.
+                    println!(
+                        "Slack needs an app you set up by hand, with Socket Mode on: see docs/channels.md#slack-contract. Enter its bot token (xoxb-), then its app-level token (xapp-, connections:write)."
+                    );
+                    let bot_token = read_secret("Slack bot token (input hidden)")?.into();
+                    let app_token = read_secret("Slack app-level token (input hidden)")?.into();
+                    Slack::login(
+                        layout,
+                        &account,
+                        slack::Login {
+                            bot_token,
+                            app_token,
+                            owner_user_id: slack_owner_user_id,
+                        },
+                    )
+                    .await?;
                 }
                 ChannelArg::Email => {
                     if login_url.is_some() || app_id.is_some() {
@@ -286,3 +314,6 @@ async fn reload_after_login(layout: &Layout) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

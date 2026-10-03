@@ -1,7 +1,7 @@
-//! SCV's chat channels: WeChat ([`wechat`], feature `wechat`) and Feishu or
-//! Lark ([`feishu`], feature `feishu`), on the bridge they share, and read-only
-//! mail triage ([`email`], feature `email`), which reports only to chat
-//! accounts set apart as mail chats.
+//! SCV's chat channels: WeChat ([`wechat`], feature `wechat`), Feishu or Lark
+//! ([`feishu`], feature `feishu`), and Slack ([`slack`], feature `slack`), on
+//! the bridge they share, and read-only mail triage ([`email`], feature
+//! `email`), which reports only to chat accounts set apart as mail chats.
 //!
 //! The bridge claims inbound messages durably, runs each conversation's
 //! turns in order on its own SCV daemon session, and delivers replies with
@@ -12,7 +12,7 @@
 // Without a chat channel the bridge has no transport to run, and without
 // any channel the dispatch has no arms that use their inputs.
 #![cfg_attr(
-    not(any(feature = "wechat", feature = "feishu")),
+    not(any(feature = "wechat", feature = "feishu", feature = "slack")),
     allow(
         dead_code,
         unused_variables,
@@ -51,6 +51,8 @@ mod mail_chat;
 pub mod media;
 mod retry;
 mod session;
+#[cfg(feature = "slack")]
+pub mod slack;
 pub mod state;
 #[cfg(feature = "wechat")]
 pub mod wechat;
@@ -242,6 +244,13 @@ pub(crate) struct Batch {
 pub(crate) enum Inbound {
     /// Not something to answer (a system message, or missing a field a
     /// reply needs); it is only recorded as seen.
+    #[cfg_attr(
+        all(feature = "slack", not(feature = "wechat"), not(feature = "feishu")),
+        allow(
+            dead_code,
+            reason = "Slack filters unsupported events before the bridge"
+        )
+    )]
     Ignored { id: String },
     /// A message to answer: text, files, or both.
     Text(Message),
@@ -377,8 +386,16 @@ pub(crate) struct OutboundFile<'a> {
     pub(crate) part: usize,
     pub(crate) path: &'a Path,
     pub(crate) name: &'a str,
+    #[cfg_attr(
+        not(any(feature = "wechat", feature = "feishu")),
+        allow(dead_code, reason = "Slack decides how to show a file itself")
+    )]
     pub(crate) kind: MediaKind,
     /// Stable across retries of this file, including after a restart.
+    #[cfg_attr(
+        not(any(feature = "wechat", feature = "feishu")),
+        allow(dead_code, reason = "Slack has no idempotency key")
+    )]
     pub(crate) client_id: &'a str,
 }
 
@@ -396,6 +413,10 @@ pub(crate) struct Outbound<'a> {
     pub(crate) part: usize,
     pub(crate) text: &'a str,
     /// Stable across retries of this part, including after a restart.
+    #[cfg_attr(
+        not(any(feature = "wechat", feature = "feishu")),
+        allow(dead_code, reason = "Slack has no idempotency key")
+    )]
     pub(crate) client_id: &'a str,
 }
 
