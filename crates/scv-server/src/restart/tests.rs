@@ -846,42 +846,37 @@ async fn a_planned_restart_waits_out_a_mail_action_before_it_hands_over() {
 
 #[tokio::test]
 async fn a_planned_restart_lowers_the_mail_drain_when_handing_over_fails() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     let home = tempfile::tempdir().unwrap();
     let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
         home.path(),
     )));
     let hub = Hub::new(None);
+    // An action under way holds the restart in its drain once its deadline
+    // has passed, so the raised flag is seen without racing for it.
+    let registration = hub.register_mail("email:default", vec!["feishu:mail".into()]);
+    assert!(registration.begin_execution());
     let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
-    let saw_drain = Arc::new(AtomicBool::new(false));
-    let stop = Arc::new(AtomicBool::new(false));
-    let watcher = {
-        let hub = Arc::clone(&hub);
-        let saw_drain = Arc::clone(&saw_drain);
-        let stop = Arc::clone(&stop);
-        std::thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                if hub.mail_draining() {
-                    saw_drain.store(true, Ordering::Relaxed);
-                }
-            }
-        })
-    };
     let mut waiting = plan(PlanState::Waiting);
     waiting.requested_unix = unix_now();
-    waiting.deadline_unix = unix_now() + 600;
+    waiting.deadline_unix = unix_now();
     waiting.restart_unix = None;
     restarter.arm(waiting).unwrap();
+    eventually(|| hub.mail_draining()).await;
+    assert!(
+        launched.lock().unwrap().is_empty(),
+        "the restart drains before it hands over"
+    );
+    assert!(
+        !registration.begin_execution(),
+        "no new action starts while the drain flag is up"
+    );
     // The plan is saved. The next save, in the hand-over, has to fail.
     let state = home.path().join("state");
     assert!(state.join("update.json").is_file());
     std::fs::remove_dir_all(&state).unwrap();
     std::fs::write(&state, b"not a directory").unwrap();
+    registration.end_execution();
     eventually(|| restarter.info().is_none()).await;
-    assert!(
-        saw_drain.load(Ordering::Relaxed),
-        "the drain flag was raised before the hand-over failed"
-    );
     assert!(
         !hub.mail_draining(),
         "a failed hand-over lowers the drain flag"
@@ -890,7 +885,10 @@ async fn a_planned_restart_lowers_the_mail_drain_when_handing_over_fails() {
         launched.lock().unwrap().is_empty(),
         "a failed hand-over is not recorded as started"
     );
+    assert!(
+        registration.begin_execution(),
+        "actions start again once the flag is lowered"
+    );
+    registration.end_execution();
     restarter.cancel.cancel();
-    stop.store(true, Ordering::Relaxed);
-    watcher.join().unwrap();
 }
