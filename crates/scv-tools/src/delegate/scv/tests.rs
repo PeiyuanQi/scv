@@ -349,8 +349,35 @@ fn background_work_follows_jobs_until_their_report_turn_ends() {
         None
     );
     assert_eq!(work.count(), 1);
+    // A failed report turn that will be tried again leaves the job counting.
+    let retried = json!({"kind":"background","jobs":["job-1"],"retry_seconds":30});
     assert_eq!(
-        work.observe(&turn("turn.failed", "background:1", origin.clone())),
+        work.observe(&turn("turn.failed", "background:1", retried)),
+        None
+    );
+    assert_eq!(work.count(), 1);
+    assert_eq!(
+        work.observe(&turn("turn.started", "background:2", origin.clone())),
+        None
+    );
+    assert_eq!(
+        work.observe(&turn("turn.failed", "background:2", origin.clone())),
+        Some(0)
+    );
+    // A report turn whose job the model looked up meanwhile still counts as
+    // one until it ends, and its retry brings back nothing settled.
+    work.observe(&tool_completed(
+        json!([{"job":"job-3","tool":"agent","agent":"codex","status":"running"}]),
+    ));
+    let job_3 = json!({"kind":"background","jobs":["job-3"]});
+    work.observe(&turn("turn.started", "background:3", job_3));
+    work.observe(&tool_completed(
+        json!([{"job":"job-3","tool":"agent","agent":"codex","status":"completed"}]),
+    ));
+    assert_eq!(work.count(), 1);
+    let job_3_retried = json!({"kind":"background","jobs":["job-3"],"retry_seconds":30});
+    assert_eq!(
+        work.observe(&turn("turn.failed", "background:3", job_3_retried)),
         Some(0)
     );
     // A server-started turn of a kind this client does not know counts too.

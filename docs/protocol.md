@@ -39,7 +39,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.10"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.11"}}
 ```
 
 ### `daemon.control`
@@ -59,7 +59,7 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 {"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
-{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.10 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.11 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
 {"type":"daemon.control","request_id":"d11","command":{"action":"confirm_status","id":"5f0c9a1e2b3d"}}
 {"type":"daemon.control","request_id":"p1","command":{"action":"project_create","name":"release","workspace":"/workspace/project"}}
 {"type":"daemon.control","request_id":"p2","command":{"action":"project_tasks","project":"release"}}
@@ -287,16 +287,16 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.10"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.11"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.10","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.10","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
-{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.10","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.11","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.11","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.11","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -422,8 +422,10 @@ A job appears as `running` in the `agent` call that started it, and once
 more, with how it ended (`completed`, `failed`, `declined`, `timeout`, or
 `cancelled`), in the `agent_wait`, `agent_status`, or `agent_cancel` call
 through which the model saw its result or asked for its stop; a job reported
-in a server-started turn is named by that turn's `origin.jobs` instead. A job
-is therefore settled once the model has seen its result, not when it
+in a server-started turn is named by that turn's `origin.jobs` instead, and
+one the server reports directly by `background.reported` (see
+[Server-started turns](#server-started-turns)). A job is therefore settled
+once the model has seen its result, or the client was given it, not when it
 finishes: a client keeps the session open until then, since closing it
 cancels the session's jobs. The field is omitted when a call touched no job,
 and by servers before 0.3.0.
@@ -467,9 +469,8 @@ result, it reports the job in a new turn once the session is idle and its
 queue is empty. Such a turn is announced and ended like any other, and its
 `turn.started` and terminal event carry an `origin`: its `kind`
 (`scv_protocol::OriginKind`, `background` for these reports; a kind a client
-does not know parses as `unknown`) and the `jobs` it reports, whose results the
-model sees in this turn. A client's own turns have none, and older frames
-without the field parse as client turns.
+does not know parses as `unknown`) and the `jobs` it reports. A client's own
+turns have none, and older frames without the field parse as client turns.
 
 ```json
 {"type":"turn.started","request_id":"background:…","session_id":"...","turn_id":"...","seq":20,"origin":{"kind":"background","jobs":["job-1"]}}
@@ -477,10 +478,37 @@ without the field parse as client turns.
 {"type":"turn.completed","request_id":"background:…","session_id":"...","turn_id":"...","seq":22,"steps":1,"usage":{},"origin":{"kind":"background","jobs":["job-1"]}}
 ```
 
+The terminal event settles the jobs: `turn.completed` because the model has
+seen their results, and `turn.cancelled` because the user stopped the report.
+A `turn.failed` leaves no history, so the model has not seen them, and one of
+two things follows (see [tools](tools.md#background-jobs) for when):
+
+- its `origin` carries `retry_seconds`, and the jobs stay unreported: the
+  server starts another report turn for them about that many seconds later,
+  or as soon as another turn of the session succeeds. A client sends nothing
+  to its user for this failure and keeps tracking the jobs.
+- just before it, a `background.reported` event reports the jobs directly,
+  without the model, and settles them. A client shows its user `message` and
+  each job's result; the `turn.failed` after it has no `retry_seconds`.
+
+```json
+{"type":"turn.failed","request_id":"background:…","session_id":"...","turn_id":"...","seq":23,"code":"provider_error","message":"provider returned HTTP 503 Service Unavailable: sub2api: MODEL_NOT_AVAILABLE () (new_api_error, query_data_error)","origin":{"kind":"background","jobs":["job-1"],"retry_seconds":30}}
+{"type":"background.reported","session_id":"...","seq":30,"code":"provider_error","message":"provider returned HTTP 503 Service Unavailable: …","attempts":3,"reports":[{"job":"job-1","agent":"codex","task":"Land the fix","status":"completed","session":"codex-1","reply":"Landed 0.3.11 …"}]}
+{"type":"turn.failed","request_id":"background:…","session_id":"...","turn_id":"...","seq":31,"code":"provider_error","message":"provider returned HTTP 503 Service Unavailable: …","origin":{"kind":"background","jobs":["job-1"]}}
+```
+
+`background.reported` (`scv_protocol::JobReport` for each of `reports`) names
+no request and belongs to no turn; `attempts` counts the failed report turns,
+and each report's `reply` is the agent's bounded reply, untrusted
+delegated-agent output. `scv_protocol::describe_reports` renders reports the
+way the model's prompt does.
+
 Its `request_id` is server-generated, so a client tells its own turns' events
 apart by `request_id`. A `turn.start` sent while it runs is queued as usual.
-The optional field keeps protocol version 3: v3 clients that predate it read
-the turn as an ordinary one.
+The optional fields and the new event keep protocol version 3: v3 clients that
+predate `origin` read the turn as an ordinary one, ones that predate
+`background.reported` skip it as an unknown event, and servers before 0.3.11
+settled the jobs of every failed report turn.
 
 ### Errors
 

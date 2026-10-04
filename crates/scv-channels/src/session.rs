@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, bail};
 use scv_client::Connection;
 use scv_protocol::{
-    Attachment, ClientMessage, Frame, FrameDecoder, Overflow, PROTOCOL_VERSION, ReplyAttachment,
-    ServerEvent,
+    Attachment, ClientMessage, Frame, FrameDecoder, JobReport, Overflow, PROTOCOL_VERSION,
+    ReplyAttachment, ServerEvent,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -55,12 +55,13 @@ pub(crate) struct Session {
     server_turns: HashMap<String, Reply>,
     /// This client's abandoned turns, whose late events are ignored.
     stale: HashSet<String>,
-    /// Finished server-started turns' answers, waiting to be sent.
+    /// Finished server-started turns' answers, and results the server
+    /// reported directly, waiting to be sent.
     reports: VecDeque<Response>,
     /// Files the model attached during this client's current turn.
     files: Vec<ReplyAttachment>,
-    /// Background jobs this session started whose results the model has not
-    /// seen yet.
+    /// Background jobs this session started that are not settled yet:
+    /// running, or finished and not yet reported.
     background: HashMap<String, JobInfo>,
     /// A read or write failed, so the session cannot be reused.
     broken: bool,
@@ -235,8 +236,10 @@ impl Session {
     }
 
     /// Track background jobs and server-started turns in any event. A job
-    /// runs from the call that started it until the model has seen its
-    /// result: through a later call, or the report turn that names it.
+    /// counts from the call that started it until it is settled: a later
+    /// call shows the model its result, a report turn that names it ends
+    /// (unless it failed and will be tried again), or the server reports it
+    /// directly, whose text then waits in `reports`.
     fn observe(&mut self, event: &ServerEvent) {
         match event {
             ServerEvent::ToolCompleted {
@@ -273,13 +276,50 @@ impl Session {
             }
             ServerEvent::TurnStarted {
                 request_id,
-                origin: Some(origin),
+                origin: Some(_),
                 ..
             } => {
                 self.server_turns
                     .insert(request_id.clone(), Reply::default());
+            }
+            ServerEvent::TurnCompleted {
+                origin: Some(origin),
+                ..
+            }
+            | ServerEvent::TurnCancelled {
+                origin: Some(origin),
+                ..
+            } => {
                 for job in &origin.jobs {
                     self.background.remove(job);
+                }
+            }
+            ServerEvent::TurnFailed {
+                origin: Some(origin),
+                ..
+            } if origin.retry_seconds.is_none() => {
+                for job in &origin.jobs {
+                    self.background.remove(job);
+                }
+            }
+            ServerEvent::BackgroundReported {
+                message,
+                attempts,
+                reports,
+                ..
+            } => {
+                for report in reports {
+                    self.background.remove(&report.job);
+                }
+                if !reports.is_empty() {
+                    // Bounded like a report the model writes.
+                    let mut text = String::new();
+                    append_capped(
+                        &mut text,
+                        &direct_report(message, *attempts, reports),
+                        MAX_REPORT_BYTES,
+                    );
+                    self.reports.push_back(Response::System(text));
                 }
             }
             ServerEvent::TurnStarted {
@@ -343,12 +383,11 @@ impl Session {
                     self.reports.push_back(Response::Model(answer));
                 }
             }
+            // A failed report is tried again, or the server reports its
+            // jobs directly just before this (`observe`).
             ServerEvent::TurnFailed { .. } => {
                 self.stale.remove(&request);
-                if self.server_turns.remove(&request).is_some() {
-                    self.reports
-                        .push_back(Response::System(REPORT_FAILURE.to_owned()));
-                }
+                self.server_turns.remove(&request);
             }
             ServerEvent::TurnCancelled { .. } => {
                 self.stale.remove(&request);
@@ -518,8 +557,30 @@ pub(crate) struct JobInfo {
 
 /// Answers from a background report turn, like any reply, are bounded.
 const MAX_REPORT_BYTES: usize = 64 * 1024;
-const REPORT_FAILURE: &str = "SCV could not report a finished background job.";
 const TRUNCATED_NOTE: &str = "\n[reply truncated]";
+
+/// What the owner is told of finished background jobs whose report turns
+/// failed `attempts` times, the last with `error`: that, and each job's
+/// result as its agent gave it.
+pub(crate) fn direct_report(error: &str, attempts: u32, reports: &[JobReport]) -> String {
+    let (finished, them) = match reports {
+        [_] => ("A background job finished".to_owned(), "it"),
+        _ => (
+            format!("{} background jobs finished", reports.len()),
+            "them",
+        ),
+    };
+    let tries = if attempts > 1 {
+        format!(" ({attempts} tries)")
+    } else {
+        String::new()
+    };
+    format!(
+        "{finished}, but the model could not report {them}{tries}, so here is what the agent \
+         replied, unedited.\nError: {error}\n\n{}",
+        scv_protocol::describe_reports(reports).trim_end()
+    )
+}
 
 /// Append `content` to `answer` up to `max_bytes`; the first cut adds a note.
 fn append_capped(answer: &mut String, content: &str, max_bytes: usize) {

@@ -227,10 +227,17 @@ fn transcript_text(app: &App) -> Text<'static> {
                     }
                 }
             }
-            TranscriptItem::System(content) => lines.push(Line::styled(
-                format!("· {content}"),
-                Style::default().fg(Color::DarkGray),
-            )),
+            TranscriptItem::System(content) => {
+                // A note may run over several lines, such as a job's reply.
+                let mut marker = "· ";
+                for line in content.split('\n') {
+                    lines.push(Line::styled(
+                        format!("{marker}{line}"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    marker = "  ";
+                }
+            }
             TranscriptItem::Error(content) => lines.push(Line::styled(
                 format!("! {content}"),
                 Style::default().fg(Color::Red),

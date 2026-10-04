@@ -311,10 +311,32 @@ impl App {
                 ToolStatus::Cancelled,
                 TranscriptItem::System("Turn cancelled.".into()),
             ),
-            ServerEvent::TurnFailed { code, message, .. } => self.turn_ended(
-                ToolStatus::Failed,
-                TranscriptItem::Error(format!("{code}: {message}")),
-            ),
+            ServerEvent::TurnFailed {
+                code,
+                message,
+                origin,
+                ..
+            } => {
+                let retry = origin
+                    .and_then(|origin| origin.retry_seconds)
+                    .map_or_else(String::new, |seconds| {
+                        format!(" SCV will try the report again in about {seconds} seconds.")
+                    });
+                self.turn_ended(
+                    ToolStatus::Failed,
+                    TranscriptItem::Error(format!("{code}: {message}{retry}")),
+                );
+            }
+            ServerEvent::BackgroundReported {
+                code,
+                message,
+                reports,
+                ..
+            } => self.push_item(TranscriptItem::System(format!(
+                "The model could not report finished background work ({code}: {message}). \
+                 The agent's reply, unedited:\n{}",
+                scv_protocol::describe_reports(&reports).trim_end()
+            ))),
             ServerEvent::SessionCleared { .. } => {
                 self.items.clear();
                 self.prompt_history.clear();
@@ -556,7 +578,8 @@ fn event_seq(event: &ServerEvent) -> Option<u64> {
         | ServerEvent::SessionCleared { seq, .. }
         | ServerEvent::TurnCompleted { seq, .. }
         | ServerEvent::TurnCancelled { seq, .. }
-        | ServerEvent::TurnFailed { seq, .. } => Some(*seq),
+        | ServerEvent::TurnFailed { seq, .. }
+        | ServerEvent::BackgroundReported { seq, .. } => Some(*seq),
         ServerEvent::QueueSnapshot { seq, .. }
         | ServerEvent::QueueEnqueued { seq, .. }
         | ServerEvent::QueueUpdated { seq, .. }

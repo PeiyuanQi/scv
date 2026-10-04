@@ -1,6 +1,9 @@
 //! Turning a turn's `CoreEvent`s into protocol `ServerEvent`s.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use scv_core::{AgentError, CoreEvent, EventSink, ToolFailure};
@@ -55,6 +58,9 @@ pub(crate) struct ProtocolSink {
     /// The session's background jobs, whose changes each call's
     /// `tool.completed` carries.
     pub(crate) background: Option<Arc<BackgroundJobs>>,
+    /// Set once a tool call starts, so a failed turn that may have acted is
+    /// never run again on its own.
+    pub(crate) acted: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -89,14 +95,17 @@ impl EventSink for ProtocolSink {
                 name,
                 arguments,
             },
-            CoreEvent::ToolStarted { call_id, name } => ServerEvent::ToolStarted {
-                request_id: self.meta.request_id.clone(),
-                session_id: self.meta.session_id.clone(),
-                turn_id: self.meta.turn_id.clone(),
-                seq,
-                call_id,
-                name,
-            },
+            CoreEvent::ToolStarted { call_id, name } => {
+                self.acted.store(true, Ordering::Release);
+                ServerEvent::ToolStarted {
+                    request_id: self.meta.request_id.clone(),
+                    session_id: self.meta.session_id.clone(),
+                    turn_id: self.meta.turn_id.clone(),
+                    seq,
+                    call_id,
+                    name,
+                }
+            }
             CoreEvent::ToolProgress { call_id, text } => ServerEvent::ToolProgress {
                 request_id: self.meta.request_id.clone(),
                 session_id: self.meta.session_id.clone(),

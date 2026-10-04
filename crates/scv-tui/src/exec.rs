@@ -8,12 +8,14 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
-use scv_protocol::{ClientMessage, ServerEvent};
+use scv_protocol::{ClientMessage, ServerEvent, describe_reports};
 
 use crate::client::{Client, LaunchOptions, new_id};
 
 /// Run `prompt` in `cwd` and print the answer. Tool approvals are answered
-/// with `approve_risky`; background jobs the turn starts are waited for.
+/// with `approve_risky`; background jobs the turn starts are waited for, and
+/// their reports printed: the model's, or the agent's own reply when the
+/// model could not report them.
 pub async fn run_exec(
     cwd: &Path,
     prompt: String,
@@ -34,7 +36,7 @@ pub async fn run_exec(
         let mut printed_delta = false;
         let mut own_done = false;
         // Background jobs started in this session keep it open until they
-        // are reported, since closing the session cancels them.
+        // are settled, since closing the session cancels them.
         let mut background: HashSet<String> = HashSet::new();
         let mut reporting: HashSet<String> = HashSet::new();
         loop {
@@ -94,9 +96,6 @@ pub async fn run_exec(
                     origin: Some(origin),
                     ..
                 } => {
-                    for job in &origin.jobs {
-                        background.remove(job);
-                    }
                     if printed_delta {
                         println!();
                         printed_delta = false;
@@ -104,13 +103,37 @@ pub async fn run_exec(
                     eprintln!("[background report: {}]", origin.jobs.join(", "));
                     reporting.insert(started);
                 }
-                ServerEvent::TurnCompleted {
-                    request_id: finished,
+                ServerEvent::BackgroundReported {
+                    code,
+                    message,
+                    reports,
                     ..
                 } => {
                     if printed_delta {
                         println!();
                         printed_delta = false;
+                    }
+                    eprintln!(
+                        "[background report could not be written by the model ({code}): {message}; \
+                         the agent's reply follows]"
+                    );
+                    print!("{}", describe_reports(&reports));
+                    stdout().flush()?;
+                    for report in &reports {
+                        background.remove(&report.job);
+                    }
+                }
+                ServerEvent::TurnCompleted {
+                    request_id: finished,
+                    origin,
+                    ..
+                } => {
+                    if printed_delta {
+                        println!();
+                        printed_delta = false;
+                    }
+                    for job in origin.iter().flat_map(|origin| &origin.jobs) {
+                        background.remove(job);
                     }
                     reporting.remove(&finished);
                     if finished == request_id {
@@ -140,13 +163,36 @@ pub async fn run_exec(
                 }
                 ServerEvent::TurnCancelled {
                     request_id: finished,
-                    ..
-                }
-                | ServerEvent::TurnFailed {
-                    request_id: finished,
+                    origin,
                     ..
                 } => {
                     eprintln!("[background report did not complete]");
+                    for job in origin.iter().flat_map(|origin| &origin.jobs) {
+                        background.remove(job);
+                    }
+                    reporting.remove(&finished);
+                    if own_done && background.is_empty() && reporting.is_empty() {
+                        break;
+                    }
+                }
+                ServerEvent::TurnFailed {
+                    request_id: finished,
+                    code,
+                    message,
+                    origin,
+                    ..
+                } => {
+                    if let Some(seconds) = origin.as_ref().and_then(|origin| origin.retry_seconds) {
+                        eprintln!(
+                            "[background report failed ({code}): {message}; SCV tries again in \
+                             about {seconds} seconds]"
+                        );
+                    } else {
+                        eprintln!("[background report did not complete ({code}): {message}]");
+                        for job in origin.iter().flat_map(|origin| &origin.jobs) {
+                            background.remove(job);
+                        }
+                    }
                     reporting.remove(&finished);
                     if own_done && background.is_empty() && reporting.is_empty() {
                         break;

@@ -762,6 +762,7 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
         origin: Some(scv_protocol::TurnOrigin {
             kind: scv_protocol::OriginKind::Background,
             jobs: vec!["job-1".into()],
+            retry_seconds: None,
         }),
     });
     assert!(app.turn.is_some());
@@ -779,9 +780,74 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
         origin: Some(scv_protocol::TurnOrigin {
             kind: scv_protocol::OriginKind::Background,
             jobs: vec!["job-1".into()],
+            retry_seconds: None,
         }),
     });
     assert!(app.turn.is_none());
+}
+
+#[test]
+fn a_failed_report_says_when_it_is_tried_again_and_a_direct_report_shows_the_reply() {
+    let mut app = App::new(SessionInfo {
+        id: "s".into(),
+        cwd: "/tmp".into(),
+        model: "test".into(),
+        context_max_tokens: 100,
+        max_server_frame_bytes: DEFAULT_SERVER_FRAME_LIMIT,
+        max_transcript_bytes: 64 * 1024,
+        max_transcript_items: 100,
+        max_prompt_history_bytes: 1024,
+        max_prompt_history_items: 10,
+    });
+    let origin = |retry_seconds| {
+        Some(scv_protocol::TurnOrigin {
+            kind: scv_protocol::OriginKind::Background,
+            jobs: vec!["job-1".into()],
+            retry_seconds,
+        })
+    };
+    let failed = |seq, retry_seconds| ServerEvent::TurnFailed {
+        request_id: "background:1".into(),
+        session_id: "s".into(),
+        turn_id: "t".into(),
+        seq,
+        code: scv_protocol::ErrorCode::ProviderError,
+        message: "provider returned HTTP 503".into(),
+        origin: origin(retry_seconds),
+    };
+    app.handle_server_event(failed(1, Some(30)));
+    assert!(matches!(
+        app.items.back(),
+        Some(TranscriptItem::Error(text)) if text
+            == "provider_error: provider returned HTTP 503 SCV will try the report again in about 30 seconds."
+    ));
+    app.handle_server_event(ServerEvent::BackgroundReported {
+        session_id: "s".into(),
+        seq: 2,
+        code: scv_protocol::ErrorCode::ProviderError,
+        message: "provider returned HTTP 503".into(),
+        attempts: 3,
+        reports: vec![scv_protocol::JobReport {
+            job: "job-1".into(),
+            agent: "codex".into(),
+            task: String::new(),
+            status: scv_protocol::JobStatus::Completed,
+            session: None,
+            reply: "landed\nall green".into(),
+        }],
+    });
+    assert_eq!(app.last_seq, 2);
+    assert!(matches!(
+        app.items.back(),
+        Some(TranscriptItem::System(text)) if text.ends_with(
+            "unedited:\njob-1 (codex): completed\nlanded\nall green"
+        )
+    ));
+    app.handle_server_event(failed(3, None));
+    assert!(matches!(
+        app.items.back(),
+        Some(TranscriptItem::Error(text)) if text == "provider_error: provider returned HTTP 503"
+    ));
 }
 
 #[test]

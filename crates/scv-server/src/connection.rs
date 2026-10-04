@@ -1,16 +1,20 @@
 //! One client connection: bounded protocol frames in, one handler per
 //! `ClientMessage`, and its session's turns run one at a time. Background
-//! job reports start turns of their own once the user's work is done.
+//! job reports start turns of their own once the user's work is done; a
+//! failed one is tried again later, and then reported directly.
 
 use std::sync::{Arc, atomic::Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use scv_core::AgentError;
+use scv_core::{AgentError, Message};
 use scv_protocol::{
     Attachment, ClientMessage, DaemonCommand, ErrorCode, Frame, FrameDecoder, Overflow,
     PROTOCOL_VERSION, PeerInfo, ServerEvent, Usage, trim_line,
 };
-use scv_tools::delegation::DelegationRegistry;
+use scv_tools::{
+    background::{self, ReportFailure},
+    delegation::DelegationRegistry,
+};
 use tokio::{
     io::{AsyncBufRead, AsyncWriteExt, BufReader},
     sync::{Mutex, mpsc},
@@ -101,6 +105,7 @@ where
         loop {
             connection.track_activity();
             let frame_limit = connection.client_frame_limit();
+            let retry_due = connection.next_report_retry();
             tokio::select! {
                 () = cancellation.cancelled() => break,
                 read = frames.read(&mut reader, frame_limit) => {
@@ -115,6 +120,13 @@ where
                     break;
                 }
                 Some(()) = recv_background(&mut connection.background_rx) => {
+                    connection.on_background().await?;
+                }
+                // A report whose turn failed is due again; once it has fired,
+                // `background_ready` holds it until the session is idle.
+                () = report_retry(retry_due),
+                    if connection.active.is_none() && !connection.background_ready =>
+                {
                     connection.on_background().await?;
                 }
                 done = done_rx.recv(), if connection.active.is_some() => {
@@ -974,12 +986,89 @@ impl Connection {
         Ok(())
     }
 
-    /// A turn ended: announce how, then start the next queued prompt or a
-    /// pending background report.
+    /// When a background report whose turn failed is due again.
+    fn next_report_retry(&self) -> Option<tokio::time::Instant> {
+        self.session
+            .as_ref()
+            .and_then(|current| current.background.as_ref())
+            .and_then(|jobs| jobs.next_retry())
+    }
+
+    /// Settle the jobs a report turn named by how it ended. A failure is
+    /// tried again later (`origin.retry_seconds`), or else its jobs are
+    /// reported to the client directly, ahead of the turn's own end, and
+    /// the note telling the model so is returned.
+    async fn settle_report(&self, done: &mut TurnDone) -> Result<Option<String>> {
+        let TurnDone {
+            origin: Some(origin),
+            result,
+            acted,
+            ..
+        } = done
+        else {
+            return Ok(None);
+        };
+        let Some(current) = self.session.as_ref() else {
+            return Ok(None);
+        };
+        let Some(jobs) = current.background.as_ref() else {
+            return Ok(None);
+        };
+        let error = match result {
+            Ok(_) | Err(AgentError::Cancelled) => {
+                jobs.report_settled(&origin.jobs);
+                return Ok(None);
+            }
+            Err(error) => error,
+        };
+        // A provider failure may clear by itself. Any other would fail the
+        // same way again, and a turn that ran a tool must not run it twice.
+        let retry = matches!(error, AgentError::Provider(_)) && !*acted;
+        let message = error.to_string();
+        let names = origin.jobs.join(", ");
+        match jobs.report_failed(&origin.jobs, retry) {
+            ReportFailure::Retry(delay) => {
+                tracing::warn!(
+                    "Background report of {names} failed ({message}); trying again in {} seconds",
+                    delay.as_secs()
+                );
+                origin.retry_seconds = Some(delay.as_secs());
+                Ok(None)
+            }
+            ReportFailure::GiveUp { attempts, reports } if !reports.is_empty() => {
+                tracing::warn!(
+                    "Background report of {names} failed ({message}) after {attempts} attempt(s); \
+                     sending the results directly"
+                );
+                let note = background::delivered_note(&reports, &message);
+                let reported = ServerEvent::BackgroundReported {
+                    session_id: current.id.clone(),
+                    seq: next_seq(&current.seq),
+                    code: error_code(error),
+                    message,
+                    attempts,
+                    reports,
+                };
+                send_event(
+                    &self.output,
+                    reported,
+                    current.config.protocol.max_server_frame_bytes,
+                )
+                .await?;
+                Ok(Some(note))
+            }
+            ReportFailure::GiveUp { .. } | ReportFailure::Settled => Ok(None),
+        }
+    }
+
+    /// A turn ended: settle the jobs it reported, announce how it ended,
+    /// then start the next queued prompt or a pending background report.
     async fn on_turn_done(&mut self, done: Option<TurnDone>) -> Result<()> {
-        let Some(done) = done else {
+        let Some(mut done) = done else {
             return Ok(());
         };
+        let delivered = self.settle_report(&mut done).await?;
+        let succeeded = done.result.is_ok();
         if let Some(current) = self.session.as_ref() {
             let seq = next_seq(&current.seq);
             let event = match done.result {
@@ -1021,6 +1110,21 @@ impl Connection {
         }
         if let Some(mut active) = self.active.take() {
             let _ = (&mut active.task).await;
+        }
+        if let Some(current) = self.session.as_ref() {
+            // The turn has let go of the history: the model learns there
+            // that the user already has what it could not report.
+            if let Some(note) = delivered {
+                current.history.lock().await.push(Message::User {
+                    content: note,
+                    images: Vec::new(),
+                });
+            }
+            // The model answered, so reports waiting out a failed turn need
+            // not wait any longer.
+            if succeeded && let Some(jobs) = &current.background {
+                self.background_ready |= jobs.retry_now();
+            }
         }
         if let Some(current) = self.session.as_ref()
             && !current.paused.load(Ordering::Acquire)
@@ -1115,6 +1219,14 @@ async fn shutdown_writer(
         writer.abort();
         let _ = writer.await;
         Err(anyhow!("protocol writer shutdown timed out"))
+    }
+}
+
+/// Sleep until `due`, or forever when no report waits out a failed turn.
+async fn report_retry(due: Option<tokio::time::Instant>) {
+    match due {
+        Some(due) => tokio::time::sleep_until(due).await,
+        None => std::future::pending().await,
     }
 }
 

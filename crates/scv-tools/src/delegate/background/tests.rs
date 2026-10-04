@@ -244,10 +244,159 @@ async fn a_finished_job_nobody_looked_at_is_reported_once() {
     let prompt = report_prompt(&reports);
     assert!(prompt.starts_with("[SCV background report]"), "{prompt}");
     assert!(
-        prompt.contains("job-1 (fake, conversation fake-1): completed\nall done"),
+        prompt.contains("job-1 (fake, conversation fake-1): completed\nTask: work\nall done"),
         "{prompt}"
     );
+    // Its report turn has it; no other takes it meanwhile.
     assert!(fixture.jobs.take_unreported().is_empty(), "reported twice");
+    assert_eq!(fixture.jobs.pending(), 1);
+    // The turn completed: the model has seen it.
+    fixture.jobs.report_settled(&["job-1".to_owned()]);
+    assert_eq!(fixture.jobs.pending(), 0);
+    assert!(fixture.jobs.take_unreported().is_empty(), "reported twice");
+}
+
+/// A fixture whose job-1 has finished, unseen by the model.
+async fn finished_job() -> Fixture {
+    let mut fixture = fixture(2);
+    start(&fixture.tool).await;
+    fixture.release.notify_one();
+    fixture.finished.recv().await.unwrap();
+    fixture
+}
+
+fn job_1_only() -> Vec<String> {
+    vec!["job-1".to_owned()]
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_report_is_due_again_after_a_delay_then_reported_directly() {
+    let fixture = finished_job().await;
+    let jobs = &fixture.jobs;
+    assert_eq!(jobs.take_unreported().len(), 1);
+    assert_eq!(
+        jobs.report_failed(&job_1_only(), true),
+        ReportFailure::Retry(Duration::from_secs(30))
+    );
+    // Still unreported, and so still holding a planned restart, but not due.
+    assert_eq!(jobs.pending(), 1);
+    assert!(jobs.take_unreported().is_empty());
+    let due = jobs.next_retry().unwrap();
+    assert_eq!(due - tokio::time::Instant::now(), Duration::from_secs(30));
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert_eq!(jobs.take_unreported().len(), 1);
+    // The turn that has it is not waiting for anything.
+    assert_eq!(jobs.next_retry(), None);
+    assert_eq!(
+        jobs.report_failed(&job_1_only(), true),
+        ReportFailure::Retry(Duration::from_secs(120))
+    );
+    tokio::time::advance(Duration::from_secs(119)).await;
+    assert!(jobs.take_unreported().is_empty());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(jobs.take_unreported().len(), 1);
+
+    // The third failure is the last: the result goes to the user directly.
+    let ReportFailure::GiveUp { attempts, reports } = jobs.report_failed(&job_1_only(), true)
+    else {
+        panic!("the third failed report turn is not retried");
+    };
+    assert_eq!(attempts, 3);
+    assert_eq!(
+        reports,
+        [JobReport {
+            job: "job-1".into(),
+            agent: "fake".into(),
+            task: "work".into(),
+            status: JobStatus::Completed,
+            session: Some("fake-1".into()),
+            reply: "all done".into(),
+        }]
+    );
+    assert_eq!(jobs.pending(), 0);
+    assert_eq!(jobs.next_retry(), None);
+    assert!(jobs.take_unreported().is_empty());
+    // It is still there to look up, and looking settles nothing new.
+    let status = jobs.describe(Some("job-1"), "call-1").unwrap();
+    assert_eq!(status["result"]["reply"], "all done");
+    assert!(jobs.take_changes("call-1").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_that_must_not_be_retried_is_reported_directly_at_once() {
+    let fixture = finished_job().await;
+    assert_eq!(fixture.jobs.take_unreported().len(), 1);
+    let ReportFailure::GiveUp { attempts, reports } =
+        fixture.jobs.report_failed(&job_1_only(), false)
+    else {
+        panic!("a failure that must not be retried is not retried");
+    };
+    assert_eq!((attempts, reports.len()), (1, 1));
+    assert_eq!(fixture.jobs.pending(), 0);
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    assert!(fixture.jobs.take_unreported().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_report_turn_settles_its_jobs() {
+    let fixture = finished_job().await;
+    assert_eq!(fixture.jobs.take_unreported().len(), 1);
+    fixture.jobs.report_settled(&job_1_only());
+    assert_eq!(fixture.jobs.pending(), 0);
+    // A late failure of the same turn changes nothing.
+    assert_eq!(
+        fixture.jobs.report_failed(&job_1_only(), true),
+        ReportFailure::Settled
+    );
+    assert!(fixture.jobs.take_unreported().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_turn_that_succeeds_makes_a_waiting_report_due_at_once() {
+    let fixture = finished_job().await;
+    let jobs = &fixture.jobs;
+    // Nothing waits yet.
+    assert!(!jobs.retry_now());
+    jobs.take_unreported();
+    jobs.report_failed(&job_1_only(), true);
+    assert!(jobs.take_unreported().is_empty());
+    assert!(jobs.retry_now());
+    assert!(!jobs.retry_now());
+    assert_eq!(jobs.next_retry(), None);
+    // It keeps the failures it had: one more try is left after this one.
+    assert_eq!(jobs.take_unreported().len(), 1);
+    assert_eq!(
+        jobs.report_failed(&job_1_only(), true),
+        ReportFailure::Retry(Duration::from_secs(120))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_the_model_looks_up_needs_no_report_however_its_turn_ends() {
+    // Looked up while its report waits to be tried again.
+    let fixture = finished_job().await;
+    fixture.jobs.take_unreported();
+    fixture.jobs.report_failed(&job_1_only(), true);
+    fixture.jobs.describe(Some("job-1"), "call-1").unwrap();
+    assert_eq!(
+        fixture.jobs.take_changes("call-1"),
+        [job_1(JobStatus::Completed)]
+    );
+    assert_eq!(fixture.jobs.pending(), 0);
+    assert_eq!(fixture.jobs.next_retry(), None);
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    assert!(fixture.jobs.take_unreported().is_empty());
+
+    // Looked up during its own report turn, which then fails.
+    let fixture = finished_job().await;
+    fixture.jobs.take_unreported();
+    fixture.jobs.describe(Some("job-1"), "call-1").unwrap();
+    assert_eq!(
+        fixture.jobs.report_failed(&job_1_only(), true),
+        ReportFailure::Settled
+    );
+    assert_eq!(fixture.jobs.pending(), 0);
 }
 
 #[tokio::test]

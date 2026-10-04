@@ -88,12 +88,13 @@ struct Watcher {
 /// chat session follows its own: a job counts from the call that started it
 /// (`tool.completed.jobs`) until its model has seen the result, through a
 /// later call or a turn the nested SCV started to report it (`origin.jobs`),
-/// which counts until it ends.
+/// which counts until it ends. A report turn that failed and will be tried
+/// again (`origin.retry_seconds`) leaves its jobs counting.
 #[derive(Debug, Default)]
 struct BackgroundWork {
     jobs: HashSet<String>,
-    /// Report turns running, by request ID, with how many jobs each reports.
-    reports: HashMap<String, usize>,
+    /// Report turns running, by request ID, with the jobs each reports.
+    reports: HashMap<String, Vec<String>>,
 }
 
 impl BackgroundWork {
@@ -105,6 +106,9 @@ impl BackgroundWork {
                 for change in jobs {
                     if !change.started() {
                         self.jobs.remove(&change.job);
+                        for reported in self.reports.values_mut() {
+                            reported.retain(|job| *job != change.job);
+                        }
                     } else if self.jobs.len() < MAX_TRACKED {
                         self.jobs.insert(change.job.clone());
                     }
@@ -119,8 +123,18 @@ impl BackgroundWork {
                     self.jobs.remove(job);
                 }
                 if self.reports.len() < MAX_TRACKED {
-                    self.reports
-                        .insert(request_id.clone(), origin.jobs.len().max(1));
+                    self.reports.insert(request_id.clone(), origin.jobs.clone());
+                }
+            }
+            ServerEvent::TurnFailed {
+                request_id,
+                origin: Some(origin),
+                ..
+            } if origin.retry_seconds.is_some() => {
+                for job in self.reports.remove(request_id).unwrap_or_default() {
+                    if self.jobs.len() < MAX_TRACKED {
+                        self.jobs.insert(job);
+                    }
                 }
             }
             ServerEvent::TurnCompleted {
@@ -147,7 +161,12 @@ impl BackgroundWork {
     }
 
     fn count(&self) -> usize {
-        self.jobs.len() + self.reports.values().sum::<usize>()
+        self.jobs.len()
+            + self
+                .reports
+                .values()
+                .map(|jobs| jobs.len().max(1))
+                .sum::<usize>()
     }
 }
 

@@ -286,6 +286,9 @@ impl Drop for SessionTracker {
     }
 }
 
+/// Whether session `id` has work a planned restart waits out: a turn, or a
+/// background job still running or not yet reported (one whose report turn
+/// failed and waits to be tried again included).
 fn session_busy(id: &str) -> bool {
     let activity = SESSIONS
         .lock()
@@ -298,7 +301,7 @@ fn session_busy(id: &str) -> bool {
                 .background
                 .as_ref()
                 .and_then(Weak::upgrade)
-                .is_some_and(|jobs| jobs.running() > 0)
+                .is_some_and(|jobs| jobs.pending() > 0)
     })
 }
 

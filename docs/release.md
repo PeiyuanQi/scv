@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.10`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.10` pins.
+The current workspace release is `0.3.11`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.11` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,36 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.11
+
+`0.3.11` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.10` checks the new release and can roll it back.
+
+- **Background reports survive model outages.** A finished background job
+  stays unreported until a report turn about it completes. A report turn the
+  provider fails (no tool having run) is tried again after 30 and then 120
+  seconds, or as soon as another turn succeeds; after the third failure, or
+  any other kind, the server sends the results directly
+  (`background.reported`) and notes them in the model's history. Chats get
+  SCV's own message with the error and each job's reply instead of "SCV could
+  not report a finished background job.", `scv exec` prints the replies, the
+  TUI shows them, and a planned restart waits for a report that waits to be
+  tried again. Every failed report turn is logged with its error. See
+  [tools](tools.md#background-jobs) and
+  [protocol](protocol.md#server-started-turns).
+- A `0.3.10` client skips `background.reported` and shows the failed report
+  turn as before; a `0.3.10` server settles a failed report turn's jobs, as
+  this release's clients read a `turn.failed` without `retry_seconds`.
+
+What changes for code that embeds SCV's crates: `scv_protocol::TurnOrigin`
+gains `retry_seconds` and `ServerEvent` gains `BackgroundReported`, so a
+struct literal or an exhaustive `match` needs the new field or arm;
+`scv_protocol` adds `JobReport` and `describe_reports`, which replace
+`scv_tools::background::JobReport`. `BackgroundJobs::take_unreported` no
+longer marks jobs reported: the caller ends each report with
+`report_settled` or `report_failed` (`ReportFailure`), and `pending`,
+`next_retry`, and `retry_now` follow what is left.
 
 ## Upgrading to 0.3.10
 
