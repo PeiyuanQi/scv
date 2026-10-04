@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use super::clean::{self, Cleaned};
 use super::render::{MAX_SUMMARY_LINES, Summary};
+use super::settings::Suggestion;
 use super::source::{Address, Meta};
 
 /// Output tokens the budget sets aside for one answer.
@@ -35,16 +36,60 @@ pub(crate) struct Answer {
     pub(crate) notify: bool,
     pub(crate) urgent: bool,
     pub(crate) summary: Summary,
+    /// It thinks a reply is wanted; code only mentions `mail reply`.
+    pub(crate) reply_suggested: bool,
+    /// A move it suggests, among those the settings let it suggest; code
+    /// makes it an action for the owner to approve, on this message only.
+    pub(crate) suggestion: Option<Suggestion>,
 }
 
-/// The whole system prompt of a triage session for `account`.
+/// What a triage answer may carry beyond the report, from the settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Options {
+    /// Ask whether a reply is wanted (replies are on).
+    pub(crate) reply_hint: bool,
+    /// Moves the model may suggest (`mail.actions.propose`).
+    pub(crate) moves: Vec<Suggestion>,
+}
+
+/// The whole system prompt of a triage session for `account`, reading
+/// nothing but the report.
+#[cfg(test)]
 pub(crate) fn frame(account: &str, instructions: &str) -> String {
+    frame_with(account, instructions, &Options::default())
+}
+
+/// The whole system prompt of a triage session for `account`, with the
+/// extra answers `options` allows.
+pub(crate) fn frame_with(account: &str, instructions: &str, options: &Options) -> String {
     let instructions = instructions.trim();
     let instructions = if instructions.is_empty() {
         DEFAULT_INSTRUCTIONS
     } else {
         instructions
     };
+    let mut extra = String::new();
+    let mut explain = String::new();
+    if options.reply_hint {
+        extra.push_str(", \"reply_suggested\": true or false");
+        explain.push_str(" reply_suggested is true when the owner would likely want to answer it.");
+    }
+    if !options.moves.is_empty() {
+        let names: Vec<&str> = options
+            .moves
+            .iter()
+            .map(|suggestion| suggestion_name(*suggestion))
+            .collect();
+        extra.push_str(&format!(
+            ", \"move\": null or one of {}",
+            names
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        explain.push_str(" move suggests where this mail belongs; the owner decides.");
+    }
     format!(
         "You triage email for the owner of the mailbox \"{account}\". SCV shows the owner a \
          short report built from your answer.\n\
@@ -55,9 +100,9 @@ pub(crate) fn frame(account: &str, instructions: &str) -> String {
          Owner's standing instructions: {instructions}\n\
          Answer with exactly one JSON object and nothing else:\n\
          {{\"notify\": true or false, \"urgent\": true or false, \"summary\": [\"at most {MAX_SUMMARY_LINES} \
-         short lines: what it is, what the sender wants, deadlines or amounts, a next step\"]}}\n\
+         short lines: what it is, what the sender wants, deadlines or amounts, a next step\"]{extra}}}\n\
          notify is true when the owner should see this mail. urgent is true only when it needs \
-         the owner within hours."
+         the owner within hours.{explain}"
     )
 }
 
@@ -157,10 +202,25 @@ pub(crate) fn estimate(frame: &str, prompt: &str) -> u64 {
     ((frame.len() + prompt.len()) as u64).div_ceil(3) + ANSWER_TOKENS
 }
 
+fn suggestion_name(suggestion: Suggestion) -> &'static str {
+    match suggestion {
+        Suggestion::Archive => "archive",
+        Suggestion::Trash => "trash",
+        Suggestion::Spam => "spam",
+    }
+}
+
 /// The answer's first balanced JSON object, read into the three fields that
 /// count; unknown fields are ignored. `None` when there is no such object,
 /// which the caller reports as unreadable rather than drops.
+#[cfg(test)]
 pub(crate) fn parse(answer: &str) -> Option<Answer> {
+    parse_with(answer, &Options::default())
+}
+
+/// [`parse`], also reading the extra answers `options` allows; any other
+/// value of them is ignored.
+pub(crate) fn parse_with(answer: &str, options: &Options) -> Option<Answer> {
     let object = first_object(answer)?;
     let value: Value = serde_json::from_str(object).ok()?;
     let object = value.as_object()?;
@@ -184,16 +244,24 @@ pub(crate) fn parse(answer: &str) -> Option<Answer> {
         .filter(|line| !line.is_empty())
         .take(MAX_SUMMARY_LINES)
         .collect();
+    let suggestion = object.get("move").and_then(Value::as_str).and_then(|name| {
+        options.moves.iter().copied().find(|suggestion| {
+            name.trim()
+                .eq_ignore_ascii_case(suggestion_name(*suggestion))
+        })
+    });
     Some(Answer {
         // Failing open: without a clear `false`, the owner hears of it.
         notify: flag("notify", true),
         urgent: flag("urgent", false),
         summary: Summary { lines },
+        reply_suggested: options.reply_hint && flag("reply_suggested", false),
+        suggestion,
     })
 }
 
 /// The first `{ … }` whose braces balance outside JSON strings.
-fn first_object(text: &str) -> Option<&str> {
+pub(crate) fn first_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let mut depth = 0usize;
     let mut in_string = false;

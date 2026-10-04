@@ -5,13 +5,20 @@
 //! chat. A key is stored once, so handing the same batch over again after a
 //! lost acknowledgement never repeats it, and a route the hub reports as an
 //! ordinary chat is never used: the hub and the bridge refuse it too.
+//!
+//! With mail actions on, the notifier also watches their previews: once
+//! the mail chat reports one delivered, its actions open for approval, and
+//! one the platform refused is offered again with new codes (at most twice)
+//! or expires.
 
 use anyhow::Result;
 use std::time::Duration;
 
 use super::Clock;
+use super::ledger::actions::{ActionState, Policy, preview_key};
 use super::ledger::{Batch, Counts, Ledger};
 use super::plan::{self, Class, Limits, Plan, SendClass};
+use super::prepare::Actions;
 use super::render::{self, DigestOptions};
 use super::settings::{MailSettings, Skipped};
 use crate::hub::{Hub, KeyedOutcome, NotifyError};
@@ -48,6 +55,8 @@ pub(crate) struct Notifier<'a> {
     pub(crate) clock: &'a dyn Clock,
     /// The daemon's hub; `None` when the account runs without a daemon.
     pub(crate) hub: Option<&'a Hub>,
+    /// With mail actions on: what offering a preview again needs.
+    pub(crate) previews: Option<(&'a Actions<'a>, &'a Policy)>,
 }
 
 impl Notifier<'_> {
@@ -170,7 +179,10 @@ impl Notifier<'_> {
                     items = batch.seqs.len(),
                     "a mail chat stored a mail message"
                 );
-                return self.ledger.batch_stored(route, self.clock.now()).await;
+                return self
+                    .ledger
+                    .batch_stored(route, &owner, self.clock.now())
+                    .await;
             }
         }
         self.ledger.batch_retry(self.clock.now()).await
@@ -182,17 +194,89 @@ impl Notifier<'_> {
         let Some(hub) = self.hub else {
             return Ok(());
         };
-        let watched = self.ledger.snapshot().watched;
+        let snapshot = self.ledger.snapshot();
         let mut delivered = Vec::new();
         let mut refused = Vec::new();
-        for entry in watched {
+        for entry in snapshot.watched.clone() {
             match hub.keyed_outcome(&entry.route, &entry.key) {
-                Some(KeyedOutcome::Delivered { .. }) => delivered.push(entry.key),
+                Some(KeyedOutcome::Delivered { at_ms }) => delivered.push((entry.key, at_ms)),
                 Some(KeyedOutcome::Refused) => refused.push(entry.key),
                 Some(KeyedOutcome::Pending) | None => {}
             }
         }
-        self.ledger.settle_watched(&delivered, &refused).await
+        let mut drawn = Vec::new();
+        let mut draw = || {
+            let (actions, _) = self.previews?;
+            let code = actions.draw_code(&snapshot, &drawn);
+            drawn.push(code.clone());
+            Some(code)
+        };
+        let again = self
+            .ledger
+            .settle_watched(&delivered, &refused, &mut draw)
+            .await?;
+        if !again.is_empty() {
+            tracing::warn!(
+                actions = again.len(),
+                "a mail chat refused a preview; offering it again"
+            );
+            self.preview_again(again).await?;
+        }
+        Ok(())
+    }
+
+    /// Queue a new preview of the actions `ids` (proposed, with their
+    /// current codes), alternatives of one message together.
+    pub(crate) async fn preview_again(&self, ids: Vec<String>) -> Result<()> {
+        let Some((actions, policy)) = self.previews else {
+            return Ok(());
+        };
+        let snapshot = self.ledger.snapshot();
+        let mut done: Vec<String> = Vec::new();
+        for id in &ids {
+            if done.contains(id) {
+                continue;
+            }
+            let Some(entry) = snapshot.actions.iter().find(|entry| entry.id == *id) else {
+                continue;
+            };
+            let group: Vec<&super::ledger::ActionEntry> = snapshot
+                .actions
+                .iter()
+                .filter(|other| {
+                    other.state == ActionState::Proposed
+                        && (other.id == entry.id
+                            || (entry.group.is_some() && other.group == entry.group))
+                })
+                .collect();
+            let group_ids: Vec<String> = group.iter().map(|entry| entry.id.clone()).collect();
+            done.extend(group_ids.clone());
+            let codes: Vec<String> = group.iter().map(|entry| entry.code.clone()).collect();
+            let store = policy.content.clone();
+            let read_ids = group_ids.clone();
+            let contents = tokio::task::spawn_blocking(move || {
+                read_ids
+                    .iter()
+                    .map(|id| store.read(id).ok().flatten())
+                    .collect::<Option<Vec<_>>>()
+            })
+            .await?;
+            let Some(contents) = contents else {
+                tracing::error!("could not read a mail action to preview it again");
+                continue;
+            };
+            let text = super::preview::render(
+                &contents,
+                &codes,
+                actions.provider,
+                policy.actions.approval_hours,
+            );
+            let key = preview_key(&entry.id, entry.generation);
+            self.ledger
+                .queue_preview(group_ids, key, text, self.clock.now())
+                .await?;
+        }
+        Ok(())
     }
 }
 

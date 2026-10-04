@@ -1,10 +1,11 @@
-//! A read-only IMAP client over any byte stream.
+//! An IMAP client over any byte stream.
 //!
-//! The client's methods are the commands a read-only mailbox reader needs,
-//! typed; there is no method that sends free-form text and none that
-//! changes a mailbox. Every command still passes [`guard::check`] whole
-//! before its first byte is written, and a refused command sends nothing
-//! and ends the connection. A command that fails to write, to read, or to
+//! The client's methods here are the commands a read-only mailbox reader
+//! needs, typed; there is no method that sends free-form text, and the only
+//! methods that change a mailbox are the executor's, in [`super::writer`],
+//! on a connection in write mode for one approved action. Every command
+//! passes [`guard::check`] whole before its first byte is written, and a
+//! refused command sends nothing and ends the connection. A command that fails to write, to read, or to
 //! finish within its timeout leaves the protocol state unknown, so it also
 //! ends the connection; a server's `NO` or `BAD` does not.
 //!
@@ -75,7 +76,7 @@ pub(crate) struct Examined {
 }
 
 /// The searches the client runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Search {
     All,
     /// UIDs from this one on (`UID n:*`).
@@ -83,6 +84,8 @@ pub(crate) enum Search {
     /// Messages received on or after the UTC day holding these Unix
     /// seconds.
     Since(u64),
+    /// Messages whose `Message-ID` header holds this valid message ID.
+    MessageId(String),
 }
 
 /// The FETCH items the client asks for; each reads without setting
@@ -90,6 +93,7 @@ pub(crate) enum Search {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Item<'a> {
     Uid,
+    Flags,
     InternalDate,
     Size,
     Envelope,
@@ -107,6 +111,7 @@ impl Item<'_> {
     fn name(&self) -> String {
         match self {
             Self::Uid => "UID".to_owned(),
+            Self::Flags => "FLAGS".to_owned(),
             Self::InternalDate => "INTERNALDATE".to_owned(),
             Self::Size => "RFC822.SIZE".to_owned(),
             Self::Envelope => "ENVELOPE".to_owned(),
@@ -125,16 +130,16 @@ impl Item<'_> {
 /// A command's completion and the untagged responses before it. The
 /// completion's text is not kept: nothing may show it.
 #[derive(Debug)]
-struct Done {
-    status: Status,
-    code: Option<Code>,
-    untagged: Vec<Response>,
+pub(super) struct Done {
+    pub(super) status: Status,
+    pub(super) code: Option<Code>,
+    pub(super) untagged: Vec<Response>,
 }
 
 impl Done {
     /// The completion, or an error naming only the verb, the status, and
     /// the response code.
-    fn ok(self, verb: &str) -> Result<Self> {
+    pub(super) fn ok(self, verb: &str) -> Result<Self> {
         if self.status == Status::Ok {
             Ok(self)
         } else {
@@ -149,7 +154,7 @@ impl Done {
 
 /// ` [CODE]` for a response code in [`KNOWN_CODES`], spelled as listed
 /// there; nothing for any other.
-fn code_label(code: Option<&Code>) -> String {
+pub(super) fn code_label(code: Option<&Code>) -> String {
     code.and_then(|code| {
         KNOWN_CODES
             .iter()
@@ -158,13 +163,13 @@ fn code_label(code: Option<&Code>) -> String {
     .map_or_else(String::new, |known| format!(" [{known}]"))
 }
 
-/// A read-only IMAP connection.
+/// An IMAP connection, read-only unless made for one approved action.
 pub(crate) struct Client<S> {
     stream: BufReader<S>,
     tag: u32,
     /// Set once the protocol state is unknown or the connection closed;
     /// every later command is refused.
-    broken: bool,
+    pub(super) broken: bool,
     mode: Mode,
     timeout: Duration,
     /// Uppercased.
@@ -212,6 +217,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
             ),
             _ => bail!("the IMAP server sent an unexpected greeting"),
         }
+    }
+
+    /// Allow, besides reading, the commands of one approved action on its
+    /// targets. Only the executor's writer does this.
+    pub(super) fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     /// The capabilities last announced, uppercased.
@@ -309,42 +320,97 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
 
     /// `EXAMINE`: opens `mailbox` read-only and reports its state.
     pub(crate) async fn examine(&mut self, mailbox: &str) -> Result<Examined> {
-        let command = format!("EXAMINE {}", quote(&utf7::encode(mailbox)));
-        let done = self.run(&command, Vec::new()).await?.ok("EXAMINE")?;
-        let mut examined = Examined::default();
-        let number = |value: Option<u64>| {
-            value
-                .and_then(|n| u32::try_from(n).ok())
-                .filter(|&n| n != 0)
-        };
-        for response in &done.untagged {
-            match response {
-                Response::Status {
-                    status: Status::Ok,
-                    code: Some(code),
-                    ..
-                } => match code.name.as_str() {
-                    "UIDVALIDITY" => examined.uidvalidity = number(code.number()),
-                    "UIDNEXT" => examined.uidnext = number(code.number()),
-                    _ => {}
-                },
-                Response::Message { number, kind, .. } if kind == "EXISTS" => {
-                    examined.exists = u32::try_from(*number).ok();
-                }
-                _ => {}
-            }
-        }
-        Ok(examined)
+        self.examine_wire(&utf7::encode(mailbox)).await
     }
 
+    /// `EXAMINE` of a mailbox by its wire name, as `LIST` gave it.
+    pub(crate) async fn examine_wire(&mut self, wire: &str) -> Result<Examined> {
+        let command = format!("EXAMINE {}", quote(wire));
+        let done = self.run(&command, Vec::new()).await?.ok("EXAMINE")?;
+        Ok(examined(&done))
+    }
+
+    /// Every mailbox with its attributes: `LIST "" "*" RETURN
+    /// (SPECIAL-USE)` when the server marks special folders, `XLIST` when it
+    /// has only that, and a plain `LIST` otherwise.
+    pub(crate) async fn list_folders(&mut self) -> Result<Vec<super::Listed>> {
+        let (command, kind) = if self.has("SPECIAL-USE") {
+            ("LIST \"\" \"*\" RETURN (SPECIAL-USE)", "LIST")
+        } else if self.has("XLIST") {
+            ("XLIST \"\" \"*\"", "XLIST")
+        } else {
+            ("LIST \"\" \"*\"", "LIST")
+        };
+        let done = self.run(command, Vec::new()).await?.ok(kind)?;
+        let mut listed = Vec::new();
+        for response in &done.untagged {
+            let Response::Data {
+                kind: found,
+                values,
+            } = response
+            else {
+                continue;
+            };
+            if found != kind {
+                continue;
+            }
+            let [Value::List(attributes), _delimiter, name, ..] = values.as_slice() else {
+                continue;
+            };
+            let Some(name) = name.bytes().and_then(|name| std::str::from_utf8(name).ok()) else {
+                continue;
+            };
+            if name.is_empty() || !name.bytes().all(|byte| (0x20..0x7f).contains(&byte)) {
+                continue;
+            }
+            listed.push(super::Listed {
+                name: name.to_owned(),
+                attributes: atoms(attributes),
+            });
+        }
+        tracing::debug!(folders = listed.len(), "IMAP folders listed");
+        Ok(listed)
+    }
+}
+
+/// The mailbox state an `EXAMINE` or `SELECT` reported.
+pub(super) fn examined(done: &Done) -> Examined {
+    let mut examined = Examined::default();
+    let number = |value: Option<u64>| {
+        value
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|&n| n != 0)
+    };
+    for response in &done.untagged {
+        match response {
+            Response::Status {
+                status: Status::Ok,
+                code: Some(code),
+                ..
+            } => match code.name.as_str() {
+                "UIDVALIDITY" => examined.uidvalidity = number(code.number()),
+                "UIDNEXT" => examined.uidnext = number(code.number()),
+                _ => {}
+            },
+            Response::Message { number, kind, .. } if kind == "EXISTS" => {
+                examined.exists = u32::try_from(*number).ok();
+            }
+            _ => {}
+        }
+    }
+    examined
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     /// `UID SEARCH`: the matching UIDs, ascending. For `UID n:*`, UIDs
     /// below `n` are dropped: when no message has a UID of `n` or more,
     /// `*` stands for the highest UID in use and the range matches it.
     pub(crate) async fn uid_search(&mut self, search: Search) -> Result<Vec<u32>> {
-        let criteria = match search {
+        let criteria = match &search {
             Search::All => "ALL".to_owned(),
             Search::UidFrom(from) => format!("UID {from}:*"),
-            Search::Since(seconds) => format!("SINCE {}", fetch::search_date(seconds)),
+            Search::Since(seconds) => format!("SINCE {}", fetch::search_date(*seconds)),
+            Search::MessageId(id) => format!("HEADER MESSAGE-ID {}", quote(id)),
         };
         let done = self
             .run(&format!("UID SEARCH {criteria}"), Vec::new())
@@ -476,7 +542,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
 
     /// Runs one command: `text` (the verb and its arguments, without the
     /// tag) and then `rest`. The guard sees the whole command first.
-    async fn run(&mut self, text: &str, rest: Vec<Part>) -> Result<Done> {
+    pub(super) async fn run(&mut self, text: &str, rest: Vec<Part>) -> Result<Done> {
         if self.broken {
             bail!("the IMAP connection is closed");
         }
@@ -484,11 +550,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         let tag = format!("A{:04}", self.tag);
         let mut parts = vec![Part::Text(format!("{tag} {text}"))];
         parts.extend(rest);
-        let verb = match guard::check(self.mode, &parts) {
+        let verb = match guard::check(&self.mode, &parts) {
             Ok(verb) => verb,
             Err(violation) => {
                 self.broken = true;
-                tracing::error!(verb = %violation.verb, "refused an IMAP command on a read-only connection");
+                tracing::error!(verb = %violation.verb, "refused an IMAP command the connection may not send");
                 return Err(violation.into());
             }
         };
@@ -612,7 +678,7 @@ fn astring(value: &str) -> Part {
 }
 
 /// A quoted string, `\` and `"` escaped. Callers pass printable ASCII.
-fn quote(value: &str) -> String {
+pub(super) fn quote(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
     for c in value.chars() {

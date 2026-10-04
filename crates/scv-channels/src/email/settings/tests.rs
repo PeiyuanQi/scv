@@ -28,17 +28,161 @@ fn defaults_need_only_a_route() {
 }
 
 #[test]
-fn mail_actions_are_refused_in_this_release() {
-    for table in [
-        "[actions]\nsend = \"approve\"\n",
-        "[actions]\ndraft = \"off\"\n",
-    ] {
-        let error = parse(&format!("{ROUTE}{table}")).unwrap_err();
+fn mail_actions_are_off_until_each_kind_is_set_to_approve() {
+    assert_eq!(parse(ROUTE).unwrap().actions, None);
+    let empty = parse(&format!("{ROUTE}[actions]\n"))
+        .unwrap()
+        .actions
+        .unwrap();
+    assert_eq!(empty, ActionSettings::default());
+    assert!(!empty.any());
+    assert!(!empty.changes_mailbox());
+    // Forwarding is a form of drafting or sending: alone it does nothing.
+    let forward = parse(&format!("{ROUTE}[actions]\nforward = \"approve\"\n"))
+        .unwrap()
+        .actions
+        .unwrap();
+    assert!(!forward.any());
+    let send = parse(&format!("{ROUTE}[actions]\nsend = \"approve\"\n"))
+        .unwrap()
+        .actions
+        .unwrap();
+    assert!(send.any());
+    assert!(!send.changes_mailbox(), "sending alone writes no folder");
+    for kind in ["draft", "archive", "mark_read", "trash", "spam"] {
+        let actions = parse(&format!("{ROUTE}[actions]\n{kind} = \"approve\"\n"))
+            .unwrap()
+            .actions
+            .unwrap();
+        assert!(actions.any() && actions.changes_mailbox(), "{kind}");
+    }
+    // No value carries an action out without its approval.
+    for value in ["\"on\"", "\"auto\"", "\"always\"", "true", "1"] {
         assert!(
-            error.to_string().contains("not available in this release"),
-            "{error}"
+            parse(&format!("{ROUTE}[actions]\nsend = {value}\n")).is_err(),
+            "{value}"
         );
     }
+}
+
+#[test]
+fn mail_action_limits_and_names_are_checked() {
+    for (extra, expected) in [
+        ("typo = 1", "unknown field"),
+        ("delete = \"approve\"", "unknown field"),
+        ("max_recipients = 0", "max_recipients"),
+        ("max_recipients = 11", "max_recipients"),
+        ("approval_hours = 0", "approval_hours"),
+        ("approval_hours = 169", "approval_hours"),
+        (
+            "approval_hours = 48\nmax_pending_hours = 24",
+            "max_pending_hours",
+        ),
+        ("max_pending_hours = 337", "max_pending_hours"),
+        ("execute_minutes = 0", "execute_minutes"),
+        ("execute_minutes = 121", "execute_minutes"),
+        ("max_open = 0", "max_open"),
+        ("max_open = 129", "max_open"),
+        ("max_sends_per_day = 501", "max_sends_per_day"),
+        ("max_drafts_per_day = 1001", "max_drafts_per_day"),
+        ("max_moves_per_day = 1001", "max_moves_per_day"),
+        ("max_flags_per_day = 1001", "max_flags_per_day"),
+        ("max_compose_per_day = 201", "max_compose_per_day"),
+        ("handle_days = 0", "handle_days"),
+        ("handle_days = 61", "handle_days"),
+        (
+            "recipient_domains = [\"not a domain\"]",
+            "recipient_domains",
+        ),
+        ("recipient_domains = [\"localhost\"]", "recipient_domains"),
+        (
+            "recipient_domains = [\"-bad.example\"]",
+            "recipient_domains",
+        ),
+        ("from_name = \"a\\\"b\"", "from_name"),
+        ("from_name = \"<me>\"", "from_name"),
+        ("drafts_folder = \"a\\nb\"", "drafts_folder"),
+        ("compose_model = \"a\\u0007\"", "compose_model"),
+        ("propose = [\"trash\"]", "mail.actions.trash"),
+        (
+            "trash = \"approve\"\npropose = [\"trash\", \"trash\"]",
+            "twice",
+        ),
+        ("propose = [\"delete\"]", "unknown variant"),
+        ("reply_to = \"sometimes\"", "unknown variant"),
+        ("sent_copy = \"never\"", "unknown variant"),
+    ] {
+        let error = parse(&format!("{ROUTE}[actions]\n{extra}\n")).unwrap_err();
+        assert!(error.to_string().contains(expected), "{extra}: {error}");
+    }
+    let long = format!(
+        "{ROUTE}[actions]\nreply_instructions = \"{}\"\n",
+        "a".repeat(4097)
+    );
+    assert!(parse(&long).is_err());
+    let domains = (0..65)
+        .map(|n| format!("\"d{n}.example\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(
+        parse(&format!(
+            "{ROUTE}[actions]\nrecipient_domains = [{domains}]\n"
+        ))
+        .is_err()
+    );
+
+    let actions = parse(&format!(
+        "{ROUTE}[actions]\nrecipient_domains = [\" @Example.COM \", \"mail.example.org\"]\n\
+         drafts_folder = \"  Entwürfe \"\nfrom_name = \" Mei Chen \"\n\
+         spam = \"approve\"\narchive = \"approve\"\npropose = [\"spam\", \"archive\"]\n"
+    ))
+    .unwrap()
+    .actions
+    .unwrap();
+    assert_eq!(
+        actions.recipient_domains,
+        ["example.com", "mail.example.org"]
+    );
+    assert_eq!(actions.drafts_folder, "Entwürfe");
+    assert_eq!(actions.from_name, "Mei Chen");
+    assert_eq!(actions.propose, [Suggestion::Spam, Suggestion::Archive]);
+}
+
+#[test]
+fn retention_of_actions_is_bounded() {
+    for (retention, expected) in [
+        ("tombstone_days = 6", "tombstone_days"),
+        ("tombstone_days = 366", "tombstone_days"),
+        ("unknown_keep_days = 0", "unknown_keep_days"),
+        ("max_actions_mib = 0", "max_actions_mib"),
+        ("audit_days = 6", "audit_days"),
+        ("max_audit_kib = 63", "max_audit_kib"),
+    ] {
+        let error = parse(&format!("{ROUTE}[retention]\n{retention}\n")).unwrap_err();
+        assert!(error.to_string().contains(expected), "{retention}: {error}");
+    }
+    let settings = parse(ROUTE).unwrap();
+    assert_eq!(settings.retention.tombstone_days, 30);
+    assert_eq!(settings.retention.unknown_keep_days, 3);
+    assert_eq!(settings.retention.audit_days, 90);
+}
+
+#[test]
+fn every_preview_waiting_at_once_must_fit_in_the_state_file() {
+    // 256 queued items × 1.5 KiB and 128 previews × 12 KiB pass three
+    // quarters of 2 MiB.
+    let error = parse(&format!("{ROUTE}[actions]\nmax_open = 128\n")).unwrap_err();
+    assert!(
+        error.to_string().contains("mail.actions.max_open"),
+        "{error}"
+    );
+    assert!(
+        parse(&format!(
+            "{ROUTE}[actions]\nmax_open = 128\n[retention]\nmax_state_kib = 4096\n"
+        ))
+        .is_ok()
+    );
+    assert!(parse(&format!("{ROUTE}[actions]\n")).is_ok());
 }
 
 #[test]

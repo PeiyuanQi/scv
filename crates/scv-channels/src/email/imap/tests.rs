@@ -5,6 +5,7 @@ use fake::{Fake, Step, command};
 use tokio::io::{AsyncWriteExt as _, DuplexStream};
 
 mod changes;
+mod folders;
 mod messages;
 
 const GREETING: &str = "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN ID] ready\r\n";
@@ -98,6 +99,9 @@ async fn starts_by_signing_in_identifying_and_examining() {
             move_: true,
             uidplus: true,
             special_use: false,
+            find_by_message_id: true,
+            sent_autofile: false,
+            can_move: true,
             id: true,
         }
     );
@@ -132,6 +136,7 @@ async fn asks_for_capabilities_when_not_told_and_skips_id_when_not_offered() {
         source.caps(),
         Caps {
             special_use: true,
+            find_by_message_id: true,
             ..Caps::default()
         }
     );

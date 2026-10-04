@@ -93,10 +93,22 @@ impl std::error::Error for ControlError {
     }
 }
 
+/// How long a management exchange may take. A command that can stop a
+/// running account waits for it to stop, and an email account finishes a
+/// mail action under way first, for up to 65 seconds.
+fn control_timeout(command: &DaemonCommand) -> Duration {
+    match command {
+        DaemonCommand::Reload
+        | DaemonCommand::ChannelSet { .. }
+        | DaemonCommand::ChannelLogout { .. } => Duration::from_secs(90),
+        _ => Duration::from_secs(20),
+    }
+}
+
 /// A bounded management exchange. Never retries mutations on ambiguous failure.
 pub async fn control(path: &Path, command: DaemonCommand) -> Result<DaemonStatus, ControlError> {
     let broken = |error: std::io::Error| ControlError::Protocol(format!("{error}"));
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(control_timeout(&command), async {
         let stream = UnixStream::connect(path)
             .await
             .map_err(ControlError::Unavailable)?;

@@ -1,7 +1,8 @@
 # SCV Channels
 
-SCV's chat channels and the bridge they share. Each channel is a module behind
-a Cargo feature of the same name, all on by default:
+SCV's chat and mail channels and the bridge the chat channels share. Each
+channel is a module behind a Cargo feature of the same name, all on by
+default:
 
 - `wechat`: WeChat through a ClawBot (iLink) bot: QR sign-in, long-polled
   `getupdates`, replies, and files on the AES-encrypted CDN;
@@ -10,9 +11,13 @@ a Cargo feature of the same name, all on by default:
   catch-up from chat history, replies, and files;
 - `slack`: Slack through a bot app set up by hand: sign-in with its bot and
   app-level tokens, Socket Mode events with catch-up from conversation
-  history, replies, and files.
+  history, replies, and files;
+- `email`: a mailbox over IMAP, the Gmail API, or Microsoft Graph, triaged
+  and reported to a mail chat that no model answers in; with a `mail.actions`
+  table, drafts, sends, and mailbox changes, each only once the owner
+  approves it in that chat.
 
-A channel implements `Channel` (`WeChat`, `Feishu`, `Slack`): signing an account in
+A channel implements `Channel` (`WeChat`, `Feishu`, `Slack`, `Email`): signing an account in
 under a `Layout`, what its credentials say (owner, bot, platform name), and
 running it. The daemon reaches channels only through `ChannelKind` (`ALL`,
 `name`, `parse`, `accounts`), `ChannelCredentials`, `Accounts` (one channel's
@@ -20,10 +25,13 @@ saved accounts: discovery, snapshots, settings, removal, inspection), and
 `run(AccountRun)`. `AccountRun` carries the instance layout, the account, its
 credentials and whole settings table, the account owner (whether or not it
 holds the remote-tool grant), the owner turn timeout exactly when it does, the
-workspace, the daemon socket, the `hub::Link`, and a health callback. `run`
-launches no process and spawns no tasks: dropping its future drops active
-requests and protocol sessions, and callers enforce an external bounded stop
-timeout. The health callback reports `true` only after a successful receive,
+workspace, the daemon socket, the `hub::Link`, a health callback, and the
+`stop` token. `run` launches no process and spawns no tasks: dropping its
+future drops active requests and protocol sessions, and callers enforce an
+external bounded stop timeout. An email account is not dropped at once: it
+watches `stop` and returns once a mail action under way has finished, so a
+caller cancels `stop` and waits `ChannelKind::stop_grace` before dropping
+it. The health callback reports `true` only after a successful receive,
 and `false` when receiving, sending, or the run fails. Nothing in the crate
 reads `SCV_HOME`: accounts, their state, and their media (under
 `Layout::media`, with the shared `Layout::outbox`) are found through the

@@ -1,14 +1,22 @@
 //! Keeping the account's local files bounded.
 //!
-//! The janitor runs only once the run has taken over its state, and changes
-//! state only through the ledger, so it never races another writer. It
-//! prunes the ledger's rings, empties the triage sessions' working
-//! directory, removes temporary files a crash left behind (only its own
-//! account's, in the directory the accounts share), and watches the free
-//! space of the disk holding the state: below the floor, or when the free
-//! space cannot be told, new mail is counted instead of reported, so
-//! nothing more is written about it. Its file system work runs off the
-//! async threads.
+//! The janitor runs only once the run has taken over its state (and, with
+//! mail actions on, recovered them), and changes state only through the
+//! ledger, so it never races another writer. It prunes the ledger's rings,
+//! empties the triage sessions' working directory, removes temporary files
+//! a crash left behind (only its own account's, in the directory the
+//! accounts share), and watches the free space of the disk holding the
+//! state: below the floor, or when the free space cannot be told, new mail
+//! is counted instead of reported, so nothing more is written about it.
+//!
+//! With mail actions on it also expires actions whose approval can no
+//! longer come, tombstones finished ones and only then deletes their
+//! content, deletes content files no action or tombstone names once they
+//! are an hour old (a file younger than that may belong to an action being
+//! recorded), forgets old handles and tombstones, and trims the audit log.
+//! It never touches an action that is not over, or an `unknown` one within
+//! `retention.unknown_keep_days`. Its file system work runs off the async
+//! threads.
 
 use anyhow::{Context as _, Result};
 use std::ffi::OsString;
@@ -21,6 +29,7 @@ use super::Clock;
 use super::ledger::Ledger;
 use super::plan::Class;
 use super::settings::MailSettings;
+use crate::hub::MailRegistration;
 
 /// A temporary file older than this was left by a crash.
 const STALE_TEMPORARY: Duration = Duration::from_secs(3600);
@@ -52,6 +61,8 @@ pub(crate) struct Janitor<'a> {
     /// Bytes free for the user on the disk holding a path; `None` when it
     /// cannot be told. [`free_bytes`] outside tests.
     pub(crate) free_space: fn(&Path) -> Option<u64>,
+    /// Where codes and handles no longer answered for are forgotten.
+    pub(crate) registration: Option<&'a MailRegistration>,
 }
 
 impl Janitor<'_> {
@@ -67,6 +78,7 @@ impl Janitor<'_> {
     pub(crate) async fn sweep(&self) -> Result<()> {
         let now = self.clock.now();
         self.ledger.prune(now).await?;
+        self.sweep_actions(now).await?;
         let private = self.private.to_owned();
         let state_dir = self.state_dir.to_owned();
         let own = own_temporaries(self.state_dir, self.account);
@@ -118,6 +130,73 @@ impl Janitor<'_> {
                 .await?;
         }
         self.low_space.set(low);
+        Ok(())
+    }
+}
+
+impl Janitor<'_> {
+    /// The mail actions' part of a sweep.
+    async fn sweep_actions(&self, now: u64) -> Result<()> {
+        let Some(policy) = self.ledger.actions_policy() else {
+            return Ok(());
+        };
+        let retention = &self.settings.retention;
+        let expired = self.ledger.expire(now).await?;
+        let handle_seconds = self
+            .settings
+            .actions
+            .as_ref()
+            .map_or(14, |actions| actions.handle_days)
+            * 86_400;
+        let swept = self.ledger.sweep_actions(handle_seconds, now).await?;
+        if let Some(registration) = self.registration {
+            registration.forget_codes(&swept.codes);
+            registration.forget_handles(&swept.handles);
+        }
+        let snapshot = self.ledger.snapshot();
+        let mut known: Vec<String> = snapshot
+            .actions
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let tombstoned: Vec<String> = snapshot
+            .tombstones
+            .iter()
+            .map(|tombstone| tombstone.id.clone())
+            .collect();
+        known.extend(tombstoned.iter().cloned());
+        let store = policy.content.clone();
+        let (removed, bytes) = tokio::task::spawn_blocking(move || {
+            let mut removed = 0;
+            let mut bytes = 0;
+            for listed in store.list() {
+                let orphan = !known.contains(&listed.id) && listed.age > STALE_TEMPORARY.as_secs();
+                if tombstoned.contains(&listed.id) || orphan {
+                    if store.remove(&listed.id).is_ok() {
+                        removed += 1;
+                    }
+                } else {
+                    bytes += listed.bytes;
+                }
+            }
+            (removed, bytes)
+        })
+        .await
+        .context("the mail janitor's sweep stopped")?;
+        let dropped = self
+            .ledger
+            .prune_audit(
+                now,
+                retention.audit_days * 86_400,
+                usize::try_from(retention.max_audit_kib * 1024).unwrap_or(usize::MAX),
+            )
+            .await?;
+        if expired + removed + dropped > 0 {
+            tracing::info!(expired, removed, dropped, "swept mail actions");
+        }
+        if bytes > retention.max_actions_mib * 1024 * 1024 {
+            tracing::warn!("mail actions' content is over its size limit; new actions wait");
+        }
         Ok(())
     }
 }

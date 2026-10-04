@@ -125,8 +125,20 @@ impl ChannelKind {
         }
     }
 
+    /// How long the daemon waits for a stopping account: an email account
+    /// finishes a mail action under way first; everything else stops at
+    /// once.
+    pub fn stop_grace(self) -> Option<Duration> {
+        match self {
+            #[cfg(feature = "email")]
+            Self::Email => Some(crate::email::STOP_GRACE),
+            #[allow(unreachable_patterns, reason = "every other channel stops at once")]
+            _ => None,
+        }
+    }
+
     /// Whether the channel's accounts are chats, which answer people, as
-    /// opposed to mailboxes, which SCV only reads.
+    /// opposed to mailboxes, which SCV reads and acts on.
     pub fn is_chat(self) -> bool {
         match self {
             #[cfg(feature = "email")]
@@ -361,6 +373,10 @@ pub struct AccountRun<'a> {
     /// Called with `true` after each authenticated contact with the platform,
     /// and with `false` when contact fails.
     pub health: &'a (dyn Fn(bool) + Send + Sync),
+    /// Cancelled when the daemon stops the account. A channel that must
+    /// finish work first (an email account's mail action under way) watches
+    /// it and returns once done; the others are simply dropped.
+    pub stop: &'a tokio_util::sync::CancellationToken,
 }
 
 impl<'a> AccountRun<'a> {

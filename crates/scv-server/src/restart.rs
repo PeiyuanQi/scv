@@ -57,6 +57,8 @@ const DOWN_NOTICE_AFTER: Duration = Duration::from_secs(10 * 60);
 const MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 /// A plan restarted this long ago no longer explains interrupted work.
 const RESTART_CONTEXT_MAX_AGE: u64 = 60 * 60;
+/// How long a restart that goes ahead waits for mail actions under way.
+const MAIL_DRAIN: Duration = Duration::from_secs(60);
 
 /// What a binary reports about itself for a planned restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -788,6 +790,9 @@ impl Restarter {
         if self.hub.owner_claims() > 0 {
             return Some("an owner message to be answered".into());
         }
+        if self.hub.mail_executing() > 0 {
+            return Some("a mail action to finish".into());
+        }
         None
     }
 
@@ -822,7 +827,15 @@ impl Restarter {
                 break;
             }
         }
+        // No mail action starts from here on; one under way finishes first,
+        // for at most a minute.
+        self.hub.set_mail_drain(true);
+        let drained = tokio::time::Instant::now() + MAIL_DRAIN;
+        while self.hub.mail_executing() > 0 && tokio::time::Instant::now() < drained {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         if let Err(error) = self.hand_over(&mut plan).await {
+            self.hub.set_mail_drain(false);
             tracing::error!("Restart into v{} did not start: {error:#}", plan.to_version);
             plan.state = PlanState::Failed;
             plan.detail = Some(format!("the restart did not start: {error:#}"));

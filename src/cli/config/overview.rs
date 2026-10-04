@@ -254,7 +254,7 @@ fn channel(
                     "disabled"
                 };
                 match scv_channels::email::describe_settings(settings.mail.as_ref()) {
-                    Ok(summary) => format!("{enabled}, reads mail read-only, {summary}"),
+                    Ok(summary) => format!("{enabled}, reads mail, {summary}"),
                     Err(error) => {
                         format!("{enabled}, invalid mail settings: {}", safe_error(&error))
                     }

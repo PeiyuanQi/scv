@@ -7,10 +7,10 @@
 //! is only ever read with `BODY.PEEK`, so reading sets no flag.
 //!
 //! Layers, each with its own module: [`wire`] frames and parses responses,
-//! [`guard`] checks every command against the read-only allowlist,
-//! [`client`] offers typed commands only, [`fetch`] and [`structure`]
-//! interpret what FETCH returns, [`utf7`] encodes mailbox names, and [`tls`]
-//! connects.
+//! [`guard`] checks every command against the connection's allowlist,
+//! [`client`] offers typed read commands only, [`writer`] the executor's
+//! write commands, [`fetch`] and [`structure`] interpret what FETCH
+//! returns, [`utf7`] encodes mailbox names, and [`tls`] connects.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -25,7 +25,8 @@ use tokio_rustls::client::TlsStream;
 
 use super::parse;
 use super::source::{
-    Caps, Changes, Cursor, MailSource, Meta, PartRef, PartText, ProviderKind, Signals, SourceRef,
+    Caps, Changes, Cursor, FolderNames, Folders, MailSource, Meta, PartRef, PartText, ProviderKind,
+    Signals, SourceRef,
 };
 use client::{Client, Item, Search};
 use fetch::{Envelope, Fetched};
@@ -36,14 +37,16 @@ pub(crate) mod fake;
 mod fetch;
 mod guard;
 mod structure;
-mod tls;
+pub(crate) mod tls;
 mod utf7;
 mod wire;
+pub(crate) mod writer;
 
-/// Header fields fetched with each message's metadata: the identity and
-/// the bulk signals.
-const HEADER_FIELDS: [&str; 6] = [
+/// Header fields fetched with each message's metadata: the identity, the
+/// thread a reply joins, and the bulk signals.
+pub(crate) const HEADER_FIELDS: [&str; 7] = [
     "MESSAGE-ID",
+    "REFERENCES",
     "LIST-ID",
     "LIST-UNSUBSCRIBE",
     "PRECEDENCE",
@@ -122,24 +125,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImapSource<S> {
     /// Starts a session on a connected stream: the greeting, capabilities,
     /// sign-in, `ID` when offered, and `EXAMINE`.
     pub(crate) async fn start(stream: S, config: &ImapConfig) -> Result<Self> {
-        let mut client = Client::start(stream, client::COMMAND_TIMEOUT).await?;
-        if client.capabilities().is_empty() {
-            client.capability().await?;
-        }
-        if !client.preauthenticated() {
-            client.login(&config.username, &config.password).await?;
-        }
-        if client.has("ID") {
-            client
-                .id(&[("name", "SCV"), ("version", env!("CARGO_PKG_VERSION"))])
-                .await?;
-        }
+        let client = open_session(stream, config).await?;
         let caps = Caps {
             push: client.has("IDLE"),
             move_: client.has("MOVE"),
             uidplus: client.has("UIDPLUS"),
             special_use: client.has("SPECIAL-USE"),
             id: client.has("ID"),
+            // Base IMAP4rev1 searches any header.
+            find_by_message_id: true,
+            sent_autofile: false,
+            can_move: client.has("MOVE") || client.has("UIDPLUS"),
         };
         let mut source = Self {
             client,
@@ -227,7 +223,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImapSource<S> {
     /// Where a cursor resumes, when it is this mailbox's under the current
     /// `UIDVALIDITY`; `None` calls for a reset.
     fn resume(&self, cursor: &Cursor) -> Option<u32> {
-        let ProviderKind::Imap = cursor.provider;
+        if cursor.provider != ProviderKind::Imap {
+            return None;
+        }
         let position: Position = serde_json::from_str(&cursor.value).ok()?;
         (position.mailbox == self.mailbox && position.uidvalidity == self.uidvalidity)
             .then_some(position.next.max(1))
@@ -273,7 +271,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImapSource<S> {
             mailbox,
             uidvalidity,
             uid,
-        } = source;
+        } = source
+        else {
+            return None;
+        };
         (*mailbox == self.mailbox && *uidvalidity == self.uidvalidity && *uid != 0).then_some(*uid)
     }
 
@@ -309,14 +310,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImapSource<S> {
             .into_iter()
             .next()
             .filter(|reply_to| Some(reply_to) != from.as_ref());
+        let sender = from.as_ref().map_or("", |from| from.address.as_str());
         let identity = parse::identity(
             &self.mailbox,
             message_id,
             internal_date,
             size,
-            from.as_ref().map_or("", |from| from.address.as_str()),
+            sender,
             &envelope.subject,
         );
+        let locator = parse::locator(message_id, internal_date, size, sender, &envelope.subject);
+        let references = field("references").map(parse::msg_ids).unwrap_or_default();
         Meta {
             source: SourceRef::Imap {
                 mailbox: self.mailbox.clone(),
@@ -332,6 +336,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImapSource<S> {
             cc: envelope.cc,
             subject: envelope.subject,
             message_id: message_id.and_then(parse::msg_id),
+            locator,
+            references,
+            date: envelope.date,
             signals: signals(&header),
             category: None,
             text: layout.text,
@@ -339,6 +346,56 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ImapSource<S> {
         }
         .bounded()
     }
+}
+
+/// A signed-in session on a connected stream, read-only: the greeting,
+/// capabilities, sign-in, and `ID` when offered.
+pub(crate) async fn open_session<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    stream: S,
+    config: &ImapConfig,
+) -> Result<Client<S>> {
+    let mut client = Client::start(stream, client::COMMAND_TIMEOUT).await?;
+    if client.capabilities().is_empty() {
+        client.capability().await?;
+    }
+    if !client.preauthenticated() {
+        client.login(&config.username, &config.password).await?;
+    }
+    if client.has("ID") {
+        client
+            .id(&[("name", "SCV"), ("version", env!("CARGO_PKG_VERSION"))])
+            .await?;
+    }
+    Ok(client)
+}
+
+/// The identity and locator of the message `fetched` describes in
+/// `mailbox` (UTF-8), as [`ImapSource`] computes them for its metadata.
+pub(crate) fn names(mailbox: &str, fetched: &Fetched) -> (String, String) {
+    let header = fetched
+        .header_fields()
+        .map(parse::header_fields)
+        .unwrap_or_default();
+    let envelope = fetched
+        .envelope
+        .as_ref()
+        .map(Envelope::read)
+        .unwrap_or_default();
+    let message_id = header
+        .iter()
+        .find(|(name, _)| name == "message-id")
+        .map(|(_, value)| value.as_slice())
+        .or(envelope.message_id.as_deref());
+    let received = fetched.internal_date.as_deref().unwrap_or_default();
+    let size = fetched.size.unwrap_or(0);
+    let from = envelope
+        .from
+        .first()
+        .map_or("", |from| from.address.as_str());
+    (
+        parse::identity(mailbox, message_id, received, size, from, &envelope.subject),
+        parse::locator(message_id, received, size, from, &envelope.subject),
+    )
 }
 
 /// The bulk and automation signals in a message's fetched header fields.
@@ -458,6 +515,69 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> MailSource for ImapSource<S> {
 
     fn caps(&self) -> Caps {
         self.caps.clone()
+    }
+
+    async fn folders(&mut self, names: &FolderNames) -> Result<Folders> {
+        let listed = self.client.list_folders().await?;
+        Ok(resolve_folders(&listed, names))
+    }
+}
+
+/// A mailbox name from the wire, as Unicode, or as it came when it does
+/// not decode.
+pub(crate) fn utf7_decode(name: &str) -> String {
+    utf7::decode(name).unwrap_or_else(|_| name.to_owned())
+}
+
+/// One mailbox as `LIST` or `XLIST` names it: its wire name and its
+/// attributes, uppercased.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) name: String,
+    pub(crate) attributes: Vec<String>,
+}
+
+/// The special folders among `listed`: marked by `SPECIAL-USE` or `XLIST`
+/// attributes, or, where none is marked, named in `names` (UTF-8, encoded
+/// here) and present. A folder that cannot be selected is never used, and
+/// nothing is guessed.
+pub(crate) fn resolve_folders(listed: &[Listed], names: &FolderNames) -> Folders {
+    let usable = |folder: &&Listed| {
+        !folder
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute.as_str(), "\\NOSELECT" | "\\NONEXISTENT"))
+    };
+    let marked = |marks: &[&str]| {
+        listed
+            .iter()
+            .filter(usable)
+            .find(|folder| {
+                folder
+                    .attributes
+                    .iter()
+                    .any(|attribute| marks.contains(&attribute.as_str()))
+            })
+            .map(|folder| folder.name.clone())
+    };
+    let named = |name: &str| {
+        if name.is_empty() {
+            return None;
+        }
+        let wire = utf7::encode(name);
+        listed
+            .iter()
+            .filter(usable)
+            .find(|folder| folder.name == wire)
+            .map(|folder| folder.name.clone())
+    };
+    let pick = |marks: &[&str], name: &str| marked(marks).or_else(|| named(name));
+    Folders {
+        drafts: pick(&["\\DRAFTS"], &names.drafts),
+        sent: pick(&["\\SENT"], &names.sent),
+        trash: pick(&["\\TRASH"], &names.trash),
+        junk: pick(&["\\JUNK", "\\SPAM"], &names.junk),
+        archive: pick(&["\\ARCHIVE"], &names.archive),
     }
 }
 

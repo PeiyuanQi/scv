@@ -17,19 +17,37 @@
 //! email account that handed it over learns whether it was stored,
 //! delivered, or refused, and it holds each running email account's counts
 //! for `mail status` and daemon status.
+//!
+//! An email account that takes actions registers its authority here: the
+//! channel its ledger reads commands from, and the approval codes and
+//! message handles it answers for, so an owner's command in a mail chat
+//! reaches the one account that can act on it. The hub carries commands and
+//! replies and never decides anything itself. It also counts the actions
+//! being carried out, and holds the drain flag a planned restart raises so
+//! that no new one starts.
 
-use scv_protocol::{MailCounts, Purpose};
+use scv_protocol::{MailAction, MailCounts, Purpose};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::mail_chat::{ChatEvidence, MailCommand};
+
 /// How long [`Hub::notify`] waits for a bridge to store a notice.
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a mail command waits for the accounts' answers.
+const MAIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// The answer when an account took a command but has not answered in time;
+/// its ledger sends the outcome to the chat when it has one.
+pub(crate) const STILL_WORKING_REPLY: &str = "Still working on that; SCV will confirm here.";
 /// The last-owner record is rewritten at most this often for the same chat.
 const LAST_OWNER_REFRESH: u64 = 10 * 60;
 
@@ -179,6 +197,9 @@ pub struct Hub {
     /// A disk holding chat files is below its free-space floor, so bridges
     /// save no new files from chat.
     low_disk: std::sync::atomic::AtomicBool,
+    /// A planned restart is about to happen: no email account starts
+    /// another action.
+    mail_drain: AtomicBool,
 }
 
 #[derive(Default)]
@@ -203,7 +224,82 @@ struct MailAccount {
     /// The mail chats it reports to, in order.
     routes: Vec<String>,
     counts: MailCounts,
+    /// Where its ledger takes commands, when it takes actions.
+    authority: Option<mpsc::Sender<MailRequest>>,
+    /// The approval codes it answers for, live or remembered.
+    codes: HashSet<String>,
+    /// The handles of its reported mail.
+    handles: HashSet<String>,
+    /// Actions it is carrying out now.
+    executing: usize,
 }
+
+/// What the daemon asks an email account to do outside a mail chat. None
+/// of these can approve anything: they only withdraw or list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MailOrder {
+    /// `scv mail cancel`: withdraw action `action`, or every action.
+    Cancel { action: Option<String> },
+    /// `scv mail status`: the actions, by ID, kind, and state.
+    List,
+}
+
+/// What an email account's ledger is asked.
+#[cfg_attr(
+    not(feature = "email"),
+    allow(dead_code, reason = "only an email account's ledger reads a request")
+)]
+#[derive(Debug)]
+pub(crate) enum MailWork {
+    /// A command the owner sent in a mail chat, with its evidence.
+    Chat {
+        command: MailCommand,
+        evidence: ChatEvidence,
+    },
+    /// An order from the daemon.
+    Order(MailOrder),
+}
+
+/// One request to an email account's ledger, and where its answer goes.
+#[cfg_attr(
+    not(feature = "email"),
+    allow(dead_code, reason = "only an email account's ledger reads a request")
+)]
+#[derive(Debug)]
+pub(crate) struct MailRequest {
+    pub(crate) work: MailWork,
+    pub(crate) reply: oneshot::Sender<MailReply>,
+}
+
+/// An email account's answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MailReply {
+    /// SCV's words for the chat or the command line: codes, kinds, times,
+    /// and counts, never an address, a subject, or a model's text.
+    Text(String),
+    /// The account's actions, for `scv mail status`.
+    Actions(Vec<MailAction>),
+}
+
+/// Why [`Hub::mail_order`] could not reach an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailOrderError {
+    /// No running email account by that name takes actions.
+    NotRunning,
+    /// The account did not answer in time.
+    NoAnswer,
+}
+
+impl std::fmt::Display for MailOrderError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotRunning => "that email account is not running with mail actions on",
+            Self::NoAnswer => "the email account did not answer in time",
+        })
+    }
+}
+
+impl std::error::Error for MailOrderError {}
 
 /// The most keyed outcomes the mirror holds for one mail chat; a mail
 /// chat keeps no more in its own state.
@@ -254,6 +350,7 @@ impl Hub {
             recovered: Mutex::default(),
             last_owner_path,
             low_disk: std::sync::atomic::AtomicBool::new(false),
+            mail_drain: AtomicBool::new(false),
         })
     }
 
@@ -379,6 +476,10 @@ impl Hub {
                 id,
                 routes,
                 counts: MailCounts::default(),
+                authority: None,
+                codes: HashSet::new(),
+                handles: HashSet::new(),
+                executing: 0,
             },
         );
         MailRegistration {
@@ -408,6 +509,241 @@ impl Hub {
             .collect();
         accounts.sort_by(|a, b| a.0.cmp(&b.0));
         accounts
+    }
+
+    /// The running email accounts that take actions, by component ID.
+    pub fn mail_authorities(&self) -> Vec<String> {
+        let mut found: Vec<String> = self
+            .inner()
+            .mail
+            .iter()
+            .filter(|(_, account)| account.authority.is_some())
+            .map(|(component, _)| component.clone())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Mail actions every email account is carrying out now; a planned
+    /// restart waits for none.
+    pub fn mail_executing(&self) -> usize {
+        self.inner()
+            .mail
+            .values()
+            .map(|account| account.executing)
+            .sum()
+    }
+
+    /// Raise or lower the drain flag: while it is up, no email account
+    /// starts another action, and those under way finish. Raised, it holds
+    /// for every action counted after this returns, so a restart that then
+    /// sees [`Hub::mail_executing`] at zero sees none start.
+    pub fn set_mail_drain(&self, drain: bool) {
+        let _inner = self.inner();
+        self.mail_drain.store(drain, Ordering::SeqCst);
+    }
+
+    /// Whether the drain flag is up.
+    pub fn mail_draining(&self) -> bool {
+        self.mail_drain.load(Ordering::SeqCst)
+    }
+
+    /// Hand the daemon's `order` to email account `component` and wait for
+    /// its answer.
+    pub async fn mail_order(
+        &self,
+        component: &str,
+        order: MailOrder,
+    ) -> Result<MailReply, MailOrderError> {
+        let authority = self
+            .inner()
+            .mail
+            .get(component)
+            .and_then(|account| account.authority.clone())
+            .ok_or(MailOrderError::NotRunning)?;
+        let (reply, answer) = oneshot::channel();
+        authority
+            .send(MailRequest {
+                work: MailWork::Order(order),
+                reply,
+            })
+            .await
+            .map_err(|_| MailOrderError::NotRunning)?;
+        match tokio::time::timeout(MAIL_COMMAND_TIMEOUT, answer).await {
+            Ok(Ok(reply)) => Ok(reply),
+            _ => Err(MailOrderError::NoAnswer),
+        }
+    }
+
+    /// The email accounts that take actions and report to `route`, with
+    /// where to send them work, sorted by component.
+    fn authorities_for(&self, route: &str) -> Vec<(String, mpsc::Sender<MailRequest>)> {
+        let mut found: Vec<_> = self
+            .inner()
+            .mail
+            .iter()
+            .filter(|(_, account)| account.routes.iter().any(|r| r == route))
+            .filter_map(|(component, account)| {
+                account
+                    .authority
+                    .clone()
+                    .map(|authority| (component.clone(), authority))
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    }
+
+    /// The account that answers for code or handle `key`, among those that
+    /// report to `route` when it is set, and where to send it work.
+    fn authority_of(
+        &self,
+        key: &str,
+        handle: bool,
+        route: Option<&str>,
+    ) -> Option<(String, mpsc::Sender<MailRequest>)> {
+        self.inner().mail.iter().find_map(|(component, account)| {
+            let known = if handle {
+                account.handles.contains(key)
+            } else {
+                account.codes.contains(key)
+            };
+            let here = route.is_none_or(|route| account.routes.iter().any(|known| known == route));
+            (known && here)
+                .then(|| account.authority.clone())
+                .flatten()
+                .map(|authority| (component.clone(), authority))
+        })
+    }
+
+    /// Carry out the owner's `command` from mail chat `evidence.route`: hand
+    /// it to the email accounts it concerns (by code, by handle, or every
+    /// account that reports there) and gather their answers, one line each,
+    /// waiting at most ten seconds. The answer holds SCV's words only.
+    pub(crate) async fn mail_command(
+        &self,
+        evidence: ChatEvidence,
+        command: MailCommand,
+    ) -> String {
+        let route = evidence.route.clone();
+        let everyone = self.authorities_for(&route);
+        let mut work: Vec<(mpsc::Sender<MailRequest>, MailCommand)> = Vec::new();
+        let mut answers: Vec<String> = Vec::new();
+        match &command {
+            MailCommand::Approve(codes) | MailCommand::Deny(codes) => {
+                let mut by_account: Vec<(String, mpsc::Sender<MailRequest>, Vec<String>)> =
+                    Vec::new();
+                for code in codes {
+                    match self.authority_of(code, false, None) {
+                        Some((component, authority)) => {
+                            match by_account
+                                .iter_mut()
+                                .find(|(known, ..)| *known == component)
+                            {
+                                Some((_, _, list)) => list.push(code.clone()),
+                                None => by_account.push((component, authority, vec![code.clone()])),
+                            }
+                        }
+                        None if everyone.is_empty() => {
+                            answers.push(crate::mail_chat::NOT_RUNNING_REPLY.into());
+                        }
+                        None => answers.push(format!("No mail action has code {code}.")),
+                    }
+                }
+                for (_, authority, list) in by_account {
+                    let each = match command {
+                        MailCommand::Approve(_) => MailCommand::Approve(list),
+                        _ => MailCommand::Deny(list),
+                    };
+                    work.push((authority, each));
+                }
+            }
+            // A revision or a request about reported mail goes only to an
+            // account that reports here, so another chat's codes and handles
+            // are neither used nor confirmed from this one.
+            MailCommand::Revise { code, .. } => {
+                match self.authority_of(code, false, Some(&route)) {
+                    Some((_, authority)) => work.push((authority, command.clone())),
+                    None if everyone.is_empty() => {
+                        answers.push(crate::mail_chat::NOT_RUNNING_REPLY.into());
+                    }
+                    None => answers.push(format!("No mail action has code {code}.")),
+                }
+            }
+            MailCommand::Reply { handle, .. }
+            | MailCommand::Forward { handle, .. }
+            | MailCommand::Message { handle, .. } => {
+                match self.authority_of(handle, true, Some(&route)) {
+                    Some((_, authority)) => work.push((authority, command.clone())),
+                    None if everyone.is_empty() => {
+                        answers.push(crate::mail_chat::NOT_RUNNING_REPLY.into());
+                    }
+                    None => answers.push(format!(
+                        "No reported mail has handle #{handle}; handles work for mail reported in \
+                     the last days only."
+                    )),
+                }
+            }
+            MailCommand::Compose { account, .. } => {
+                let chosen = match account {
+                    Some(name) => {
+                        let component = format!("email:{name}");
+                        everyone
+                            .iter()
+                            .find(|(known, _)| *known == component)
+                            .cloned()
+                    }
+                    None if everyone.len() == 1 => everyone.first().cloned(),
+                    None => None,
+                };
+                match chosen {
+                    Some((_, authority)) => work.push((authority, command.clone())),
+                    None if everyone.is_empty() => {
+                        answers.push(crate::mail_chat::NOT_RUNNING_REPLY.into());
+                    }
+                    None if account.is_some() => answers.push(
+                        "No mail account by that name takes actions here; nothing was done.".into(),
+                    ),
+                    None => answers.push(
+                        "Say which account: mail compose ACCOUNT ADDRESS what to write.".into(),
+                    ),
+                }
+            }
+            MailCommand::DenyAll | MailCommand::Status => {
+                if everyone.is_empty() && command == MailCommand::DenyAll {
+                    answers.push(crate::mail_chat::NOT_RUNNING_REPLY.into());
+                }
+                for (_, authority) in &everyone {
+                    work.push((authority.clone(), command.clone()));
+                }
+            }
+        }
+        let deadline = tokio::time::Instant::now() + MAIL_COMMAND_TIMEOUT;
+        let mut waiting = Vec::new();
+        for (authority, command) in work {
+            let (reply, answer) = oneshot::channel();
+            let request = MailRequest {
+                work: MailWork::Chat {
+                    command,
+                    evidence: evidence.clone(),
+                },
+                reply,
+            };
+            match tokio::time::timeout_at(deadline, authority.send(request)).await {
+                Ok(Ok(())) => waiting.push(answer),
+                _ => answers.push(crate::mail_chat::NOT_RUNNING_REPLY.into()),
+            }
+        }
+        for answer in waiting {
+            match tokio::time::timeout_at(deadline, answer).await {
+                Ok(Ok(MailReply::Text(text))) => answers.push(text),
+                Ok(Ok(MailReply::Actions(_))) => {}
+                Ok(Err(_)) => answers.push(crate::mail_chat::NOT_RUNNING_REPLY.into()),
+                Err(_) => answers.push(STILL_WORKING_REPLY.into()),
+            }
+        }
+        answers.dedup();
+        answers.join("\n")
     }
 
     /// The chat the account owner last wrote from, on any account.
@@ -695,6 +1031,28 @@ impl Registration {
             .retain(|(component, key), _| component != &self.component || keep(key));
     }
 
+    /// Hand the owner's `command`, sent in this mail chat as `message_id`
+    /// by `peer` at `sent_ms`, to the email accounts it concerns, and gather
+    /// their answer; with no daemon, say nothing runs.
+    pub(crate) async fn mail_command(
+        &self,
+        peer: &str,
+        message_id: &str,
+        sent_ms: Option<u64>,
+        command: MailCommand,
+    ) -> String {
+        let Some(hub) = &self.hub else {
+            return crate::mail_chat::NOT_RUNNING_REPLY.to_owned();
+        };
+        let evidence = ChatEvidence {
+            route: self.component.clone(),
+            peer: peer.to_owned(),
+            message_id: message_id.to_owned(),
+            sent_ms,
+        };
+        hub.mail_command(evidence, command).await
+    }
+
     /// The running email accounts that report to this mail chat, with their
     /// counts.
     pub(crate) fn mail_accounts(&self) -> Vec<(String, MailCounts)> {
@@ -828,14 +1186,115 @@ pub struct MailRegistration {
     id: u64,
 }
 
+#[cfg_attr(
+    not(feature = "email"),
+    allow(
+        dead_code,
+        reason = "only an email account's ledger serves commands and draws codes and handles"
+    )
+)]
 impl MailRegistration {
+    /// Change this account's entry, if it is still this registration's.
+    fn with<T>(&self, change: impl FnOnce(&mut MailAccount) -> T) -> Option<T> {
+        let mut inner = self.hub.inner();
+        inner
+            .mail
+            .get_mut(&self.component)
+            .filter(|account| account.id == self.id)
+            .map(change)
+    }
+
     /// Publish the account's current counts.
     pub fn set_counts(&self, counts: MailCounts) {
-        if let Some(account) = self.hub.inner().mail.get_mut(&self.component)
-            && account.id == self.id
+        self.with(|account| account.counts = counts);
+    }
+
+    /// Take commands for this account's actions from `commands`.
+    pub(crate) fn serve(&self, commands: mpsc::Sender<MailRequest>) {
+        self.with(|account| account.authority = Some(commands));
+    }
+
+    /// Record `code` as this account's, unless any running account already
+    /// holds it. A code is registered when it is drawn, so a quick answer
+    /// always finds its account.
+    pub(crate) fn claim_code(&self, code: &str) -> bool {
+        let mut inner = self.hub.inner();
+        if inner
+            .mail
+            .values()
+            .any(|account| account.codes.contains(code))
         {
-            account.counts = counts;
+            return false;
         }
+        inner
+            .mail
+            .get_mut(&self.component)
+            .filter(|account| account.id == self.id)
+            .is_some_and(|account| account.codes.insert(code.to_owned()))
+    }
+
+    /// Forget codes this account no longer answers for.
+    pub(crate) fn forget_codes(&self, codes: &[String]) {
+        self.with(|account| {
+            for code in codes {
+                account.codes.remove(code);
+            }
+        });
+    }
+
+    /// Record `handle` as this account's, unless any running account already
+    /// holds it.
+    pub(crate) fn claim_handle(&self, handle: &str) -> bool {
+        let mut inner = self.hub.inner();
+        if inner
+            .mail
+            .values()
+            .any(|account| account.handles.contains(handle))
+        {
+            return false;
+        }
+        inner
+            .mail
+            .get_mut(&self.component)
+            .filter(|account| account.id == self.id)
+            .is_some_and(|account| account.handles.insert(handle.to_owned()))
+    }
+
+    /// Forget handles this account no longer answers for.
+    pub(crate) fn forget_handles(&self, handles: &[String]) {
+        self.with(|account| {
+            for handle in handles {
+                account.handles.remove(handle);
+            }
+        });
+    }
+
+    /// Count an action as under way, unless a planned restart drains mail:
+    /// then nothing new starts. The flag is read under the lock the count
+    /// is kept under, so a restart never misses an action that starts.
+    /// The server's restarter reads the total through [`Hub::mail_executing`].
+    pub fn begin_execution(&self) -> bool {
+        let mut inner = self.hub.inner();
+        if self.hub.mail_draining() {
+            return false;
+        }
+        inner
+            .mail
+            .get_mut(&self.component)
+            .filter(|account| account.id == self.id)
+            .map(|account| account.executing += 1)
+            .is_some()
+    }
+
+    /// An action counted by [`MailRegistration::begin_execution`] ended.
+    pub fn end_execution(&self) {
+        self.with(|account| account.executing = account.executing.saturating_sub(1));
+    }
+
+    /// The owner of the running chat account `route`: `None` while it is not
+    /// running or has no owner.
+    pub(crate) fn chat_owner(&self, route: &str) -> Option<String> {
+        self.hub.owner(route).flatten()
     }
 
     /// The hub this account reports through.

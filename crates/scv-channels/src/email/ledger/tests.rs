@@ -9,6 +9,8 @@ fn account() -> Account {
         port: 993,
         username: "me".into(),
         password: "secret".into(),
+        address: None,
+        smtp: None,
     }
 }
 
@@ -52,6 +54,8 @@ fn report(source: SourceRef, text: &str) -> Decided {
             key: format!("report:{}", source.label()),
             text: text.into(),
             urgent: false,
+            handle: None,
+            actions: Vec::new(),
         },
         source,
         turned: true,
@@ -84,8 +88,8 @@ async fn a_new_state_gets_an_epoch_and_a_newer_one_is_refused() {
     // Fields a later release adds are refused too, not silently dropped.
     let path = directory.path().join("state/channels/email/default.json");
     let text = std::fs::read_to_string(&path).unwrap();
-    let with_actions = text.replacen('{', "{\"actions\":[],", 1);
-    crate::state::atomic_write(&path, &with_actions).unwrap();
+    let with_later = text.replacen('{', "{\"later\":[],", 1);
+    crate::state::atomic_write(&path, &with_later).unwrap();
     assert!(
         Store::new(&Layout::new(directory.path()), "email")
             .load_state("default")
@@ -277,7 +281,10 @@ async fn a_batch_is_stored_once_and_its_counts_leave_the_next_digest() {
     let retried = saved(directory.path()).batch.unwrap();
     assert_eq!((retried.attempts, retried.next_attempt_at), (1, 22 + 60));
     assert_eq!(retried.key, batch.key, "a retry hands over the same key");
-    ledger.batch_stored("feishu:mail", 30).await.unwrap();
+    ledger
+        .batch_stored("feishu:mail", "owner", 30)
+        .await
+        .unwrap();
     let state = saved(directory.path());
     assert!(state.batch.is_none());
     assert_eq!(state.queue.len(), 1);
@@ -299,7 +306,7 @@ async fn a_batch_is_stored_once_and_its_counts_leave_the_next_digest() {
     );
     assert_eq!(state.watched[0].route, "feishu:mail");
     ledger
-        .settle_watched(&[], std::slice::from_ref(&batch.key))
+        .settle_watched(&[], std::slice::from_ref(&batch.key), &mut || None)
         .await
         .unwrap();
     let state = saved(directory.path());
@@ -385,6 +392,8 @@ async fn a_failed_write_changes_nothing() {
         port: 993,
         username: "me".into(),
         password: "secret".into(),
+        address: None,
+        smtp: None,
     };
     let path = directory.path().join("credentials/email/default.json");
     crate::state::atomic_write(&path, &serde_json::to_string(&other).unwrap()).unwrap();
@@ -444,4 +453,51 @@ async fn a_slow_disk_holds_up_no_reader_and_no_shutdown() {
         "the run lock is released once the write lands"
     );
     assert_eq!(saved(directory.path()).queue.len(), 1);
+}
+
+#[tokio::test]
+async fn a_cancelled_write_keeps_its_writer_lock_and_publishes_before_the_next_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ledger = ledger(directory.path());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entering = Arc::clone(&entered);
+    let (release, released) = std::sync::mpsc::channel();
+    let released = Mutex::new(released);
+    let first = std::sync::atomic::AtomicBool::new(true);
+    ledger.before_write = Some(Arc::new(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            entering.notify_one();
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+    }));
+    let mut change = Box::pin(ledger.note("system:first", Class::System, "first".into(), 1));
+    tokio::select! {
+        result = &mut change => panic!("write did not wait: {result:?}"),
+        () = entered.notified() => {}
+    }
+    drop(change);
+    assert!(
+        ledger.writer.try_lock().is_err(),
+        "the blocking write still owns serialization"
+    );
+    assert!(ledger.snapshot().queue.is_empty());
+    release.send(()).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        ledger.note("system:second", Class::System, "second".into(), 2),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let snapshot = ledger.snapshot();
+    assert_eq!(
+        snapshot.queue.len(),
+        2,
+        "the cancelled caller's write must not be overwritten"
+    );
+    assert_eq!(saved(directory.path()), snapshot);
 }

@@ -33,7 +33,9 @@ fn stderr(output: &std::process::Output) -> String {
 }
 
 /// Email sign-in takes the password only from stdin or a hidden prompt,
-/// refuses the chat channels' options, and saves nothing it could not check.
+/// refuses the chat channels' options and mismatched IMAP, SMTP, and OAuth
+/// options, and saves nothing it could not check; `scv mail cancel` names
+/// one action or all of them.
 #[test]
 fn email_sign_in_checks_the_mailbox_before_saving_and_takes_no_chat_options() {
     let home = tempfile::tempdir().unwrap();
@@ -114,6 +116,49 @@ fn email_sign_in_checks_the_mailbox_before_saving_and_takes_no_chat_options() {
             ],
             "--password",
         ),
+        (
+            vec![
+                "channels",
+                "login",
+                "email",
+                "--oauth",
+                "gmail",
+                "--imap-host",
+                "imap.example.com",
+            ],
+            "cannot be used with",
+        ),
+        (
+            vec![
+                "channels",
+                "login",
+                "email",
+                "--smtp-host",
+                "smtp.example.com",
+            ],
+            "--imap-host",
+        ),
+        (vec!["channels", "login", "email", "--write"], "--oauth"),
+        (
+            vec!["channels", "login", "email", "--oauth", "gmail"],
+            "--client-id",
+        ),
+        (
+            vec![
+                "channels",
+                "login",
+                "email",
+                "--oauth",
+                "gmail",
+                "--client-id",
+                "client",
+                "--tenant",
+                "consumers",
+            ],
+            "--tenant is for --oauth outlook",
+        ),
+        (vec!["mail", "cancel"], "<ID>"),
+        (vec!["mail", "cancel", "a1", "--all"], "cannot be used with"),
     ] {
         let error = stderr(&scv(home.path(), &args, "code-secret\n"));
         assert!(error.contains(expected), "{args:?}: {error}");
@@ -135,10 +180,17 @@ fn config_show_describes_mail_accounts_and_mail_chats() {
         r#"{"provider":"imap","host":"imap.example.com","port":993,"username":"you@example.com","password":"code-secret"}"#,
     );
     write_private(
+        &home.path().join("credentials/email/acting.json"),
+        r#"{"provider":"imap","host":"imap.example.com","port":993,"username":"them@example.com","password":"code-secret","smtp":{"host":"smtp.example.com","port":465,"security":"tls"}}"#,
+    );
+    write_private(
         &home.path().join("config.toml"),
         "[channels.email.default.mail]\nmax_tokens_per_day = 50000\n\
          [channels.email.default.mail.notify]\nroute = [\"feishu:mail\"]\n\
          [channels.email.broken.mail]\nmax_body_kib = 999\n\
+         [channels.email.acting.mail]\nmax_tokens_per_day = 0\n\
+         [channels.email.acting.mail.notify]\nroute = [\"feishu:mail\"]\n\
+         [channels.email.acting.mail.actions]\nsend = \"approve\"\ntrash = \"approve\"\n\
          [channels.feishu.mail]\npurpose = \"mail\"\n",
     );
     let output = scv(home.path(), &["config", "show"], "");
@@ -150,8 +202,11 @@ fn config_show_describes_mail_accounts_and_mail_chats() {
     let shown = String::from_utf8_lossy(&output.stdout);
     for expected in [
         "email:default",
-        "enabled, reads mail read-only, watches \"INBOX\", reports to feishu:mail; triage up \
-         to 50000 tokens a day, 8 KiB of each body; 0 rules",
+        "enabled, reads mail, watches \"INBOX\", reports to feishu:mail; triage up to 50000 \
+         tokens a day, 8 KiB of each body; 0 rules; read-only",
+        "email:acting",
+        "enabled, reads mail, watches \"INBOX\", reports to feishu:mail; no model triage; 0 \
+         rules; actions on approval: send, trash",
         "email:broken",
         "invalid mail settings: mail.max_body_kib must be between 1 and 64",
         "feishu:mail",
@@ -162,5 +217,7 @@ fn config_show_describes_mail_accounts_and_mail_chats() {
             "missing {expected:?} in:\n{shown}"
         );
     }
-    assert!(!shown.contains("me@example.com"), "{shown}");
+    for address in ["me@example.com", "them@example.com"] {
+        assert!(!shown.contains(address), "{shown}");
+    }
 }

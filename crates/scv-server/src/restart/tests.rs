@@ -784,3 +784,113 @@ async fn notices_never_go_to_a_mail_chat_or_a_mailbox() {
     );
     assert_eq!(channel_title("email:default"), "Email");
 }
+
+#[tokio::test]
+async fn a_planned_restart_raises_the_mail_drain_before_it_hands_over() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    assert_eq!(
+        restarter.waiting_for(&plan(PlanState::Waiting)),
+        None,
+        "nothing executing is not a mail action"
+    );
+    assert_eq!(hub.mail_executing(), 0);
+    let mut waiting = plan(PlanState::Waiting);
+    waiting.requested_unix = unix_now();
+    waiting.deadline_unix = unix_now() + 600;
+    waiting.restart_unix = None;
+    let info = restarter.arm(waiting).unwrap();
+    assert_eq!(info.waiting_for, None);
+    assert!(!hub.mail_draining());
+    eventually(|| launched.lock().unwrap().len() == 1).await;
+    assert!(hub.mail_draining(), "handing over leaves the drain flag up");
+    let started = launched.lock().unwrap()[0].clone();
+    assert_eq!(started.state, PlanState::Restarting);
+    assert!(!started.waited_out);
+}
+
+#[tokio::test]
+async fn a_planned_restart_waits_out_a_mail_action_before_it_hands_over() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let registration = hub.register_mail("email:default", vec!["feishu:mail".into()]);
+    assert!(registration.begin_execution());
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    let mut waiting = plan(PlanState::Waiting);
+    waiting.requested_unix = unix_now();
+    waiting.deadline_unix = unix_now() + 600;
+    waiting.restart_unix = None;
+    let info = restarter.arm(waiting).unwrap();
+    assert_eq!(info.waiting_for.as_deref(), Some("a mail action to finish"));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        launched.lock().unwrap().is_empty(),
+        "an action under way holds the restart"
+    );
+    assert!(
+        !hub.mail_draining(),
+        "the drain flag goes up only after the action ends"
+    );
+    registration.end_execution();
+    eventually(|| launched.lock().unwrap().len() == 1).await;
+    assert!(hub.mail_draining(), "handing over leaves the drain flag up");
+    assert!(!launched.lock().unwrap()[0].waited_out);
+}
+
+#[tokio::test]
+async fn a_planned_restart_lowers_the_mail_drain_when_handing_over_fails() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    let saw_drain = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let hub = Arc::clone(&hub);
+        let saw_drain = Arc::clone(&saw_drain);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if hub.mail_draining() {
+                    saw_drain.store(true, Ordering::Relaxed);
+                }
+            }
+        })
+    };
+    let mut waiting = plan(PlanState::Waiting);
+    waiting.requested_unix = unix_now();
+    waiting.deadline_unix = unix_now() + 600;
+    waiting.restart_unix = None;
+    restarter.arm(waiting).unwrap();
+    // The plan is saved. The next save, in the hand-over, has to fail.
+    let state = home.path().join("state");
+    assert!(state.join("update.json").is_file());
+    std::fs::remove_dir_all(&state).unwrap();
+    std::fs::write(&state, b"not a directory").unwrap();
+    eventually(|| restarter.info().is_none()).await;
+    assert!(
+        saw_drain.load(Ordering::Relaxed),
+        "the drain flag was raised before the hand-over failed"
+    );
+    assert!(
+        !hub.mail_draining(),
+        "a failed hand-over lowers the drain flag"
+    );
+    assert!(
+        launched.lock().unwrap().is_empty(),
+        "a failed hand-over is not recorded as started"
+    );
+    restarter.cancel.cancel();
+    stop.store(true, Ordering::Relaxed);
+    watcher.join().unwrap();
+}

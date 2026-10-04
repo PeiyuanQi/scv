@@ -95,6 +95,7 @@ async fn a_sweep_prunes_and_flags_a_full_disk_once() {
         state_dir: &home.path().join("state/channels/email"),
         account: "default",
         free_space: free_bytes,
+        registration: None,
     };
     janitor.sweep().await.unwrap();
     assert!(!low.is_low());
@@ -139,6 +140,7 @@ async fn free_space_that_cannot_be_told_counts_as_too_little() {
         state_dir: &home.path().join("state/channels/email"),
         account: "default",
         free_space: |_| None,
+        registration: None,
     };
     janitor.sweep().await.unwrap();
     assert!(low.is_low(), "new mail is counted, not reported");

@@ -39,7 +39,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.11"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.12"}}
 ```
 
 ### `daemon.control`
@@ -59,7 +59,7 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 {"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
-{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.11 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.12 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
 {"type":"daemon.control","request_id":"d11","command":{"action":"confirm_status","id":"5f0c9a1e2b3d"}}
 {"type":"daemon.control","request_id":"p1","command":{"action":"project_create","name":"release","workspace":"/workspace/project"}}
 {"type":"daemon.control","request_id":"p2","command":{"action":"project_tasks","project":"release"}}
@@ -86,8 +86,12 @@ no workspace, purpose, owner tools, or other senders, each a
 it otherwise; an email account's status carries `mail`, counts only: mail
 claimed, reports queued, mail seen, triaged, and reported today, tokens used
 today and the daily budget, digests sent in the last day, and the last check
-(`last_check_unix_seconds`). It never holds an address, subject, or other mail
-text. Daemons before mail omit both fields and ignore `purpose`. Without a
+(`last_check_unix_seconds`). From 0.3.12 it may also carry `provider`
+(`imap`, `gmail`, or `graph`), `actions` (the kinds the account may propose),
+and, when nonzero, `actions_open`, `actions_executing`, `actions_unknown`,
+and `actions_done_24h`. It never holds an address, subject, code, or other
+mail text. Daemons before mail omit both fields and ignore `purpose`. Older
+clients ignore the added count fields. Without a
 saved workspace, the account uses the daemon workspace. Replacements stop and
 join the old instance first. `channel_logout` persists disablement and joins
 before removing credentials, delivery state, and settings. Successful actions
@@ -111,8 +115,10 @@ not answer `scv build-info`, or when that reports a version other than
 nested SCV or ACP agent, which lives for its whole conversation, until its
 turn has ended and, for a nested SCV, the background jobs of its own session
 have been reported to it) and its report is stored, then any owner message a
-chat bridge has claimed but not answered. At `max_wait_seconds` (default 600,
-at most 3600) it restarts anyway. A second request for the same version
+chat bridge has claimed but not answered, and any mail action an email
+account is carrying out. At `max_wait_seconds` (default 600, at most 3600) it
+restarts anyway. Before it hands over, email accounts start no new mail
+action, and one under way gets up to a minute more to finish. A second request for the same version
 returns the scheduled restart. The restart itself runs in a watchdog unit
 outside the daemon; see [architecture.md](architecture.md#planned-restarts).
 
@@ -130,6 +136,26 @@ such as after a restart: questions live in memory only. Following a question
 keeps it alive; one nobody asks about for a minute is withdrawn. A client
 asks and then follows the question, because a single request cannot outlast
 the control helper's time limit.
+
+`mail_status` lists the mail actions of one email `account`, or of every
+running email account that takes actions when `account` is omitted. The reply is `daemon.status`
+with `mail_actions`: each entry is the component id, the action id (`a` and
+32 hex digits), the kind (`draft`, `send`, `archive`, `mark_read`, `trash`,
+or `spam`), the state (`proposed`, `previewing`, `open`, `approved`,
+`executing`, or `unknown`), when it was proposed, and, while it waits for
+approval, when that approval stops counting. It never carries a code, a
+handle, an address, or mail text. An account that is not running, runs
+without `mail.actions`, or does not answer is a `component_error` when it was
+named, and is skipped when every account was asked. `mail_cancel` withdraws one action by `id`, or
+every action of `account` that has not started when `all` is true. Exactly
+one of `id` and `all` is set. The reply's `mail_note` is SCV's sentence about
+what it withdrew. It cannot approve an action. Daemons before 0.3.12 do not
+know these commands.
+
+```json
+{"type":"daemon.control","request_id":"d13","command":{"action":"mail_status","account":"default"}}
+{"type":"daemon.control","request_id":"d14","command":{"action":"mail_cancel","account":"default","id":"a0123456789abcdef0123456789abcdef","all":false}}
+```
 
 Component management is unsupported on stdio. The client helper bounds its
 exchange and never automatically retries a mutation after an ambiguous failure;
@@ -287,16 +313,16 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.11"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.12"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.11","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.11","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
-{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.11","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.12","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.12","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.12","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.

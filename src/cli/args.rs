@@ -123,6 +123,13 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ChannelsCommand,
     },
+    /// List or withdraw the mail actions email accounts are waiting to
+    /// carry out. Only the owner approves an action, in the mail chat;
+    /// nothing here can.
+    Mail {
+        #[command(subcommand)]
+        command: MailCommand,
+    },
     /// Sign in the agent CLIs SCV delegates to (Claude Code, Codex, Grok
     /// Build, DeepSeek Harness, pi).
     ///
@@ -232,11 +239,16 @@ pub(crate) enum ConfigCommand {
 }
 
 #[derive(Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one command is parsed once per process, so the login variant's size does not matter"
+)]
 pub(crate) enum ChannelsCommand {
     /// Sign a channel account in by scanning the QR code it shows. For
     /// Feishu the scan creates a bot app; `--app-id` signs in an existing
-    /// app instead. For email, name the IMAP server and user; the password
-    /// or authorization code is read from a hidden prompt or stdin.
+    /// app instead. For email, name the IMAP server and user (the password
+    /// or authorization code is read from a hidden prompt or stdin), or
+    /// sign a Gmail or Outlook mailbox in with OAuth.
     Login {
         #[arg(value_enum)]
         channel: ChannelArg,
@@ -272,6 +284,40 @@ pub(crate) enum ChannelsCommand {
         /// answers only its owner answers nobody.
         #[arg(long, value_name = "MEMBER_ID")]
         slack_owner_user_id: Option<String>,
+        /// Email over IMAP: the mailbox's own address, when --user is not it.
+        #[arg(long, value_name = "ADDRESS", requires = "imap_host")]
+        address: Option<String>,
+        /// Email over IMAP: the SMTP server approved mail is sent through,
+        /// such as smtp.qq.com, signed in with the same user and secret.
+        #[arg(long, value_name = "HOST", requires = "imap_host")]
+        smtp_host: Option<String>,
+        /// Email: the SMTP server's port [default: 465, or 587 with --smtp-starttls].
+        #[arg(long, value_name = "PORT", requires = "smtp_host")]
+        smtp_port: Option<u16>,
+        /// Email: secure SMTP with STARTTLS instead of TLS from the start.
+        #[arg(long, requires = "smtp_host")]
+        smtp_starttls: bool,
+        /// Email: sign in to the Gmail API or Microsoft Graph with OAuth,
+        /// with your own OAuth client, instead of IMAP.
+        #[arg(long, value_enum, conflicts_with = "imap_host")]
+        oauth: Option<OAuthArg>,
+        /// Email with --oauth: your OAuth client's ID. A Gmail client's
+        /// secret is read from a hidden prompt or stdin.
+        #[arg(long, value_name = "ID", requires = "oauth")]
+        client_id: Option<String>,
+        /// Email with --oauth outlook: `consumers` (Outlook.com, the
+        /// default), `organizations`, `common`, or a tenant ID.
+        #[arg(long, value_name = "TENANT", requires = "oauth")]
+        tenant: Option<String>,
+        /// Email with --oauth: also grant saving drafts and moving and
+        /// marking mail (and, for Gmail, sending), each only once you
+        /// approve it in the mail chat.
+        #[arg(long, requires = "oauth")]
+        write: bool,
+        /// Email with --oauth: also grant sending, each message only once
+        /// you approve it in the mail chat.
+        #[arg(long, requires = "oauth")]
+        send: bool,
     },
     /// Enable a signed-in account under the SCV daemon.
     Run {
@@ -321,7 +367,43 @@ pub(crate) enum ChannelsCommand {
         channel: ChannelArg,
         #[arg(long, default_value = "default")]
         account: String,
+        /// Email: log out even though mail actions are waiting; they are
+        /// withdrawn.
+        #[arg(long)]
+        yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MailCommand {
+    /// Show each email account's mail actions that are not over: IDs, kinds,
+    /// and states, never a code, an address, or mail text.
+    Status {
+        /// Only this email account [default: every account].
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Withdraw a mail action by its ID, or every one of an account that
+    /// has not started. An action being carried out cannot be withdrawn.
+    Cancel {
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// The action's ID, as `scv mail status` shows it.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        /// Withdraw every action that has not started.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+/// A mail API signed in with OAuth.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum OAuthArg {
+    /// Gmail, through the Gmail API.
+    Gmail,
+    /// Outlook.com or Microsoft 365, through Microsoft Graph.
+    Outlook,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -334,7 +416,7 @@ pub(crate) enum ChannelArg {
     Slack,
     /// Lark, Feishu's international edition: the `feishu` channel.
     Lark,
-    /// A mailbox over IMAP, read-only, reported to a mail chat.
+    /// A mailbox (IMAP, Gmail, or Outlook), reported to a mail chat.
     Email,
 }
 

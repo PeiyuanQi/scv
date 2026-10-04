@@ -3,8 +3,10 @@
 //! It answers each command from a script and records every command it
 //! receives. It fails the test, by panicking its task (which
 //! [`Fake::finish`] re-raises), when a command is not the one scripted,
-//! when one arrives after the script ends, and when one could change a
-//! mailbox: that last check is its own, independent of the client's guard.
+//! when one arrives after the script ends, and, unless it serves the
+//! executor's write connection ([`serve_writable`]), when one could change
+//! a mailbox: that last check is its own, independent of the client's
+//! guard.
 
 use tokio::io::{
     AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader, DuplexStream, ReadHalf,
@@ -48,7 +50,15 @@ pub(crate) struct Fake {
 /// returned stream is the client's end.
 pub(crate) fn serve(greeting: &str, script: Vec<Step>) -> (DuplexStream, Fake) {
     let (client, server) = tokio::io::duplex(1 << 16);
-    let task = tokio::spawn(run(server, greeting.to_owned(), script));
+    let task = tokio::spawn(run(server, greeting.to_owned(), script, false));
+    (client, Fake { task })
+}
+
+/// [`serve`] for the executor's write connection: its commands must still
+/// match the script exactly, but may change the mailbox.
+pub(crate) fn serve_writable(greeting: &str, script: Vec<Step>) -> (DuplexStream, Fake) {
+    let (client, server) = tokio::io::duplex(1 << 16);
+    let task = tokio::spawn(run(server, greeting.to_owned(), script, true));
     (client, Fake { task })
 }
 
@@ -66,7 +76,12 @@ impl Fake {
 type Reader = BufReader<ReadHalf<DuplexStream>>;
 type Writer = WriteHalf<DuplexStream>;
 
-async fn run(stream: DuplexStream, greeting: String, script: Vec<Step>) -> Vec<String> {
+async fn run(
+    stream: DuplexStream,
+    greeting: String,
+    script: Vec<Step>,
+    writable: bool,
+) -> Vec<String> {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
     let mut received = Vec::new();
@@ -80,7 +95,9 @@ async fn run(stream: DuplexStream, greeting: String, script: Vec<Step>) -> Vec<S
                 };
                 received.push(command.clone());
                 let (tag, text) = command.split_once(' ').unwrap_or((&command, ""));
-                assert_read_only(text);
+                if !writable {
+                    assert_read_only(text);
+                }
                 assert_eq!(text, expect, "the client sent an unexpected command");
                 last_tag = tag.to_owned();
                 let _ = write
@@ -100,7 +117,9 @@ async fn run(stream: DuplexStream, greeting: String, script: Vec<Step>) -> Vec<S
             Step::Hang => {
                 if let Some(command) = read_command(&mut read, &mut write).await {
                     let text = command.split_once(' ').map_or("", |(_, text)| text);
-                    assert_read_only(text);
+                    if !writable {
+                        assert_read_only(text);
+                    }
                     received.push(command);
                 }
                 let mut rest = Vec::new();
@@ -115,7 +134,9 @@ async fn run(stream: DuplexStream, greeting: String, script: Vec<Step>) -> Vec<S
     }
     if let Some(command) = read_command(&mut read, &mut write).await {
         let text = command.split_once(' ').map_or("", |(_, text)| text);
-        assert_read_only(text);
+        if !writable {
+            assert_read_only(text);
+        }
         panic!("the client sent an unscripted command: {command}");
     }
     received
@@ -161,7 +182,8 @@ fn assert_read_only(text: &str) {
     let mut words = upper.split(' ');
     let verb = words.next().unwrap_or_default();
     let allowed = match verb {
-        "CAPABILITY" | "NOOP" | "LOGOUT" | "ID" | "LOGIN" | "EXAMINE" | "LIST" | "STATUS" => true,
+        "CAPABILITY" | "NOOP" | "LOGOUT" | "ID" | "LOGIN" | "EXAMINE" | "LIST" | "XLIST"
+        | "STATUS" => true,
         "AUTHENTICATE" => words.next() == Some("PLAIN"),
         "UID" => match words.next() {
             Some("SEARCH") => true,

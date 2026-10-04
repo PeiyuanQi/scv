@@ -43,6 +43,8 @@ impl Bench {
             clock: &self.clock,
             low_space: &self.low_space,
             frame: triage::frame("default", ""),
+            options: triage::Options::default(),
+            actions: None,
         }
     }
 

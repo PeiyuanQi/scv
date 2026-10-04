@@ -10,6 +10,89 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::UnixListener;
 
+mod actions;
+mod oauth_login;
+
+#[tokio::test]
+async fn a_sibling_exit_lets_the_executor_finish_before_it_is_dropped() {
+    let stop = tokio_util::sync::CancellationToken::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_executor = Arc::clone(&started);
+    let dropped_executor = Arc::clone(&dropped);
+    let stop_executor = stop.clone();
+    let executor = async move {
+        struct Guard {
+            dropped: Arc<std::sync::atomic::AtomicBool>,
+            done: bool,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if !self.done {
+                    self.dropped
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let mut guard = Guard {
+            dropped: dropped_executor,
+            done: false,
+        };
+        started_executor.notify_one();
+        stop_executor.cancelled().await;
+        guard.done = true;
+        Ok(())
+    };
+    let started_others = Arc::clone(&started);
+    let others = async move {
+        started_others.notified().await;
+        Err(anyhow::anyhow!("the worker stopped"))
+    };
+    let error = beside_executor(others, executor, &stop, STOP_GRACE)
+        .await
+        .expect_err("the sibling's error is returned after the executor finishes");
+    assert!(error.to_string().contains("worker stopped"), "{error:#}");
+    assert!(
+        !dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "the executor was dropped before it finished"
+    );
+}
+
+#[tokio::test]
+async fn the_executor_finishing_stops_the_other_tasks() {
+    let stop = tokio_util::sync::CancellationToken::new();
+    let executor = async { Ok(()) };
+    let others = std::future::pending();
+    beside_executor(others, executor, &stop, STOP_GRACE)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_sibling_exit_waits_only_up_to_the_bound() {
+    let stop = tokio_util::sync::CancellationToken::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let started_executor = Arc::clone(&started);
+    let executor = async move {
+        started_executor.notify_one();
+        std::future::pending().await
+    };
+    let started_others = Arc::clone(&started);
+    let others = async move {
+        started_others.notified().await;
+        Err(anyhow::anyhow!("the janitor stopped"))
+    };
+    let started_at = std::time::Instant::now();
+    let error = beside_executor(others, executor, &stop, Duration::from_millis(50))
+        .await
+        .expect_err("the bound ends the wait");
+    assert!(
+        error.to_string().contains("did not finish in time"),
+        "{error:#}"
+    );
+    assert!(started_at.elapsed() < Duration::from_secs(2));
+}
+
 const CANARY: &str = "CANARY-7F3Q";
 
 /// Every tracing event, as text.
@@ -89,6 +172,8 @@ async fn mail_text_reaches_the_mail_chat_and_nothing_else() {
         clock: &clock,
         low_space: &low_space,
         frame: triage::frame("default", &settings.instructions),
+        options: triage::Options::default(),
+        actions: None,
     };
     let notifier = notify::Notifier {
         ledger: &ledger,
@@ -96,6 +181,7 @@ async fn mail_text_reaches_the_mail_chat_and_nothing_else() {
         account: "default",
         clock: &clock,
         hub: Some(&hub),
+        previews: None,
     };
     let mut mailbox = FakeMailbox::default();
     assert!(worker.check(&mut mailbox).await.is_ok());
@@ -155,7 +241,13 @@ async fn mail_text_reaches_the_mail_chat_and_nothing_else() {
     assert!(!logs.is_empty());
     assert!(!logs.contains(CANARY), "{logs}");
     assert!(!logs.contains("alice@example.com"), "{logs}");
-    let status = serde_json::to_string(&counts(&ledger, &settings, &clock)).unwrap();
+    let status = serde_json::to_string(&counts(
+        &ledger,
+        &settings,
+        &clock,
+        source::ProviderKind::Imap,
+    ))
+    .unwrap();
     assert!(!status.contains(CANARY), "{status}");
     assert!(status.contains("\"reported_today\":1"), "{status}");
 }
@@ -185,6 +277,8 @@ async fn a_refused_sign_in_logs_nothing_the_server_said_or_was_sent() {
         clock: &clock,
         low_space: &low_space,
         frame: triage::frame("default", ""),
+        options: triage::Options::default(),
+        actions: None,
     };
     let config = imap::ImapConfig {
         host: "imap.example.com".into(),

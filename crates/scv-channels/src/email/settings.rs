@@ -4,6 +4,10 @@
 //! opaque, so a mistake here fails only that account: it is parsed and
 //! checked when the account starts, and `scv config show` reports the same
 //! error. Every limit has a default and bounds.
+//!
+//! Without a `mail.actions` table the account only reads. With one, each
+//! kind of action is `"off"` until the owner sets it to `"approve"`, the
+//! only other value: no setting carries an action out by itself.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -15,6 +19,12 @@ const MAX_RULES: usize = 64;
 const MAX_RULE_ENTRIES: usize = 64;
 /// Mail chats one account reports to, tried in order.
 const MAX_ROUTES: usize = 4;
+/// Domains `mail.actions.recipient_domains` may list.
+const MAX_DOMAINS: usize = 64;
+/// The most recipients one outgoing message may have, `to` and `cc` together.
+pub(crate) const MAX_RECIPIENTS: usize = 10;
+/// The largest preview in the state file, in KiB, for the state budget.
+const PREVIEW_KIB: u64 = 12;
 
 /// `[channels.email.<account>.mail]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -50,6 +60,9 @@ pub(crate) struct MailSettings {
     pub(crate) rules: Vec<Rule>,
     pub(crate) notify: NotifySettings,
     pub(crate) retention: RetentionSettings,
+    /// What the owner may have SCV do with mail, each kind only after the
+    /// owner approves it. Absent, the account only reads.
+    pub(crate) actions: Option<ActionSettings>,
 }
 
 impl Default for MailSettings {
@@ -69,6 +82,7 @@ impl Default for MailSettings {
             rules: Vec::new(),
             notify: NotifySettings::default(),
             retention: RetentionSettings::default(),
+            actions: None,
         }
     }
 }
@@ -195,6 +209,17 @@ pub(crate) struct RetentionSettings {
     pub(crate) min_free_mib: u64,
     /// How often the janitor runs.
     pub(crate) sweep_minutes: u64,
+    /// How long a finished action's code is remembered, so a late command
+    /// is answered and no code is used twice.
+    pub(crate) tombstone_days: u64,
+    /// How long an action SCV lost track of is kept for a later check.
+    pub(crate) unknown_keep_days: u64,
+    /// The pending actions' content may not grow past this, in MiB.
+    pub(crate) max_actions_mib: u64,
+    /// How long the action audit log keeps a line.
+    pub(crate) audit_days: u64,
+    /// The action audit log may not grow past this, in KiB.
+    pub(crate) max_audit_kib: u64,
 }
 
 impl Default for RetentionSettings {
@@ -203,6 +228,157 @@ impl Default for RetentionSettings {
             max_state_kib: 2048,
             min_free_mib: 64,
             sweep_minutes: 60,
+            tombstone_days: 30,
+            unknown_keep_days: 3,
+            max_actions_mib: 8,
+            audit_days: 90,
+            max_audit_kib: 4096,
+        }
+    }
+}
+
+/// Whether one kind of action may happen: never, or once the owner
+/// approves that very action. There is no third value; serde refuses any
+/// other, so no setting carries an action out unapproved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ActionMode {
+    #[default]
+    Off,
+    Approve,
+}
+
+/// A move triage may suggest by itself, for the owner to approve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Suggestion {
+    Archive,
+    Trash,
+    Spam,
+}
+
+/// Where a reply goes when the original names a `Reply-To`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReplyTo {
+    /// To the `Reply-To` address, as mail clients do (the preview points
+    /// it out when it differs from the sender).
+    #[default]
+    Honor,
+    /// Always to the sender.
+    Ignore,
+}
+
+/// How a sent message reaches the Sent folder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SentCopy {
+    /// The provider files it (the Gmail API and Graph always do; some SMTP
+    /// servers do).
+    #[default]
+    Provider,
+    /// SCV appends a copy to the Sent folder over IMAP after sending.
+    Append,
+}
+
+/// `[channels.email.<account>.mail.actions]`: what SCV may do with mail
+/// once the owner approves each action, and the limits around it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ActionSettings {
+    /// Save a reply, a forward, or new mail in the Drafts folder.
+    pub(crate) draft: ActionMode,
+    /// Send a reply, a forward, or new mail.
+    pub(crate) send: ActionMode,
+    /// Forward a reported message (as a draft or sent, which `draft` and
+    /// `send` gate too).
+    pub(crate) forward: ActionMode,
+    /// Move a message out of the inbox to the archive.
+    pub(crate) archive: ActionMode,
+    /// Mark a message read.
+    pub(crate) mark_read: ActionMode,
+    /// Move a message to Trash.
+    pub(crate) trash: ActionMode,
+    /// Move a message to Spam (Junk).
+    pub(crate) spam: ActionMode,
+    /// Moves triage may suggest on its own, each only when its kind is on.
+    pub(crate) propose: Vec<Suggestion>,
+    /// The owner's standing guidance for replies and new mail, ≤ 4 KiB.
+    pub(crate) reply_instructions: String,
+    /// The model that drafts replies and new mail; empty uses the daemon's
+    /// default model.
+    pub(crate) compose_model: String,
+    /// Drafting turns per local day.
+    pub(crate) max_compose_per_day: u64,
+    pub(crate) reply_to: ReplyTo,
+    /// Replies also go to the original's other recipients.
+    pub(crate) reply_all: bool,
+    /// When not empty, every recipient must be in one of these domains
+    /// or their subdomains.
+    pub(crate) recipient_domains: Vec<String>,
+    /// Recipients of one message, `to` and `cc` together.
+    pub(crate) max_recipients: usize,
+    /// How long an approval code works once it reached the owner.
+    pub(crate) approval_hours: u64,
+    /// How long an action may wait for its approval at all.
+    pub(crate) max_pending_hours: u64,
+    /// How long after its approval an action may still start.
+    pub(crate) execute_minutes: u64,
+    /// Actions waiting or under way at once.
+    pub(crate) max_open: usize,
+    /// Approvals per rolling day, by what they do.
+    pub(crate) max_sends_per_day: u64,
+    pub(crate) max_drafts_per_day: u64,
+    pub(crate) max_moves_per_day: u64,
+    pub(crate) max_flags_per_day: u64,
+    /// Folder names for providers that do not mark them (IMAP without
+    /// SPECIAL-USE or XLIST), as UTF-8; empty finds them by their marks.
+    pub(crate) drafts_folder: String,
+    pub(crate) sent_folder: String,
+    pub(crate) trash_folder: String,
+    pub(crate) spam_folder: String,
+    pub(crate) archive_folder: String,
+    pub(crate) sent_copy: SentCopy,
+    /// The display name on outgoing mail; empty for the address alone.
+    pub(crate) from_name: String,
+    /// How long a report's `#` handle works in commands.
+    pub(crate) handle_days: u64,
+}
+
+impl Default for ActionSettings {
+    fn default() -> Self {
+        Self {
+            draft: ActionMode::Off,
+            send: ActionMode::Off,
+            forward: ActionMode::Off,
+            archive: ActionMode::Off,
+            mark_read: ActionMode::Off,
+            trash: ActionMode::Off,
+            spam: ActionMode::Off,
+            propose: Vec::new(),
+            reply_instructions: String::new(),
+            compose_model: String::new(),
+            max_compose_per_day: 20,
+            reply_to: ReplyTo::Honor,
+            reply_all: false,
+            recipient_domains: Vec::new(),
+            max_recipients: MAX_RECIPIENTS,
+            approval_hours: 24,
+            max_pending_hours: 72,
+            execute_minutes: 15,
+            max_open: 32,
+            max_sends_per_day: 20,
+            max_drafts_per_day: 50,
+            max_moves_per_day: 100,
+            max_flags_per_day: 200,
+            drafts_folder: String::new(),
+            sent_folder: String::new(),
+            trash_folder: String::new(),
+            spam_folder: String::new(),
+            archive_folder: String::new(),
+            sent_copy: SentCopy::Provider,
+            from_name: String::new(),
+            handle_days: 14,
         }
     }
 }
@@ -219,12 +395,6 @@ impl MailSettings {
     /// then fail for lack of a route).
     pub(crate) fn parse(table: Option<&toml::Table>) -> Result<Self> {
         let table = table.cloned().unwrap_or_default();
-        if table.contains_key("actions") {
-            bail!(
-                "mail.actions: saving drafts, sending, and moving mail are not available in \
-                 this release; remove the table"
-            );
-        }
         let settings: Self = toml::Value::Table(table)
             .try_into()
             .map_err(|error: toml::de::Error| anyhow::anyhow!("mail: {}", error.message()))?;
@@ -286,11 +456,49 @@ impl MailSettings {
             5,
             1440,
         )?;
+        within(
+            "mail.retention.tombstone_days",
+            retention.tombstone_days,
+            7,
+            365,
+        )?;
+        within(
+            "mail.retention.unknown_keep_days",
+            retention.unknown_keep_days,
+            1,
+            30,
+        )?;
+        within(
+            "mail.retention.max_actions_mib",
+            retention.max_actions_mib,
+            1,
+            256,
+        )?;
+        within("mail.retention.audit_days", retention.audit_days, 7, 730)?;
+        within(
+            "mail.retention.max_audit_kib",
+            retention.max_audit_kib,
+            64,
+            65_536,
+        )?;
         // The queue's text must fit in half the state file.
         if (self.notify.max_queue as u64) * 3 > retention.max_state_kib {
             bail!(
                 "mail.notify.max_queue × 1.5 KiB must fit in half of mail.retention.max_state_kib"
             );
+        }
+        if let Some(actions) = &mut self.actions {
+            actions.validate()?;
+            // Previews wait in the queue too: all of them at once must still
+            // leave a quarter of the state file free.
+            let needed =
+                (self.notify.max_queue as u64) * 3 / 2 + actions.max_open as u64 * PREVIEW_KIB;
+            if needed * 4 > retention.max_state_kib * 3 {
+                bail!(
+                    "mail.notify.max_queue × 1.5 KiB and mail.actions.max_open × 12 KiB must fit \
+                     in three quarters of mail.retention.max_state_kib"
+                );
+            }
         }
         Ok(self)
     }
@@ -333,6 +541,160 @@ impl Rule {
         }
         Ok(())
     }
+}
+
+impl ActionSettings {
+    fn validate(&mut self) -> Result<()> {
+        if self.reply_instructions.len() > MAX_INSTRUCTIONS_BYTES {
+            bail!("mail.actions.reply_instructions must be at most 4 KiB");
+        }
+        if self.compose_model.len() > 128 || self.compose_model.chars().any(char::is_control) {
+            bail!("mail.actions.compose_model must be a model name");
+        }
+        within(
+            "mail.actions.max_compose_per_day",
+            self.max_compose_per_day,
+            0,
+            200,
+        )?;
+        if self.recipient_domains.len() > MAX_DOMAINS {
+            bail!("mail.actions.recipient_domains may hold at most {MAX_DOMAINS} domains");
+        }
+        for domain in &mut self.recipient_domains {
+            let lowered = domain.trim().trim_start_matches('@').to_ascii_lowercase();
+            if !valid_domain(&lowered) {
+                bail!("mail.actions.recipient_domains entries must be domains, not {domain:?}");
+            }
+            *domain = lowered;
+        }
+        within(
+            "mail.actions.max_recipients",
+            self.max_recipients as u64,
+            1,
+            MAX_RECIPIENTS as u64,
+        )?;
+        within("mail.actions.approval_hours", self.approval_hours, 1, 168)?;
+        within(
+            "mail.actions.max_pending_hours",
+            self.max_pending_hours,
+            self.approval_hours,
+            336,
+        )?;
+        within("mail.actions.execute_minutes", self.execute_minutes, 1, 120)?;
+        within("mail.actions.max_open", self.max_open as u64, 1, 128)?;
+        within(
+            "mail.actions.max_sends_per_day",
+            self.max_sends_per_day,
+            0,
+            500,
+        )?;
+        within(
+            "mail.actions.max_drafts_per_day",
+            self.max_drafts_per_day,
+            0,
+            1000,
+        )?;
+        within(
+            "mail.actions.max_moves_per_day",
+            self.max_moves_per_day,
+            0,
+            1000,
+        )?;
+        within(
+            "mail.actions.max_flags_per_day",
+            self.max_flags_per_day,
+            0,
+            1000,
+        )?;
+        within("mail.actions.handle_days", self.handle_days, 1, 60)?;
+        for (name, folder) in [
+            ("drafts_folder", &mut self.drafts_folder),
+            ("sent_folder", &mut self.sent_folder),
+            ("trash_folder", &mut self.trash_folder),
+            ("spam_folder", &mut self.spam_folder),
+            ("archive_folder", &mut self.archive_folder),
+        ] {
+            let trimmed = folder.trim().to_owned();
+            if trimmed.len() > 255 || trimmed.chars().any(char::is_control) {
+                bail!("mail.actions.{name} must be a folder name without control characters");
+            }
+            *folder = trimmed;
+        }
+        let name = self.from_name.trim().to_owned();
+        if name.chars().count() > 64
+            || name
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '"' | '<' | '>' | '\\'))
+        {
+            bail!(
+                "mail.actions.from_name must be one line of at most 64 characters without \
+                 quotes or angle brackets"
+            );
+        }
+        self.from_name = name;
+        let mut seen = Vec::new();
+        for suggestion in &self.propose {
+            if seen.contains(suggestion) {
+                bail!("mail.actions.propose names a move twice");
+            }
+            seen.push(*suggestion);
+            let (name, mode) = match suggestion {
+                Suggestion::Archive => ("archive", self.archive),
+                Suggestion::Trash => ("trash", self.trash),
+                Suggestion::Spam => ("spam", self.spam),
+            };
+            if mode != ActionMode::Approve {
+                bail!(
+                    "mail.actions.propose names {name}, but mail.actions.{name} is \"off\"; set \
+                     it to \"approve\" or leave it out of propose"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any kind of action may happen at all.
+    pub(crate) fn any(&self) -> bool {
+        [
+            self.draft,
+            self.send,
+            self.archive,
+            self.mark_read,
+            self.trash,
+            self.spam,
+        ]
+        .contains(&ActionMode::Approve)
+    }
+
+    /// Whether the mailbox itself may change (drafts saved, messages moved
+    /// or marked), which needs a credential that can write.
+    pub(crate) fn changes_mailbox(&self) -> bool {
+        [
+            self.draft,
+            self.archive,
+            self.mark_read,
+            self.trash,
+            self.spam,
+        ]
+        .contains(&ActionMode::Approve)
+    }
+}
+
+/// A lowercase ASCII domain of at least two labels of letters, digits, and
+/// inner hyphens.
+pub(crate) fn valid_domain(domain: &str) -> bool {
+    let labels: Vec<&str> = domain.split('.').collect();
+    domain.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 impl NotifySettings {

@@ -1,20 +1,90 @@
 //! The command guard: defence in depth under the typed client.
 //!
-//! The client offers no method that changes a mailbox, so the guard should
-//! never fire. It exists so that a bug in how a command is built cannot put
-//! a mailbox-changing command on the wire: every command is checked whole,
-//! literals included as markers, before any byte of it is written, against
-//! an allowlist of verbs and of the arguments each may take. Anything it
+//! The reader's client offers no method that changes a mailbox, and the
+//! executor's writer offers only the approved action's commands, so the
+//! guard should never fire. It exists so that a bug in how a command is
+//! built cannot put a mailbox-changing command on the wire: every command
+//! is checked whole, literals included as markers, before any byte of it is
+//! written, against an allowlist of verbs and of the arguments each may
+//! take. A read-only connection allows only reading. A write connection,
+//! made for one approved action, additionally allows exactly that action's
+//! commands, on exactly its message, folder, and flags. Anything the guard
 //! does not recognize is refused, so a new server extension or a malformed
 //! argument fails closed.
 
 use std::fmt;
 
-/// What a connection may do. This release has only a read-only mode; a
-/// write mode would be a new variant with its own allowlist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a connection may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Mode {
+    /// Reading only: every connection but the executor's.
     ReadOnly,
+    /// Reading, and the commands of one approved action on its targets.
+    Write(Targets),
+}
+
+/// The one message, folder, and flags an approved action may touch, taken
+/// from the action as it was approved. Mailbox names are their wire form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Targets {
+    /// The mailbox the action's message is in: `SELECT` may open only it.
+    pub(crate) source: Option<String>,
+    /// The action's message: the only UID a write may name.
+    pub(crate) uid: Option<u32>,
+    /// Where a move, copy, or append goes: the only folder it may name.
+    pub(crate) folder: Option<String>,
+    /// The flags an `APPEND` must carry, exactly.
+    pub(crate) append: Option<AppendFlags>,
+    /// The one flag `UID STORE` may add.
+    pub(crate) store: Option<StoreFlag>,
+    /// `UID MOVE` may move the message.
+    pub(crate) moves: bool,
+    /// `UID COPY` and `UID EXPUNGE` may move it the long way.
+    pub(crate) copies: bool,
+}
+
+/// The flags an appended message carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppendFlags {
+    /// A draft: `(\Draft \Seen)`.
+    Draft,
+    /// A copy of sent mail: `(\Seen)`.
+    Seen,
+}
+
+impl AppendFlags {
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Draft => "(\\Draft \\Seen)",
+            Self::Seen => "(\\Seen)",
+        }
+    }
+
+    fn flags(self) -> &'static [&'static str] {
+        match self {
+            Self::Draft => &["\\DRAFT", "\\SEEN"],
+            Self::Seen => &["\\SEEN"],
+        }
+    }
+}
+
+/// The flag `UID STORE` may add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreFlag {
+    /// Marking the message read.
+    Seen,
+    /// A move without `MOVE`: the original, once copied, is marked deleted
+    /// and expunged by its UID alone.
+    Deleted,
+}
+
+impl StoreFlag {
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Seen => "\\Seen",
+            Self::Deleted => "\\Deleted",
+        }
+    }
 }
 
 /// One piece of a logical command, in wire order.
@@ -66,8 +136,7 @@ const FETCH_ITEMS: [&str; 7] = [
 ];
 
 /// Checks a whole logical command, tag first, and returns its verb.
-pub(crate) fn check(mode: Mode, parts: &[Part]) -> Result<String, GuardViolation> {
-    let Mode::ReadOnly = mode;
+pub(crate) fn check(mode: &Mode, parts: &[Part]) -> Result<String, GuardViolation> {
     let verb = verb_label(parts);
     let refuse = || GuardViolation { verb: verb.clone() };
     let tokens = tokenize(parts).map_err(|()| refuse())?;
@@ -93,15 +162,83 @@ pub(crate) fn check(mode: Mode, parts: &[Part]) -> Result<String, GuardViolation
         "LOGIN" => matches!(args, [user, password] if astring(user) && astring(password)),
         "AUTHENTICATE" => authenticate_args(args),
         "EXAMINE" => matches!(args, [mailbox] if astring(mailbox)),
-        "LIST" => {
+        "LIST" => list_args(args),
+        "XLIST" => {
             matches!(args, [reference, pattern] if astring(reference) && list_pattern(pattern))
         }
         "STATUS" => status_args(args),
         "UID SEARCH" => search_args(args),
         "UID FETCH" => fetch_args(args),
-        _ => false,
+        _ => match mode {
+            Mode::ReadOnly => false,
+            Mode::Write(targets) => write_args(targets, &verb, args),
+        },
     };
     if allowed { Ok(verb) } else { Err(refuse()) }
+}
+
+/// Whether a write connection's `verb` with `args` is exactly one of the
+/// approved action's commands.
+fn write_args(targets: &Targets, verb: &str, args: &[Token]) -> bool {
+    let named = |token: &Token, target: Option<&String>| match (token, target) {
+        (Token::Quoted(value) | Token::Atom(value), Some(target)) => value == target,
+        _ => false,
+    };
+    let bound_uid = |token: &Token| matches!((token, targets.uid), (Token::Atom(set), Some(uid)) if *set == uid.to_string());
+    match verb {
+        "SELECT" => matches!(args, [mailbox] if named(mailbox, targets.source.as_ref())),
+        "APPEND" => match (args, targets.append) {
+            ([mailbox, Token::Open, flags @ .., Token::Close, Token::Literal], Some(append)) => {
+                named(mailbox, targets.folder.as_ref())
+                    && flags.len() == append.flags().len()
+                    && flags.iter().zip(append.flags()).all(|(flag, wanted)| {
+                        matches!(flag, Token::Atom(flag) if flag.eq_ignore_ascii_case(wanted))
+                    })
+            }
+            _ => false,
+        },
+        "UID MOVE" => {
+            targets.moves
+                && matches!(args, [uid, mailbox]
+                    if bound_uid(uid) && named(mailbox, targets.folder.as_ref()))
+        }
+        "UID COPY" => {
+            targets.copies
+                && matches!(args, [uid, mailbox]
+                    if bound_uid(uid) && named(mailbox, targets.folder.as_ref()))
+        }
+        "UID STORE" => match (args, targets.store) {
+            ([uid, Token::Atom(operation), Token::Open, Token::Atom(flag), Token::Close], Some(store)) => {
+                bound_uid(uid)
+                    && operation.eq_ignore_ascii_case("+FLAGS.SILENT")
+                    && flag.eq_ignore_ascii_case(store.wire())
+            }
+            _ => false,
+        },
+        "UID EXPUNGE" => targets.copies && matches!(args, [uid] if bound_uid(uid)),
+        _ => false,
+    }
+}
+
+/// `LIST reference pattern`, optionally `RETURN (SPECIAL-USE)`.
+fn list_args(args: &[Token]) -> bool {
+    match args {
+        [reference, pattern] => astring(reference) && list_pattern(pattern),
+        [
+            reference,
+            pattern,
+            Token::Atom(keyword),
+            Token::Open,
+            Token::Atom(option),
+            Token::Close,
+        ] => {
+            astring(reference)
+                && list_pattern(pattern)
+                && keyword.eq_ignore_ascii_case("RETURN")
+                && option.eq_ignore_ascii_case("SPECIAL-USE")
+        }
+        _ => false,
+    }
 }
 
 /// The verb of a command, read from its first words for the violation's
@@ -212,7 +349,9 @@ fn tokenize_text(text: &[u8], tokens: &mut Vec<Token>) -> Result<(), ()> {
                 at += 1;
                 tokens.push(Token::Quoted(String::from_utf8_lossy(&value).into_owned()));
             }
-            b'{' | b'[' | b']' | b'\\' | b'<' => return Err(()),
+            // A backslash may start a flag (`\Seen`), and nothing else.
+            b'\\' if !text.get(at + 1).is_some_and(u8::is_ascii_alphabetic) => return Err(()),
+            b'{' | b'[' | b']' | b'<' => return Err(()),
             _ => {
                 let start = at;
                 while at < text.len() && !matches!(text[at], b' ' | b'(' | b')' | b'"') {
@@ -328,6 +467,13 @@ fn search_args(args: &[Token]) -> bool {
             "SINCE" | "BEFORE" | "ON" | "SENTSINCE" | "SENTBEFORE" | "SENTON" => {
                 index += 2;
                 matches!(operand, Some(Token::Atom(date) | Token::Quoted(date)) if search_date(date))
+            }
+            // Finding a message by a header, as checks after an
+            // interrupted action do.
+            "HEADER" => {
+                index += 3;
+                matches!(operand, Some(Token::Atom(field)) if field.eq_ignore_ascii_case("MESSAGE-ID"))
+                    && matches!(args.get(index - 1), Some(Token::Quoted(_)))
             }
             _ => false,
         };

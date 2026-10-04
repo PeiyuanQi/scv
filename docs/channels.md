@@ -13,17 +13,19 @@ optional, and nothing of it runs until an account signs in.
 
 The `email` channel is different: it reads a mailbox, answers nobody, and
 reports what arrives to a *mail chat*, a WeChat, Feishu, or Slack account set
-apart with `purpose = "mail"` that no model ever answers in (see
-[Mail chats](#mail-chats) and [Email](#email)).
+apart with `purpose = "mail"` that no model ever answers in. With a
+`mail.actions` table it can also draft, send, forward, archive, mark read, or
+move mail to Trash or Spam, each action only after the owner approves that
+action in the mail chat (see [Mail chats](#mail-chats) and [Email](#email)).
 
 Each account runs as a supervised component inside the single SCV daemon,
 which remains authoritative for sessions, provider selection, policy, and turn
 execution. `scv-channels` holds the bridge every channel shares and, in a
 module behind a Cargo feature of the same name, each channel's transport
-(`wechat`, `feishu`, `slack`) and read-only mail triage (`email`), all on by
-default; a transport supplies only receiving and sending. `scv-server` runs
-accounts through `scv_channels::run`; the crate uses `scv-client` and
-`scv-protocol` and never depends on the server crate.
+(`wechat`, `feishu`, `slack`) and mail triage with approval-gated actions
+(`email`), all on by default; a transport supplies only receiving and sending.
+`scv-server` runs accounts through `scv_channels::run`; the crate uses
+`scv-client` and `scv-protocol` and never depends on the server crate.
 
 ## User workflow
 
@@ -32,21 +34,25 @@ scv channels login wechat [--account NAME] [--login-url URL]
 scv channels login feishu|lark [--account NAME]
 scv channels login feishu|lark --app-id CLI_ID [--owner-open-id OPEN_ID] [--account NAME]
 scv channels login slack [--slack-owner-user-id MEMBER_ID] [--account NAME]
-scv channels login email --imap-host HOST --user NAME [--imap-port 993] [--account NAME]
+scv channels login email --imap-host HOST --user NAME [--imap-port 993] [--address ADDRESS] [--smtp-host HOST] [--smtp-port PORT] [--smtp-starttls] [--account NAME]
+scv channels login email --oauth gmail|outlook --client-id ID [--tenant TENANT] [--write] [--send] [--account NAME]
 scv channels run <channel> --workspace PATH [--account NAME] [--remote-tools none|owner] [--senders owner|anyone] [--purpose chat|mail]
 scv channels run email [--account NAME]
 scv channels stop <channel> [--account NAME]
 scv channels status [<channel>] [--account NAME]
-scv channels logout <channel> [--account NAME]
+scv channels logout <channel> [--account NAME] [--yes]
+scv mail status [--account NAME]
+scv mail cancel [--account NAME] (<ID> | --all)
 scv reload
 ```
 
-`--account` defaults to `default`, except for `status`, which lists every
-channel and account unless narrowed. `--login-url` is WeChat's iLink login
+`--account` defaults to `default`, except for `status` and `scv mail status`,
+which list every account unless narrowed. `--login-url` is WeChat's iLink login
 origin (default `https://ilinkai.weixin.qq.com`); `--app-id` and
 `--owner-open-id` are Feishu's; `--slack-owner-user-id` is Slack's;
-`--imap-host`, `--imap-port`, and `--user` are email's; and each channel
-refuses the others' options. `--purpose` is for chat accounts only.
+`--imap-host`, `--user`, `--smtp-host`, and `--oauth` are email's; and each
+channel refuses the others' options. `--purpose` is for chat accounts only.
+`scv mail` lists or withdraws actions; it cannot approve one.
 Daemon status names each account `<channel>:<account>`, such as
 `wechat:default` or `feishu:default`, with a `channel` field, the bot's
 identity in `bot_id` (the iLink bot, the Feishu app ID, or the Slack bot's
@@ -69,7 +75,10 @@ authority and `--senders` whose messages it answers (see
 value. `stop` persistently disables the account and joins
 its component while retaining credentials. `logout` requires a live daemon:
 it persists disablement, cancels and joins the component, then removes local
-credentials, delivery state, and the account's `[channels]` table. The API has no documented remote
+credentials, delivery state, and the account's `[channels]` table. An email
+account with a mail action waiting asks for `scv channels logout email --yes`,
+which withdraws those actions; one being carried out is joined first, within
+about a minute. Logout does not revoke an OAuth grant at the provider. The API has no documented remote
 token-revocation operation.
 
 `status` queries the running daemon, showing its PID/version, a
@@ -973,7 +982,8 @@ with `scv restart --when-idle`. The daemon then restarts only once that agent ha
 finished (a nested SCV or ACP agent, which lives for its whole conversation:
 once its turn has ended and, for a nested SCV, the background jobs of its own
 session have been reported to it), its report is stored in the chat's outbox,
-and no owner message is being answered, or after ten minutes at the latest (see
+no owner message is being answered, and no mail action is being carried out,
+or after ten minutes at the latest (see
 [architecture](architecture.md#planned-restarts)). Across the restart:
 
 - Messages whose turns the restart interrupted are answered with "SCV
@@ -1214,13 +1224,33 @@ A mail chat:
   counts (mail seen, triaged, and reported today, reports waiting, model
   tokens used against the daily budget, and the last check). `mail help`, and
   anything that is not a command, gets the help reply. The mail design's
-  action commands (`approve`, `deny`, `批准`, `拒绝`, and `mail reply`,
-  `trash`, `spam`, `compose`, `revise`) are recognised only to answer "Mail
-  actions are not available in this release; nothing was done." A message
-  that quotes or forwards another (WeChat `ref_msg`, Feishu `parent_id`
-  outside a thread, a Slack attachment, or a forwarded bundle) or carries
-  files is never read as
-  a command; a message in a thread, whose root is not put into its text, is
+  action commands are parsed here and carried out only by the email account's
+  ledger. `approve CODE…` and `deny CODE…` (or `批准` / `拒绝`) name up to 20
+  codes; `deny all` (or `拒绝 全部`) withdraws every action waiting for this
+  chat, and only that chat's owner. An action is bound to a chat when it is
+  proposed: the chat the owner asked in, when this account still reports
+  there, otherwise the first chat it reports to. Until a preview is stored,
+  only that chat's owner can deny it. `deny` and `deny all` do not reach an
+  action bound to another chat, and an action that names no chat cannot be
+  denied from any chat. Once a chat stores the preview, only that chat, and
+  the owner the preview was addressed to, can deny it. A code from an earlier
+  generation does not deny the action a newer code now names. `mail reply #H
+  [what to say]`, `mail forward #H ADDRESS[,ADDRESS] [note]`, `mail compose
+  [ACCOUNT] ADDRESS[,ADDRESS] what to write`, `mail revise CODE what to
+  change`, and `mail archive|read|trash|spam #H` ask that account to prepare
+  an action. Only the owner of a chat the account reports to can ask, and a
+  handle or code reaches only an account that reports to the chat it is sent
+  in, so another chat's are neither used nor confirmed. A revision supersedes
+  the draft it revises, so it follows deny's binding: only the chat, and the
+  owner, that may deny the draft may revise it. Addresses a chat sends as
+  links, as Slack does, are read as the addresses they show; a link that
+  shows another address than it names is refused. `mail status` adds each account's
+  waiting actions to the counts. When no running account that reports here
+  takes actions, the reply is "Mail actions are not running for any account
+  that reports here; nothing was done." A message that quotes or forwards
+  another (WeChat `ref_msg`, Feishu `parent_id` outside a thread, a Slack
+  attachment, or a forwarded bundle) or carries files is never read as a
+  command; a message in a thread, whose root is not put into its text, is
   read like any other;
 - drops everyone else's messages, and group messages, the owner's included,
   as an owner-only account does;
@@ -1254,10 +1284,13 @@ app before using one that carried mail as an ordinary chat.
 
 ## Email
 
-An email account reads one mailbox and reports what arrives to mail chats. It
-is read-only: this release has no code that writes to a mailbox or sends
-mail. Saving drafts, replying, sending, and moving mail to Trash or Spam are
-not available, and a `mail.actions` table is refused.
+An email account reads one mailbox and reports what arrives to mail chats.
+Without a `[channels.email.<account>.mail.actions]` table, or when every kind
+in it is `"off"`, the account only reads: no writing credential is loaded and
+no executor runs. With a kind set to `"approve"`, the owner can have SCV
+draft, send, forward, archive, mark read, or move mail to Trash or Spam.
+Each action happens only after the owner approves that action, with its own
+code, in the mail chat. No setting carries an action out by itself.
 
 **Sign-in.** `scv channels login email --imap-host imap.qq.com --user
 me@qq.com` reads the password or, as QQ, Foxmail, and 163 require, the
@@ -1265,15 +1298,36 @@ authorization code from a hidden prompt or stdin, never an argument. It
 connects over implicit TLS (port 993 unless `--imap-port` says otherwise; no
 plaintext and no STARTTLS), logs in, sends `ID` when the server offers it (163
 requires it), opens `INBOX` with `EXAMINE`, logs out, and only then saves
-`credentials/email/<account>.json` (mode `0600`). The credential fingerprint
-is the server, port, and user name: signing in again with a new password or
-code keeps the account's state, and another mailbox needs a logout. Status
-shows the server as the account's `bot_id`, never the user name. A refused
-sign-in names only the server's status and a standard IMAP response code
-(such as `NO [AUTHENTICATIONFAILED]`) with SCV's own advice; the server's
-text is never shown or logged, since a hostile server could put the password
-it was just sent in it. No other error from the server carries its text
-either.
+`credentials/email/<account>.json` (mode `0600`). `--address` is the
+mailbox's own address when `--user` is not it. `--smtp-host` (port 465, or
+587 with `--smtp-starttls`) is checked with the same user and secret before
+the credentials are saved; approved mail is sent through it. The credential
+fingerprint is the server, port, and user name: signing in again with a new
+password or code keeps the account's state, and another mailbox needs a
+logout. Status shows the server as the account's `bot_id`, never the user
+name. A refused sign-in names only the server's status and a standard IMAP
+response code (such as `NO [AUTHENTICATIONFAILED]`) with SCV's own advice; the
+server's text is never shown or logged, since a hostile server could put the
+password it was just sent in it. No other error from the server carries its
+text either.
+
+`scv channels login email --oauth gmail --client-id ID` or `--oauth outlook`
+signs in with OAuth in a browser. Gmail uses the owner's own installed-app
+client with PKCE and a loopback redirect that only an answer carrying this
+sign-in's state ends; on a host without a browser, the owner opens the link
+elsewhere and pastes back the address the browser could not load. Outlook
+uses the device code flow. A Gmail client's secret is read from a hidden
+prompt or stdin, never an argument. `--tenant` is Outlook only: `consumers`
+(the default), `organizations`, `common`, or a tenant ID. `--write` and
+`--send` ask for separate grants. Refresh tokens are stored in
+`credentials/email/<account>.grants` (mode `0600`), apart from the account
+file. A Gmail reader grant that comes back allowed to write or send is
+refused; Microsoft consents per app, so a Graph token may carry scopes
+another grant of the same app was given, and SCV's own gates hold the line
+there. The mailbox's address is learned with the reader token and saved on
+the account; status shows the API host, never the address. An OAuth
+account's credential fingerprint is the provider, the address, the client
+ID, and for Outlook the tenant.
 
 **Settings.** `[channels.email.<account>]` holds `enabled` and the `mail`
 table, which needs at least `notify.route`, the mail chats to report to (see
@@ -1282,9 +1336,9 @@ keeps `mail` opaque, so a mistake in it fails only that account, when it
 starts, with the error in its status and in `scv config show`. An email
 account refuses `remote_tools`, `senders`, `workspace`, and `purpose`.
 
-**Reading.** The account's IMAP client can only read. It offers no command
-that changes a mailbox, and under it a guard checks every command whole,
-before any byte is written, against a read-only allowlist: `CAPABILITY`,
+**Reading.** Triage uses a read-only connection. The IMAP reader offers no
+command that changes a mailbox, and under it a guard checks every command
+whole, before any byte is written, against a read-only allowlist: `CAPABILITY`,
 `ID`, `LOGIN` or `AUTHENTICATE PLAIN`, `EXAMINE`, `LIST`, `STATUS`, `UID
 SEARCH`, `UID FETCH` of `UID`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`,
 `ENVELOPE`, `BODYSTRUCTURE`, `RFC822.HEADER`, and `BODY.PEEK[…]`, `NOOP`, and
@@ -1338,11 +1392,13 @@ rung that decides it, so tokens are spent only when cheaper rungs pass:
    whole system prompt, so neither `agent.system_prompt` nor any skill
    reaches it. The frame carries the owner's `instructions` and tells the
    model that the mail between two delimiter lines, which carry a random
-   nonce, is untrusted. The model answers with one JSON object, `notify`,
-   `urgent`, and up to five `summary` lines; code reads those three fields and
-   ignores the rest, so the model chooses no target, recipient, or action.
-   `notify: false` counts the message. Any tool or approval event ends the
-   turn. A turn that fails, times out (120 seconds), or answers unreadably
+   nonce, is untrusted. The model answers with one JSON object. Code reads
+   `notify`, `urgent`, and up to five `summary` lines, and, when
+   `mail.actions.propose` names them, a `move` of `archive`, `trash`, or
+   `spam` and whether a reply may be wanted. Any other field is ignored, so
+   the model chooses no target, recipient, or folder. A suggested move becomes
+   an action only after the owner approves its code. `notify: false` counts
+   the message. Any tool or approval event ends the turn. A turn that fails, times out (120 seconds), or answers unreadably
    still reports the message by its headers, with a note saying why, and so
    does one whose frame and message together would pass 128 KiB, which is
    never started.
@@ -1407,14 +1463,95 @@ doubling to 30 minutes. A message no route took within `give_up_hours` (72)
 is given up, and its reports are counted as undelivered in the next digest,
 as are messages the platform refused.
 
+**Providers.** Reading goes through one adapter: IMAP, the Gmail API, or
+Microsoft Graph. Each speaks the same mailbox interface (a cursor, metadata,
+one text part, capabilities, folders). Gmail lists changes from a history
+cursor; Graph from a delta link. Both keep message IDs stable. IMAP keeps
+`UIDVALIDITY` and UIDs. Folder roles (Drafts, Sent, Trash, Spam, Archive)
+come from the provider's marks (`SPECIAL-USE` or `XLIST` on IMAP, the
+well-known folders on the APIs). An IMAP server without those marks uses the
+folder names in `mail.actions`, matched as UTF-8 against modified UTF-7, and
+never guesses a name. A provider that cannot move, or has no Trash folder,
+cannot carry out a move; the owner is told, and nothing is written.
+
+**Actions.** An action is one of `draft`, `send`, `archive`, `mark_read`,
+`trash`, or `spam`. `forward` is a further gate on forwarding a reported
+message, as a draft or a send. The owner asks in the mail chat, or triage
+suggests a move named in `mail.actions.propose` (only a kind set to
+`"approve"`). Preparation re-reads the message, refuses bulk, automated, and
+self-sent mail for a reply, and for a reply or new mail runs one tool-free
+drafting turn in the same kind of session triage uses, on `compose_model` or
+the daemon's default, with `reply_instructions` in the fixed frame. The
+model does not choose recipients: code takes them from the command, or from
+`Reply-To` or `From` according to `reply_to`, and checks
+`recipient_domains` and `max_recipients`. A forward sends the original
+headers and cleaned text and names attachments it does not attach.
+
+What the action will do is written once to
+`state/mail/<account>/actions/<id>.json` (mode `0600`) and bound by a
+SHA-256 digest of a canonical encoding, not of JSON bytes. The file is never
+rewritten. The ledger then records the action. A preview goes to the mail
+chat on untrusted `│ ` lines: the sender, every recipient, the subject, the
+whole body, and the codes. Draft and send of one message are alternatives
+with distinct codes. Once the mail chat reports the preview delivered, the
+action is open. `approve CODE` counts only from that chat's owner, in a
+direct message that is not a quote or a file, with the platform's send time
+after delivery, within `approval_hours` of delivery and `max_pending_hours`
+of the proposal. The same platform message approves an action once. `deny
+CODE` and `deny all` use that same owner and route boundary. The action is
+bound to a chat when it is proposed, so a deny from another configured chat
+cannot withdraw it before the preview is stored, and a missing binding is
+not a deny from every chat. A code from an earlier generation does not
+approve or deny the current action; the answer says it was replaced. A code
+already used, expired, or unknown is refused, and a finished code is
+remembered for `retention.tombstone_days` so a late command is answered and
+the code is not reused.
+
+Only the ledger mints a sealed approval. The executor takes the oldest
+approved action, checks the digest, the settings, the deadline, and the
+credentials again, and hands that seal to a fresh connection. The IMAP
+writer's guard allows only the commands of that one action: one `UID` of the
+bound message, one destination folder, one flag, or one `APPEND` of the
+bound bytes. SMTP's guard allows `MAIL FROM` only for the approved sender,
+each approved recipient once, and `DATA` once. The HTTP guard allows only
+the one Gmail or Graph request that matches the seal. A `GET` answered with
+HTTP 401 refreshes the access token and is tried once more. A `POST` or
+`PATCH` is never tried again after HTTP 401. Gmail and Graph document no
+deduplication key for those calls, so that 401 is recorded as unknown and
+then checked. The check can record that the change is visible. If it does
+not find the change, the action stays unknown and is not carried out again;
+the owner has to propose it again. A refused token cannot send the
+message twice. A send whose provider
+does not file it in Sent is appended afterwards when `sent_copy` is
+`"append"`. A lost connection after the bytes were written is recorded as
+unknown, probed on the next start, and never sent again blindly. The owner
+is told the outcome in the mail chat. `scv mail status` lists IDs, kinds,
+and states; `scv mail cancel` withdraws an action that has not started.
+Neither command can approve.
+
+Daily quotas bound composing, sends, drafts, moves, and flag changes.
+`max_open` bounds actions waiting or under way. Low disk space, counted the
+same way as reports, refuses new preparation.
+
 **State and cleanup.** The account's state,
 `state/channels/email/<account>.json` (mode `0600`), holds its cursor,
 claims, the identities of mail decided in the last week (at most 1024), the
-queue, the message being handed over, the send log, and today's counts. It
-holds mail text only in queued reports (at most 1.5 KiB each and
-`max_queue`, 256, of them, the oldest collapsing into a count beyond that)
-and in the message being handed over; the mail chat's outbox holds that
-message until it is delivered. Every change is one atomic write, the file is
+queue, the message being handed over, the send log, today's counts, and the
+action records (IDs, kinds, states, digests, and the approval codes). It
+holds mail text only in queued reports and previews (at most 1.5
+KiB each for a report, 12 KiB for a preview, and `max_queue`, 256, of them,
+the oldest collapsing into a count beyond that) and in the message being
+handed over; the mail chat's outbox holds that message until it is delivered.
+Action bodies live only in the content files under `state/mail/<account>/actions/`.
+Every ledger write that changes an action first syncs those lines to
+`state/mail/<account>/audit.jsonl.pending` and then replaces the state file.
+The lines are appended to `state/mail/<account>/audit.jsonl` after that
+write: time, ID, kind, event, generation, the
+first eight hex digits of the digest, and a detail that is only a mail chat's
+name or an outcome code. If the process stops between the two, the next start
+appends the pending lines when the state file is the one they describe, and
+drops them when an earlier state is still the one on disk. The audit log holds no code, handle, address,
+subject, or mail text. Every change is one atomic write, the file is
 kept within `retention.max_state_kib` (2048) by trimming the identity list and
 collapsing old reports, and a state written by a newer SCV is refused rather
 than silently truncated. Writes run off the daemon's async threads, and no
@@ -1425,14 +1562,32 @@ triage sessions' working directory. A janitor runs at start and every
 `retention.sweep_minutes` (60): it prunes the lists by age and count, empties
 that directory, removes temporary files older than an hour that a crash left
 (in `state/channels/email/`, which the accounts share, only its own: a state
-write's temporary file is named `.<account>.json.<random>.tmp`), and, while
-the disk holding the state has less than `retention.min_free_mib` (64) free
-or its free space cannot be told, has new mail counted instead of reported,
-saying so once a day.
+write's temporary file is named `.<account>.json.<random>.tmp`), drops audit
+lines older than `retention.audit_days` (90) and keeps that file within
+`retention.max_audit_kib` (4096), drops finished action content once its
+tombstone is written, and, while the disk holding the state has less than
+`retention.min_free_mib` (64) free or its free space cannot be told, has new
+mail counted instead of reported and refuses to prepare a new action, saying
+so once a day. An action SCV lost track of while carrying it out is kept for
+`retention.unknown_keep_days` (3) and probed when the mailbox can be checked.
 Mail being decided lives only in memory, for that one turn.
 
-The account logs counts, message numbers, and IMAP verbs, never an address,
-subject, body, or summary. Daemon status and `scv channels status` show
-counts only (`mail` in the component's status). `scv channels logout email`
-removes the credentials, the state file, `state/mail/<account>/`, and the
-account's table.
+The account logs counts, message numbers, and protocol verbs, never an
+address, subject, body, summary, code, or token. Daemon status and `scv
+channels status` show counts only (`mail` in the component's status: the
+provider, which kinds may be proposed, and how many actions are waiting,
+under way, unknown, or done in the last day). `scv channels logout email`
+removes the credentials, the grants file, the state file,
+`state/mail/<account>/`, and the account's table; when an action is under
+way, the account first finishes it, and `logout`, `stop`, and `reload` wait
+for that (their requests to the daemon allow 90 seconds instead of the usual
+20).
+
+A planned restart waits while a mail action is under way, like any other
+work it waits for, and raises a drain flag before it hands over. No new mail
+action starts while it is raised, and the restart waits up to a minute more
+for one under way to finish (each action's own budget is 55 seconds, and the
+email component's stop grace 65). If the hand-over does not happen, the flag is
+lowered and actions continue. If another task of the account stops while an
+action is under way, that action is given the same grace to finish; it is
+not dropped with the task that stopped.

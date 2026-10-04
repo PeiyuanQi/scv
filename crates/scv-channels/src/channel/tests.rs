@@ -97,6 +97,7 @@ fn the_bridge_grants_tools_only_with_an_owner_and_a_turn_timeout() {
     let credentials = ChannelCredentials::from(wechat());
     let settings = AccountSettings::default();
     let link = hub::Link::detached();
+    let stop = tokio_util::sync::CancellationToken::new();
     let run = AccountRun {
         layout: &layout,
         account: "default",
@@ -109,6 +110,7 @@ fn the_bridge_grants_tools_only_with_an_owner_and_a_turn_timeout() {
         socket: &home.path().join("state/server.sock"),
         link: &link,
         health: &|_| {},
+        stop: &stop,
     };
     let bridge = run.bridge(ChannelKind::Wechat).unwrap();
     assert_eq!(bridge.owner, Some("owner@im.wechat"));

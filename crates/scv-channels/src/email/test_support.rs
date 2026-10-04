@@ -14,8 +14,8 @@ use super::Clock;
 use super::credentials::Account;
 use super::ledger::{Ledger, Store};
 use super::source::{
-    Address, Caps, Changes, Cursor, MailSource, Meta, PartRef, PartText, ProviderKind, Signals,
-    SourceRef, TransferEncoding,
+    Address, Caps, Changes, Cursor, FolderNames, Folders, MailSource, Meta, PartRef, PartText,
+    ProviderKind, Signals, SourceRef, TransferEncoding,
 };
 use crate::hub;
 use crate::state::Purpose;
@@ -52,6 +52,8 @@ pub(crate) fn account() -> Account {
         port: 993,
         username: "me@example.com".into(),
         password: "authorization-code".into(),
+        address: None,
+        smtp: None,
     }
 }
 
@@ -87,6 +89,9 @@ pub(crate) fn meta(uid: u32, from: &str, subject: &str) -> Meta {
         cc: Vec::new(),
         subject: subject.into(),
         message_id: None,
+        locator: "locator".into(),
+        references: Vec::new(),
+        date: None,
         signals: Signals::default(),
         category: None,
         text: Some(PartRef {
@@ -110,6 +115,8 @@ pub(crate) struct FakeMailbox {
     pub(crate) broken: Arc<AtomicBool>,
     /// The next `changes` reports a reset.
     pub(crate) reset: Arc<AtomicBool>,
+    /// The special folders it reports.
+    pub(crate) folders: Arc<Mutex<Folders>>,
 }
 
 impl FakeMailbox {
@@ -118,8 +125,10 @@ impl FakeMailbox {
     }
 
     fn uid(source: &SourceRef) -> u32 {
-        let SourceRef::Imap { uid, .. } = source;
-        *uid
+        match source {
+            SourceRef::Imap { uid, .. } => *uid,
+            SourceRef::Gmail { .. } | SourceRef::Graph { .. } => 0,
+        }
     }
 }
 
@@ -214,6 +223,10 @@ impl MailSource for FakeMailbox {
     fn caps(&self) -> Caps {
         Caps::default()
     }
+
+    async fn folders(&mut self, _names: &FolderNames) -> Result<Folders> {
+        Ok(self.folders.lock().unwrap().clone())
+    }
 }
 
 /// What the fake daemon saw of one triage session.
@@ -301,4 +314,228 @@ pub(crate) fn mail_chat(
         }
     });
     (texts, task)
+}
+
+/// One request the fake HTTP server received.
+#[derive(Debug, Clone)]
+pub(crate) struct HttpRequest {
+    pub(crate) method: String,
+    /// The path, without the query.
+    pub(crate) path: String,
+    /// The query's pairs, decoded.
+    pub(crate) query: Vec<(String, String)>,
+    /// Header names lowercased.
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
+}
+
+impl HttpRequest {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub(crate) fn query(&self, name: &str) -> Option<&str> {
+        self.query
+            .iter()
+            .find(|(known, _)| known == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The body as JSON; `null` when it is not.
+    pub(crate) fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+    }
+
+    /// A field of a form-encoded body, decoded.
+    pub(crate) fn form(&self, name: &str) -> Option<String> {
+        let body = String::from_utf8_lossy(&self.body);
+        reqwest::Url::parse(&format!("http://form.invalid/?{body}"))
+            .ok()?
+            .query_pairs()
+            .find(|(known, _)| known == name)
+            .map(|(_, value)| value.into_owned())
+    }
+}
+
+/// A local HTTP server answering each request with `answer(request)`: a
+/// status and a body. Status 0 closes the connection without an answer,
+/// as a request lost on the way would; a 3xx points elsewhere with a
+/// `Location` header. Every request is recorded.
+pub(crate) struct FakeHttp {
+    /// `http://127.0.0.1:<port>`.
+    pub(crate) origin: String,
+    requests: Arc<Mutex<Vec<HttpRequest>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for FakeHttp {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl FakeHttp {
+    pub(crate) async fn start(
+        answer: impl Fn(&HttpRequest) -> (u16, String) + Send + Sync + 'static,
+    ) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&requests);
+        let answer = Arc::new(answer);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let (record, answer) = (Arc::clone(&record), Arc::clone(&answer));
+                tokio::spawn(async move {
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    let Some(request) = read_http(&mut stream).await else {
+                        return;
+                    };
+                    let (status, body) = answer(&request);
+                    record.lock().unwrap().push(request);
+                    if status == 0 {
+                        return;
+                    }
+                    let location = if (300..400).contains(&status) {
+                        "Location: http://127.0.0.1:9/elsewhere\r\n"
+                    } else {
+                        ""
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status} Fake\r\nContent-Type: application/json\r\n\
+                         {location}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let stream = stream.get_mut();
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(body.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        Self {
+            origin,
+            requests,
+            task,
+        }
+    }
+
+    /// Every request received so far, in order.
+    pub(crate) fn requests(&self) -> Vec<HttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+/// One HTTP/1.1 request: its head, then a body of its `Content-Length`.
+async fn read_http(
+    stream: &mut tokio::io::BufReader<tokio::net::TcpStream>,
+) -> Option<HttpRequest> {
+    use tokio::io::AsyncReadExt as _;
+    let mut line = String::new();
+    stream.read_line(&mut line).await.ok()?;
+    let mut words = line.split_whitespace();
+    let method = words.next()?.to_owned();
+    let target = words.next()?.to_owned();
+    let mut headers = Vec::new();
+    loop {
+        let mut header = String::new();
+        stream.read_line(&mut header).await.ok()?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        let (name, value) = header.split_once(':')?;
+        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+    }
+    let length = headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.ok()?;
+    let url = reqwest::Url::parse(&format!("http://fake.invalid{target}")).ok()?;
+    Some(HttpRequest {
+        method,
+        path: url.path().to_owned(),
+        query: url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect(),
+        headers,
+        body,
+    })
+}
+
+/// The fake token endpoint's path.
+pub(crate) const TOKEN_PATH: &str = "/oauth/token";
+
+/// The fake token endpoint's answer to a refresh, when `request` is one:
+/// grant `rt-<kind>` is exchanged for access token `at-<kind>`, good for an
+/// hour.
+pub(crate) fn token_answer(request: &HttpRequest) -> Option<(u16, String)> {
+    (request.method == "POST" && request.path == TOKEN_PATH).then(|| {
+        let refresh = request.form("refresh_token").unwrap_or_default();
+        let access = refresh.replacen("rt-", "at-", 1);
+        (
+            200,
+            json!({ "access_token": access, "expires_in": 3600, "token_type": "Bearer" })
+                .to_string(),
+        )
+    })
+}
+
+/// A grants file under `directory` holding a reader, a writer, and a
+/// sender grant (refresh tokens `rt-reader`, `rt-writer`, `rt-sender`),
+/// and the token source of grant `kind` for `provider`, renewing at
+/// `origin`'s [`TOKEN_PATH`].
+pub(crate) fn tokens(
+    directory: &std::path::Path,
+    origin: &str,
+    provider: super::oauth::OAuthProvider,
+    kind: super::credentials::GrantKind,
+) -> Arc<super::oauth::TokenSource> {
+    use super::credentials::{Grant, GrantKind, Grants};
+    let path = directory.join("test.grants");
+    if !path.exists() {
+        let mut grants = Grants::default();
+        for each in [GrantKind::Reader, GrantKind::Writer, GrantKind::Sender] {
+            grants.set(
+                each,
+                Grant {
+                    refresh_token: format!("rt-{}", each.name()).into(),
+                    scopes: Vec::new(),
+                },
+            );
+        }
+        grants.save(&path).unwrap();
+    }
+    let lock_path = directory.join("test.lock");
+    Arc::new(
+        super::oauth::TokenSource::new(
+            provider,
+            kind,
+            super::oauth::Endpoints {
+                authorize: format!("{origin}/oauth/authorize"),
+                token: format!("{origin}{TOKEN_PATH}"),
+            },
+            "client".into(),
+            None,
+            path,
+            Arc::new(move || {
+                Ok(std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(&lock_path)?)
+            }),
+        )
+        .unwrap(),
+    )
 }

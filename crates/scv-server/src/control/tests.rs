@@ -152,3 +152,127 @@ async fn daemon_control_lists_and_stops_delegations() {
     };
     assert!(registry.list(true).is_empty());
 }
+
+/// A mail action's ID: `a` and 32 hex digits.
+fn action_id() -> String {
+    format!("a{}", "0123456789abcdef".repeat(2))
+}
+
+/// The safe message of a mail control failure.
+fn mail_failure(result: std::result::Result<DaemonStatus, ControlFailure>) -> String {
+    let Err(ControlFailure::Mail(message)) = result else {
+        panic!("expected a mail failure");
+    };
+    message
+}
+
+#[tokio::test]
+async fn mail_status_and_mail_cancel_reject_an_unknown_or_stopped_account() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = DelegationRegistry::new(&scv_client::Layout::new(home.path()));
+    let hub = Hub::new(None);
+    // Registered, but not taking actions.
+    let _idle = hub.register_mail("email:work", vec!["feishu:mail".into()]);
+    let components = Arc::new(Mutex::new(
+        components::Components::with_hub(
+            crate::test_support::test_instance(home.path()),
+            PathBuf::from("/"),
+            Arc::clone(&hub),
+        )
+        .unwrap(),
+    ));
+    let control = |command| daemon_control(&components, &registry, command);
+
+    let not_running = "that email account is not running with mail actions on";
+    let not_a_name = "not an email account name";
+    let name_one = "name one mail action's ID, or ask for all of them";
+    let not_an_id = "that is not a mail action's ID";
+
+    assert_eq!(
+        mail_failure(
+            control(DaemonCommand::MailStatus {
+                account: Some("secret token".into())
+            })
+            .await
+        ),
+        not_a_name,
+        "an account name that is not one is refused without echoing it"
+    );
+    assert_eq!(
+        mail_failure(
+            control(DaemonCommand::MailStatus {
+                account: Some("work".into())
+            })
+            .await
+        ),
+        not_running
+    );
+    let Ok(status) = control(DaemonCommand::MailStatus { account: None }).await else {
+        panic!("status of every account failed");
+    };
+    assert!(
+        status.mail_actions.is_empty(),
+        "an account that is not taking actions is not asked"
+    );
+    assert_eq!(status.mail_note, None);
+
+    for (id, all) in [(None, false), (Some(action_id()), true)] {
+        assert_eq!(
+            mail_failure(
+                control(DaemonCommand::MailCancel {
+                    account: "work".into(),
+                    id,
+                    all,
+                })
+                .await
+            ),
+            name_one,
+            "cancel needs exactly one of an ID and all"
+        );
+    }
+    for id in [
+        "abc",
+        "a",
+        &"g".repeat(32),
+        &format!("b{}", "ab".repeat(16)),
+    ] {
+        let message = mail_failure(
+            control(DaemonCommand::MailCancel {
+                account: "secret token".into(),
+                id: Some(id.to_owned()),
+                all: false,
+            })
+            .await,
+        );
+        assert_eq!(message, not_an_id, "rejected {id}");
+        assert!(
+            !message.contains("secret"),
+            "the refusal must not carry the account text"
+        );
+    }
+    assert_eq!(
+        mail_failure(
+            control(DaemonCommand::MailCancel {
+                account: "not a name".into(),
+                id: Some(action_id()),
+                all: false,
+            })
+            .await
+        ),
+        not_a_name
+    );
+    for command in [
+        DaemonCommand::MailCancel {
+            account: "work".into(),
+            id: Some(action_id()),
+            all: false,
+        },
+        DaemonCommand::MailCancel {
+            account: "work".into(),
+            id: None,
+            all: true,
+        },
+    ] {
+        assert_eq!(mail_failure(control(command).await), not_running);
+    }
+}

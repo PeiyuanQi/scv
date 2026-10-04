@@ -57,10 +57,14 @@ SCV provides:
 - a TUI and chat channel bridges (WeChat, Feishu/Lark, Slack) that attach to the
   daemon through the same protocol, including media in both directions
   (`chat_attach`);
-- read-only mail triage: an email account watches an IMAP mailbox, decides
-  each new message with deterministic rules and, within a token budget, one
-  tool-free model turn, and reports to a *mail chat*, a chat account set
-  apart so that no model ever answers in it;
+- mail triage and approval-gated actions: an email account watches a
+  mailbox over IMAP, the Gmail API, or Microsoft Graph, decides each new
+  message with deterministic rules and, within a token budget, one tool-free
+  model turn, and reports to a *mail chat*, a chat account set apart so that
+  no model ever answers in it. With `mail.actions` it can draft, send,
+  forward, archive, mark read, or move mail, each action only after the
+  owner approves that action in the mail chat; without that table it only
+  reads and starts no write executor;
 - a chat log of each account owner's direct chat, and of each Feishu or Slack
   thread in it, from which a new session carries on the open episode and which the
   model can search, with the files the owner keeps and a free-disk-space
@@ -90,8 +94,8 @@ The repository is one Cargo workspace with these packages:
 | `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, event serialization, and the optional durable project ledger/orchestrator. |
 | `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
-| `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), `slack` (tokens entered by hand, Socket Mode events with catch-up from conversation history, sending, files both ways, and its credentials), and `email` (read-only mail triage: the provider-neutral mail core and the IMAP adapter). |
-| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
+| `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), `slack` (tokens entered by hand, Socket Mode events with catch-up from conversation history, sending, files both ways, and its credentials), and `email` (mail triage and approval-gated actions: IMAP, the Gmail API, Microsoft Graph, and SMTP). |
+| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), `scv mail` (`mail.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
 The integration dependency chain is
 `server -> channels -> client -> protocol`.
@@ -99,7 +103,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.11` and exact workspace dependency pins.
+`0.3.12` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -141,7 +145,7 @@ What lives where in the largest crates:
 | `scv-server` | `lib.rs` | Module list and the public API (`run_socket`, `run_stdio`, `config`, build info, the restart watchdog) |
 | | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs |
 | | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
-| | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, and questions to the owner |
+| | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, questions to the owner, and mail action status and withdrawal |
 | | `outbound.rs` | The byte- and frame-bounded outbound queue and event encoding |
 | | `session/` | A session (`mod.rs`), building one (`build.rs`), starting a chat session with its log's open episode (`reload.rs`), its turn queue (`queue.rs`), and running a turn (`turn.rs`) |
 | | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`), with the built-in skills from `skills/<name>/SKILL.md` |
@@ -166,12 +170,12 @@ What lives where in the largest crates:
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
 | | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state (a `Store` generic over the account's state type), what the daemon shares with running bridges, chat media, and logging the owner's direct chat and its threads |
-| | `mail_chat.rs` | A mail chat's fixed replies to its owner (`mail status`, `mail help`) |
+| | `mail_chat.rs` | A mail chat's fixed replies and commands (`mail status`, `mail help`, `approve`, `deny`, `mail reply`, `forward`, `compose`, `revise`, `archive`, `read`, `trash`, `spam`) |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
 | | `wechat/` | WeChat login, polling `getupdates`, and sending (`mod.rs`); iLink requests (`ilink.rs`); credentials (`credentials.rs`); CDN files, AES-encrypted both ways (`cdn.rs`) |
 | | `feishu/` | The Feishu transport (`mod.rs`) and its Open Platform client (`api.rs`); the event long connection, its protobuf frames, and parsing events and catch-up history (`socket.rs`, `frame.rs`, `inbound.rs`); signing in by QR scan or with an existing app (`login.rs`); credentials (`credentials.rs`) |
 | | `slack/` | The Slack transport with its catch-up (`mod.rs`) and its Web API client, including files (`api.rs`); Socket Mode framing and liveness (`socket.rs`); parsing events and history, and the catch-up checkpoint (`inbound.rs`); tokens entered by hand and the installation they belong to (`credentials.rs`) |
-| | `email/` | The email channel and its run (`mod.rs`); the provider-neutral mailbox interface, `MailSource` and `SourceRef` (`source.rs`); the read-only IMAP adapter with its response parser, command guard, and typed client (`imap/`); decoding and cleaning mail text (`parse.rs`, `clean.rs`); rules, the token ladder, and triage turns (`rules.rs`, `worker.rs`, `triage.rs`, `model.rs`); the account's state and its single writer (`ledger.rs`); notification planning, rendering, and delivery (`plan.rs`, `render.rs`, `notify.rs`); retention (`janitor.rs`); settings and credentials (`settings.rs`, `credentials.rs`) |
+| | `email/` | The email channel and its run (`mod.rs`); which adapter an account uses, loading a writer only when `mail.actions` is on (`provider.rs`); the provider-neutral mailbox interface (`source.rs`) and effects of one approved action (`effects.rs`); IMAP reading and, per approval, writing (`imap/`, including `writer.rs`); the Gmail API and Microsoft Graph (`gmail.rs`, `graph.rs`) over the guarded HTTP client (`api.rs`) and OAuth grants (`oauth.rs`); SMTP submission (`smtp/`); decoding and cleaning mail text (`parse.rs`, `clean.rs`); rules, the token ladder, and triage turns (`rules.rs`, `worker.rs`, `triage.rs`, `model.rs`); composing a draft (`compose.rs`, `prepare.rs`, `message.rs`, `preview.rs`); the account's state and its single writer, including the action state machine (`ledger.rs`, `ledger/actions.rs`); action content bound by a digest (`content.rs`) and the audit log (`audit.rs`); the executor (`executor.rs`) and what it may do (`authority.rs`); notification planning, rendering, and delivery (`plan.rs`, `render.rs`, `notify.rs`); retention (`janitor.rs`); settings and credentials (`settings.rs`, `credentials.rs`) |
 | `scv-core` | `message.rs`, `tool.rs` | History messages; the `Tool` trait, its context and output, and `ToolRegistry` |
 | | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` |
 | | `progress.rs` | Bounded, paced tool progress lines |
@@ -195,9 +199,11 @@ Each channel account is a component hosted by the daemon's supervisor, which
 hands it to `scv_channels::run` with an `AccountRun`: the instance layout,
 the account's credentials and whole settings table, its owner (whether or not
 the owner holds the tool grant), the owner turn timeout when it does, the
-workspace, the daemon socket, the hub link, and a health callback; the
-supervisor cancels the run by dropping it. Each channel module (`wechat`,
-`feishu`) implements `Channel`, which signs in and runs an account, and the
+workspace, the daemon socket, the hub link, a health callback, and the stop
+token. The supervisor cancels a chat account's run by dropping it; an email
+account watches the stop token instead and returns once a mail action under
+way has finished, within its stop grace. Each channel module (`wechat`,
+`feishu`, `slack`, `email`) implements `Channel`, which signs in and runs an account, and the
 crate-internal `Transport`, which receives a batch of messages after a
 checkpoint and sends one part of a message. A transport may also name a label
 for the messages SCV writes itself, as WeChat's does (`system msg: `); the
@@ -269,14 +275,17 @@ an owner's chat request to change, publish, and deploy SCV itself.
    at work, its daemon session has no running turn, running or unreported
    background job (one whose report turn failed and waits to be tried again
    included), and (through the channel hub) no unstored report; and no
-   chat bridge holds an owner message it has not answered durably. A
+   chat bridge holds an owner message it has not answered durably, and no
+   email account is carrying out a mail action. A
    per-turn CLI run is at work while it has live processes. A live child (a
    nested SCV or an ACP agent) keeps its process for its whole conversation,
    so it is at work only while a turn runs on it (`idle_since_unix` is absent
    then) or, for a nested SCV, while background jobs of its own session still
    run or wait to be reported to its model (`background_jobs`), which its
    delegation record tells (`DelegationEntry::working`). At the request's
-   deadline it goes ahead anyway and the plan says so.
+   deadline it goes ahead anyway and the plan says so. Before it hands over,
+   email accounts start no new mail action, and one under way gets up to a
+   minute to finish.
 3. It records the accounts connected at that moment, copies its own image
    (`/proc/self/exe`) to `<binary>.prev`, and starts `scv restart-watchdog`
    from that copy as a transient unit (`systemd-run --user`), outside its own
@@ -311,8 +320,10 @@ each running account's owner, purpose, and outbox, which daemon session each
 direct chat runs on and its unreported background work, claimed owner
 messages, the owner's last chat, questions waiting for the owner's answer,
 whether this start is a planned restart, and for mail the outcome of each
-keyed notice a mail chat stored and each running email account's routes and
-counts. Notices and questions never go to a mail chat, and keyed mail notices
+keyed notice a mail chat stored, each running email account's routes and
+counts, the owner's mail-chat commands routed to the account that holds the
+code or handle, and whether a planned restart is draining mail actions.
+Notices and questions never go to a mail chat, and keyed mail notices
 only to one. `scv_tools::delegation::DelegationRegistry::own_run`
 reads an `SCV_PARENT` chain for both planned restarts and questions: which of
 the daemon's own delegations the caller runs inside, and its session.
@@ -362,7 +373,10 @@ finding the question unknown or the daemon gone, exits 2.
 `Component::run(cancel, HealthReporter)` must observe cancellation and must not
 detach child tasks. The supervisor starts at most one instance per account,
 retries unexpected exits with exponential backoff from 1 to 60 seconds, and
-cancels, aborts if necessary, and joins work within bounded shutdown.
+cancels, aborts if necessary, and joins work within bounded shutdown: a
+cancelled run gets the supervisor's grace (5 seconds) to return, or the
+longer one its component asks for (`Component::stop_grace`; an email
+account's 65 seconds, for a mail action under way) before it is aborted.
 All future long-running components must use this server-owned lifecycle.
 
 The daemon discovers saved channel accounts on startup and reconciles every

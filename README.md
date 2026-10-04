@@ -156,7 +156,8 @@ for selection rules and limits.
 | `scv` | Open the terminal UI on the running daemon |
 | `scv exec [--yes] "…"` | Run one prompt headless; `--yes` approves risky tools for that run |
 | `scv run`, `start`, `stop`, `status`, `reload` | Run or manage the daemon |
-| `scv channels login`, `run`, `stop`, `status`, `logout` | Manage chat accounts (`wechat`, `feishu`, `lark`) and read-only mailboxes (`email`) |
+| `scv channels login`, `run`, `stop`, `status`, `logout` | Manage chat accounts (`wechat`, `feishu`, `lark`, `slack`) and mailboxes (`email`: read-only unless `mail.actions` is on) |
+| `scv mail status`, `cancel` | List or withdraw mail actions waiting for approval. Approval happens only in the mail chat |
 | `scv agents login`, `status`, `check`, `ps`, `kill` | Sign agents in, check them, and list or stop their runs |
 | `scv confirm "…"` | Ask the owner yes or no in chat; exits 0 only on yes |
 | `scv project create`, `status`, `tasks`, `report` | Opt into a durable project ledger and inspect its evidence |
@@ -281,7 +282,7 @@ and report vulnerabilities as
 | Guide | What's inside |
 | --- | --- |
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | Crates, the agent loop, planned restarts, and where to start reading the code |
-| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | Feishu/Lark, WeChat, and Slack: sign-in, media, background reports, questions to the owner; read-only mail triage reported to a mail chat |
+| [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | Feishu/Lark, WeChat, and Slack: sign-in, media, background reports, questions to the owner; mail triage reported to a mail chat, and mail actions the owner approves there |
 | [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | Built-in tools, delegated agents, their models and checks, ACP, background jobs, and agent sign-ins |
 | [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | Instance layout, every setting, providers, the daemon, and notices |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | Trust boundaries, approvals, remote tools, and delegated runs |

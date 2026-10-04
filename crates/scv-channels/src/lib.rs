@@ -1080,36 +1080,76 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         }
     }
 
-    /// Answer a message in a mail chat: the owner's direct messages get one
-    /// of SCV's fixed replies ([`mail_chat`]); everything else is only
-    /// marked seen. No session, turn, download, or chat log is involved, and
-    /// the owner writing here never makes it their last chat.
+    /// Answer a message in a mail chat: the owner's direct messages are read
+    /// as commands ([`mail_chat`]), and everything else is only marked seen.
+    /// A command for the email accounts goes to them through the hub with
+    /// this chat's state unlocked, and their answer, SCV's own words, is
+    /// queued as the reply. No session, turn, download, or chat log is
+    /// involved, and the owner writing here never makes it their last chat.
     async fn accept_mail(&self, inbound: &Inbound) -> Result<()> {
         let id = inbound.id();
+        let message = {
+            let mut state = self.state.lock().await;
+            if state.seen.iter().any(|seen| seen == id)
+                || state.pending.iter().any(|pending| pending.message_id == id)
+            {
+                return Ok(());
+            }
+            match inbound {
+                Inbound::Text(message)
+                    if message.group.is_none() && self.owner == Some(message.sender.as_str()) =>
+                {
+                    message.clone()
+                }
+                Inbound::Text(_) => {
+                    tracing::info!(
+                        "a mail chat ignored a message from someone other than its owner"
+                    );
+                    mark_seen(&mut state, id);
+                    return self.save(&state).await;
+                }
+                Inbound::Ignored { .. } => {
+                    mark_seen(&mut state, id);
+                    return self.save(&state).await;
+                }
+            }
+        };
+        let text = match mail_chat::command(&message) {
+            mail_chat::Command::Help => mail_chat::HELP_REPLY.to_owned(),
+            mail_chat::Command::Invalid(text) => text.to_owned(),
+            mail_chat::Command::Mail(mail_chat::MailCommand::Status) => {
+                let mut lines = vec![mail_chat::status(
+                    &self.registration.mail_accounts(),
+                    unix_now(),
+                )];
+                let actions = self
+                    .registration
+                    .mail_command(
+                        &message.sender,
+                        id,
+                        message.sent_ms,
+                        mail_chat::MailCommand::Status,
+                    )
+                    .await;
+                if !actions.is_empty() {
+                    lines.push(actions);
+                }
+                lines.join("\n")
+            }
+            mail_chat::Command::Mail(command) => {
+                tracing::info!("a mail chat's owner sent a mail command");
+                self.registration
+                    .mail_command(&message.sender, id, message.sent_ms, command)
+                    .await
+            }
+        };
         let mut state = self.state.lock().await;
+        // Handed over again while the accounts answered: answered once.
         if state.seen.iter().any(|seen| seen == id)
             || state.pending.iter().any(|pending| pending.message_id == id)
         {
             return Ok(());
         }
-        let message = match inbound {
-            Inbound::Text(message)
-                if message.group.is_none() && self.owner == Some(message.sender.as_str()) =>
-            {
-                message
-            }
-            Inbound::Text(_) => {
-                tracing::info!("a mail chat ignored a message from someone other than its owner");
-                mark_seen(&mut state, id);
-                return self.save(&state).await;
-            }
-            Inbound::Ignored { .. } => {
-                mark_seen(&mut state, id);
-                return self.save(&state).await;
-            }
-        };
-        let command = mail_chat::command(message);
-        let text = mail_chat::reply(command, &self.registration.mail_accounts(), unix_now());
         let mut reply = new_pending(
             id,
             &message.sender,
