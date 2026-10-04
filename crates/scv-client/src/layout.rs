@@ -187,7 +187,8 @@ impl Layout {
     }
 
     /// One mail account's private working files: the empty working
-    /// directory its tool-free triage sessions start in. Removed at logout.
+    /// directory its tool-free sessions start in and, with mail actions on,
+    /// each action's content and the audit log. Removed at logout.
     pub fn mail_state(&self, account: &str) -> PathBuf {
         self.state().join("mail").join(account)
     }

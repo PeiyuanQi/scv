@@ -245,7 +245,31 @@ Mail changes require focused coverage for:
   keeping the run lock until it lands, the state-file quota, the queue
   bound, retention, a janitor that removes only its own account's
   temporaries and counts mail when free space cannot be told, and `0600`
-  files in `0700` directories.
+  files in `0700` directories;
+- without `mail.actions`, no writer grant loaded and no executor started;
+  with it, each kind only `"off"` or `"approve"`, and a proposal only for a
+  kind that is on;
+- approval only from the mail chat's owner, after the preview was delivered,
+  with the platform's send time, once per platform message, and refused when
+  the code is unknown, expired, reused, or from another chat; `deny` and
+  `deny all` stay inside the chat the action is bound to, including before
+  its preview is stored, and do not apply when it is bound to no chat; an
+  earlier code does not deny the current action; `scv mail` lists and
+  withdraws and cannot approve;
+- the content digest checked again at execution, a changed file refused, a
+  lost connection after the bytes were written probed and never resent, and
+  daily quotas and `max_open`;
+- IMAP, SMTP, and HTTP guards allowing only the sealed action's commands,
+  Gmail and Graph using the matching grant, a `GET` retried once after HTTP
+  401 and a `POST` or `PATCH` never retried after it even when a later check
+  does not find the change, and OAuth sign-in refusing a reader token that
+  can write or send;
+- the audit log free of codes, handles, addresses, and mail text, with a
+  pending journal reconciled after a crash between the state write and the
+  append; drain on a planned restart waiting for the action under way and
+  lowering the flag when the hand-over does not happen; a sibling task that
+  exits does not drop the executor before the action under way finishes,
+  within the stop grace.
 
 Use fake components, local protocol peers, and fake HTTP services for these
 checks. Correctness tests must not contact WeChat, Feishu, a mail server, or a

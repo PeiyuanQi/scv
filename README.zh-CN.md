@@ -140,7 +140,8 @@ scv agents check                 # 版本、可用模型，以及每个智能体
 | `scv` | 打开连接到运行中守护进程的终端界面 |
 | `scv exec [--yes] "…"` | 无界面运行一条提示；`--yes` 为这次运行批准有风险的工具 |
 | `scv run`、`start`、`stop`、`status`、`reload` | 运行或管理守护进程 |
-| `scv channels login`、`run`、`stop`、`status`、`logout` | 管理聊天账号（`feishu`、`lark`、`wechat`） |
+| `scv channels login`、`run`、`stop`、`status`、`logout` | 管理聊天账号（`feishu`、`lark`、`wechat`、`slack`）和邮箱（`email`：未开启 `mail.actions` 时只读） |
+| `scv mail status`、`cancel` | 列出或撤回等待批准的邮件操作；批准只能在邮件聊天中进行 |
 | `scv agents login`、`status`、`check`、`ps`、`kill` | 登录并检查智能体，列出或停止它们的运行 |
 | `scv confirm "…"` | 在聊天中向主人提一个是/否问题；只有回答"是"时退出码为 0 |
 | `scv config show` | 列出生效的每个路径和设置，隐藏密钥 |

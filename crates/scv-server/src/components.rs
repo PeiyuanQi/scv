@@ -27,6 +27,14 @@ const BUSY_RETRY: Duration = Duration::from_secs(5);
 #[async_trait]
 pub(crate) trait Component: Send + Sync + 'static {
     async fn run(&self, cancellation: CancellationToken, health: HealthReporter) -> Result<()>;
+
+    /// How long a cancelled run may take to return before it is aborted;
+    /// `None` uses the supervisor's default, [`STOP_GRACE`]. A component
+    /// that finishes work it started (an email account's mail action) asks
+    /// for longer.
+    fn stop_grace(&self) -> Option<Duration> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -118,7 +126,7 @@ impl Supervisor {
         let cancel = cancellation.clone();
         let report = health.clone();
         let initial_backoff = self.initial_backoff;
-        let grace = self.grace;
+        let grace = component.stop_grace().unwrap_or(self.grace);
         let task = tokio::spawn(async move {
             let mut delay = initial_backoff;
             loop {
@@ -256,13 +264,24 @@ impl Component for ChannelAccount {
             socket: &socket,
             link: &self.link,
             health: &report,
+            stop: &cancellation,
         };
-        // Cancellation drops the run's I/O and sessions; it spawns no tasks.
+        // A channel that finishes started work (an email account's mail
+        // action under way) returns by itself once cancelled, within its
+        // stop grace. Cancellation drops every other channel's run, its I/O
+        // and sessions; none spawns tasks.
+        if self.kind.stop_grace().is_some() {
+            return scv_channels::run(run).await;
+        }
         tokio::select! {
             biased;
             () = cancellation.cancelled() => Ok(()),
             result = scv_channels::run(run) => result,
         }
+    }
+
+    fn stop_grace(&self) -> Option<Duration> {
+        self.kind.stop_grace()
     }
 }
 
@@ -338,6 +357,11 @@ impl Components {
         self.confirmer.clone()
     }
 
+    /// What the daemon shares with the channel bridges it runs.
+    pub(crate) fn hub(&self) -> Arc<scv_channels::hub::Hub> {
+        Arc::clone(&self.hub)
+    }
+
     pub(crate) fn status(&self) -> DaemonStatus {
         let mut components = self.supervisor.health();
         // Email accounts publish counts only: never mail text.
@@ -354,6 +378,8 @@ impl Components {
             restart: None,
             confirm: None,
             project: None,
+            mail_actions: Vec::new(),
+            mail_note: None,
         }
     }
 
@@ -534,7 +560,9 @@ impl Components {
             | DaemonCommand::DelegationKill { .. }
             | DaemonCommand::RestartWhenIdle { .. }
             | DaemonCommand::ConfirmAsk { .. }
-            | DaemonCommand::ConfirmStatus { .. } => return Ok(self.status()),
+            | DaemonCommand::ConfirmStatus { .. }
+            | DaemonCommand::MailStatus { .. }
+            | DaemonCommand::MailCancel { .. } => return Ok(self.status()),
             DaemonCommand::Reload => {}
             DaemonCommand::ChannelSet {
                 channel,

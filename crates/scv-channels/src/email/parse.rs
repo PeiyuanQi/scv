@@ -468,6 +468,141 @@ pub(crate) fn identity(
     hex_string(&hasher.finalize())
 }
 
+/// The same stored message in whichever folder it is in: [`identity`]
+/// without the mailbox. IMAP keeps a message's received time and size when
+/// it moves it, so a check after an interrupted move finds the message in
+/// its new folder by its `Message-ID` and knows it by this.
+pub(crate) fn locator(
+    message_id: Option<&[u8]>,
+    received: &str,
+    size: u64,
+    from: &str,
+    subject: &str,
+) -> String {
+    use sha2::Digest as _;
+    let id = message_id.and_then(msg_id).unwrap_or_default();
+    let size = size.to_string();
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"scv-mail-locator-1");
+    for field in [&id, received, &size, from, subject] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    hex_string(&hasher.finalize())
+}
+
+/// The identity, and locator, of a message an API names by an ID that stays
+/// its own for its whole life, moves included: nothing else can ever have
+/// that ID.
+pub(crate) fn api_identity(provider: &str, id: &str) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"scv-mail-api-identity-1");
+    for field in [provider, id] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    hex_string(&hasher.finalize())
+}
+
+/// The valid message IDs in a `References` or `In-Reply-To` value, in
+/// order, each at most [`MAX_MSG_ID_BYTES`]; anything else is dropped.
+pub(crate) fn msg_ids(value: &[u8]) -> Vec<String> {
+    let Ok(text) = std::str::from_utf8(value) else {
+        return Vec::new();
+    };
+    let text = strip_comments(text);
+    let mut ids = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find('<') {
+        let Some(end) = rest[start..].find('>') else {
+            break;
+        };
+        if let Some(id) = msg_id(&rest.as_bytes()[start..=start + end]) {
+            ids.push(id);
+        }
+        rest = &rest[start + end + 1..];
+    }
+    ids
+}
+
+/// The addresses in an address-list header value (`From`, `To`, `Cc`,
+/// `Reply-To`) as an API returns it: display names decoded, comments
+/// dropped, group names left out. An entry without an address keeps an
+/// empty one. Only the first [`MAX_HEADER_VALUE_BYTES`] are read.
+pub(crate) fn addresses(value: &str) -> Vec<super::source::Address> {
+    let value = scv_client::text::utf8_prefix(value, MAX_HEADER_VALUE_BYTES);
+    // Split at commas outside quotes, angle brackets, and comments; a group's
+    // `name:` and `;` are separators too.
+    let mut entries: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut angle = false;
+    let mut depth = 0usize;
+    for c in value.chars() {
+        if escaped {
+            if depth == 0 {
+                current.push(c);
+            }
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if quoted => {
+                escaped = true;
+                current.push(c);
+            }
+            '\\' if depth > 0 => escaped = true,
+            '"' if depth == 0 => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            '(' if !quoted => depth += 1,
+            ')' if !quoted && depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            '<' if !quoted => {
+                angle = true;
+                current.push(c);
+            }
+            '>' if !quoted => {
+                angle = false;
+                current.push(c);
+            }
+            ',' | ';' if !quoted && !angle => entries.push(std::mem::take(&mut current)),
+            ':' if !quoted && !angle => current.clear(),
+            _ => current.push(c),
+        }
+    }
+    entries.push(current);
+    entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (name, address) = match (entry.rfind('<'), entry.rfind('>')) {
+                (Some(open), Some(close)) if open < close => {
+                    (&entry[..open], entry[open + 1..close].trim())
+                }
+                _ if entry.contains('@') => ("", entry),
+                _ => (entry, ""),
+            };
+            let name = name.trim();
+            let name = name
+                .strip_prefix('"')
+                .and_then(|name| name.strip_suffix('"'))
+                .map_or_else(
+                    || name.to_owned(),
+                    |inner| inner.replace("\\\"", "\"").replace("\\\\", "\\"),
+                );
+            super::source::Address {
+                name: decode_words(name.as_bytes()),
+                address: address.split_whitespace().collect(),
+            }
+        })
+        .collect()
+}
+
 /// `bytes` as lowercase hex SHA-256, so that a record can tell what it saw
 /// before without keeping it: a `Message-ID`, for spotting one reused.
 pub(crate) fn digest(bytes: &[u8]) -> String {

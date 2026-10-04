@@ -6,7 +6,6 @@
 //! no padding) between `&` and `-`. The output is printable ASCII, so a
 //! mailbox name can never carry a line break onto the wire.
 
-#[cfg(test)]
 use anyhow::{Result, bail};
 use base64::Engine as _;
 use base64::alphabet::Alphabet;
@@ -58,7 +57,6 @@ fn flush(pending: &mut Vec<u16>, out: &mut String) {
 }
 
 /// A mailbox name from the wire, as Unicode.
-#[cfg(test)]
 pub(crate) fn decode(name: &str) -> Result<String> {
     let mut out = String::with_capacity(name.len());
     let mut rest = name;

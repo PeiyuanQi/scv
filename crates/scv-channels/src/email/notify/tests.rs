@@ -37,6 +37,7 @@ impl Bench {
             account: "default",
             clock: &self.clock,
             hub: Some(&self.hub),
+            previews: None,
         }
     }
 
@@ -57,6 +58,8 @@ impl Bench {
                             "a{uid}@example.com · 17:00 (sender not verified)\n│ Subject: s{uid}"
                         ),
                         urgent,
+                        handle: None,
+                        actions: Vec::new(),
                     },
                     source,
                     turned: false,

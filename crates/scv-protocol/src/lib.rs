@@ -28,7 +28,7 @@ pub use client::{ChatLog, ClientMessage};
 pub use daemon::{
     ComponentHealth, ComponentState, ConfirmInfo, ConfirmState, DEFAULT_CONFIRM_SECONDS,
     DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary, MAX_CONFIRM_SECONDS,
-    MailCounts, ProjectEvent, ProjectPhase, ProjectReport, ProjectResponse, ProjectRun,
+    MailAction, MailCounts, ProjectEvent, ProjectPhase, ProjectReport, ProjectResponse, ProjectRun,
     ProjectRunStatus, ProjectStatus, ProjectSummary, ProjectTask, ProjectTaskStatus, Purpose,
     RemoteTools, RestartInfo, Senders,
 };

@@ -101,6 +101,56 @@ pub struct MailCounts {
     pub messages_24h: u64,
     /// When the mailbox was last checked, in Unix seconds.
     pub last_check_unix_seconds: Option<u64>,
+    /// The provider: `imap`, `gmail`, or `graph`. Absent from daemons
+    /// before mail actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The kinds of mail action the account may propose, as the provider
+    /// and the settings allow them (`draft`, `send`, `archive`,
+    /// `mark_read`, `trash`, `spam`); empty when it only reads.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+    /// Mail actions waiting for the owner or for their turn to run.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub actions_open: u64,
+    /// Mail actions being carried out now.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub actions_executing: u64,
+    /// Mail actions SCV lost track of while carrying them out, kept for a
+    /// check of the mailbox.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub actions_unknown: u64,
+    /// Mail actions carried out in the last 24 hours.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub actions_done_24h: u64,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// One mail action, as `scv mail status` lists it: IDs, kinds, states, and
+/// times only, never a code, a handle, an address, or mail text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailAction {
+    /// The email account, `email:<account>`.
+    pub account: String,
+    /// The action's ID, `a` and 32 hex digits.
+    pub id: String,
+    /// `draft`, `send`, `archive`, `mark_read`, `trash`, or `spam`.
+    pub kind: String,
+    /// `proposed`, `previewing`, `open`, `approved`, `executing`, or
+    /// `unknown`.
+    pub state: String,
+    /// When it was proposed.
+    pub created_unix_seconds: u64,
+    /// When its approval stops counting, while it waits for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_unix_seconds: Option<u64>,
 }
 
 /// Who may use tools through a remote bridge account.
@@ -147,6 +197,12 @@ pub struct DaemonStatus {
     /// The response to a project ledger command, when one was requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectResponse>,
+    /// The mail actions a `mail_status` or `mail_cancel` request is about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mail_actions: Vec<MailAction>,
+    /// What a `mail_cancel` request did, in SCV's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_note: Option<String>,
 }
 
 /// The lifecycle phase observed for a durable project.
@@ -680,5 +736,24 @@ pub enum DaemonCommand {
         task: Option<String>,
         /// Optional run identifier.
         run: Option<String>,
+    },
+    /// List the mail actions of every running email account, or of one;
+    /// the reply's `mail_actions` holds them.
+    MailStatus {
+        /// The email account name; omitted, every account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    /// Withdraw one mail action by its ID, or every action of an account
+    /// that has not started. It can never approve anything.
+    MailCancel {
+        /// The email account name.
+        account: String,
+        /// The action's ID; omitted with `all`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Withdraw every action that has not started.
+        #[serde(default)]
+        all: bool,
     },
 }

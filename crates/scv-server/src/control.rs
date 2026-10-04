@@ -1,10 +1,12 @@
 //! `daemon.control`: status, component and delegation management,
-//! scheduling a restart into a new release, and asking the owner a yes/no
-//! question in chat.
+//! scheduling a restart into a new release, asking the owner a yes/no
+//! question in chat, and listing or withdrawing mail actions (never
+//! approving one).
 
 use std::sync::Arc;
 
-use scv_protocol::{DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary};
+use scv_channels::hub::{Hub, MailOrder, MailReply};
+use scv_protocol::{DaemonCommand, DaemonStatus, DelegationInfo, DelegationSummary, MailAction};
 use scv_tools::delegation::DelegationRegistry;
 use tokio::sync::Mutex;
 
@@ -21,6 +23,9 @@ pub(crate) enum ControlFailure {
     Confirm(String),
     /// A project ledger request the operator can correct.
     Project(String),
+    /// A mail action request the daemon could not carry out; the message is
+    /// safe to show.
+    Mail(String),
     Component,
 }
 
@@ -64,6 +69,17 @@ pub(crate) async fn daemon_control(
                 .status(id)
                 .map_err(ControlFailure::Confirm)?,
         ),
+        _ => None,
+    };
+    let mail = match &command {
+        DaemonCommand::MailStatus { account } => {
+            let hub = components.lock().await.hub();
+            Some(mail_status(&hub, account.as_deref()).await?)
+        }
+        DaemonCommand::MailCancel { account, id, all } => {
+            let hub = components.lock().await.hub();
+            Some(mail_cancel(&hub, account, id.as_deref(), *all).await?)
+        }
         _ => None,
     };
     let listing = match &command {
@@ -143,6 +159,10 @@ pub(crate) async fn daemon_control(
     };
     status.restart = restarter.and_then(|restarter| restarter.info());
     status.confirm = confirm;
+    if let Some((actions, note)) = mail {
+        status.mail_actions = actions;
+        status.mail_note = note;
+    }
     Ok(status)
 }
 
@@ -161,6 +181,67 @@ fn is_project_command(command: &DaemonCommand) -> bool {
             | DaemonCommand::ProjectRunFinish { .. }
             | DaemonCommand::ProjectHeartbeat { .. }
     )
+}
+
+/// The actions of email account `account`, or of every running one that
+/// takes actions: IDs, kinds, states, and times only.
+async fn mail_status(
+    hub: &Hub,
+    account: Option<&str>,
+) -> std::result::Result<(Vec<MailAction>, Option<String>), ControlFailure> {
+    let components = match account {
+        Some(account) => vec![mail_component(account)?],
+        None => hub.mail_authorities(),
+    };
+    let mut actions = Vec::new();
+    for component in components {
+        match hub.mail_order(&component, MailOrder::List).await {
+            Ok(MailReply::Actions(listed)) => actions.extend(listed),
+            Ok(MailReply::Text(_)) => {}
+            Err(error) if account.is_some() => return Err(ControlFailure::Mail(error.to_string())),
+            Err(_) => {}
+        }
+    }
+    Ok((actions, None))
+}
+
+/// Withdraw email account `account`'s action `id`, or all its actions.
+async fn mail_cancel(
+    hub: &Hub,
+    account: &str,
+    id: Option<&str>,
+    all: bool,
+) -> std::result::Result<(Vec<MailAction>, Option<String>), ControlFailure> {
+    if id.is_some() == all {
+        return Err(ControlFailure::Mail(
+            "name one mail action's ID, or ask for all of them".into(),
+        ));
+    }
+    if let Some(id) = id
+        && !(id.len() == 33
+            && id.starts_with('a')
+            && id[1..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(ControlFailure::Mail(
+            "that is not a mail action's ID".into(),
+        ));
+    }
+    let component = mail_component(account)?;
+    let order = MailOrder::Cancel {
+        action: id.map(str::to_owned),
+    };
+    match hub.mail_order(&component, order).await {
+        Ok(MailReply::Text(note)) => Ok((Vec::new(), Some(note))),
+        Ok(MailReply::Actions(_)) => Ok((Vec::new(), None)),
+        Err(error) => Err(ControlFailure::Mail(error.to_string())),
+    }
+}
+
+/// The component of email account `account`.
+fn mail_component(account: &str) -> std::result::Result<String, ControlFailure> {
+    scv_channels::state::validate_name(account)
+        .map_err(|_| ControlFailure::Mail("not an email account name".into()))?;
+    Ok(format!("{}:{account}", scv_channels::email::CHANNEL))
 }
 
 const ONLY_THE_DAEMON_ASKS: &str = "only the SCV daemon can ask the owner";

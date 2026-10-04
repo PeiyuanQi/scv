@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.11`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.11` pins.
+The current workspace release is `0.3.12`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.12` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,49 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.12
+
+`0.3.12` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.11` checks the new release and can roll it back.
+An instance that never sets `mail.actions` behaves as in `0.3.11`: the account
+only reads, and no write executor or writing credential is started.
+
+What changes for a person running SCV:
+
+- **Mail actions the owner approves.** `[channels.email.<account>.mail.actions]`
+  turns on draft, send, forward, archive, mark read, Trash, and Spam, each
+  only as `"approve"`. The owner approves one action with its code in the
+  mail chat (`approve CODE`). `scv mail status` and `scv mail cancel` list
+  and withdraw; they cannot approve. See [Email](channels.md#email) and
+  [Mail accounts](configuration.md#mail-accounts).
+- **Gmail and Microsoft Graph.** `scv channels login email --oauth gmail` or
+  `--oauth outlook` signs in with separate reader, writer, and sender grants.
+  IMAP remains the fallback, with SMTP when `--smtp-host` was set at sign-in.
+- **Going back to `0.3.11`.** `0.3.11` refuses a `mail.actions` table, does
+  not know Gmail, Graph, or SMTP credentials or an IMAP account's own
+  `--address`, and cannot read the state of an account that has had mail
+  actions. Before going back, log out every email account that had
+  `mail.actions` or was signed in with `--oauth`, `--address`, or
+  `--smtp-host`. An IMAP account signed in without them that never had
+  `mail.actions` is unaffected, so an automatic rollback right after the
+  upgrade is too.
+
+What changes for code that embeds SCV's crates:
+
+- `scv-protocol` adds `MailAction`, `DaemonStatus` `mail_actions` and
+  `mail_note`, `DaemonCommand` `mail_status` and `mail_cancel`, and optional
+  fields on `MailCounts` (`provider`, `actions`, and the action counts). All
+  are additive on the wire; a `DaemonStatus` or `MailCounts` struct literal,
+  or an exhaustive `match` on `DaemonCommand`, needs the new fields or arms.
+- `scv-channels`' `AccountRun` gains `stop`, the token an email account
+  watches to finish a mail action under way before it returns, and
+  `ChannelKind::stop_grace` says how long to wait for that (65 seconds for
+  every email account, which returns at once when nothing is under way).
+  The hub routes mail-chat commands and counts actions under way for the
+  planned-restart drain.
+- `scv_client::control` allows 90 seconds instead of 20 for `reload`,
+  `channel_set`, and `channel_logout`, which can wait for such a stop.
 
 ## Upgrading to 0.3.11
 

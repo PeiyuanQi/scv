@@ -463,6 +463,9 @@ fn toml_line(text: &str, span: Option<std::ops::Range<usize>>) -> String {
     .unwrap_or_default()
 }
 
+/// Where an account's extra file is, by account name.
+type Sidecar = std::sync::Arc<dyn Fn(&str) -> PathBuf + Send + Sync>;
+
 /// One channel's accounts in an SCV instance:
 ///
 /// - credentials in `credentials/<channel>/<account>.json`;
@@ -480,6 +483,9 @@ pub(crate) struct Store<C, S = BridgeState> {
     config: PathBuf,
     config_lock: PathBuf,
     private: Option<PathBuf>,
+    /// Another file an account keeps, such as an OAuth account's grants,
+    /// removed with the account.
+    sidecar: Option<Sidecar>,
     kind: PhantomData<fn() -> (C, S)>,
 }
 
@@ -493,8 +499,19 @@ impl<C: Credentials, S: AccountState> Store<C, S> {
             config: layout.config(),
             config_lock: layout.config_lock(),
             private: None,
+            sidecar: None,
             kind: PhantomData,
         }
+    }
+
+    /// Remove the file `path` names for an account with the account.
+    #[cfg(feature = "email")]
+    pub(crate) fn with_sidecar(
+        mut self,
+        path: impl Fn(&str) -> PathBuf + Send + Sync + 'static,
+    ) -> Self {
+        self.sidecar = Some(std::sync::Arc::new(path));
+        self
     }
 
     /// Keep each account's private working files in `<root>/<account>/`,
@@ -892,6 +909,9 @@ impl<C: Credentials, S: AccountState> Store<C, S> {
         // Credentials must be durably gone before settings can disappear and
         // fall back to enabled-by-default on the next startup.
         remove_if_present(&self.credentials_path(name)?)?;
+        if let Some(sidecar) = &self.sidecar {
+            remove_if_present(&sidecar(name))?;
+        }
         remove_if_present(&self.state_path(name)?)?;
         if let Some(directory) = self.private_path(name)? {
             remove_tree(&directory)?;

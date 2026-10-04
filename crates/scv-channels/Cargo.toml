@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Chat and mail channels for the SCV daemon: WeChat, Feishu/Lark, Slack, and read-only mail triage"
+description = "Chat and mail channels for the SCV daemon: WeChat, Feishu/Lark, Slack, and mail triage with approval-gated mail actions"
 repository.workspace = true
 
 [lints]
@@ -18,8 +18,9 @@ wechat = ["dep:aes", "dep:md-5", "dep:base64", "dep:reqwest"]
 feishu = ["dep:prost", "dep:qrcode", "dep:reqwest", "dep:tokio-tungstenite", "futures-util/sink"]
 # Slack through the Events API over Socket Mode.
 slack = ["dep:reqwest", "dep:tokio-tungstenite", "futures-util/sink"]
-# Read-only mail triage: an IMAP mailbox reported to a mail chat.
-email = ["dep:encoding_rs", "dep:html2text", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots", "dep:base64"]
+# Mail: IMAP, the Gmail API, or Microsoft Graph, triaged and reported to a
+# mail chat, with drafts, sends, and mailbox changes the owner approves.
+email = ["dep:encoding_rs", "dep:html2text", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots", "dep:base64", "dep:reqwest"]
 
 [dependencies]
 aes = { workspace = true, optional = true }
@@ -44,6 +45,7 @@ tempfile.workspace = true
 tokio.workspace = true
 tokio-rustls = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
+tokio-util.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
@@ -52,5 +54,4 @@ webpki-roots = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tokio-util.workspace = true
 tracing-subscriber.workspace = true

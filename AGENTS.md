@@ -61,9 +61,11 @@
   `scv config show`, the systemd unit) in the root package's `src/cli/`. Keep
   the chat and mail channels in `scv-channels`: the bridge the chat channels
   share, and each platform's transport in its own module behind a Cargo
-  feature (WeChat in `wechat`, Feishu/Lark in `feishu`), and read-only mail
-  triage with its provider adapters in `email`. Mail text never reaches a
-  tool-enabled session, a log, or any chat but a mail chat. Preserve
+  feature (WeChat in `wechat`, Feishu/Lark in `feishu`, Slack in `slack`),
+  and mail triage with approval-gated actions in `email`. Without
+  `mail.actions` an account only reads and starts no write executor. Mail
+  text never reaches a tool-enabled session, a log, or any chat but a mail
+  chat. Preserve
   `server -> channels -> client -> protocol`;
   TUI and channels must not depend on server. A change to an internal
   dependency updates the diagram in `docs/architecture.md` in the same commit.

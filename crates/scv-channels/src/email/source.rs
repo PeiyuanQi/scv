@@ -19,6 +19,10 @@ pub(crate) use super::parse::TransferEncoding;
 pub(crate) enum ProviderKind {
     /// IMAP over implicit TLS.
     Imap,
+    /// The Gmail API.
+    Gmail,
+    /// Microsoft Graph.
+    Graph,
 }
 
 /// A message's identity at its provider, as records bind it. Never shown to
@@ -32,17 +36,36 @@ pub(crate) enum SourceRef {
         uidvalidity: u32,
         uid: u32,
     },
+    /// A Gmail message ID, stable for the message's life.
+    Gmail { id: String },
+    /// A Graph immutable ID, stable while the message stays in the
+    /// mailbox, moves included.
+    Graph { id: String },
 }
 
 impl SourceRef {
     /// A short, text-free label for logs and notice keys, such as
-    /// `imap:1700000000:42`.
+    /// `imap:1700000000:42`. An API's ID is shown as a digest of it.
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Imap {
                 uidvalidity, uid, ..
             } => format!("imap:{uidvalidity}:{uid}"),
+            Self::Gmail { id } => format!("gmail:{}", &super::parse::digest(id.as_bytes())[..16]),
+            Self::Graph { id } => format!("graph:{}", &super::parse::digest(id.as_bytes())[..16]),
         }
+    }
+
+    /// Whether an ID an API returned is safe to use in a request path.
+    /// `.` and `..` are rejected, as is any ID that contains `..`.
+    pub(crate) fn valid_api_id(id: &str) -> bool {
+        !id.is_empty()
+            && id != "."
+            && !id.contains("..")
+            && id.len() <= 512
+            && id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'=' | b'.')
+            })
     }
 }
 
@@ -158,6 +181,8 @@ pub(crate) const MAX_LABEL_BYTES: usize = 128;
 pub(crate) const MAX_RECIPIENTS: usize = 64;
 /// The most attachments described; the rest are not.
 pub(crate) const MAX_ATTACHMENTS: usize = 16;
+/// The most message IDs of `References` kept.
+pub(crate) const MAX_REFERENCES: usize = 10;
 /// What ends a field that was cut to its bound.
 pub(crate) const CUT: &str = "…";
 
@@ -194,6 +219,13 @@ pub(crate) struct Meta {
     pub(crate) subject: String,
     /// The valid `Message-ID`, angle brackets kept.
     pub(crate) message_id: Option<String>,
+    /// [`super::parse::locator`]: the same for this message in any folder.
+    pub(crate) locator: String,
+    /// The valid message IDs of its `References` header, oldest first, at
+    /// most [`MAX_REFERENCES`].
+    pub(crate) references: Vec<String>,
+    /// Its `Date` header as sent, for a forward; bounded.
+    pub(crate) date: Option<String>,
     pub(crate) signals: Signals,
     /// The provider's own category, such as Gmail's `CATEGORY_PROMOTIONS`;
     /// IMAP has none.
@@ -221,6 +253,11 @@ impl Meta {
             list.iter_mut().for_each(address);
         }
         cut(&mut self.subject, MAX_SUBJECT_BYTES);
+        let excess = self.references.len().saturating_sub(MAX_REFERENCES);
+        self.references.drain(..excess);
+        if let Some(date) = &mut self.date {
+            cut(date, MAX_LABEL_BYTES);
+        }
         let signals = &mut self.signals;
         for (field, max) in [
             (&mut signals.list_id, MAX_NAME_BYTES),
@@ -256,8 +293,9 @@ pub(crate) struct PartText {
     pub(crate) truncated: bool,
 }
 
-/// What the source can do, probed at connection. The pipeline reads only;
-/// the rest is recorded for status.
+/// What the source can do, probed at connection: the provider's own
+/// extensions, and the actions it can carry out at all. An action the
+/// provider cannot do is never proposed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Caps {
     /// IMAP `IDLE`.
@@ -270,6 +308,49 @@ pub(crate) struct Caps {
     pub(crate) special_use: bool,
     /// IMAP `ID`.
     pub(crate) id: bool,
+    /// A message can be found by its `Message-ID`, so an interrupted
+    /// action can be checked.
+    pub(crate) find_by_message_id: bool,
+    /// The provider files sent mail in Sent by itself.
+    pub(crate) sent_autofile: bool,
+    /// Moving a message: with IMAP, `MOVE`, or `UIDPLUS` for copy and
+    /// expunge; always with an API.
+    pub(crate) can_move: bool,
+}
+
+/// Where the provider keeps its special folders, by their provider names
+/// (for IMAP the modified UTF-7 names); `None` when none was found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Folders {
+    pub(crate) drafts: Option<String>,
+    pub(crate) sent: Option<String>,
+    pub(crate) trash: Option<String>,
+    pub(crate) junk: Option<String>,
+    pub(crate) archive: Option<String>,
+}
+
+impl Folders {
+    pub(crate) fn get(&self, role: super::content::FolderRole) -> Option<&str> {
+        use super::content::FolderRole;
+        match role {
+            FolderRole::Drafts => self.drafts.as_deref(),
+            FolderRole::Sent => self.sent.as_deref(),
+            FolderRole::Trash => self.trash.as_deref(),
+            FolderRole::Junk => self.junk.as_deref(),
+            FolderRole::Archive => self.archive.as_deref(),
+        }
+    }
+}
+
+/// The owner's folder names for providers that do not mark their folders,
+/// as UTF-8; empty means none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FolderNames {
+    pub(crate) drafts: String,
+    pub(crate) sent: String,
+    pub(crate) trash: String,
+    pub(crate) junk: String,
+    pub(crate) archive: String,
 }
 
 /// A mailbox the pipeline reads, through a read-only connection or
@@ -303,6 +384,43 @@ pub(crate) trait MailSource: Send {
 
     /// What the connected source offers.
     fn caps(&self) -> Caps;
+
+    /// Where the special folders are: marked by the provider, or else named
+    /// by the owner and present. Never guessed, and never created.
+    async fn folders(&mut self, names: &FolderNames) -> Result<Folders>;
+}
+
+#[async_trait]
+impl<T: MailSource + ?Sized> MailSource for Box<T> {
+    async fn changes(
+        &mut self,
+        cursor: Option<&Cursor>,
+        limit: usize,
+        window_seconds: u64,
+    ) -> Result<Changes> {
+        (**self).changes(cursor, limit, window_seconds).await
+    }
+
+    async fn metadata(&mut self, refs: &[SourceRef]) -> Result<Vec<Meta>> {
+        (**self).metadata(refs).await
+    }
+
+    async fn text(
+        &mut self,
+        source: &SourceRef,
+        part: &PartRef,
+        max_bytes: usize,
+    ) -> Result<Option<PartText>> {
+        (**self).text(source, part, max_bytes).await
+    }
+
+    fn caps(&self) -> Caps {
+        (**self).caps()
+    }
+
+    async fn folders(&mut self, names: &FolderNames) -> Result<Folders> {
+        (**self).folders(names).await
+    }
 }
 
 #[cfg(test)]

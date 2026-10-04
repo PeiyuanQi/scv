@@ -11,7 +11,7 @@ use scv_client::Layout;
 use scv_protocol::{ComponentHealth, DaemonCommand, Purpose, RemoteTools, Senders};
 use std::path::Path;
 
-use super::args::{ChannelArg, ChannelsCommand};
+use super::args::{ChannelArg, ChannelsCommand, OAuthArg};
 use super::control;
 use super::prompt::read_secret;
 use super::status::show_status;
@@ -28,12 +28,21 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
             imap_port,
             user,
             slack_owner_user_id,
+            address,
+            smtp_host,
+            smtp_port,
+            smtp_starttls,
+            oauth,
+            client_id,
+            tenant,
+            write,
+            send,
         } => {
             if channel != ChannelArg::Slack && slack_owner_user_id.is_some() {
                 bail!("--slack-owner-user-id is a Slack option");
             }
-            if channel != ChannelArg::Email && imap_host.is_some() {
-                bail!("--imap-host, --imap-port, and --user are email options");
+            if channel != ChannelArg::Email && (imap_host.is_some() || oauth.is_some()) {
+                bail!("--imap-host, --user, --smtp-host, and --oauth are email options");
             }
             match channel {
                 ChannelArg::Wechat => {
@@ -96,26 +105,62 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
                     if login_url.is_some() || app_id.is_some() {
                         bail!("--login-url, --app-id, and --owner-open-id are chat options");
                     }
-                    let (Some(host), Some(username)) = (imap_host, user) else {
-                        bail!("email sign-in needs --imap-host and --user");
-                    };
-                    // Never an argument: argv is visible to every local user.
-                    let password =
-                        read_secret("Mailbox password or authorization code (input hidden)")?;
-                    Email::login(
-                        layout,
-                        &account,
-                        email::Login {
+                    let login = if let Some(oauth) = oauth {
+                        let Some(client_id) = client_id else {
+                            bail!("OAuth sign-in needs --client-id, your OAuth client's ID");
+                        };
+                        let provider = match oauth {
+                            OAuthArg::Gmail => email::oauth::OAuthProvider::Gmail,
+                            OAuthArg::Outlook => email::oauth::OAuthProvider::Graph,
+                        };
+                        if provider == email::oauth::OAuthProvider::Gmail && tenant.is_some() {
+                            bail!("--tenant is for --oauth outlook");
+                        }
+                        // Never an argument: argv is visible to every local user.
+                        let client_secret = (provider == email::oauth::OAuthProvider::Gmail)
+                            .then(|| read_secret("OAuth client secret (input hidden)"))
+                            .transpose()?
+                            .map(Into::into);
+                        email::Login::OAuth(email::oauth::Request {
+                            provider,
+                            client_id,
+                            client_secret,
+                            tenant: tenant.unwrap_or_else(|| "consumers".into()),
+                            write,
+                            send,
+                            interact: Box::new(Terminal::default()),
+                        })
+                    } else {
+                        let (Some(host), Some(username)) = (imap_host, user) else {
+                            bail!("email sign-in needs --imap-host and --user, or --oauth");
+                        };
+                        // Never an argument: argv is visible to every local user.
+                        let password =
+                            read_secret("Mailbox password or authorization code (input hidden)")?;
+                        let smtp = smtp_host.map(|host| email::Smtp {
+                            host,
+                            port: smtp_port.unwrap_or(if smtp_starttls { 587 } else { 465 }),
+                            security: if smtp_starttls {
+                                email::SmtpSecurity::Starttls
+                            } else {
+                                email::SmtpSecurity::Tls
+                            },
+                        });
+                        email::Login::Imap {
                             host,
                             port: imap_port,
                             username,
                             password: password.into(),
-                        },
-                    )
-                    .await?;
+                            address,
+                            smtp,
+                        }
+                    };
+                    Email::login(layout, &account, login).await?;
                     println!(
-                        "Mailbox signed in; SCV only reads it. Add [channels.email.{account}.mail] \
-                         with notify.route naming a mail chat before it runs; see `scv config show`."
+                        "Mailbox signed in. Add [channels.email.{account}.mail] with notify.route \
+                         naming a mail chat before it runs; it only reads mail unless \
+                         [channels.email.{account}.mail.actions] turns an action on. See `scv config \
+                         show`."
                     );
                 }
             }
@@ -162,7 +207,14 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
         ChannelsCommand::Status { channel, account } => {
             show_status(layout, channel.map(ChannelArg::name), account.as_deref()).await
         }
-        ChannelsCommand::Logout { channel, account } => {
+        ChannelsCommand::Logout {
+            channel,
+            account,
+            yes,
+        } => {
+            if channel == ChannelArg::Email {
+                refuse_open_actions(layout, &account, yes).await?;
+            }
             control(
                 layout,
                 DaemonCommand::ChannelLogout {
@@ -185,6 +237,71 @@ pub(crate) async fn channels(layout: &Layout, command: ChannelsCommand) -> Resul
             }
             Ok(())
         }
+    }
+}
+
+/// Refuse to log email account `account` out while mail actions wait,
+/// unless `yes`; say that one being carried out finishes first.
+async fn refuse_open_actions(layout: &Layout, account: &str, yes: bool) -> Result<()> {
+    let Ok(status) = control(layout, DaemonCommand::Status).await else {
+        // Logout needs the daemon anyway, and says so.
+        return Ok(());
+    };
+    let id = format!("{}:{account}", email::CHANNEL);
+    let Some(counts) = status
+        .components
+        .iter()
+        .find(|health| health.id == id)
+        .and_then(|health| health.mail.as_ref())
+    else {
+        return Ok(());
+    };
+    if counts.actions_executing > 0 {
+        println!(
+            "A mail action is being carried out; logout waits for it to finish (at most a minute)."
+        );
+    }
+    if counts.actions_open > 0 && !yes {
+        bail!(
+            "{} mail action(s) of {id} are waiting; logging out withdraws them. Run `scv mail \
+             status` to see them, or log out again with --yes",
+            counts.actions_open
+        );
+    }
+    Ok(())
+}
+
+/// Sign-in talking to the person at this terminal: it shows what to do,
+/// and reads a pasted address, one line at a time, from stdin.
+#[derive(Default)]
+struct Terminal {
+    lines: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+}
+
+impl email::oauth::Interact for Terminal {
+    fn show(&self, text: &str) {
+        eprintln!("{text}");
+    }
+
+    fn pasted(&self) -> email::oauth::Pasted<'_> {
+        Box::pin(async move {
+            let mut lines = self.lines.lock().await;
+            let receiver = lines.get_or_insert_with(|| {
+                let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                // One reader for the whole sign-in, so a line meant for a
+                // later grant is never taken by an earlier one.
+                std::thread::spawn(move || {
+                    for line in std::io::stdin().lines().map_while(Result::ok) {
+                        let line = line.trim().to_owned();
+                        if !line.is_empty() && sender.send(line).is_err() {
+                            break;
+                        }
+                    }
+                });
+                receiver
+            });
+            receiver.recv().await
+        })
     }
 }
 

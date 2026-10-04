@@ -30,6 +30,7 @@ pub(crate) struct Summary {
 /// One message's report: its sender and time on SCV's line, then its
 /// untrusted fields, the triage summary when there is one, and SCV's `note`
 /// about how it was triaged. At most [`MAX_ITEM_BYTES`].
+#[cfg(test)]
 pub(crate) fn report(
     meta: &Meta,
     summary: Option<&Summary>,
@@ -37,14 +38,30 @@ pub(crate) fn report(
     urgent: bool,
     offset: i32,
 ) -> String {
+    report_with(meta, summary, note, urgent, offset, None)
+}
+
+/// [`report`], naming the message by `handle` (without its `#`) when mail
+/// actions are on, so commands can name it.
+pub(crate) fn report_with(
+    meta: &Meta,
+    summary: Option<&Summary>,
+    note: Option<&str>,
+    urgent: bool,
+    offset: i32,
+    handle: Option<&str>,
+) -> String {
     let mut lines = Vec::new();
     let sender = meta
         .from
         .as_ref()
         .and_then(|from| valid_address(&from.address));
     lines.push(format!(
-        "{}{} · {} (sender not verified)",
+        "{}{}{} · {} (sender not verified)",
         if urgent { "! " } else { "" },
+        handle
+            .map(|handle| format!("#{handle} "))
+            .unwrap_or_default(),
         sender.as_deref().unwrap_or("(sender address not shown)"),
         clock(meta.received_at, offset),
     ));
@@ -289,6 +306,13 @@ pub(crate) fn digest(
             "{} mail{} could not be read.",
             counts.unreadable,
             plural(counts.unreadable)
+        ));
+    }
+    if counts.expired > 0 {
+        footer.push(format!(
+            "{} mail action{} expired without an answer.",
+            counts.expired,
+            plural(counts.expired)
         ));
     }
     if !footer.is_empty() {

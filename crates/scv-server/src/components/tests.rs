@@ -1,7 +1,7 @@
 //! Unit tests for `src/components.rs`.
 
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Wait for `condition`, polling, rather than for a fixed time that a busy
 /// machine may overrun.
@@ -371,4 +371,163 @@ fn slack_contact_failure_has_actionable_status_and_success_clears_it() {
     assert!(snapshot.error.unwrap().contains("Socket Mode is on"));
     reporter.contact(true);
     assert!(reporter.snapshot().error.is_none());
+}
+
+struct TimedStop {
+    grace: Option<Duration>,
+    /// How long the run takes to return after it is cancelled.
+    linger: Duration,
+    started: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Component for TimedStop {
+    async fn run(&self, cancellation: CancellationToken, _: HealthReporter) -> Result<()> {
+        self.started.store(true, Ordering::SeqCst);
+        cancellation.cancelled().await;
+        tokio::time::sleep(self.linger).await;
+        self.finished.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stop_grace(&self) -> Option<Duration> {
+        self.grace
+    }
+}
+
+/// Start `component` and stop it once `started` is set. The supervisor's own
+/// grace is `supervisor_grace`; the component may override it.
+async fn stop_once_started(
+    component: Arc<dyn Component>,
+    started: &AtomicBool,
+    id: &str,
+    supervisor_grace: Duration,
+) {
+    let mut supervisor = Supervisor {
+        grace: supervisor_grace,
+        ..Supervisor::default()
+    };
+    supervisor.start(
+        component,
+        initial_health(ChannelKind::Wechat, id, None, true),
+    );
+    wait_until(|| started.load(Ordering::SeqCst)).await;
+    tokio::time::timeout(Duration::from_secs(2), supervisor.shutdown())
+        .await
+        .expect("stop finished within the grace under test");
+}
+
+#[tokio::test]
+async fn a_component_is_stopped_with_its_own_grace_or_the_supervisor_default() {
+    let started = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    stop_once_started(
+        Arc::new(TimedStop {
+            // Longer than the supervisor's 40ms, and longer than the linger.
+            grace: Some(Duration::from_secs(2)),
+            linger: Duration::from_millis(150),
+            started: Arc::clone(&started),
+            finished: Arc::clone(&finished),
+        }),
+        &started,
+        "own-grace",
+        Duration::from_millis(40),
+    )
+    .await;
+    assert!(
+        finished.load(Ordering::SeqCst),
+        "a run that returns within its own grace is joined, not aborted"
+    );
+
+    let started = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    stop_once_started(
+        Arc::new(TimedStop {
+            grace: None,
+            linger: Duration::from_secs(30),
+            started: Arc::clone(&started),
+            finished: Arc::clone(&finished),
+        }),
+        &started,
+        "default-grace",
+        Duration::from_millis(40),
+    )
+    .await;
+    assert!(
+        !finished.load(Ordering::SeqCst),
+        "with no grace of its own, the supervisor's grace aborts a run that outlasts it"
+    );
+
+    let started = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    stop_once_started(
+        Arc::new(TimedStop {
+            grace: Some(Duration::from_millis(40)),
+            linger: Duration::from_secs(30),
+            started: Arc::clone(&started),
+            finished: Arc::clone(&finished),
+        }),
+        &started,
+        "short-grace",
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        !finished.load(Ordering::SeqCst),
+        "a run that outlasts its own grace is aborted even when the supervisor default is longer"
+    );
+    assert_eq!(ChannelKind::Wechat.stop_grace(), None);
+    assert_eq!(
+        ChannelKind::Email.stop_grace(),
+        Some(scv_channels::email::STOP_GRACE)
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_email_account_is_not_dropped_before_its_own_run_returns() {
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let account = ChannelAccount {
+        kind: ChannelKind::Email,
+        account: "../invalid".into(),
+        credentials: ChannelCredentials::Email(scv_channels::email::Account::Imap {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "user".into(),
+            password: "secret".into(),
+            address: None,
+            smtp: None,
+        }),
+        settings: AccountSettings::default(),
+        workspace: "/".into(),
+        instance: crate::test_support::test_instance("/missing"),
+        tools: false,
+        link: scv_channels::hub::Link::detached(),
+    };
+    assert_eq!(
+        account.stop_grace(),
+        Some(scv_channels::email::STOP_GRACE),
+        "an email account asks for long enough to finish an action"
+    );
+    let health = HealthReporter(Arc::new(Mutex::new(initial_health(
+        ChannelKind::Email,
+        "invalid",
+        None,
+        true,
+    ))));
+    let error = account
+        .run(cancellation, health.clone())
+        .await
+        .expect_err("an invalid account name fails inside the email run");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("invalid channel account name"),
+        "cancellation must not skip the email run: {message}"
+    );
+    assert!(
+        !message.contains("secret"),
+        "the failure must not carry the mailbox secret: {message}"
+    );
+    assert_eq!(health.snapshot().state, ComponentState::Disconnected);
 }

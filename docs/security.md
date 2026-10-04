@@ -515,13 +515,15 @@ a zero-click prompt-injection surface, so its text may exist only in these
 places:
 
 - a tool-free daemon session that the email account opens for one message
-  and closes after one turn, with no channel, in the account's empty private
-  directory, and with a fixed frame as its whole system prompt
-  (`session.start` `system_prompt`, allowed only with `no_tools: true`), and
-  the model provider that session calls;
-- the account's state file, in queued reports and the one message being
-  handed over, bounded by `max_queue`, 1.5 KiB per report, and
-  `retention.max_state_kib`;
+  (triage or one draft) and closes after one turn, with no channel, in the
+  account's empty private directory, and with a fixed frame as its whole
+  system prompt (`session.start` `system_prompt`, allowed only with
+  `no_tools: true`), and the model provider that session calls;
+- the account's state file, in queued reports, previews, and the one message
+  being handed over, bounded by `max_queue`, 1.5 KiB per report, 12 KiB per
+  preview, and `retention.max_state_kib`;
+- one action's content file, `state/mail/<account>/actions/<id>.json`, written
+  once, mode `0600`, and deleted when the action is over;
 - a mail chat's outbox, until the platform takes the message, and the mail
   chat on the platform.
 
@@ -546,10 +548,11 @@ configured system prompt. Every metadata field is cut to a fixed bound as it
 is read, and a turn whose frame and message would pass 128 KiB is never
 started, so a hostile mailbox cannot grow a prompt or the state without
 limit. It sees one message, between delimiter lines that
-carry a random nonce, and answers with one JSON object; code reads only
-`notify`, `urgent`, and the summary lines, so the model chooses no target,
-recipient, folder, or action, and a sender cannot steer another message's
-report. Any tool or approval event in a triage session ends it. What the
+carry a random nonce, and answers with one JSON object; code reads
+`notify`, `urgent`, the summary lines, and, only when `mail.actions.propose`
+lists them, a `move` of `archive`, `trash`, or `spam`. The model chooses no
+target, recipient, or folder. A suggestion is a proposal the owner still
+approves, and a sender cannot steer another message's report. Any tool or approval event in a triage session ends it. What the
 model or a sender wrote reaches the owner only on lines prefixed `│ `, with
 control, bidi, zero-width, and tag characters removed and links shown by
 their host; an HTML link shows where it really goes. SCV's own lines carry
@@ -557,18 +560,52 @@ only its words, counts, times, and addresses that are plain `local@domain`.
 Every report says the sender is not verified, and a `Reply-To` that differs
 from the sender is pointed out.
 
-This release cannot change a mailbox or send mail. The IMAP client offers
-only read commands and reads content only with `BODY.PEEK`, and under it a
-command guard checks every command whole, before any byte is written,
-against a read-only allowlist; a refused command fails the connection and is
-logged by its verb only. No SMTP, draft, move, flag, or delete code exists,
-and `mail.actions` is refused. The account connects over implicit TLS only,
-verified against the Mozilla root store.
+Changing a mailbox or sending mail is a separate path from triage, and it
+runs only when `mail.actions` turns a kind on. Without that table no writing
+credential is loaded and no executor starts: the IMAP reader offers only
+read commands and reads content only with `BODY.PEEK`, and under it a guard
+checks every command whole, before any byte is written, against a read-only
+allowlist. A refused command fails the connection and is logged by its verb
+only.
 
-Mail text is never written to disk as raw message bytes; attachments are
-never downloaded. The account logs counts, message numbers, and IMAP verbs,
-never an address, subject, body, or summary, and its status carries counts
-only. The mailbox password or authorization code is read from a hidden
+With actions on, the only code that can hand a connection a write is the
+ledger, and only as a sealed approval of one action. The executor recomputes
+the content file's digest and refuses any difference. The IMAP write guard,
+the SMTP guard, and the HTTP guard each allow only the commands of that
+seal: one UID, one folder, one flag, one append, or one API request. A mail
+API `GET` may refresh its token and try once more after HTTP 401. A `POST`
+or `PATCH` is never repeated after HTTP 401. Gmail and Graph document no
+deduplication key for those calls, so the outcome is unknown and is probed.
+A probe that does not find the change does not run the mutation again; the
+action ends unknown and the owner has to propose it again.
+Gmail and Graph use a reader grant for triage and a separate writer or
+sender grant for the action. A Gmail reader token that comes back allowed to write
+or send is refused at sign-in. Graph consent is per app, so a Graph token may
+list scopes from another grant of the same app; SCV still calls write and
+send endpoints only with the writer and sender grants, and only for a sealed
+action. Graph's send grant is `Mail.Send` and its write grant is
+`Mail.ReadWrite`. Gmail has no scope that changes the mailbox without also
+allowing send, so a Gmail write grant and a Gmail send grant both ask for
+`gmail.modify`; SCV still sends only when `send` is `"approve"` and the
+owner approves that message. IMAP connects over implicit TLS, and SMTP over
+implicit TLS or STARTTLS, both verified against the Mozilla root store.
+Approval is not a model decision: the owner types `approve` and the code in
+the mail chat, after the preview was delivered there, and `scv mail` cannot
+approve. `deny` and `deny all` are checked on that same boundary. An action
+is bound to a chat when it is proposed, and only that chat's owner can deny
+it; an action with no chat binding cannot be denied from another configured
+chat. A code from an earlier generation cannot deny the action the current
+code names. Asking for an action (a reply, forward, new mail, move, or mark)
+is bound the same way: only the owner of a chat the account reports to can
+ask, a handle or code reaches only an account that reports to the chat it
+was sent in, and `mail revise`, which supersedes a draft, follows deny's
+binding.
+
+Inbound mail is never written to disk as raw message bytes; attachments are
+never downloaded. The outgoing message of an approved action is that action's
+content file. The account logs counts, message numbers, and protocol verbs,
+never an address, subject, body, summary, code, or token, and its status
+carries counts only. The mailbox password or authorization code is read from a hidden
 prompt or stdin, never an argument, stored with mode `0600`, and never shown.
 Errors from the mail server, a refused sign-in's included, carry only its
 status and a response code from the standard set, never its text, which a
@@ -585,8 +622,13 @@ Residual risks:
 
 - Same-user code is trusted: any process running as the user can read the
   mailbox credential, which for IMAP providers such as QQ and 163 is as
-  powerful as the password, and can edit the account's state. A dedicated
-  mailbox limits what a leaked credential can do.
+  powerful as the password (it can send and move mail outside SCV), and can
+  edit the account's state, including approval codes. A Gmail `gmail.modify`
+  grant can send even when SCV's `send` setting is off. A dedicated mailbox
+  and separate OAuth grants limit what a leaked credential can do.
+- An approved action does what the preview showed. A misleading preview can
+  still be approved by the owner; the code checks recipients, the digest, and
+  the quota, and it does not judge whether the mail is wise to send.
 - Triage sends the headers and a cleaned body of up to `max_body_kib` of each
   triaged message to the configured model provider; `send_body = false`
   keeps bodies back, and rules can keep a message from any model.

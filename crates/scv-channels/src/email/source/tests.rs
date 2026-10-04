@@ -77,3 +77,13 @@ fn bounded_cuts_every_field_and_list_of_hostile_metadata() {
     let ordinary = meta(2, "alice@example.com", "Invoice");
     assert_eq!(ordinary.clone().bounded(), ordinary);
 }
+
+#[test]
+fn api_ids_reject_dot_segments_and_accept_ordinary_ids() {
+    assert!(SourceRef::valid_api_id("msg.1_A-b="));
+    assert!(!SourceRef::valid_api_id("."));
+    assert!(!SourceRef::valid_api_id(".."));
+    assert!(!SourceRef::valid_api_id("a..b"));
+    assert!(!SourceRef::valid_api_id(""));
+    assert!(!SourceRef::valid_api_id("ab/cd"));
+}

@@ -1174,7 +1174,7 @@ async fn a_mail_chat_answers_its_owner_with_fixed_replies_and_never_runs_a_model
                 ("re-m1", mail_chat::HELP_REPLY),
                 ("re-m2", mail_chat::NO_ACCOUNTS_REPLY),
                 ("re-m3", mail_chat::HELP_REPLY),
-                ("re-m4", mail_chat::LATER_REPLY),
+                ("re-m4", mail_chat::NOT_RUNNING_REPLY),
             ];
             for (reply_to, text) in expected {
                 assert_eq!(
@@ -1731,4 +1731,258 @@ async fn a_threads_origin_alone_is_not_enough_for_a_turn() {
             );
         })
         .await;
+}
+
+/// An email account on `hub` that reports to this bench's mail chat and takes
+/// commands.
+fn serving_mail(
+    hub: &Arc<hub::Hub>,
+    component: &str,
+) -> (
+    hub::MailRegistration,
+    tokio::sync::mpsc::Receiver<hub::MailRequest>,
+) {
+    let registration = hub.register_mail(component, vec!["fake:mail".into()]);
+    let (commands, requests) = tokio::sync::mpsc::channel(4);
+    registration.serve(commands);
+    (registration, requests)
+}
+
+/// The chat command `request` carries, and where its answer goes.
+fn chat_work(
+    request: hub::MailRequest,
+) -> (
+    mail_chat::MailCommand,
+    mail_chat::ChatEvidence,
+    tokio::sync::oneshot::Sender<hub::MailReply>,
+) {
+    let hub::MailWork::Chat { command, evidence } = request.work else {
+        panic!("a mail-chat command arrived as a daemon order");
+    };
+    (command, evidence, request.reply)
+}
+
+#[tokio::test]
+async fn an_owners_direct_approve_reaches_the_hub_and_the_answer_is_stored() {
+    let (bench, mut peer, hub, link) = mail_bench();
+    let (registration, mut requests) = serving_mail(&hub, "email:work");
+    assert!(registration.claim_code("Q7M2KD"));
+    let sent_ms = 1_700_000_000_123;
+    peer.push(vec![sent_at("m1", "owner", "approve Q7M2KD", sent_ms)]);
+    bench
+        .run_linked(&link, async {
+            let request = requests.recv().await.unwrap();
+            let (command, evidence, reply) = chat_work(request);
+            assert_eq!(
+                command,
+                mail_chat::MailCommand::Approve(vec!["Q7M2KD".into()])
+            );
+            assert_eq!(
+                (
+                    evidence.route.as_str(),
+                    evidence.peer.as_str(),
+                    evidence.message_id.as_str(),
+                    evidence.sent_ms
+                ),
+                ("fake:mail", "owner", "m1", Some(sent_ms))
+            );
+            reply
+                .send(hub::MailReply::Text("Approved Q7M2KD.".into()))
+                .unwrap();
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: "re-m1".into(),
+                    text: "Approved Q7M2KD.".into(),
+                }
+            );
+            eventually(|| bench.state().seen.iter().any(|seen| seen == "m1")).await;
+            let connected =
+                tokio::time::timeout(Duration::from_millis(100), peer.daemon.accept()).await;
+            assert!(connected.is_err(), "a mail chat opened a session");
+            assert_eq!(hub.last_owner(), None, "writing here is not the last chat");
+        })
+        .await;
+    assert!(!bench.directory.path().join("history").exists());
+    assert!(bench.state().mail_chat);
+}
+
+#[tokio::test]
+async fn a_quoted_forwarded_media_group_or_other_senders_message_is_never_a_command() {
+    let (bench, mut peer, hub, link) = mail_bench();
+    let (registration, mut requests) = serving_mail(&hub, "email:work");
+    assert!(registration.claim_code("Q7M2KD"));
+    let mut quoted = Message::text("quoted", "owner", "approve Q7M2KD", "re-quoted", None);
+    quoted.quoted = true;
+    quoted.sent_ms = Some(1);
+    let mut forwarded = Message::text("forwarded", "owner", "approve Q7M2KD", "re-forwarded", None);
+    forwarded.reference = Some("earlier".into());
+    forwarded.sent_ms = Some(1);
+    let mut with_media = Message::text("media", "owner", "approve Q7M2KD", "re-media", None);
+    with_media.media.push(Media {
+        kind: MediaKind::File,
+        name: "note.txt".into(),
+        size: None,
+        mime: None,
+        transcript: None,
+        source: "file".into(),
+    });
+    with_media.sent_ms = Some(1);
+    let mut group = Message::text("group", "owner", "approve Q7M2KD", "re-group", Some("room"));
+    group.sent_ms = Some(1);
+    peer.push(vec![
+        Inbound::Text(quoted),
+        Inbound::Text(forwarded),
+        Inbound::Text(with_media),
+        Inbound::Text(group),
+        sent_at("stranger", "stranger", "approve Q7M2KD", 1),
+        sent_at("ok", "owner", "approve Q7M2KD", 9),
+    ]);
+    bench
+        .run_linked(&link, async {
+            let request = requests.recv().await.unwrap();
+            let (command, evidence, reply) = chat_work(request);
+            assert_eq!(
+                command,
+                mail_chat::MailCommand::Approve(vec!["Q7M2KD".into()]),
+                "only the owner's plain message is a command"
+            );
+            assert_eq!(evidence.message_id, "ok");
+            reply
+                .send(hub::MailReply::Text("Approved Q7M2KD.".into()))
+                .unwrap();
+            for reply_to in ["re-quoted", "re-forwarded", "re-media"] {
+                assert_eq!(
+                    peer.sent().await,
+                    Sent {
+                        to: "owner".into(),
+                        reply_to: reply_to.into(),
+                        text: mail_chat::HELP_REPLY.into(),
+                    },
+                    "a quote, a forward, or a file is help, not a command"
+                );
+            }
+            assert_eq!(peer.sent().await.text, "Approved Q7M2KD.");
+            eventually(|| bench.state().seen.len() == 6).await;
+            assert!(
+                requests.try_recv().is_err(),
+                "no other message was a command"
+            );
+            assert!(
+                peer.sent.try_recv().is_err(),
+                "a group or a stranger got a reply"
+            );
+            assert_eq!(*bench.transport.downloads.lock().unwrap(), 0);
+            let connected =
+                tokio::time::timeout(Duration::from_millis(100), peer.daemon.accept()).await;
+            assert!(connected.is_err(), "a mail chat opened a session");
+            assert_eq!(hub.last_owner(), None);
+        })
+        .await;
+    assert!(!bench.directory.path().join("history").exists());
+}
+
+#[tokio::test]
+async fn mail_status_joins_the_counts_with_each_accounts_status() {
+    let (bench, mut peer, hub, link) = mail_bench();
+    let (alpha, mut alpha_requests) = serving_mail(&hub, "email:alpha");
+    let (zeta, mut zeta_requests) = serving_mail(&hub, "email:zeta");
+    alpha.set_counts(scv_protocol::MailCounts {
+        seen_today: 4,
+        token_budget: 0,
+        ..Default::default()
+    });
+    zeta.set_counts(scv_protocol::MailCounts {
+        seen_today: 1,
+        queued: 2,
+        token_budget: 0,
+        ..Default::default()
+    });
+    let _elsewhere = hub.register_mail("email:elsewhere", vec!["fake:other".into()]);
+    peer.push(vec![message("m1", "owner", "mail status")]);
+    bench
+        .run_linked(&link, async {
+            let (alpha_command, alpha_evidence, alpha_reply) =
+                chat_work(alpha_requests.recv().await.unwrap());
+            let (zeta_command, _, zeta_reply) = chat_work(zeta_requests.recv().await.unwrap());
+            assert_eq!(alpha_command, mail_chat::MailCommand::Status);
+            assert_eq!(zeta_command, mail_chat::MailCommand::Status);
+            assert_eq!(alpha_evidence.message_id, "m1");
+            assert_eq!(alpha_evidence.route, "fake:mail");
+            assert_eq!(alpha_evidence.peer, "owner");
+            alpha_reply
+                .send(hub::MailReply::Text("alpha: 1 waiting.".into()))
+                .unwrap();
+            zeta_reply
+                .send(hub::MailReply::Text("zeta: 2 waiting.".into()))
+                .unwrap();
+            let text = peer.sent().await.text;
+            assert!(
+                text.starts_with("email:alpha: 4 new today"),
+                "counts come first: {text}"
+            );
+            assert!(
+                text.contains("email:zeta: 1 new today") && text.contains("2 waiting to be sent"),
+                "every account reporting here is counted: {text}"
+            );
+            assert!(
+                text.contains("alpha: 1 waiting.\nzeta: 2 waiting."),
+                "each account's status follows the counts: {text}"
+            );
+            assert!(!text.contains("email:elsewhere"), "{text}");
+            let connected =
+                tokio::time::timeout(Duration::from_millis(100), peer.daemon.accept()).await;
+            assert!(connected.is_err(), "a mail chat opened a session");
+        })
+        .await;
+    assert!(!bench.directory.path().join("history").exists());
+}
+
+#[tokio::test]
+async fn the_same_mail_command_handed_over_twice_is_answered_once() {
+    let (bench, mut peer, hub, link) = mail_bench();
+    let (registration, mut requests) = serving_mail(&hub, "email:work");
+    assert!(registration.claim_code("Q7M2KD"));
+    let again = || message("m1", "owner", "approve Q7M2KD");
+    peer.push(vec![again(), again()]);
+    peer.push(vec![again()]);
+    bench
+        .run_linked(&link, async {
+            let request = requests.recv().await.unwrap();
+            let (command, evidence, reply) = chat_work(request);
+            assert_eq!(
+                command,
+                mail_chat::MailCommand::Approve(vec!["Q7M2KD".into()])
+            );
+            assert_eq!(evidence.message_id, "m1");
+            reply
+                .send(hub::MailReply::Text("Approved Q7M2KD.".into()))
+                .unwrap();
+            assert_eq!(peer.sent().await.text, "Approved Q7M2KD.");
+            eventually(|| bench.state().cursor == "c2").await;
+            assert_eq!(
+                bench
+                    .state()
+                    .seen
+                    .iter()
+                    .filter(|seen| seen.as_str() == "m1")
+                    .count(),
+                1,
+                "the message is remembered once"
+            );
+            assert!(
+                requests.try_recv().is_err(),
+                "the same message was read as a command again"
+            );
+            assert!(
+                peer.sent.try_recv().is_err(),
+                "the same message was answered again"
+            );
+            let connected =
+                tokio::time::timeout(Duration::from_millis(100), peer.daemon.accept()).await;
+            assert!(connected.is_err(), "a mail chat opened a session");
+        })
+        .await;
+    assert!(!bench.directory.path().join("history").exists());
 }

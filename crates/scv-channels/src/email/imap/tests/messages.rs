@@ -5,9 +5,9 @@ use super::*;
 use crate::email::source::{Address, AttachmentInfo};
 
 const METADATA_ITEMS: &str = "(UID INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE \
-BODY.PEEK[HEADER.FIELDS (MESSAGE-ID LIST-ID LIST-UNSUBSCRIBE PRECEDENCE AUTO-SUBMITTED RETURN-PATH)])";
+BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES LIST-ID LIST-UNSUBSCRIBE PRECEDENCE AUTO-SUBMITTED RETURN-PATH)])";
 
-const HEADER_KEY: &str = "BODY[HEADER.FIELDS (MESSAGE-ID LIST-ID LIST-UNSUBSCRIBE PRECEDENCE AUTO-SUBMITTED RETURN-PATH)]";
+const HEADER_KEY: &str = "BODY[HEADER.FIELDS (MESSAGE-ID REFERENCES LIST-ID LIST-UNSUBSCRIBE PRECEDENCE AUTO-SUBMITTED RETURN-PATH)]";
 
 fn address(name: &str, address: &str) -> Address {
     Address {
@@ -100,6 +100,15 @@ async fn metadata_reads_headers_envelope_and_structure_in_ref_order() {
             cc: vec![address("", "cc@example.org")],
             subject: "Invoice 42".to_owned(),
             message_id: Some("<hdr@example.com>".to_owned()),
+            locator: parse::locator(
+                Some(b"<hdr@example.com>"),
+                " 7-Sep-2026 08:05:09 +0000",
+                2048,
+                "alice@example.com",
+                "Invoice 42",
+            ),
+            references: Vec::new(),
+            date: metas[0].date.clone(),
             signals: Signals {
                 list_id: Some("Billing <billing.example.com>".to_owned()),
                 list_unsubscribe: true,

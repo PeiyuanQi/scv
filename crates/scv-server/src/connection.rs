@@ -500,7 +500,7 @@ impl Connection {
                 self.reject(&request_id, ErrorCode::ConfirmError, &message)
                     .await?;
             }
-            Err(ControlFailure::Project(message)) => {
+            Err(ControlFailure::Project(message) | ControlFailure::Mail(message)) => {
                 self.reject(&request_id, ErrorCode::ComponentError, &message)
                     .await?;
             }

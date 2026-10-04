@@ -9,6 +9,8 @@ fn account(host: &str, username: &str, password: &str) -> Account {
         port: 993,
         username: username.into(),
         password: password.into(),
+        address: None,
+        smtp: None,
     }
 }
 
@@ -70,6 +72,8 @@ fn validation_refuses_what_cannot_be_a_mailbox_login() {
     ] {
         assert!(bad.validate().is_err(), "{bad:?}");
     }
-    let Account::Imap { host, .. } = account("imap.qq.com", "me", "code");
+    let Account::Imap { host, .. } = account("imap.qq.com", "me", "code") else {
+        unreachable!("an IMAP account");
+    };
     assert_eq!(host, "imap.qq.com");
 }

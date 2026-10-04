@@ -24,6 +24,9 @@ fn meta() -> Meta {
         cc: Vec::new(),
         subject: "Contract renewal".into(),
         message_id: None,
+        locator: "locator".into(),
+        references: Vec::new(),
+        date: None,
         signals: Signals::default(),
         category: None,
         text: None,
@@ -161,6 +164,7 @@ fn a_digest_says_what_it_carries_and_what_it_left_out() {
         class,
         urgent,
         text: text.into(),
+        actions: Vec::new(),
     };
     let base = 20_000 * 86_400 + 9 * 3600 + 12 * 60;
     let items = [
@@ -181,6 +185,7 @@ fn a_digest_says_what_it_carries_and_what_it_left_out() {
         unlisted: 2,
         unlisted_since: Some(base - 3600),
         unreadable: 1,
+        expired: 0,
     };
     let text = digest(
         "default",

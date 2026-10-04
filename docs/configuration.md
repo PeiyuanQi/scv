@@ -51,7 +51,10 @@ six places:
 │   ├── wechat/<account>.json
 │   ├── feishu/<account>.json
 │   ├── slack/<account>.json
-│   └── email/<account>.json   a mailbox's server, user, and password or code
+│   ├── email/<account>.json   a mailbox: IMAP's server, user, and password or
+│   │                          code (and SMTP server); for Gmail or Outlook the
+│   │                          address and OAuth client
+│   └── email/<account>.grants an OAuth mailbox's refresh tokens (0600)
 ├── agents/<name>/     private homes of the delegated agents (claude, codex,
 │                      grok, dsh, pi, scv), with their own sign-ins
 ├── skills/            your SCV skills
@@ -74,7 +77,10 @@ six places:
     ├── channels/<channel>/<account>.json, .lock, .transaction
     │                  (for email: the mail account's cursor, claims, and
     │                  queued reports)
-    └── mail/<account>/empty/  the working directory of mail triage sessions
+    └── mail/<account>/
+        ├── empty/     the working directory of tool-free mail sessions
+        ├── actions/<id>.json  a mail action's content, bound by its digest
+        └── audit.jsonl, audit.jsonl.pending  the mail actions' audit log
 ```
 
 The rules behind it:
@@ -835,8 +841,9 @@ as a mail chat it refuses to run as an ordinary one until logout.
 
 ### Mail accounts
 
-`scv channels login email --imap-host HOST --user NAME [--imap-port 993]
-[--account NAME]` signs a mailbox in (see [Email](channels.md#email)). An
+`scv channels login email` signs a mailbox in over IMAP, with an optional
+SMTP server, or with `--oauth gmail` or `--oauth outlook` (see
+[Email](channels.md#email)). An
 email account's table holds `enabled` and a `mail` table, and takes no
 `workspace`, `remote_tools`, `senders`, or `purpose`. The daemon's
 configuration keeps `mail` opaque: the account reads it strictly when it
@@ -890,6 +897,46 @@ give_up_hours = 72           # 1–168
 max_state_kib = 2048         # 512–16384
 min_free_mib = 64            # 16–4096
 sweep_minutes = 60           # 5–1440
+tombstone_days = 30          # 7–365; finished codes stay remembered
+unknown_keep_days = 3        # 1–30; an action lost mid-flight, for a later check
+max_actions_mib = 8          # 1–256; pending action content
+audit_days = 90              # 7–730
+max_audit_kib = 4096         # 64–65536
+
+# Absent, the account only reads: no writer is loaded and no executor runs.
+# Each kind is "off" or "approve". No other value exists.
+[channels.email.default.mail.actions]
+draft = "off"
+send = "off"
+forward = "off"
+archive = "off"
+mark_read = "off"
+trash = "off"
+spam = "off"
+propose = []                 # archive, trash, spam; each must itself be "approve"
+reply_instructions = ""      # ≤ 4 KiB, for drafting turns
+compose_model = ""           # empty uses the daemon's default
+max_compose_per_day = 20     # 0–200
+reply_to = "honor"           # or "ignore": Reply-To, or always the sender
+reply_all = false
+recipient_domains = []       # empty allows any domain; else those and their subdomains
+max_recipients = 10          # 1–10, to and cc together
+approval_hours = 24          # 1–168, once the preview was delivered
+max_pending_hours = 72       # approval_hours–336, from the proposal
+execute_minutes = 15         # 1–120, after approval, before it must start
+max_open = 32                # 1–128 waiting or under way
+max_sends_per_day = 20       # 0–500
+max_drafts_per_day = 50      # 0–1000
+max_moves_per_day = 100      # 0–1000
+max_flags_per_day = 200      # 0–1000
+drafts_folder = ""           # IMAP without SPECIAL-USE; empty finds the mark
+sent_folder = ""
+trash_folder = ""
+spam_folder = ""
+archive_folder = ""
+sent_copy = "provider"       # or "append": SCV copies the send into Sent over IMAP
+from_name = ""               # ≤ 64 characters, one line
+handle_days = 14             # 1–60; how long #H works in a command
 ```
 
 Rules match on what code can check without a model: `from`, `list_id`,
@@ -902,9 +949,13 @@ built-in ones: bulk and automated mail is counted, no-reply senders are
 reported by their headers, and the rest is triaged. `urgent` has matching
 mail reported as urgent, within `max_urgent_per_hour`.
 
-This release cannot write to a mailbox or send mail: a `mail.actions` table
-(drafts, sending, moving mail) is refused with "not available in this
-release".
+`mail.actions` is optional. Without it the account only reads. With it,
+each kind stays off until it is `"approve"`. `propose` may name `archive`,
+`trash`, or `spam` only when that kind is `"approve"`. `max_queue` × 1.5 KiB
+and `max_open` × 12 KiB together must fit in three quarters of
+`max_state_kib`. `forward` does not send by itself: a forward is saved or
+sent only when `draft` or `send` is also `"approve"`. See
+[Email](channels.md#email).
 
 For an offline opt-out, set `enabled = false` in the account's table before
 starting the daemon. Keep channel directories mode

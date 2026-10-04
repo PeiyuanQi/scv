@@ -1,7 +1,10 @@
-//! Connecting to an IMAP server over implicit TLS.
+//! Connecting to a mail server over TLS.
 //!
-//! Only implicit TLS (port 993 style) is offered: no STARTTLS, whose
-//! plaintext prelude can be stripped, and never plaintext. Certificates are
+//! IMAP uses implicit TLS only (port 993 style): no STARTTLS, whose
+//! plaintext prelude can be stripped, and never plaintext. SMTP uses
+//! implicit TLS (port 465) or, when the owner says so, STARTTLS (port 587),
+//! upgraded with [`upgrade`] before anything but the greeting and `EHLO` is
+//! sent; a server that refuses the upgrade is never used. Certificates are
 //! checked against the Mozilla roots bundled in `webpki-roots`, so the
 //! host's trust store cannot widen what is accepted.
 
@@ -20,20 +23,51 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// The TLS handshake once connected.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// A TLS connection to `host:port`, the certificate verified for `host`.
+/// A TLS connection to the IMAP server `host:port`, the certificate
+/// verified for `host`.
 pub(crate) async fn connect(host: &str, port: u16) -> Result<TlsStream<TcpStream>> {
-    let name = ServerName::try_from(host.to_owned())
-        .context("the IMAP host is not a valid server name")?;
+    connect_to(host, port, "IMAP").await
+}
+
+/// A TLS connection to the `what` (`IMAP`, `SMTP`) server `host:port`.
+pub(crate) async fn connect_to(
+    host: &str,
+    port: u16,
+    what: &'static str,
+) -> Result<TlsStream<TcpStream>> {
+    server_name(host, what)?;
+    let tcp = tcp(host, port, what).await?;
+    upgrade(host, tcp, what).await
+}
+
+/// `host` as the name its certificate must carry.
+fn server_name(host: &str, what: &'static str) -> Result<ServerName<'static>> {
+    ServerName::try_from(host.to_owned())
+        .with_context(|| format!("the {what} host is not a valid server name"))
+}
+
+/// A plain TCP connection to `host:port`, for a protocol that upgrades it.
+pub(crate) async fn tcp(host: &str, port: u16, what: &'static str) -> Result<TcpStream> {
     let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
         .await
-        .context("connecting to the IMAP server timed out")?
-        .context("could not connect to the IMAP server")?;
+        .with_context(|| format!("connecting to the {what} server timed out"))?
+        .with_context(|| format!("could not connect to the {what} server"))?;
     tcp.set_nodelay(true)?;
+    Ok(tcp)
+}
+
+/// TLS over `tcp`, the certificate verified for `host`.
+pub(crate) async fn upgrade(
+    host: &str,
+    tcp: TcpStream,
+    what: &'static str,
+) -> Result<TlsStream<TcpStream>> {
+    let name = server_name(host, what)?;
     let connector = TlsConnector::from(Arc::new(client_config()?));
     timeout(HANDSHAKE_TIMEOUT, connector.connect(name, tcp))
         .await
-        .context("the TLS handshake with the IMAP server timed out")?
-        .context("the TLS handshake with the IMAP server failed")
+        .with_context(|| format!("the TLS handshake with the {what} server timed out"))?
+        .with_context(|| format!("the TLS handshake with the {what} server failed"))
 }
 
 fn client_config() -> Result<rustls::ClientConfig> {
