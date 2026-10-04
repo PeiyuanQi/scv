@@ -6,6 +6,11 @@
 //! Each call that starts a job, or shows the model a job's result, leaves a
 //! [`JobChange`] under its call ID, which the server hands to the session's
 //! clients with the call's `tool.completed` ([`BackgroundJobs::take_changes`]).
+//!
+//! A finished job stays unreported until a report turn about it succeeds. A
+//! failed one makes it due again after a delay, a bounded number of times;
+//! after that, or when another turn must not be tried, the server reports it
+//! to the client directly ([`BackgroundJobs::report_failed`]).
 
 use std::{
     path::PathBuf,
@@ -18,7 +23,7 @@ use scv_core::{
     ApprovalGate, ProgressSink, Tool, ToolApprovals, ToolContext, ToolError, ToolOutput, ToolRisk,
     ToolSpec,
 };
-use scv_protocol::{JobChange, JobStatus};
+use scv_protocol::{JobChange, JobReport, JobStatus, describe_reports};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
@@ -39,6 +44,10 @@ const MAX_FINISHED: usize = 16;
 const REPORT_REPLY_CHARS: usize = 6000;
 /// Jobs one report turn covers; any more wait for the next.
 const REPORT_MAX_JOBS: usize = 4;
+/// How long after each failed report turn the next one is due: after the
+/// first failure, then after the second. Once they run out, the job is
+/// reported directly.
+const REPORT_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(120)];
 /// How long `agent_cancel` waits for a stopped job to settle.
 const CANCEL_SETTLE: Duration = Duration::from_secs(10);
 /// Job changes kept for calls whose `tool.completed` has not taken them,
@@ -108,9 +117,16 @@ struct Job {
     cancelled: bool,
     outcome: Option<Outcome>,
     /// The model has seen the result (through `agent_wait`, `agent_status`,
-    /// or a report turn), or asked for the stop with `agent_cancel`, so it
-    /// needs no report turn.
+    /// or a report turn that completed), the user stopped its report turn,
+    /// the server reported it directly, or the model asked for the stop with
+    /// `agent_cancel`, so it needs no report turn.
     reported: bool,
+    /// A report turn about it runs.
+    reporting: bool,
+    /// Report turns about it that failed.
+    report_attempts: u32,
+    /// After a failed report turn: when the next one is due.
+    report_due: Option<tokio::time::Instant>,
     done: watch::Receiver<bool>,
 }
 
@@ -119,15 +135,19 @@ struct Outcome {
     elapsed: Duration,
 }
 
-/// A finished job not yet seen by the model, for a server-started report turn.
-#[derive(Debug, Clone)]
-pub struct JobReport {
-    pub job: String,
-    /// The agent that ran it, such as `codex`.
-    pub(crate) agent: String,
-    pub(crate) status: JobStatus,
-    pub(crate) session: Option<String>,
-    pub(crate) reply: String,
+/// What a failed report turn leaves its jobs to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReportFailure {
+    /// Another report turn about them is due after this long.
+    Retry(Duration),
+    /// No more report turns: the server reports them directly. `attempts`
+    /// counts the report turns that failed.
+    GiveUp {
+        attempts: u32,
+        reports: Vec<JobReport>,
+    },
+    /// The model saw each of them through a call during the turn.
+    Settled,
 }
 
 impl Drop for BackgroundJobs {
@@ -223,6 +243,9 @@ impl BackgroundJobs {
                 cancelled: false,
                 outcome: None,
                 reported: false,
+                reporting: false,
+                report_attempts: 0,
+                report_due: None,
                 done,
             });
             (id, progress, done_tx, cancel)
@@ -362,34 +385,110 @@ impl BackgroundJobs {
         taken
     }
 
-    /// Finished jobs the model has not seen yet, marked seen, for a report
-    /// turn. At most a few per call; the rest stay for the next.
+    /// Finished jobs the model has not seen yet whose report is due, at most
+    /// a few, for a report turn. Each stays unreported, and is not taken
+    /// again, until the turn ends: [`report_settled`](Self::report_settled)
+    /// or [`report_failed`](Self::report_failed).
     pub fn take_unreported(&self) -> Vec<JobReport> {
+        let now = tokio::time::Instant::now();
         let mut state = self.state();
         state
             .jobs
             .iter_mut()
-            .filter(|job| job.outcome.is_some() && !job.reported)
+            .filter(|job| job.awaits_report() && job.report_due.is_none_or(|due| due <= now))
             .take(REPORT_MAX_JOBS)
-            .map(|job| {
-                job.reported = true;
-                let outcome = job.outcome.as_ref().expect("filtered on outcome");
-                let reply = AgentReply::read(&result_value(&outcome.output)).unwrap_or_default();
-                JobReport {
-                    job: job.id.clone(),
-                    agent: job.agent.clone(),
-                    status: job_status(&outcome.output, &reply),
-                    session: reply.session,
-                    reply: bounded(
-                        reply
-                            .reply
-                            .as_deref()
-                            .unwrap_or(outcome.output.content.as_str()),
-                        REPORT_REPLY_CHARS,
-                    ),
-                }
+            .filter_map(|job| {
+                job.reporting = true;
+                job.report()
             })
             .collect()
+    }
+
+    /// The report turn about `jobs` ended without failing: it completed, so
+    /// the model has seen them, or the user cancelled it. Either settles them.
+    pub fn report_settled(&self, jobs: &[String]) {
+        let mut state = self.state();
+        for job in state.jobs.iter_mut().filter(|job| jobs.contains(&job.id)) {
+            job.reporting = false;
+            job.reported = true;
+            job.report_due = None;
+        }
+    }
+
+    /// The report turn about `jobs` failed, so the model has not seen them
+    /// (a failed turn leaves no history). With `retry`, another turn is due
+    /// after a delay, up to three turns in all; otherwise, or once they are
+    /// used up, the jobs are settled and returned for the server to report
+    /// directly. A turn that reported several jobs decides for all of them,
+    /// by the one that failed most.
+    pub fn report_failed(&self, jobs: &[String], retry: bool) -> ReportFailure {
+        let mut state = self.state();
+        let mut failed: Vec<&mut Job> = state
+            .jobs
+            .iter_mut()
+            .filter(|job| job.reporting && jobs.contains(&job.id))
+            .collect();
+        for job in &mut failed {
+            job.reporting = false;
+            job.report_attempts += 1;
+        }
+        // One the turn's model looked up through a call is settled already.
+        failed.retain(|job| !job.reported);
+        let Some(attempts) = failed.iter().map(|job| job.report_attempts).max() else {
+            return ReportFailure::Settled;
+        };
+        let delay = usize::try_from(attempts - 1)
+            .ok()
+            .and_then(|earlier| REPORT_RETRY_DELAYS.get(earlier));
+        if retry && let Some(&delay) = delay {
+            let due = tokio::time::Instant::now() + delay;
+            for job in failed {
+                job.report_due = Some(due);
+            }
+            return ReportFailure::Retry(delay);
+        }
+        let reports = failed
+            .into_iter()
+            .filter_map(|job| {
+                job.reported = true;
+                job.report_due = None;
+                job.report()
+            })
+            .collect();
+        ReportFailure::GiveUp { attempts, reports }
+    }
+
+    /// Make every report waiting out a failed turn due now, as once a turn
+    /// succeeds and the model is evidently reachable again. Whether any was
+    /// waiting.
+    pub fn retry_now(&self) -> bool {
+        let mut state = self.state();
+        let mut waiting = false;
+        for job in state.jobs.iter_mut().filter(|job| job.awaits_report()) {
+            waiting |= job.report_due.take().is_some();
+        }
+        waiting
+    }
+
+    /// When the earliest report waiting out a failed turn is due; it may
+    /// already have passed.
+    pub fn next_retry(&self) -> Option<tokio::time::Instant> {
+        self.state()
+            .jobs
+            .iter()
+            .filter(|job| job.awaits_report())
+            .filter_map(|job| job.report_due)
+            .min()
+    }
+
+    /// Jobs still running or whose result is not reported yet, including
+    /// those a report turn is reporting now.
+    pub fn pending(&self) -> usize {
+        self.state()
+            .jobs
+            .iter()
+            .filter(|job| job.outcome.is_none() || !job.reported)
+            .count()
     }
 
     /// Whether any job is still running.
@@ -437,6 +536,31 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
 }
 
 impl Job {
+    /// Finished, unseen by the model, and not in a report turn.
+    fn awaits_report(&self) -> bool {
+        self.outcome.is_some() && !self.reported && !self.reporting
+    }
+
+    /// The finished job's result, for a report.
+    fn report(&self) -> Option<JobReport> {
+        let outcome = self.outcome.as_ref()?;
+        let reply = AgentReply::read(&result_value(&outcome.output)).unwrap_or_default();
+        Some(JobReport {
+            job: self.id.clone(),
+            agent: self.agent.clone(),
+            task: self.task.clone(),
+            status: job_status(&outcome.output, &reply),
+            session: reply.session,
+            reply: bounded(
+                reply
+                    .reply
+                    .as_deref()
+                    .unwrap_or(outcome.output.content.as_str()),
+                REPORT_REPLY_CHARS,
+            ),
+        })
+    }
+
     /// This job with `status`, as its clients learn of it.
     fn change(&self, status: JobStatus) -> JobChange {
         JobChange {
@@ -538,25 +662,24 @@ fn unknown_job(job: &str) -> ToolError {
 
 /// The server-started turn that reports finished jobs to the model.
 pub fn report_prompt(reports: &[JobReport]) -> String {
-    let mut prompt = String::from(
+    format!(
         "[SCV background report] Delegated work you started in the background has \
          finished. The user did not send this message: tell them briefly what \
-         happened and the key result.\n",
-    );
-    for report in reports {
-        prompt.push_str(&format!(
-            "\n{} ({}{}): {}\n{}\n",
-            report.job,
-            report.agent,
-            report
-                .session
-                .as_deref()
-                .map_or_else(String::new, |session| format!(", conversation {session}")),
-            report.status,
-            report.reply.trim()
-        ));
-    }
-    prompt
+         happened and the key result.\n\n{}",
+        describe_reports(reports)
+    )
+}
+
+/// What the model is told of jobs the server reported directly, because
+/// their report turns failed with `error`: the user has their results.
+pub fn delivered_note(reports: &[JobReport], error: &str) -> String {
+    format!(
+        "[SCV background report, already delivered] Delegated work you started in \
+         the background has finished. Your report of it failed ({error}), so SCV \
+         sent the user the results below directly. The user did not send this \
+         message; repeat the results only if they ask.\n\n{}",
+        describe_reports(reports)
+    )
 }
 
 /// The `agent` tool, able to run a call in the background as well.

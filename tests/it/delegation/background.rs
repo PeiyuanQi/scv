@@ -1,6 +1,7 @@
 //! Background delegations: an `agent` call with `background: true` returns
 //! a job at once, and when the job finishes the server reports it in a turn
-//! of its own unless the model already waited for it.
+//! of its own unless the model already waited for it. A report turn that
+//! fails is tried again, or the result goes to the client directly.
 
 use crate::support::{Isolated, call, read_http_request, sse_response, text, write_private};
 use serde_json::{Value, json};
@@ -25,25 +26,52 @@ use tokio::{
 /// A provider answering each request with the next body, passing on every
 /// request body it received.
 fn serve_provider(listener: TcpListener, bodies: Vec<String>) -> mpsc::Receiver<String> {
+    serve_responses(
+        listener,
+        bodies.iter().map(|body| sse_response(body)).collect(),
+    )
+}
+
+/// A provider answering each request with the next whole HTTP response.
+fn serve_responses(listener: TcpListener, responses: Vec<String>) -> mpsc::Receiver<String> {
     let (requests, received) = mpsc::channel();
     thread::spawn(move || {
-        for body in bodies {
+        for response in responses {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = StdBufReader::new(stream);
             let request = read_http_request(&mut reader);
             let _ = requests.send(String::from_utf8_lossy(&request).into_owned());
-            reader
-                .get_mut()
-                .write_all(sse_response(&body).as_bytes())
-                .unwrap();
+            reader.get_mut().write_all(response.as_bytes()).unwrap();
         }
     });
     received
 }
 
+/// An HTTP error response with a JSON `body`.
+fn http_error(status: &str, body: &Value) -> String {
+    let body = body.to_string();
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// What a relay with no upstream for the model answers.
+fn model_not_available() -> String {
+    http_error(
+        "503 Service Unavailable",
+        &json!({"error":{"message":"sub2api: MODEL_NOT_AVAILABLE ()","type":"new_api_error","code":"query_data_error"}}),
+    )
+}
+
 /// An SCV home whose Codex, the user's preferred agent, is a script that
 /// works for about a second.
 fn home_with_fake_codex() -> (tempfile::TempDir, std::path::PathBuf) {
+    home_with_fake_codex_and("")
+}
+
+/// [`home_with_fake_codex`] with `extra` configuration appended.
+fn home_with_fake_codex_and(extra: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let home = tempfile::tempdir().unwrap();
     let home_path = std::fs::canonicalize(home.path()).unwrap();
     let agent = home_path.join("fake-codex");
@@ -62,7 +90,7 @@ fn home_with_fake_codex() -> (tempfile::TempDir, std::path::PathBuf) {
     write_private(
         &home_path.join("config.toml"),
         &format!(
-            "[agent]\nprefer = [\"codex\"]\n\n[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\n",
+            "[agent]\nprefer = [\"codex\"]\n\n[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\n{extra}",
             agent.display().to_string()
         ),
     );
@@ -274,6 +302,236 @@ async fn a_finished_background_job_is_reported_in_a_turn_the_server_starts() {
         "{report}"
     );
     assert!(report.contains("landed 0.9.9"), "{report}");
+}
+
+/// A home whose provider requests are never retried within one turn, so a
+/// failing response fails its turn at once.
+fn home_failing_fast() -> (tempfile::TempDir, std::path::PathBuf) {
+    home_with_fake_codex_and("\n[provider_limits]\nmax_retries = 0\n")
+}
+
+#[tokio::test]
+async fn a_report_the_model_could_not_write_is_tried_again_once_a_turn_succeeds() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = serve_responses(
+        listener,
+        vec![
+            sse_response(&call(
+                "call_1",
+                "agent",
+                json!({"prompt":"land it","background":true}),
+            )),
+            sse_response(&text("Started job-1.")),
+            // The report turn: the relay has no channel for the model.
+            model_not_available(),
+            // The user's next turn works, and the report follows it.
+            sse_response(&text("Hi.")),
+            sse_response(&text("job-1 landed 0.9.9.")),
+        ],
+    );
+    let (_home, home) = home_failing_fast();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut server = Server::start(&home, address, workspace.path()).await;
+    server.turn("land it in the background").await;
+    let (code, message, origin) = loop {
+        match server.next().await.expect("server went quiet") {
+            ServerEvent::TurnFailed {
+                code,
+                message,
+                origin: Some(origin),
+                ..
+            } => break (code, message, origin),
+            ServerEvent::TurnFailed { message, .. } => panic!("turn failed: {message}"),
+            ServerEvent::BackgroundReported { .. } => panic!("reported before trying again"),
+            _ => {}
+        }
+    };
+    assert_eq!(code, scv_protocol::ErrorCode::ProviderError);
+    assert!(message.contains("HTTP 503"), "{message}");
+    assert!(message.contains("MODEL_NOT_AVAILABLE"), "{message}");
+    assert_eq!(origin.jobs, vec!["job-1".to_owned()]);
+    assert_eq!(origin.retry_seconds, Some(30));
+
+    server.turn("hello").await;
+    let mut own_completed = false;
+    let mut report_text = String::new();
+    let origin = loop {
+        match server.next().await.expect("server went quiet") {
+            ServerEvent::TurnCompleted { origin: None, .. } => own_completed = true,
+            ServerEvent::TurnStarted {
+                origin: Some(_), ..
+            } => assert!(own_completed, "the report waits for the user's turn"),
+            ServerEvent::AssistantDelta {
+                request_id,
+                content,
+                ..
+            } if request_id.starts_with("background:") => report_text.push_str(&content),
+            ServerEvent::TurnCompleted {
+                origin: Some(origin),
+                ..
+            } => break origin,
+            ServerEvent::TurnFailed { message, .. } => panic!("turn failed: {message}"),
+            ServerEvent::BackgroundReported { .. } => panic!("reported directly"),
+            _ => {}
+        }
+    };
+    assert_eq!(origin.jobs, vec!["job-1".to_owned()]);
+    assert_eq!(origin.retry_seconds, None);
+    assert_eq!(report_text, "job-1 landed 0.9.9.");
+    let bodies: Vec<String> = requests.try_iter().collect();
+    assert_eq!(bodies.len(), 5);
+    // The messages each request carried, apart from the system prompt.
+    let input = |body: &str| serde_json::from_str::<Value>(body).unwrap()["input"].to_string();
+    assert!(input(&bodies[2]).contains("[SCV background report]"));
+    // The failed report left nothing in the history the user's turn saw.
+    let hello = input(&bodies[3]);
+    assert!(!hello.contains("[SCV background report"), "{hello}");
+    let report = input(&bodies[4]);
+    assert!(
+        report.contains("job-1 (codex, conversation codex-1): completed"),
+        "{report}"
+    );
+}
+
+/// A provider script whose report turn runs a tool and then fails, so it is
+/// not tried again.
+fn report_fails_after_a_tool() -> Vec<String> {
+    vec![
+        sse_response(&call(
+            "call_1",
+            "agent",
+            json!({"prompt":"land it","background":true}),
+        )),
+        sse_response(&text("Started job-1.")),
+        sse_response(&call("call_2", "read", json!({"path":"notes.txt"}))),
+        http_error(
+            "400 Bad Request",
+            &json!({"error":{"message":"No available channel for model fake-model","type":"invalid_request_error"}}),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_report_that_fails_after_running_a_tool_is_sent_to_the_client_directly() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut responses = report_fails_after_a_tool();
+    responses.push(sse_response(&text("Noted.")));
+    let requests = serve_responses(listener, responses);
+    let (_home, home) = home_failing_fast();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut server = Server::start(&home, address, workspace.path()).await;
+    server.turn("land it in the background").await;
+    let mut reported = None;
+    let failed = loop {
+        match server.next().await.expect("server went quiet") {
+            ServerEvent::BackgroundReported {
+                seq,
+                code,
+                message,
+                attempts,
+                reports,
+                ..
+            } => reported = Some((seq, code, message, attempts, reports)),
+            ServerEvent::TurnFailed {
+                seq,
+                origin: Some(origin),
+                ..
+            } => break (seq, origin),
+            ServerEvent::TurnFailed { message, .. } => panic!("turn failed: {message}"),
+            _ => {}
+        }
+    };
+    let (seq, code, message, attempts, reports) =
+        reported.expect("the jobs were reported before the turn ended");
+    assert_eq!(failed.0, seq + 1);
+    assert_eq!(failed.1.retry_seconds, None);
+    assert_eq!(code, scv_protocol::ErrorCode::ProviderError);
+    assert!(message.contains("HTTP 400"), "{message}");
+    assert!(message.contains("No available channel"), "{message}");
+    assert_eq!(attempts, 1);
+    assert_eq!(
+        reports,
+        [scv_protocol::JobReport {
+            job: "job-1".into(),
+            agent: "codex".into(),
+            task: "land it".into(),
+            status: scv_protocol::JobStatus::Completed,
+            session: Some("codex-1".into()),
+            reply: "landed 0.9.9".into(),
+        }]
+    );
+
+    // The model learns the user already has the result.
+    server.turn("what now?").await;
+    loop {
+        match server.next().await.expect("server went quiet") {
+            ServerEvent::TurnCompleted { origin: None, .. } => break,
+            ServerEvent::TurnStarted {
+                origin: Some(_), ..
+            } => panic!("reported twice"),
+            ServerEvent::TurnFailed { message, .. } => panic!("turn failed: {message}"),
+            _ => {}
+        }
+    }
+    let bodies: Vec<String> = requests.try_iter().collect();
+    assert_eq!(bodies.len(), 5);
+    let next = serde_json::from_str::<Value>(&bodies[4]).unwrap()["input"].to_string();
+    assert!(
+        next.contains("[SCV background report, already delivered]"),
+        "{next}"
+    );
+    assert!(next.contains("landed 0.9.9"), "{next}");
+    assert!(next.contains("HTTP 400"), "{next}");
+}
+
+#[tokio::test]
+async fn scv_exec_prints_a_report_the_model_could_not_write() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let _requests = serve_responses(listener, report_fails_after_a_tool());
+    let (_home, home) = home_failing_fast();
+    let workspace = tempfile::tempdir().unwrap();
+    let output = timeout(
+        Duration::from_secs(60),
+        Command::new(env!("CARGO_BIN_EXE_scv"))
+            .isolated(&home)
+            .current_dir(workspace.path())
+            .arg("--scv-home")
+            .arg(&home)
+            .args([
+                "--model",
+                "fake-model",
+                "--base-url",
+                &format!("http://{address}/v1"),
+                "exec",
+                "--yes",
+                "land it in the background",
+            ])
+            .env("OPENAI_API_KEY", "test-only")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("scv exec returned")
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stdout.contains("Started job-1."), "{stdout}");
+    assert!(
+        stdout.contains(
+            "job-1 (codex, conversation codex-1): completed\nTask: land it\nlanded 0.9.9"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("could not be written by the model (provider_error)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("HTTP 400"), "{stderr}");
 }
 
 #[tokio::test]

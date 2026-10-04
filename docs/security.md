@@ -218,6 +218,14 @@ processes, when it closes. The turn the server starts to report a finished job h
 own tools and approval policy, like any turn; its prompt quotes the job's
 bounded reply, which is untrusted delegated-agent output. Over WeChat or Feishu
 the report goes only to the owner's direct chat, as an unprompted message.
+A report turn that failed after a tool ran is never run again, so its side
+effects are not repeated. When the server gives up on the model and reports
+jobs directly (`background.reported`), the chat message is SCV's own, so on
+WeChat it is a `system msg: ` block, but it quotes each job's bounded reply
+under a line saying that is the agent's reply, unedited: the block vouches
+for SCV's line, not for the quoted reply. The history note that tells the
+model about it is a user message, quoting the same untrusted reply, as the
+report turn's prompt would have.
 
 SCV never auto-invokes another agent after a refusal. A run whose model
 refused (`declined`) gets no availability `fallback` field. When the session

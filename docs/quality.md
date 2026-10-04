@@ -201,6 +201,14 @@ Daemon and component changes require focused coverage for:
   once seen or stopped, never merely finished, and never twice), report turns
   naming theirs in `origin.jobs`, and the channel bridge and `scv exec`
   keeping a session open from those events alone;
+- failed background reports: a job unreported until its report turn
+  completes, a provider failure in a turn that ran no tool tried again after
+  30 and then 120 seconds or as soon as a turn succeeds, the third failure (or
+  any other failure, or one after a tool ran) reported directly with
+  `background.reported` before its `turn.failed` and noted in the history, a
+  restart waiting for a job that waits to be tried again, and the chat bridge,
+  `scv exec`, the TUI, and a nested SCV's count following all of it, with the
+  owner never sent a bare failure line;
 - TUI reconnect creating a fresh session without history restoration or
   automatic replay of submitted work.
 

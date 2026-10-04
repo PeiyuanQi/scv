@@ -272,9 +272,10 @@ That covers:
 
 - the busy notice, the voice reply, and the short reply to a message with
   nothing SCV can read (see [Media](#media));
-- the failure reply for a failed or timed-out turn, "SCV could not report a
-  finished background job." for a failed report turn, and "SCV completed
-  without a text response." for an empty answer;
+- the failure reply for a failed or timed-out turn, the direct report of
+  background jobs the model could not report (see
+  [Background reports](#background-reports)), and "SCV completed without a
+  text response." for an empty answer;
 - the reply to work a planned restart interrupted, the notice of stopped
   background jobs, and every notice and update announcement the daemon sends
   (see [Restarts and notices](#restarts-and-notices));
@@ -896,9 +897,10 @@ When the owner's session starts a background delegation (an `agent` call
 with `background: true`; see [tools](tools.md#background-jobs)), the bridge
 notes the job from the call's `tool.completed.jobs` (see
 [protocol](protocol.md#tool-lifecycle-and-approval)) and keeps that
-conversation's session open, without the 30-minute idle limit, until the model
-has seen the job's result: in a report turn, or through a later
-`agent_wait`, `agent_status`, or `agent_cancel` call. When the server
+conversation's session open, without the 30-minute idle limit, until the job
+is settled: the model has seen its result, in a report turn or through a later
+`agent_wait`, `agent_status`, or `agent_cancel` call, or the server reported
+it directly. When the server
 starts a turn reporting it (`turn.started` with an `origin`), the bridge
 answers that turn's approval requests like the owner's own, collects its
 answer, and sends it to the owner as an unprompted message (for Feishu, a
@@ -910,6 +912,30 @@ held-reply store if the platform refuses it outright. A report that finishes
 during one of the owner's turns follows that turn's reply. Only direct chats,
 and threads in them, receive reports; group and non-owner sessions have no
 tools.
+
+When the model cannot write a report, such as when the provider answers
+`HTTP 503 … MODEL_NOT_AVAILABLE`, the owner never gets a bare failure line
+and the result is never lost with it (see
+[tools](tools.md#background-jobs)). A failed report turn the server will try
+again (`origin.retry_seconds` on its `turn.failed`) sends nothing, and the job
+stays recorded and keeps the session open; the next try's answer goes out as
+usual. Once the server gives up, it reports the jobs itself
+(`background.reported`), and the owner gets SCV's own message saying why and
+quoting each job's reply as its agent gave it, delivered and logged like any
+other unprompted message:
+
+```text
+A background job finished, but the model could not report it (3 tries), so here is what the agent replied, unedited.
+Error: provider returned HTTP 503 Service Unavailable: sub2api: MODEL_NOT_AVAILABLE () (new_api_error, query_data_error)
+
+job-1 (codex, conversation codex-1): completed
+Task: Land the fix
+Landed 0.3.11 …
+```
+
+Several jobs reported together share one message ("2 background jobs
+finished, but the model could not report them"), and the tries are named only
+after more than one.
 
 This is what lets the owner keep chatting while work runs: an owner session
 starts with `auto_approve: true`, so the background agents it starts get the

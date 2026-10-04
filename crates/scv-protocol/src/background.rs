@@ -9,10 +9,20 @@ use serde::{Deserialize, Serialize};
 pub struct TurnOrigin {
     /// What the turn is for.
     pub kind: OriginKind,
-    /// The background jobs this turn reports. Once it starts, the model has
-    /// seen their results.
+    /// The background jobs this turn reports. Its end settles them: the
+    /// model has seen their results when it completes, the user stopped the
+    /// report when it is cancelled, and when it fails they are reported
+    /// directly ([`ServerEvent::BackgroundReported`](crate::ServerEvent::BackgroundReported),
+    /// sent first), unless `retry_seconds` is set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub jobs: Vec<String>,
+    /// On a report turn's `turn.failed` only: its jobs are still unreported,
+    /// and the server starts another report turn for them in about this many
+    /// seconds, or as soon as another turn succeeds. Absent everywhere else,
+    /// and from servers before 0.3.11, whose failed report turns settled their
+    /// jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_seconds: Option<u64>,
 }
 
 /// What a server-started turn is for.
@@ -108,6 +118,54 @@ impl JobChange {
     pub fn agent_name(&self) -> &str {
         job_agent(&self.agent, &self.tool)
     }
+}
+
+/// A finished background job's result, as the server reports it: to the
+/// model in a report turn's prompt, or to the client in
+/// [`ServerEvent::BackgroundReported`](crate::ServerEvent::BackgroundReported)
+/// when the model could not report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobReport {
+    /// The job's handle, such as `job-1`.
+    pub job: String,
+    /// The agent that ran it, such as `codex`.
+    pub agent: String,
+    /// The first line of the delegated prompt, shortened; empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task: String,
+    /// How it ended.
+    pub status: JobStatus,
+    /// The agent conversation it ran in, which a later `agent` call may
+    /// continue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The agent's reply, bounded: untrusted delegated-agent output.
+    pub reply: String,
+}
+
+/// `reports` as people and the model read them: for each job, a line naming
+/// it, its agent, conversation, and status, then its task and its reply.
+pub fn describe_reports(reports: &[JobReport]) -> String {
+    let mut text = String::new();
+    for report in reports {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("{} ({}", report.job, report.agent));
+        if let Some(session) = &report.session {
+            text.push_str(&format!(", conversation {session}"));
+        }
+        text.push_str(&format!("): {}\n", report.status));
+        if !report.task.is_empty() {
+            text.push_str(&format!("Task: {}\n", report.task));
+        }
+        let reply = report.reply.trim();
+        if !reply.is_empty() {
+            text.push_str(reply);
+            text.push('\n');
+        }
+    }
+    text
 }
 
 /// The agent a background job runs, such as `codex`: `agent` when it is

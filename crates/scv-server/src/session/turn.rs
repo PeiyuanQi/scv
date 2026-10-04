@@ -1,7 +1,13 @@
 //! Running one turn: announcing it, wiring its events and approvals to the
 //! connection, and reporting finished background jobs.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::Result;
 use scv_core::{AgentError, ApprovalGate, EventSink, TurnInput};
@@ -48,6 +54,8 @@ pub(crate) struct TurnDone {
     pub(crate) turn_id: String,
     pub(crate) origin: Option<TurnOrigin>,
     pub(crate) result: Result<scv_core::TurnOutcome, AgentError>,
+    /// A tool call started during the turn.
+    pub(crate) acted: bool,
 }
 
 /// What a connection needs to start a turn in its session.
@@ -89,11 +97,13 @@ impl TurnStarter {
             seq: Arc::clone(&current.seq),
             max_server_frame: current.config.protocol.max_server_frame_bytes,
         };
+        let acted = Arc::new(AtomicBool::new(false));
         let sink: Arc<dyn EventSink> = Arc::new(ProtocolSink {
             meta: meta.clone(),
             output: self.output.clone(),
             cancellation: cancellation.clone(),
             background: current.background.clone(),
+            acted: Arc::clone(&acted),
         });
         let gate: Arc<dyn ApprovalGate> = Arc::new(ProtocolApprovalGate {
             policy: current.config.tools.approval_policy,
@@ -119,6 +129,7 @@ impl TurnStarter {
                     turn_id: task_turn,
                     origin,
                     result,
+                    acted: acted.load(Ordering::Acquire),
                 })
                 .await;
         });
@@ -130,7 +141,7 @@ impl TurnStarter {
     }
 
     /// Start a turn reporting background jobs the model has not seen yet,
-    /// or `None` when every finished job was already seen.
+    /// or `None` when no finished job's report is due.
     pub(crate) async fn report_background(&self, current: &Session) -> Result<Option<ActiveTurn>> {
         let Some(jobs) = &current.background else {
             return Ok(None);
@@ -142,6 +153,7 @@ impl TurnStarter {
         let origin = TurnOrigin {
             kind: OriginKind::Background,
             jobs: reports.iter().map(|report| report.job.clone()).collect(),
+            retry_seconds: None,
         };
         let prompt = background::report_prompt(&reports);
         let request_id = format!("background:{}", Uuid::new_v4());

@@ -169,7 +169,11 @@ stderr. The approval policy decides first, so under `on-risk` reads run
 unasked; every request that would ask a person is denied unless `--yes`
 approves it for this run. A cancelled or failed turn makes the command fail.
 When the turn starts background jobs, `scv exec` stays open until each one has
-been reported, and prints the report.
+been reported, and prints the report, waiting through a failed report turn the
+server will try again. When the server reports jobs directly because the model
+could not, it prints each job's reply to stdout and why to stderr. The TUI
+shows a failed report turn's error with when it is tried again, and a direct
+report as a note quoting each job's reply.
 
 ## Compatibility boundary
 

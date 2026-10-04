@@ -1000,6 +1000,91 @@ async fn new_lets_a_running_background_report_finish_and_sends_it_first() {
 }
 
 #[tokio::test]
+async fn a_failed_report_turn_that_will_be_tried_again_sends_nothing_and_keeps_its_job() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "land it")]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "land it");
+            start_background_job(&mut side, "job-1", "Started job-1.").await;
+            assert_eq!(peer.sent().await.text, "Started job-1.");
+            eventually(|| bench.state().jobs.iter().any(|job| job.job == "job-1")).await;
+            // The model is unreachable; the server will try again.
+            let origin = json!({"kind":"background","jobs":["job-1"]});
+            let retried = json!({"kind":"background","jobs":["job-1"],"retry_seconds":30});
+            send_frame(&mut side, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+            send_frame(&mut side, json!({"type":"turn.failed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":11,"code":"provider_error","message":"provider returned HTTP 503 Service Unavailable","origin":retried})).await;
+            // The owner's next message runs as usual, and the job still
+            // keeps the conversation and its record.
+            peer.push(vec![message("m2", "owner", "still there?")]);
+            assert_eq!(next_turn(&mut side).await, "still there?");
+            finish_turn(&mut side, "yes").await;
+            assert_eq!(peer.sent().await.text, "yes");
+            assert!(bench.state().jobs.iter().any(|job| job.job == "job-1"));
+            // The next try works, and only its report reaches the owner.
+            send_frame(&mut side, json!({"type":"turn.started","request_id":"background:2","session_id":"s","turn_id":"t3","seq":14,"origin":origin})).await;
+            send_frame(&mut side, json!({"type":"assistant.completed","request_id":"background:2","session_id":"s","turn_id":"t3","seq":15,"content":"job-1 is done"})).await;
+            send_frame(&mut side, json!({"type":"turn.completed","request_id":"background:2","session_id":"s","turn_id":"t3","seq":16,"steps":1,"usage":{},"origin":origin})).await;
+            assert_eq!(peer.sent().await.text, "job-1 is done");
+            eventually(|| {
+                let saved = bench.state();
+                saved.jobs.is_empty() && saved.pending.is_empty()
+            })
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_job_the_server_reports_directly_reaches_the_owner_with_the_error_and_reply() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "land it")]);
+    let error = "provider returned HTTP 503 Service Unavailable: MODEL_NOT_AVAILABLE \
+                 (gave up after 3 attempts)";
+    let report = json!({"job":"job-1","agent":"codex","task":"Land it","status":"completed",
+        "session":"codex-1","reply":"Landed 0.9.9."});
+    let expected =
+        session::direct_report(error, 3, &[serde_json::from_value(report.clone()).unwrap()]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "land it");
+            start_background_job(&mut side, "job-1", "Started job-1.").await;
+            assert_eq!(peer.sent().await.text, "Started job-1.");
+            // The last try failed: the server reports the job itself, then
+            // ends the turn without a retry.
+            let origin = json!({"kind":"background","jobs":["job-1"]});
+            send_frame(&mut side, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+            send_frame(&mut side, json!({"type":"background.reported","session_id":"s","seq":11,"code":"provider_error","message":error,"attempts":3,"reports":[report]})).await;
+            send_frame(&mut side, json!({"type":"turn.failed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":12,"code":"provider_error","message":error,"origin":origin})).await;
+            let sent = peer.sent().await;
+            assert_eq!(sent.text, expected);
+            assert!(sent.text.contains("Landed 0.9.9."), "{}", sent.text);
+            assert!(sent.text.contains("MODEL_NOT_AVAILABLE"), "{}", sent.text);
+            eventually(|| {
+                let saved = bench.state();
+                saved.jobs.is_empty() && saved.pending.is_empty()
+            })
+            .await;
+            // Nothing else follows, such as a generic failure.
+            peer.push(vec![message("m2", "owner", "thanks")]);
+            assert_eq!(next_turn(&mut side).await, "thanks");
+            finish_turn(&mut side, "welcome").await;
+            assert_eq!(peer.sent().await.text, "welcome");
+        })
+        .await;
+    let entries = logged(&owner_log(&bench, "owner"));
+    assert_eq!(
+        entries[0][2..4],
+        [
+            (history::Role::System, expected),
+            (history::Role::Owner, "thanks".to_owned())
+        ]
+    );
+}
+
+#[tokio::test]
 async fn replies_written_while_recovering_from_a_crash_are_logged() {
     let (bench, mut peer) = Bench::owned_by("owner");
     bench

@@ -735,13 +735,40 @@ When a job finishes and the model has not already seen its result through
 `agent_wait` or `agent_status`, the server reports it: once the session is idle
 (the user's own queued prompts run first), it starts a turn of its own whose
 prompt, beginning `[SCV background report]`, names each finished job, its
-agent, conversation, status, and bounded reply, and asks the model to tell the
-user. That turn's `turn.started` and final event carry
+agent, conversation, status, task, and bounded reply, and asks the model to
+tell the user. That turn's `turn.started` and final event carry
 `"origin":{"kind":"background","jobs":[...]}` (see
 [protocol](protocol.md#server-started-turns)); one turn reports up to four jobs.
 A chat channel (WeChat, Feishu, or Slack) sends the owner the answer as an unprompted message; `scv exec`
 prints it and stays open until every job it started has been reported; the
 TUI shows it like any turn.
+
+A job counts as reported only once a report turn about it completes (or the
+user cancels that turn, or the model looks the job up). A report turn that
+fails, such as when the provider answers `HTTP 503` because no upstream
+serves the model, leaves no history, so the model has not seen the result
+and the job stays unreported:
+
+- When the failure is the provider's and no tool ran in the turn, the job is
+  reported again in a new turn 30 seconds later, then 120 seconds after a
+  second failure, or as soon as any other turn of the session succeeds, since
+  the model is then evidently reachable. Its `turn.failed` says when
+  (`origin.retry_seconds`), and clients send nothing for it.
+- After the third failed report turn, or at once when the failure was not the
+  provider's or a tool ran (a retry could repeat the tool's side effects), the
+  server reports the jobs to the client itself, without the model:
+  `background.reported` carries the last failure's code and message, the
+  number of failed report turns, and each job's handle, agent, task, status,
+  conversation, and bounded reply. A chat channel sends it to the owner as
+  SCV's own message, `scv exec` prints the replies, and the TUI shows them.
+  The session's history then gets a note, as a user message beginning
+  `[SCV background report, already delivered]`, quoting the same results and
+  the error, so the model's next turn knows the user has them.
+
+The server logs every failed report turn with its jobs and error. A job
+waiting to be reported again still counts as unreported: a planned restart
+waits for it (see [architecture](architecture.md#planned-restarts)), and
+`agent_status` still shows it.
 
 A job has no turn to carry an approval request to a person, so each request a
 nested agent relays (over ACP or from a nested SCV) gets the answer the
@@ -907,7 +934,9 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   and counts the jobs that still run or wait to be reported, from the call
   that started each (`tool.completed.jobs`) until the nested model has seen
   its result, through a later call or a report turn, which counts until it
-  ends. Only job handles and statuses count, so a nested SCV 0.3.0, whose job
+  ends; a report turn that failed and will be tried again
+  (`origin.retry_seconds`) leaves its jobs counting. Only job handles and
+  statuses count, so a nested SCV 0.3.0, whose job
   changes name one tool per agent (`agent_codex`), is followed the same way.
   A planned restart waits for them as for a running turn (see
   [architecture](architecture.md#planned-restarts)).

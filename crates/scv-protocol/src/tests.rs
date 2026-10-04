@@ -519,6 +519,7 @@ fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
         origin: Some(TurnOrigin {
             kind: OriginKind::Background,
             jobs: vec!["job-1".into()],
+            retry_seconds: None,
         }),
     };
     let json = serde_json::to_value(&started).unwrap();
@@ -541,6 +542,94 @@ fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
         ServerEvent::TurnCompleted { origin: None, .. }
     ));
     assert!(!serde_json::to_string(&own).unwrap().contains("origin"));
+}
+
+#[test]
+fn a_failed_report_turn_says_when_it_is_tried_again() {
+    let origin = |retry_seconds| TurnOrigin {
+        kind: OriginKind::Background,
+        jobs: vec!["job-1".into()],
+        retry_seconds,
+    };
+    let failed = |retry_seconds| ServerEvent::TurnFailed {
+        request_id: "background:1".into(),
+        session_id: "s".into(),
+        turn_id: "t".into(),
+        seq: 5,
+        code: ErrorCode::ProviderError,
+        message: "provider returned HTTP 503 Service Unavailable".into(),
+        origin: Some(origin(retry_seconds)),
+    };
+    let retried = serde_json::to_value(failed(Some(30))).unwrap();
+    assert_eq!(
+        retried["origin"],
+        serde_json::json!({"kind":"background","jobs":["job-1"],"retry_seconds":30})
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerEvent>(retried).unwrap(),
+        failed(Some(30))
+    );
+    // Without a retry the field stays off the wire, as older servers sent it.
+    let settled = serde_json::to_string(&failed(None)).unwrap();
+    assert!(!settled.contains("retry_seconds"), "{settled}");
+    assert_eq!(
+        serde_json::from_str::<ServerEvent>(&settled).unwrap(),
+        failed(None)
+    );
+}
+
+#[test]
+fn jobs_the_model_could_not_report_are_reported_directly() {
+    let reports = vec![
+        JobReport {
+            job: "job-1".into(),
+            agent: "codex".into(),
+            task: "Land the fix".into(),
+            status: JobStatus::Completed,
+            session: Some("codex-1".into()),
+            reply: "Landed 0.9.9.\n".into(),
+        },
+        JobReport {
+            job: "job-2".into(),
+            agent: "claude".into(),
+            task: String::new(),
+            status: JobStatus::Failed,
+            session: None,
+            reply: "  ".into(),
+        },
+    ];
+    let reported = ServerEvent::BackgroundReported {
+        session_id: "s".into(),
+        seq: 7,
+        code: ErrorCode::ProviderError,
+        message: "provider returned HTTP 503".into(),
+        attempts: 3,
+        reports: reports.clone(),
+    };
+    let json = serde_json::to_value(&reported).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "type":"background.reported","session_id":"s","seq":7,
+            "code":"provider_error","message":"provider returned HTTP 503","attempts":3,
+            "reports":[
+                {"job":"job-1","agent":"codex","task":"Land the fix","status":"completed",
+                 "session":"codex-1","reply":"Landed 0.9.9.\n"},
+                {"job":"job-2","agent":"claude","status":"failed","reply":"  "}
+            ]
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerEvent>(json).unwrap(),
+        reported
+    );
+    // Not a turn's event: it belongs to no client request.
+    assert_eq!(reported.turn_request_id(), None);
+    assert_eq!(
+        describe_reports(&reports),
+        "job-1 (codex, conversation codex-1): completed\nTask: Land the fix\nLanded 0.9.9.\n\n\
+         job-2 (claude): failed\n"
+    );
 }
 
 #[test]

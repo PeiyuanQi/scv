@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    DaemonStatus, ErrorCode, JobChange, PeerInfo, QueueEntry, ToolErrorKind, TurnOrigin, Usage,
+    DaemonStatus, ErrorCode, JobChange, JobReport, PeerInfo, QueueEntry, ToolErrorKind, TurnOrigin,
+    Usage,
 };
 
 /// A message from server to client. Serialized as one JSON object per line,
@@ -405,6 +406,26 @@ pub enum ServerEvent {
         /// finished background work; absent for a client's own `turn.start`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<TurnOrigin>,
+    },
+    /// Finished background jobs the server reports to the client itself,
+    /// because the model could not: their report turn failed and will not be
+    /// tried again. Sent just before that turn's `turn.failed`; it settles the
+    /// jobs it names.
+    #[serde(rename = "background.reported")]
+    BackgroundReported {
+        /// The session this concerns.
+        session_id: String,
+        /// The session's event sequence number: consecutive, so a gap means events were lost.
+        seq: u64,
+        /// Why the model could not report them: the last report turn's
+        /// failure, as its `turn.failed` gives it.
+        code: ErrorCode,
+        /// What went wrong, for people.
+        message: String,
+        /// Report turns that failed for these jobs, the last included.
+        attempts: u32,
+        /// The jobs' results.
+        reports: Vec<JobReport>,
     },
     /// A request failed, or a connection-level error.
     #[serde(rename = "error")]

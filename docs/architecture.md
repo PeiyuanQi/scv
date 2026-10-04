@@ -99,7 +99,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.10` and exact workspace dependency pins.
+`0.3.11` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -267,7 +267,8 @@ an owner's chat request to change, publish, and deploy SCV itself.
    waits, checking every second. It goes ahead after two clear checks in a
    row: the delegation named by the request's `SCV_PARENT` chain is no longer
    at work, its daemon session has no running turn, running or unreported
-   background job, and (through the channel hub) no unstored report; and no
+   background job (one whose report turn failed and waits to be tried again
+   included), and (through the channel hub) no unstored report; and no
    chat bridge holds an owner message it has not answered durably. A
    per-turn CLI run is at work while it has live processes. A live child (a
    nested SCV or an ACP agent) keeps its process for its whole conversation,
@@ -472,10 +473,18 @@ and names the other offered agents on availability failures. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a
-`TurnOrigin` naming those jobs. The channel bridge and `scv exec` track a
-session's jobs from `tool.completed.jobs` and report turns' `origin.jobs`;
-the bridge routes report turns by `request_id`, keeps a session with running
-jobs open (and exempt from eviction), and sends their answers as unprompted
+`TurnOrigin` naming those jobs. The jobs stay unreported in
+`BackgroundJobs` until that turn ends. When it fails, the connection
+(`Connection::settle_report`) asks the store whether to try again, after a
+bounded backoff (`BackgroundJobs::report_failed`, retried only for a provider
+error in a turn that ran no tool) that a timer in the connection loop, or the
+next successful turn, ends; otherwise it sends the results itself
+(`background.reported`) before the turn's `turn.failed` and adds a note to
+the session's history. The channel bridge and `scv exec` track a session's
+jobs from `tool.completed.jobs`, report turns' `origin.jobs`, and
+`background.reported` until each is settled; the bridge routes report turns
+by `request_id`, keeps a session with unsettled jobs open (and exempt from
+eviction), and sends their answers, or the direct report, as unprompted
 messages. The system prompt's delegation and chat-channel sections
 are built after the registry, from the agents its `agent` tool actually offers and the
 `channel` the client declared.
