@@ -12,6 +12,8 @@ pub(super) const MAX_TOOL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 pub(super) const MAX_PROVIDER_RETRIES: usize = 10;
 /// The most background agent jobs `agent.max_background` may allow.
 pub(super) const MAX_BACKGROUND_JOBS: usize = 16;
+/// The most prompts `agent.max_queued_turns` may let wait per conversation.
+pub(super) const MAX_QUEUED_TURNS: usize = 32;
 /// Longest `[agents.<name>] use_for` note.
 pub(super) const MAX_USE_FOR_BYTES: usize = 500;
 /// The longest episode gap: a year.
@@ -36,7 +38,7 @@ pub(super) struct Limit {
 }
 
 /// How many numeric limits [`Config::limits`] lists.
-const LIMITS: usize = 35;
+const LIMITS: usize = 36;
 
 impl Config {
     /// Every numeric limit, each named once, so validation and the project
@@ -68,6 +70,7 @@ impl Config {
                 self.agent.conversation_idle_seconds,
             ),
             limit("agent.max_background", self.agent.max_background),
+            limit("agent.max_queued_turns", self.agent.max_queued_turns),
             positive("session.max_history_bytes", self.session.max_history_bytes),
             positive("session.max_messages", self.session.max_messages),
             positive("context.max_tokens", self.context.max_tokens),
@@ -282,6 +285,11 @@ impl Config {
             if adapter.command.trim().is_empty() {
                 bail!("{name} must be non-empty");
             }
+            validate_busy(
+                &format!("agents.{agent}"),
+                adapter.steer_fallback,
+                adapter.max_queued_turns,
+            )?;
             if let Some(use_for) = &adapter.use_for
                 && (use_for.trim().is_empty()
                     || use_for.len() > MAX_USE_FOR_BYTES
@@ -424,6 +432,11 @@ impl Config {
         if self.agent.max_background > MAX_BACKGROUND_JOBS {
             bail!("agent.max_background must be at most {MAX_BACKGROUND_JOBS}");
         }
+        validate_busy(
+            "agent",
+            Some(self.agent.steer_fallback),
+            Some(self.agent.max_queued_turns),
+        )?;
         for agent in &self.agent.prefer {
             if scv_tools::adapters::adapter(agent).is_none() {
                 bail!("agent.prefer names unknown agent {agent:?}");
@@ -554,6 +567,22 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// A busy policy's fallback and queue bound under `table`: a steer that
+/// cannot steer must queue, wait, or fail.
+fn validate_busy(
+    table: &str,
+    steer_fallback: Option<scv_tools::BusyBehavior>,
+    max_queued_turns: Option<usize>,
+) -> Result<()> {
+    if steer_fallback == Some(scv_tools::BusyBehavior::Steer) {
+        bail!("{table}.steer_fallback must be queue, wait, or fail");
+    }
+    if max_queued_turns.is_some_and(|turns| turns > MAX_QUEUED_TURNS) {
+        bail!("{table}.max_queued_turns must be at most {MAX_QUEUED_TURNS}");
+    }
+    Ok(())
 }
 
 /// A host name, optionally prefixed with `*.` to match its subdomains.

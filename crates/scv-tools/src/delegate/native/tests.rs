@@ -67,6 +67,7 @@ fn fake_agent_with_prompt_args(
             use_for: None,
             defaults: AgentDefaults::default(),
             options_file: None,
+            busy: crate::BusyConfig::default(),
         },
         Timeouts {
             default: Duration::from_secs(2),
@@ -171,6 +172,7 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
             use_for: None,
             defaults: AgentDefaults::default(),
             options_file: None,
+            busy: crate::BusyConfig::default(),
         },
         Timeouts {
             default: Duration::from_secs(2),
@@ -533,6 +535,7 @@ fn conversing_agent(
             use_for: None,
             defaults: AgentDefaults::default(),
             options_file: None,
+            busy: crate::BusyConfig::default(),
         },
         Timeouts {
             default: timeout,

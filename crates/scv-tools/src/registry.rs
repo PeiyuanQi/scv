@@ -352,6 +352,7 @@ fn offer(
         use_for: adapter.use_for,
         defaults: adapter.defaults,
         holds_settings,
+        busy: adapter.busy,
     })
 }
 

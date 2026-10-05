@@ -79,6 +79,36 @@ fn continuing_pins_agent_and_cwd_and_counts_turns() {
     assert_eq!(third.turn, 3);
 }
 
+#[tokio::test]
+async fn waiting_for_a_busy_conversation_ends_with_its_turn_or_cancellation() {
+    let store = store(8, DAY, None);
+    let cwd = Path::new("/w");
+    let first = store.begin("codex", None, cwd, false).unwrap();
+    first.finish(Some("thread".into()), true);
+    let active = store.begin("codex", Some("codex-1"), cwd, false).unwrap();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let waiter = {
+        let store = Arc::clone(&store);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move { store.wait_idle("codex-1", &cancellation).await })
+    };
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+    active.finish(Some("thread".into()), true);
+    waiter.await.unwrap().unwrap();
+    let next = store.begin("codex", Some("codex-1"), cwd, false).unwrap();
+    drop(next);
+    let active = store.begin("codex", Some("codex-1"), cwd, false).unwrap();
+    let cancelled = {
+        let store = Arc::clone(&store);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move { store.wait_idle("codex-1", &cancellation).await })
+    };
+    cancellation.cancel();
+    assert!(cancelled.await.unwrap().is_err());
+    drop(active);
+}
+
 #[test]
 fn vendor_ids_and_unknown_handles_are_rejected() {
     let store = store(8, DAY, None);

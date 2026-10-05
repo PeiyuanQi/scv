@@ -52,6 +52,129 @@ pub(super) struct AcpChild {
     /// The session's config options (`model`, `effort`, ...) and their
     /// allowed values; an empty list accepts any value as given.
     pub(super) options: StdMutex<HashMap<String, Vec<SelectValue>>>,
+    /// The server advertised `_meta.steering.supported` at `initialize`.
+    pub(super) steerable: bool,
+    /// Steering requests sent into its running prompt turn.
+    pub(super) steering: Steering,
+}
+
+/// Steering requests sent into a prompt turn, whose answers only that
+/// turn's reader receives.
+#[derive(Debug, Default)]
+pub(super) struct Steering {
+    state: StdMutex<SteeringState>,
+    /// Woken when an answer arrives or the turn ends.
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct SteeringState {
+    /// A prompt turn is reading the agent's messages.
+    turn: bool,
+    /// Requests sent, by ID, and their answers once they come.
+    pending: HashMap<u64, Option<Result<Value, Value>>>,
+}
+
+/// A prompt turn that receives steering answers until it drops.
+pub(super) struct SteeringTurn<'a>(&'a Steering);
+
+/// A steering request whose answer is expected, until it drops.
+pub(super) struct Expected<'a> {
+    steering: &'a Steering,
+    id: u64,
+}
+
+/// What became of a steering request.
+pub(super) enum Steered {
+    /// The agent took the prompt into its running turn.
+    Accepted,
+    /// It refused, or its turn ended first, so the prompt went nowhere.
+    Refused,
+    /// No answer came in time; the agent may still take the prompt.
+    Unanswered,
+    /// The steering call was cancelled.
+    Cancelled,
+}
+
+impl Steering {
+    /// Receive answers while a prompt turn runs, until the guard drops.
+    pub(super) fn turn(&self) -> SteeringTurn<'_> {
+        lock(&self.state).turn = true;
+        SteeringTurn(self)
+    }
+
+    /// Expect the answer to request `id`. `None` when no turn runs to
+    /// receive it, so there is nothing to steer.
+    pub(super) fn expect(&self, id: u64) -> Option<Expected<'_>> {
+        let mut state = lock(&self.state);
+        state.turn.then(|| {
+            state.pending.insert(id, None);
+            Expected { steering: self, id }
+        })
+    }
+
+    /// Deliver the agent's answer to request `id`, when one is expected.
+    pub(super) fn resolve(&self, id: u64, outcome: Result<Value, Value>) {
+        if let Some(answer) = lock(&self.state).pending.get_mut(&id) {
+            *answer = Some(outcome);
+            self.changed.notify_waiters();
+        }
+    }
+}
+
+impl Expected<'_> {
+    /// Wait up to `limit` for the agent's answer.
+    pub(super) async fn answer(
+        &self,
+        limit: Duration,
+        cancellation: &CancellationToken,
+    ) -> Steered {
+        let deadline = Instant::now() + limit;
+        loop {
+            let changed = self.steering.changed.notified();
+            let answer = lock(&self.steering.state)
+                .pending
+                .get_mut(&self.id)
+                .and_then(Option::take);
+            if let Some(answer) = answer {
+                // `{"accepted": false}` refuses as an error would.
+                let accepted = answer.is_ok_and(|result| {
+                    result.get("accepted").and_then(Value::as_bool) != Some(false)
+                });
+                return if accepted {
+                    Steered::Accepted
+                } else {
+                    Steered::Refused
+                };
+            }
+            tokio::select! {
+                () = changed => {}
+                () = tokio::time::sleep_until(deadline) => return Steered::Unanswered,
+                () = cancellation.cancelled() => return Steered::Cancelled,
+            }
+        }
+    }
+}
+
+impl Drop for Expected<'_> {
+    fn drop(&mut self) {
+        // A later answer is ignored.
+        lock(&self.steering.state).pending.remove(&self.id);
+    }
+}
+
+impl Drop for SteeringTurn<'_> {
+    fn drop(&mut self) {
+        let mut state = lock(&self.0.state);
+        state.turn = false;
+        // Nothing reads the agent's answers until the next turn, and a
+        // prompt the turn did not take before it ended went nowhere.
+        for answer in state.pending.values_mut().filter(|answer| answer.is_none()) {
+            *answer = Some(Err(json!({"message": "the turn ended first"})));
+        }
+        drop(state);
+        self.0.changed.notify_waiters();
+    }
 }
 
 impl AcpChild {
@@ -224,6 +347,11 @@ impl AcpAgentTool {
             rpc,
             session_id,
             options: StdMutex::new(parse_config_options(&session).unwrap_or_default()),
+            steerable: initialized
+                .pointer("/_meta/steering/supported")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            steering: Steering::default(),
         };
         if let Some(mode) = &self.launch.full_mode
             && let Err(error) = self
@@ -423,6 +551,8 @@ impl AcpAgentTool {
             Ok(id) => json!(id),
             Err(error) => return TurnEnd::Lost(error.message),
         };
+        // Only now, so the agent never gets a steer before its prompt.
+        let _steering = child.steering.turn();
         let label = format!("[{handle} acp]");
         let mut reply = Reply::new(self.output_limit);
         let mut progress = Progress::default();
@@ -442,7 +572,12 @@ impl AcpAgentTool {
                 }
             };
             match message {
-                Incoming::Response { id, outcome } if id == prompt_id => {
+                Incoming::Response { id, outcome } if id != prompt_id => {
+                    if let Some(id) = id.as_u64() {
+                        child.steering.resolve(id, outcome);
+                    }
+                }
+                Incoming::Response { outcome, .. } => {
                     progress.lines.flush(&context.progress);
                     return match outcome {
                         Ok(result) => TurnEnd::Ended {
@@ -460,7 +595,6 @@ impl AcpAgentTool {
                         },
                     };
                 }
-                Incoming::Response { .. } => {}
                 Incoming::Notification { method, params } => {
                     if method == "session/update" {
                         progress.update(&params, &mut reply, &context.progress);

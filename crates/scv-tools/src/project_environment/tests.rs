@@ -390,6 +390,7 @@ async fn native_launch_receives_project_tools_and_keeps_private_home() {
         search_dirs: Vec::new(), output: OutputFormat::Text, resume: Resume::Unsupported,
         home: None, transport: Transport::Process, acp: None, use_for: None,
         defaults: crate::AgentDefaults::default(), options_file: None,
+        busy: crate::BusyConfig::default(),
     };
     let tool = NativeAgentTool::new(
         "fake".into(),

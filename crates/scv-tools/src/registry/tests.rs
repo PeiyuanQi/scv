@@ -44,6 +44,7 @@ fn uninstalled_agents_are_not_offered() {
         use_for: None,
         defaults: AgentDefaults::default(),
         options_file: None,
+        busy: crate::BusyConfig::default(),
     };
     let registry = builtin_registry(
         config.clone(),
@@ -98,6 +99,7 @@ fn agents_are_not_offered_at_the_delegation_depth_limit() {
         use_for: None,
         defaults: AgentDefaults::default(),
         options_file: None,
+        busy: crate::BusyConfig::default(),
     };
     let home = tempfile::tempdir().unwrap();
     for (max_depth, offered) in [(0, false), (1, true)] {
@@ -165,6 +167,7 @@ fn installed(model_args: bool) -> AgentAdapterConfig {
         use_for: None,
         defaults: AgentDefaults::default(),
         options_file: None,
+        busy: crate::BusyConfig::default(),
     }
 }
 

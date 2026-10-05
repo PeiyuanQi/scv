@@ -1,9 +1,16 @@
 //! Unit tests for `src/delegate/background.rs`.
 
 use super::*;
-use crate::delegate::agent::{Accepts, Backend};
+use crate::{
+    AgentDefaults, BusyConfig,
+    args::Timeouts,
+    delegate::{
+        agent::{Accepts, Backend},
+        conversation::{ConversationLimits, ConversationStore},
+    },
+};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 /// An agent that reports one progress line, then finishes when released
 /// or stops when cancelled.
@@ -86,6 +93,367 @@ fn offering(backend: impl Backend + 'static) -> Arc<AgentTool> {
 
 fn context() -> ToolContext {
     ToolContext::new(std::env::temp_dir(), CancellationToken::new())
+}
+
+/// An agent whose conversations live in a real store, which refuses a turn
+/// while another runs. Each turn records its prompt, then ends when a
+/// release permit lets it.
+struct Conversing {
+    conversations: Arc<ConversationStore>,
+    release: Arc<Semaphore>,
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Backend for Conversing {
+    fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
+        Ok(ToolRisk::Delegate)
+    }
+
+    fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
+        Ok("Continue the fake conversation.".into())
+    }
+
+    fn busy(&self, arguments: &Value) -> Result<bool, ToolError> {
+        let args: AgentArgs = parse_args(arguments)?;
+        Ok(args
+            .session
+            .is_some_and(|handle| self.conversations.is_busy(&handle)))
+    }
+
+    async fn wait_idle(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ToolError> {
+        let args: AgentArgs = parse_args(arguments)?;
+        match args.session {
+            Some(handle) => self.conversations.wait_idle(&handle, cancellation).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let args: AgentArgs = parse_args(&arguments)?;
+        let turn = self.conversations.begin(
+            "fake",
+            args.session.as_deref(),
+            std::path::Path::new("/w"),
+            false,
+        )?;
+        lock(&self.prompts).push(args.prompt.clone());
+        tokio::select! {
+            permit = self.release.acquire() => {
+                permit.unwrap().forget();
+                let session = turn.finish(Some("thread".into()), true);
+                Ok(ToolOutput::success(
+                    json!({"agent":"fake","status":"completed","reply":args.prompt,"session":session})
+                        .to_string(),
+                ))
+            }
+            () = context.cancellation.cancelled() => Err(ToolError::cancelled("cancelled")),
+        }
+    }
+}
+
+/// A session offering [`Conversing`] as `fake`, whose conversations
+/// `fake-1` and `fake-2` have each had a turn.
+struct Session {
+    tool: Arc<BackgroundCapable>,
+    jobs: Arc<BackgroundJobs>,
+    release: Arc<Semaphore>,
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+fn session(limit: usize, busy: BusyConfig) -> Session {
+    let conversations = Arc::new(ConversationStore::new(
+        ConversationLimits {
+            max: 8,
+            idle: Duration::from_secs(86400),
+        },
+        None,
+    ));
+    for _ in 0..2 {
+        let turn = conversations
+            .begin("fake", None, std::path::Path::new("/w"), false)
+            .unwrap();
+        turn.finish(Some("thread".into()), true).unwrap();
+    }
+    let release = Arc::new(Semaphore::new(0));
+    let prompts = Arc::default();
+    let offered = Offered {
+        name: "fake".into(),
+        backend: Arc::new(Conversing {
+            conversations,
+            release: Arc::clone(&release),
+            prompts: Arc::clone(&prompts),
+        }),
+        accepts: Accepts {
+            session: true,
+            ..Accepts::default()
+        },
+        model_hint: String::new(),
+        offered: None,
+        use_for: None,
+        defaults: AgentDefaults::default(),
+        holds_settings: true,
+        busy,
+    };
+    let timeouts = Timeouts {
+        default: Duration::from_secs(60),
+        max: Duration::from_secs(600),
+    };
+    let jobs = Arc::new(BackgroundJobs::new(limit, None));
+    Session {
+        tool: Arc::new(BackgroundCapable {
+            inner: Arc::new(AgentTool::new(vec![offered], &["fake".into()], timeouts)),
+            jobs: Arc::clone(&jobs),
+        }),
+        jobs,
+        release,
+        prompts,
+    }
+}
+
+impl Session {
+    async fn call(&self, arguments: Value) -> Result<Value, ToolError> {
+        let output = self.tool.execute(arguments, context()).await?;
+        Ok(serde_json::from_str(&output.content).unwrap())
+    }
+
+    /// Wait until the turns that ran had exactly `prompts`, in order.
+    async fn ran(&self, prompts: &[&str]) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock(&self.prompts).as_slice() != prompts {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("ran {:?}, not {prompts:?}", lock(&self.prompts)));
+    }
+
+    /// Let the running turn end, then wait until `next` runs.
+    async fn release_then(&self, next: &[&str]) {
+        self.release.add_permits(1);
+        self.ran(next).await;
+    }
+
+    async fn result(&self, job: &str) -> Value {
+        self.jobs
+            .wait(job, Duration::from_secs(5), &CancellationToken::new(), "")
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_busy_conversation_queues_prompts_in_the_order_they_arrive() {
+    let session = session(2, BusyConfig::default());
+    let first = session
+        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .await
+        .unwrap();
+    assert_eq!(first.get("queued"), None);
+    // The first job has not begun its turn yet, and still these wait for it.
+    let second = session
+        .call(json!({"prompt":"b","session":"fake-1"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        (&second["job"], &second["queued"]),
+        (&json!("job-2"), &json!(true))
+    );
+    let third = session
+        .call(json!({"prompt":"c","session":"fake-1","background":true}))
+        .await
+        .unwrap();
+    assert_eq!(third["queued"], true);
+    session.ran(&["a"]).await;
+    let waiting = session.jobs.describe(Some("job-3"), "").unwrap();
+    assert_eq!(waiting["status"], "running");
+    assert!(
+        waiting["progress"].as_str().unwrap().starts_with("queued"),
+        "{waiting}"
+    );
+    session.release_then(&["a", "b"]).await;
+    session.release_then(&["a", "b", "c"]).await;
+    session.release.add_permits(1);
+    for (job, reply) in [("job-1", "a"), ("job-2", "b"), ("job-3", "c")] {
+        let result = session.result(job).await;
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(result["result"]["reply"], reply);
+    }
+}
+
+#[tokio::test]
+async fn queued_prompts_are_bounded_per_conversation_not_by_max_background() {
+    let session = session(
+        1,
+        BusyConfig {
+            max_queued_turns: 1,
+            ..BusyConfig::default()
+        },
+    );
+    session
+        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .await
+        .unwrap();
+    let queued = session
+        .call(json!({"prompt":"b","session":"fake-1","background":true}))
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true);
+    let full = session
+        .call(json!({"prompt":"c","session":"fake-1"}))
+        .await
+        .unwrap_err();
+    assert!(full.message.contains("agent.max_queued_turns"), "{full}");
+    // The one background job allowed runs already.
+    let other = session
+        .call(json!({"prompt":"d","session":"fake-2","background":true}))
+        .await
+        .unwrap_err();
+    assert!(other.message.contains("agent.max_background"), "{other}");
+    // Another conversation has a queue of its own, and runs beside the first.
+    let running = tokio::spawn({
+        let tool = Arc::clone(&session.tool);
+        async move {
+            tool.execute(json!({"prompt":"e","session":"fake-2"}), context())
+                .await
+        }
+    });
+    session.ran(&["a", "e"]).await;
+    let queued = session
+        .call(json!({"prompt":"f","session":"fake-2"}))
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true);
+    session.release.add_permits(4);
+    assert!(running.await.unwrap().is_ok());
+    for (job, reply) in [("job-2", "b"), ("job-3", "f")] {
+        assert_eq!(session.result(job).await["result"]["reply"], reply);
+    }
+}
+
+#[tokio::test]
+async fn a_call_never_overtakes_prompts_already_waiting() {
+    let session = session(2, BusyConfig::default());
+    session
+        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .await
+        .unwrap();
+    session
+        .call(json!({"prompt":"b","session":"fake-1"}))
+        .await
+        .unwrap();
+    let refused = session
+        .call(json!({"prompt":"x","session":"fake-1","on_busy":"fail"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.message,
+        "session busy: conversation fake-1 is still running a turn, and 1 more prompts wait \
+         for it"
+    );
+    // Waiting holds the call until the prompts ahead of it have run.
+    let waiting = tokio::spawn({
+        let tool = Arc::clone(&session.tool);
+        async move {
+            tool.execute(
+                json!({"prompt":"c","session":"fake-1","on_busy":"wait"}),
+                context(),
+            )
+            .await
+        }
+    });
+    session.ran(&["a"]).await;
+    session.release_then(&["a", "b"]).await;
+    assert!(!waiting.is_finished());
+    session.release_then(&["a", "b", "c"]).await;
+    session.release.add_permits(1);
+    let output = waiting.await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.content).unwrap()["reply"],
+        "c"
+    );
+    assert_eq!(session.result("job-2").await["status"], "completed");
+}
+
+#[tokio::test]
+async fn cancelling_a_queued_prompt_frees_its_place_without_running_it() {
+    let session = session(2, BusyConfig::default());
+    for prompt in ["a", "b", "c"] {
+        session
+            .call(json!({"prompt":prompt,"session":"fake-1","background":true}))
+            .await
+            .unwrap();
+    }
+    session.ran(&["a"]).await;
+    let cancelled = session.jobs.cancel("job-2", "").await.unwrap();
+    assert_eq!(cancelled["status"], "cancelled");
+    session.release_then(&["a", "c"]).await;
+    session.release.add_permits(1);
+    assert_eq!(session.result("job-3").await["status"], "completed");
+    assert_eq!(lock(&session.prompts).as_slice(), ["a", "c"]);
+}
+
+#[tokio::test]
+async fn background_calls_and_steering_fall_back_to_the_busy_policy() {
+    let session = session(
+        2,
+        BusyConfig {
+            behavior: BusyBehavior::Steer,
+            steer_fallback: BusyBehavior::Fail,
+            max_queued_turns: 4,
+        },
+    );
+    session
+        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .await
+        .unwrap();
+    // This agent cannot steer, so its fallback refuses the call.
+    for arguments in [
+        json!({"prompt":"b","session":"fake-1"}),
+        json!({"prompt":"b","session":"fake-1","background":true}),
+        json!({"prompt":"b","session":"fake-1","on_busy":"fail","background":true}),
+    ] {
+        let error = session.call(arguments).await.unwrap_err();
+        assert!(error.message.starts_with("session busy"), "{error}");
+    }
+    // A background call that would wait queues instead; a blank policy is
+    // the agent's own.
+    let queued = session
+        .call(json!({"prompt":"b","session":"fake-1","on_busy":"wait","background":true}))
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true);
+    let error = session
+        .call(json!({"prompt":"c","session":"fake-1","on_busy":""}))
+        .await
+        .unwrap_err();
+    assert!(error.message.starts_with("session busy"), "{error}");
+    // A steer fallback of steer queues rather than failing.
+    let session = self::session(
+        2,
+        BusyConfig {
+            behavior: BusyBehavior::Steer,
+            steer_fallback: BusyBehavior::Steer,
+            max_queued_turns: 4,
+        },
+    );
+    session
+        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .await
+        .unwrap();
+    let queued = session
+        .call(json!({"prompt":"b","session":"fake-1"}))
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true);
 }
 
 /// The context of the model's call `call_id`.

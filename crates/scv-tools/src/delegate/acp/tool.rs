@@ -4,7 +4,7 @@ use std::{
     ffi::OsString,
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use async_trait::async_trait;
@@ -28,8 +28,11 @@ use crate::{
     },
 };
 
-use super::{AcpChild, TurnEnd};
+use super::{AcpChild, Steered, TurnEnd};
 use crate::sync::lock;
+
+/// How long a steer waits for the agent to answer whether it took the prompt.
+const STEER_ANSWER_WAIT: Duration = Duration::from_secs(30);
 
 pub(crate) struct AcpAgentTool {
     /// The adapter name, such as `claude`: conversation handles and results.
@@ -260,6 +263,83 @@ impl Backend for AcpAgentTool {
             bounded(&args.prompt, 2000),
             timeout.as_secs()
         ))
+    }
+
+    fn busy(&self, arguments: &Value) -> Result<bool, ToolError> {
+        let args: AgentArgs = parse_args(arguments)?;
+        Ok(args
+            .session
+            .as_deref()
+            .is_some_and(|h| self.conversations.is_busy(h)))
+    }
+
+    async fn wait_idle(
+        &self,
+        arguments: &Value,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), ToolError> {
+        let args: AgentArgs = parse_args(arguments)?;
+        if let Some(handle) = args.session.as_deref() {
+            self.conversations.wait_idle(handle, cancellation).await?;
+        }
+        Ok(())
+    }
+
+    async fn steer(
+        &self,
+        arguments: Value,
+        context: ToolContext,
+    ) -> Result<Option<ToolOutput>, ToolError> {
+        let args: AgentArgs = parse_args(&arguments)?;
+        let Some(handle) = args.session.as_deref() else {
+            return Ok(None);
+        };
+        let Some(Attachment(attachment)) = self.conversations.attachment(handle) else {
+            return Ok(None);
+        };
+        let Ok(child) = Arc::downcast::<AcpChild>(attachment) else {
+            return Ok(None);
+        };
+        if !child.steerable {
+            return Ok(None);
+        }
+        let request = child.rpc.reserve_request();
+        let Some(expected) = child.steering.expect(request) else {
+            return Ok(None);
+        };
+        let params = serde_json::json!({
+            "sessionId": child.session_id,
+            "prompt": [{"type": "text", "text": args.prompt}]
+        });
+        child
+            .rpc
+            .send_request(request, "_session/steering", params)
+            .await?;
+        match expected
+            .answer(STEER_ANSWER_WAIT, &context.cancellation)
+            .await
+        {
+            Steered::Accepted => Ok(Some(ToolOutput::success(
+                serde_json::json!({
+                    "agent": self.name,
+                    "status": "steered",
+                    "session": handle,
+                    "note": "The agent took the prompt into its running turn; the result \
+                             comes with that turn's."
+                })
+                .to_string(),
+            ))),
+            Steered::Refused => Ok(None),
+            // Queueing it now could deliver the prompt twice.
+            Steered::Unanswered => Err(ToolError::failed(format!(
+                "{} did not answer the steering request for conversation {handle} within {} \
+                 seconds; it may still take the prompt, so check that turn's result before \
+                 sending it again",
+                self.name,
+                STEER_ANSWER_WAIT.as_secs()
+            ))),
+            Steered::Cancelled => Err(ToolError::cancelled("steering cancelled")),
+        }
     }
 
     async fn execute(

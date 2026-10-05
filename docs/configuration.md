@@ -182,6 +182,10 @@ max_delegation_depth = 2
 max_conversations = 8
 conversation_idle_seconds = 86400
 max_background = 4
+# A call continuing a delegated conversation that is busy queues its prompt.
+on_busy = "queue"             # queue, wait, steer, or fail
+steer_fallback = "queue"      # queue, wait, or fail when steering cannot
+max_queued_turns = 4          # prompts waiting per conversation; at most 32
 prefer = []
 
 [session]
@@ -258,6 +262,9 @@ effort_args = ["--effort", "{effort}"]
 # model = "opus[1m]"        # a value `scv agents check claude` lists
 # effort = "xhigh"
 # hard_task_effort = "max"
+# on_busy = "steer"         # queue, wait, steer, or fail for this agent
+# steer_fallback = "queue"
+# max_queued_turns = 4
 
 [agents.codex]
 command = "codex"
@@ -376,6 +383,14 @@ configuration may only lower them. `agent.max_background` (default 4, at most
 at once; `0` turns background delegation off, and project configuration may
 only lower it. The default leaves room for a main agent that hands most work to
 background jobs; see [Background jobs](tools.md#background-jobs).
+`agent.on_busy` (default `queue`; `wait`, `steer`, or `fail`) decides what a
+call continuing a delegated conversation does while a turn runs or prompts
+wait for it, `agent.steer_fallback` (default `queue`; `wait` or `fail`) what
+a steer does when the running turn cannot take the prompt, and
+`agent.max_queued_turns` (default 4, at most 32) how many prompts may wait
+per conversation; `[agents.<name>]` may set each for one agent, and project
+configuration may only lower `agent.max_queued_turns`. See
+[Busy conversations](tools.md#busy-conversations).
 `agent.prefer` (default empty) lists the agents the user prefers, in order,
 such as `["codex", "claude"]`; the system prompt names the ones a session
 offers, and the first of those runs an `agent` call that names no agent.

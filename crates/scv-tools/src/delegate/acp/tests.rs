@@ -76,6 +76,7 @@ fn adapter(full: bool) -> AgentAdapterConfig {
         use_for: None,
         defaults: AgentDefaults::default(),
         options_file: None,
+        busy: crate::BusyConfig::default(),
     }
 }
 
@@ -404,6 +405,84 @@ async fn cancellation_sends_session_cancel() {
         .unwrap_err();
     assert!(error.message.contains("cancelled"), "{}", error.message);
     assert!(calls(dir.path()).contains("cancel"));
+}
+
+/// Steer `session`'s running turn with `prompt`.
+async fn steer(tool: &AcpAgentTool, dir: &Path, session: &str, prompt: &str) -> Option<ToolOutput> {
+    tool.steer(
+        json!({"prompt":prompt,"session":session}),
+        context(dir, None),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn steering_sends_the_running_turn_a_request_and_waits_for_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "steer");
+    let tool = Arc::new(acp_tool(
+        &script,
+        store(Duration::from_secs(60)),
+        None,
+        None,
+    ));
+    let session = open_conversation(&tool, dir.path()).await;
+    // Between turns nothing could take the prompt, so nothing is sent.
+    assert!(steer(&tool, dir.path(), &session, "idle").await.is_none());
+    let active = tokio::spawn({
+        let tool = Arc::clone(&tool);
+        let context = context(dir.path(), None);
+        let session = session.clone();
+        async move {
+            tool.execute(json!({"prompt":"hang","session":session}), context)
+                .await
+        }
+    });
+    until(|| calls(dir.path()).contains("hang")).await;
+    // A call that steers through the `agent` tool reaches the running turn.
+    let agent = crate::delegate::background::BackgroundCapable {
+        inner: Arc::new(AgentTool::beside(
+            "claude",
+            Arc::clone(&tool) as Arc<dyn crate::delegate::agent::Backend>,
+            tool.accepts(),
+            &[],
+        )),
+        jobs: Arc::new(crate::delegate::background::BackgroundJobs::new(1, None)),
+    };
+    let steered = agent
+        .execute(
+            json!({"prompt":"please adjust","session":session,"on_busy":"steer"}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&steered)["status"], "steered", "{}", steered.content);
+    // A refusal, or a turn that ends before it answers, took nothing.
+    assert!(
+        steer(&tool, dir.path(), &session, "refuse this")
+            .await
+            .is_none()
+    );
+    assert!(
+        steer(&tool, dir.path(), &session, "end first")
+            .await
+            .is_none()
+    );
+    let ended = active.await.unwrap().unwrap();
+    assert_eq!(json(&ended)["status"], "completed", "{}", ended.content);
+    let calls = calls(dir.path());
+    assert!(!calls.contains("steering:idle"), "{calls}");
+    assert!(calls.contains("steering:please adjust"), "{calls}");
+    // The late answer is ignored, and the conversation goes on.
+    let next = tool
+        .execute(
+            json!({"prompt":"recall","session":session}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&next)["status"], "completed", "{}", next.content);
 }
 
 #[tokio::test]

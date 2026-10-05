@@ -39,7 +39,10 @@ for line in sys.stdin:
         continue
     if method == "initialize":
         json.dump(params, open(os.path.join(DIR, "init.json"), "w"))
-        send({"id": rid, "result": {"protocolVersion": 2 if MODE == "v2" else 1, "agentCapabilities": {}, "authMethods": []}})
+        result = {"protocolVersion": 2 if MODE == "v2" else 1, "agentCapabilities": {}, "authMethods": []}
+        if MODE == "steer":
+            result["_meta"] = {"steering": {"supported": True}}
+        send({"id": rid, "result": result})
     elif method == "session/new":
         sessions += 1
         log("session/new cwd=" + params["cwd"])
@@ -60,6 +63,13 @@ for line in sys.stdin:
         if pending and MODE != "stubborn":
             send({"id": pending[0], "result": {"stopReason": "cancelled"}})
             pending = None
+    elif method == "_session/steering":
+        text = params["prompt"][0]["text"]
+        log("steering:" + text)
+        if text == "end first" and pending:
+            send({"id": pending[0], "result": {"stopReason": "end_turn"}})
+            pending = None
+        send({"id": rid, "result": {"accepted": not text.startswith("refuse")}})
     elif method == "session/prompt":
         session, text = params["sessionId"], params["prompt"][0]["text"]
         if text.startswith("remember "):
