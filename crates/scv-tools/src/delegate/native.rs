@@ -241,6 +241,26 @@ impl Backend for NativeAgentTool {
         ))
     }
 
+    fn busy(&self, arguments: &Value) -> Result<bool, ToolError> {
+        let args: AgentArgs = parse_args(arguments)?;
+        Ok(args
+            .session
+            .as_deref()
+            .is_some_and(|h| self.conversations.is_busy(h)))
+    }
+
+    async fn wait_idle(
+        &self,
+        arguments: &Value,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), ToolError> {
+        let args: AgentArgs = parse_args(arguments)?;
+        if let Some(handle) = args.session.as_deref() {
+            self.conversations.wait_idle(handle, cancellation).await?;
+        }
+        Ok(())
+    }
+
     async fn execute(
         &self,
         arguments: Value,

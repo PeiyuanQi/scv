@@ -7,6 +7,7 @@ use scv_core::{ToolContext, ToolRisk};
 use serde_json::json;
 
 use super::*;
+use crate::BusyConfig;
 use crate::delegate::{agent::Backend, output};
 
 /// A backend the entries below never call.
@@ -43,6 +44,7 @@ fn offered(name: &str, accepts: Accepts) -> Offered {
         use_for: Some("current events and posts on X".into()),
         defaults: AgentDefaults::default(),
         holds_settings: true,
+        busy: BusyConfig::default(),
     }
 }
 

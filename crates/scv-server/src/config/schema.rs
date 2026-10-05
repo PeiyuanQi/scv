@@ -9,6 +9,7 @@ use scv_channels::state::AccountSettings;
 use scv_client::Secret;
 use scv_core::ContextConfig;
 use scv_provider_openai::ProviderLimits;
+use scv_tools::BusyBehavior;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -142,6 +143,9 @@ pub(crate) struct AgentConfig {
     /// Background agent jobs (`background: true`) a session may run at once;
     /// 0 turns background delegation off.
     pub(crate) max_background: usize,
+    pub(crate) on_busy: BusyBehavior,
+    pub(crate) steer_fallback: BusyBehavior,
+    pub(crate) max_queued_turns: usize,
     /// Agents the user prefers, in order (such as `["codex", "claude"]`);
     /// the system prompt names the offered ones, and the first of them runs
     /// an `agent` call that names none. Empty states no preference.
@@ -158,6 +162,9 @@ impl Default for AgentConfig {
             // The main agent hands most work to background jobs and stays
             // available, so a few may run at once.
             max_background: 4,
+            on_busy: BusyBehavior::Queue,
+            steer_fallback: BusyBehavior::Queue,
+            max_queued_turns: 4,
             prefer: Vec::new(),
             system_prompt: "You are SCV, a concise and careful agent. Use tools to inspect, change, and verify.".into(),
         }
@@ -420,6 +427,9 @@ pub(crate) struct AdapterConfig {
     pub(crate) effort: Option<String>,
     /// The effort the main agent is told to pass for a hard task.
     pub(crate) hard_task_effort: Option<String>,
+    pub(crate) on_busy: Option<BusyBehavior>,
+    pub(crate) steer_fallback: Option<BusyBehavior>,
+    pub(crate) max_queued_turns: Option<usize>,
 }
 
 impl AdapterConfig {
@@ -499,6 +509,9 @@ impl Default for AgentsConfig {
                             model: None,
                             effort: None,
                             hard_task_effort: None,
+                            on_busy: None,
+                            steer_fallback: None,
+                            max_queued_turns: None,
                         },
                     )
                 })

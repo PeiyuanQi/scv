@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use scv_core::ToolError;
 use serde::Deserialize;
 
+use crate::BusyBehavior;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentArgs {
@@ -22,6 +24,8 @@ pub(crate) struct AgentArgs {
     pub(crate) model: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
     pub(crate) effort: Option<String>,
+    #[serde(default, deserialize_with = "blank_busy_as_none")]
+    pub(crate) on_busy: Option<BusyBehavior>,
 }
 
 /// Models often send an optional string they mean to leave unset as `""`, so
@@ -31,6 +35,15 @@ fn blank_as_none<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<String>, D::Error> {
     let value = Option::<String>::deserialize(deserializer)?;
     Ok(value.filter(|value| !value.trim().is_empty()))
+}
+
+/// `on_busy`, where blank also selects the default.
+fn blank_busy_as_none<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BusyBehavior>, D::Error> {
+    blank_as_none(deserializer)?
+        .map(|value| BusyBehavior::parse(&value).map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 /// Longest `cwd` argument accepted, in bytes.

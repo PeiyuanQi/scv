@@ -613,6 +613,7 @@ fn the_registry_offers_scv_only_below_the_depth_limit() {
         use_for: None,
         defaults: crate::AgentDefaults::default(),
         options_file: None,
+        busy: crate::BusyConfig::default(),
     };
     let home = tempfile::tempdir().unwrap();
     for (depth, offered) in [(0, true), (1, true), (2, false)] {

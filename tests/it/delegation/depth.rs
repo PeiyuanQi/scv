@@ -69,6 +69,7 @@ async fn inherited_depth_gates_agents_and_extends_the_parent_chain() {
         use_for: None,
         defaults: AgentDefaults::default(),
         options_file: None,
+        busy: scv_tools::BusyConfig::default(),
     };
     // Cover both the ambient fallback and a registry-backed client. A
     // lower client declaration must never reduce the process's own depth.

@@ -17,6 +17,8 @@ use std::{
 
 use scv_core::ToolError;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     delegate::{
@@ -81,6 +83,8 @@ pub(crate) struct ConversationStore {
     marker_dir: Option<PathBuf>,
     owner: Option<ProcessIdentity>,
     inner: Mutex<Inner>,
+    /// Woken whenever a turn ends.
+    changed: Notify,
 }
 
 /// On-disk marker keeping a live conversation's transcript from `gc`.
@@ -135,6 +139,41 @@ impl ConversationStore {
             marker_dir,
             owner: ProcessIdentity::current(),
             inner: Mutex::new(Inner::default()),
+            changed: Notify::new(),
+        }
+    }
+
+    /// Whether conversation `handle` is running a turn.
+    pub(crate) fn is_busy(&self, handle: &str) -> bool {
+        lock(&self.inner)
+            .conversations
+            .get(handle)
+            .is_some_and(|c| c.busy)
+    }
+
+    /// What conversation `handle` keeps between turns, if anything.
+    pub(crate) fn attachment(&self, handle: &str) -> Option<Attachment> {
+        lock(&self.inner)
+            .conversations
+            .get(handle)
+            .and_then(|c| c.attachment.clone())
+    }
+
+    /// Wait until conversation `handle` runs no turn.
+    pub(crate) async fn wait_idle(
+        &self,
+        handle: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ToolError> {
+        loop {
+            let notified = self.changed.notified();
+            if !self.is_busy(handle) {
+                return Ok(());
+            }
+            tokio::select! {
+                () = notified => {},
+                () = cancellation.cancelled() => return Err(ToolError::cancelled("waiting for delegated conversation")),
+            }
         }
     }
 
@@ -381,17 +420,18 @@ impl TurnGuard {
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
-        if self.finished {
-            return;
+        if !self.finished {
+            let mut inner = lock(&self.store.inner);
+            if self.turn == 1 {
+                inner.conversations.remove(&self.handle);
+                drop(inner);
+                self.store.remove_marker(self.vendor.as_deref());
+            } else if let Some(conversation) = inner.conversations.get_mut(&self.handle) {
+                conversation.busy = false;
+            }
         }
-        let mut inner = lock(&self.store.inner);
-        if self.turn == 1 {
-            inner.conversations.remove(&self.handle);
-            drop(inner);
-            self.store.remove_marker(self.vendor.as_deref());
-        } else if let Some(conversation) = inner.conversations.get_mut(&self.handle) {
-            conversation.busy = false;
-        }
+        // However the turn ended, its conversation runs none now.
+        self.store.changed.notify_waiters();
     }
 }
 

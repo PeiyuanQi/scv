@@ -201,6 +201,14 @@ Daemon and component changes require focused coverage for:
   once seen or stopped, never merely finished, and never twice), report turns
   naming theirs in `origin.jobs`, and the channel bridge and `scv exec`
   keeping a session open from those events alone;
+- busy conversations: calls that continue a conversation running their
+  turns in the order they arrived, even one arriving before an earlier
+  background turn began, with `fail` and `wait` never overtaking a queued
+  prompt, a cancelled queued prompt never sent, the queue bounded per
+  conversation apart from `agent.max_background`, background calls and a
+  steer that cannot steer following the same policy, and ACP steering sent
+  only into a running turn, answered before it reports `steered`, and
+  falling back when refused or when the turn ends first;
 - failed background reports: a job unreported until its report turn
   completes, a provider failure in a turn that ran no tool tried again after
   30 and then 120 seconds or as soon as a turn succeeds, the third failure (or

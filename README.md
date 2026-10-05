@@ -248,11 +248,15 @@ approval_policy = "on-risk"   # reads run; writes, shell, and agents ask first
 
 [agent]
 prefer = ["codex", "claude"]  # who gets delegated work first
+on_busy = "queue"             # queue, wait, steer, or fail
+steer_fallback = "queue"
+max_queued_turns = 4
 
 [agents.claude]
 use_for = "coding"
 model = "opus[1m]"            # a value `scv agents check` lists for claude
 effort = "xhigh"
+on_busy = "steer"             # per-agent override; falls back to queue
 
 [agents.grok]
 use_for = "current events, and anything that needs posts on X"

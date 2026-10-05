@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.12`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.12` pins.
+The current workspace release is `0.3.13`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.13` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,32 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.13
+
+`0.3.13` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.12` checks the new release and can roll it back.
+
+- **Busy delegated conversations.** An `agent` call that continues a
+  conversation while its turn runs no longer fails with `session busy` by
+  default: it follows `agent.on_busy`. The default, `queue`, returns a
+  background job handle at once and sends the prompt after the turns ahead
+  of it, in the order the calls arrived; `wait` holds the call until then;
+  `fail` keeps the old error; `steer` hands the prompt to the running turn
+  of an ACP server that advertises steering, and otherwise applies
+  `agent.steer_fallback`. At most `agent.max_queued_turns` (default 4, at
+  most 32) prompts wait per conversation, apart from `agent.max_background`.
+  `[agents.<name>]` may set all three for one agent, and a call may pass
+  `on_busy`. Queued prompts live only in the session's memory. See
+  [Busy conversations](tools.md#busy-conversations).
+- `0.3.12` rejects `on_busy`, `steer_fallback`, and `max_queued_turns` in
+  `[agent]` and `[agents.<name>]`, so with one in `config.toml` it cannot
+  start, and an automatic rollback would fail too. Remove them before going
+  back to `0.3.12`.
+
+What changes for code that embeds SCV's crates: `scv-tools` adds
+`BusyBehavior` and `BusyConfig`, and `AgentAdapterConfig` gains `busy`, so a
+struct literal needs the new field.
 
 ## Upgrading to 0.3.12
 

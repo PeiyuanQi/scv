@@ -76,6 +76,86 @@ impl Default for ToolsConfig {
     }
 }
 
+/// What an `agent` call does when the conversation it continues is running
+/// a turn, or has prompts queued (`agent.on_busy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BusyBehavior {
+    /// Queue the prompt as a background job that runs after the turns ahead.
+    #[default]
+    Queue,
+    /// Keep the call waiting until the turns ahead end, then run it.
+    Wait,
+    /// Add the prompt to the running turn when the agent's ACP server can be
+    /// steered, otherwise apply [`BusyConfig::steer_fallback`].
+    Steer,
+    /// Refuse the call as busy.
+    Fail,
+}
+
+impl BusyBehavior {
+    /// The behavior `value` names, or an error saying what may be named.
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "queue" => Ok(Self::Queue),
+            "wait" => Ok(Self::Wait),
+            "steer" => Ok(Self::Steer),
+            "fail" => Ok(Self::Fail),
+            other => Err(format!(
+                "invalid busy behavior {other:?}; use queue, wait, steer, or fail"
+            )),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BusyBehavior {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for BusyBehavior {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            Self::Queue => "queue",
+            Self::Wait => "wait",
+            Self::Steer => "steer",
+            Self::Fail => "fail",
+        })
+    }
+}
+
+/// How one agent's busy conversations are handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusyConfig {
+    /// What a call does by default (`on_busy`).
+    pub behavior: BusyBehavior,
+    /// What a steer does when the running turn cannot take the prompt
+    /// (`steer_fallback`): queue, wait, or fail. `Steer` means queue.
+    pub steer_fallback: BusyBehavior,
+    /// Prompts that may wait per conversation (`max_queued_turns`).
+    pub max_queued_turns: usize,
+}
+
+impl BusyConfig {
+    /// What a steer that could not steer does instead.
+    pub(crate) fn fallback(self) -> BusyBehavior {
+        match self.steer_fallback {
+            BusyBehavior::Steer => BusyBehavior::Queue,
+            other => other,
+        }
+    }
+}
+
+impl Default for BusyConfig {
+    fn default() -> Self {
+        Self {
+            behavior: BusyBehavior::Queue,
+            steer_fallback: BusyBehavior::Queue,
+            max_queued_turns: 4,
+        }
+    }
+}
+
 /// The registry and parent session that delegated runs are recorded under.
 #[derive(Debug, Clone)]
 pub struct DelegationContext {
@@ -134,6 +214,9 @@ pub struct AgentAdapterConfig {
     /// Where SCV keeps the model and effort values this agent's ACP server
     /// offers (`state/agent-options/<name>.json`); `None` keeps none.
     pub options_file: Option<PathBuf>,
+    /// How a call to one of this agent's busy conversations is handled:
+    /// `[agents.<name>]` over `[agent]`.
+    pub busy: BusyConfig,
 }
 
 /// The user's model and effort for one agent: `[agents.<name>] model`,

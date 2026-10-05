@@ -9,7 +9,9 @@
 //! `session/request_permission` goes through the calling session's approval
 //! gate, and a cancelled or timed-out call sends `session/cancel`. SCV offers
 //! no client file-system or terminal capabilities, so every other request the
-//! agent makes is refused as an unknown method.
+//! agent makes is refused as an unknown method. A server that advertises
+//! `_meta.steering.supported` can take a further prompt into its running
+//! turn through the `_session/steering` request.
 
 mod permission;
 mod progress;
@@ -23,7 +25,7 @@ use {
     permission::{choose_option, describe_permission},
     progress::Progress,
     rpc::{CallError, Incoming, Interrupt, Rpc, describe_rpc_error},
-    session::{AcpChild, TurnEnd},
+    session::{AcpChild, Steered, TurnEnd},
 };
 
 #[cfg(test)]

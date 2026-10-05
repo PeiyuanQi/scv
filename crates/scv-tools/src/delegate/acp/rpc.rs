@@ -55,11 +55,28 @@ pub(super) enum Interrupt {
 }
 
 impl Rpc {
-    pub(super) async fn request(&self, method: &str, params: Value) -> Result<u64, ToolError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    /// The ID of the next request, for a caller that must expect its
+    /// response before sending it.
+    pub(super) fn reserve_request(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Send request `id`, which [`reserve_request`](Self::reserve_request)
+    /// gave out.
+    pub(super) async fn send_request(
+        &self,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Result<(), ToolError> {
         self.live
             .send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .await?;
+            .await
+    }
+
+    pub(super) async fn request(&self, method: &str, params: Value) -> Result<u64, ToolError> {
+        let id = self.reserve_request();
+        self.send_request(id, method, params).await?;
         Ok(id)
     }
 

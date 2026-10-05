@@ -7,7 +7,7 @@ use scv_client::Layout;
 use scv_core::{AgentConfig as CoreAgentConfig, HistoryLimits};
 use scv_provider_openai::ProviderLimits;
 use scv_tools::{
-    AgentAdapterConfig, ToolsConfig,
+    AgentAdapterConfig, BusyConfig, ToolsConfig,
     conversation::ConversationLimits,
     web::{SearchBackend, WebToolsConfig},
 };
@@ -221,6 +221,15 @@ impl Config {
                         use_for: config.use_for.clone(),
                         defaults: config.defaults(),
                         options_file: Some(self.layout().agent_options(name)),
+                        busy: BusyConfig {
+                            behavior: config.on_busy.unwrap_or(self.agent.on_busy),
+                            steer_fallback: config
+                                .steer_fallback
+                                .unwrap_or(self.agent.steer_fallback),
+                            max_queued_turns: config
+                                .max_queued_turns
+                                .unwrap_or(self.agent.max_queued_turns),
+                        },
                     },
                 ))
             })

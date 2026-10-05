@@ -15,6 +15,9 @@ struct Recorder {
     risked: Mutex<Vec<Value>>,
     ran: Mutex<Vec<Value>>,
     result: Mutex<Option<Result<ToolOutput, ToolError>>>,
+    /// Its conversations are running a turn.
+    busy: Mutex<bool>,
+    idle: tokio::sync::Notify,
 }
 
 impl Recorder {
@@ -24,7 +27,14 @@ impl Recorder {
             risked: Mutex::default(),
             ran: Mutex::default(),
             result: Mutex::default(),
+            busy: Mutex::new(false),
+            idle: tokio::sync::Notify::new(),
         })
+    }
+
+    fn set_busy(&self, busy: bool) {
+        *self.busy.lock().unwrap() = busy;
+        self.idle.notify_waiters();
     }
 
     fn answering(name: &'static str, result: Result<ToolOutput, ToolError>) -> Arc<Self> {
@@ -47,6 +57,24 @@ impl Backend for Recorder {
 
     fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
         Ok(format!("Launch {} with the prompt.", self.name))
+    }
+
+    fn busy(&self, _arguments: &Value) -> Result<bool, ToolError> {
+        Ok(*self.busy.lock().unwrap())
+    }
+
+    async fn wait_idle(
+        &self,
+        _arguments: &Value,
+        _cancellation: &CancellationToken,
+    ) -> Result<(), ToolError> {
+        loop {
+            let idle = self.idle.notified();
+            if !*self.busy.lock().unwrap() {
+                return Ok(());
+            }
+            idle.await;
+        }
     }
 
     async fn execute(
@@ -92,6 +120,7 @@ fn offered(recorder: &Arc<Recorder>) -> Offered {
         use_for: None,
         defaults: AgentDefaults::default(),
         holds_settings: true,
+        busy: BusyConfig::default(),
     }
 }
 
@@ -151,6 +180,45 @@ async fn a_call_runs_on_the_agent_it_names_or_the_first_preferred_one() {
         ToolRisk::Delegate
     );
     assert_eq!(codex.risked.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn without_background_jobs_a_busy_conversation_waits_or_fails() {
+    let claude = Recorder::new("claude");
+    claude.set_busy(true);
+    // Nothing can queue, so the default refuses the call as busy.
+    let tool = dispatcher(&[&claude], &["claude"]);
+    let error = tool
+        .execute(json!({"prompt":"later","session":"claude-1"}), context())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "session busy: conversation claude-1 is still running a turn"
+    );
+    assert!(claude.ran.lock().unwrap().is_empty());
+    // The agent's own policy waits for the turn, unless the call says otherwise.
+    let mut waits = offered(&claude);
+    waits.busy.behavior = BusyBehavior::Wait;
+    let tool = Arc::new(AgentTool::new(vec![waits], &["claude".into()], timeouts()));
+    let error = tool
+        .execute(
+            json!({"prompt":"later","session":"claude-1","on_busy":"fail"}),
+            context(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message.starts_with("session busy"), "{error}");
+    let waiting = tokio::spawn({
+        let tool = Arc::clone(&tool);
+        async move { run(&tool, json!({"prompt":"later","session":"claude-1"})).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    assert!(claude.ran.lock().unwrap().is_empty());
+    claude.set_busy(false);
+    assert_eq!(waiting.await.unwrap().unwrap()["status"], "completed");
+    assert_eq!(claude.ran.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -306,6 +374,10 @@ fn the_schema_lists_only_offered_agents_and_the_options_some_of_them_take() {
             .contains("such as \"claude-1\", which names its agent"),
         "{properties}"
     );
+    assert_eq!(
+        properties["on_busy"]["enum"],
+        json!(["queue", "wait", "steer", "fail"])
+    );
     assert!(
         properties["cwd"]["description"]
             .as_str()
@@ -346,7 +418,7 @@ fn the_schema_lists_only_offered_agents_and_the_options_some_of_them_take() {
     let alone = dispatcher(&[&dsh], &[]).spec();
     let properties = &alone.parameters["properties"];
     assert_eq!(properties["agent"]["enum"], json!(["dsh"]));
-    for absent in ["model", "effort", "session"] {
+    for absent in ["model", "effort", "session", "on_busy"] {
         assert!(properties.get(absent).is_none(), "{absent} offered");
     }
     assert!(

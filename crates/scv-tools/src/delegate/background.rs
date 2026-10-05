@@ -11,9 +11,16 @@
 //! failed one makes it due again after a delay, a bounded number of times;
 //! after that, or when another turn must not be tried, the server reports it
 //! to the client directly ([`BackgroundJobs::report_failed`]).
+//!
+//! A call that continues a conversation takes its place in that
+//! conversation's lane as it arrives. When a turn or another call is
+//! ahead, the call's busy policy decides: it steers the running turn, waits
+//! in the foreground, fails, or becomes a queued job that runs once its
+//! place comes up.
+
+mod lane;
 
 use std::{
-    path::PathBuf,
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
@@ -29,11 +36,15 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use self::lane::{Lanes, Place};
 use crate::{
+    BusyBehavior,
     args::{Timeouts, bounded, parse_args, timeout_schema},
     delegate::{
-        agent::{AGENT_TOOL, AgentTool},
+        agent::{AGENT_TOOL, AgentTool, Offered},
+        conversation,
         output::AgentReply,
+        request::AgentArgs,
     },
     sync::lock,
 };
@@ -67,6 +78,8 @@ pub struct BackgroundJobs {
     /// Decides a running job's nested approval requests, since no turn is
     /// left to carry them to a person. Without it they are denied.
     approvals: Option<Arc<dyn ApprovalGate>>,
+    /// The `agent` calls continuing each conversation, in arrival order.
+    lanes: Arc<Lanes>,
 }
 
 impl std::fmt::Debug for BackgroundJobs {
@@ -115,6 +128,9 @@ struct Job {
     cancel: CancellationToken,
     /// `agent_cancel` stopped it.
     cancelled: bool,
+    /// A busy conversation's queued prompt, which `agent.max_queued_turns`
+    /// bounds instead of `agent.max_background`.
+    queued: bool,
     outcome: Option<Outcome>,
     /// The model has seen the result (through `agent_wait`, `agent_status`,
     /// or a report turn that completed), the user stopped its report turn,
@@ -165,6 +181,7 @@ impl BackgroundJobs {
             cancellation: CancellationToken::new(),
             finished,
             approvals: None,
+            lanes: Arc::default(),
         }
     }
 
@@ -184,8 +201,9 @@ impl BackgroundJobs {
         lock(&self.state)
     }
 
-    /// Start `tool` with `arguments` in the background for the call
-    /// `call_id`, on `agent`, and return its job's
+    /// Start `tool` with `arguments` in the background for the call in
+    /// `context` (whose workspace and call ID it takes; the job has its own
+    /// cancellation), on `agent`, and return its job's
     /// `{"job","agent","status":"running","background":true}` description.
     fn start(
         self: &Arc<Self>,
@@ -193,8 +211,8 @@ impl BackgroundJobs {
         name: &str,
         agent: &str,
         arguments: Value,
-        workspace: PathBuf,
-        call_id: &str,
+        context: &ToolContext,
+        turn: Turn,
     ) -> Result<Value, ToolError> {
         let task = task_line(
             arguments
@@ -202,14 +220,15 @@ impl BackgroundJobs {
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         );
+        let queued = matches!(turn, Turn::Queued(_));
         let (id, progress, done_tx, cancellation) = {
             let mut state = self.state();
             let running = state
                 .jobs
                 .iter()
-                .filter(|job| job.outcome.is_none())
+                .filter(|job| job.outcome.is_none() && !job.queued)
                 .count();
-            if running >= self.limit {
+            if !queued && running >= self.limit {
                 return Err(ToolError::limit(format!(
                     "{running} background jobs are already running, the limit \
                      (agent.max_background). Start this one after a job finishes, or \
@@ -222,7 +241,7 @@ impl BackgroundJobs {
             let (done_tx, done) = watch::channel(false);
             let cancel = self.cancellation.child_token();
             state.record(
-                call_id,
+                &context.call_id,
                 JobChange {
                     job: id.clone(),
                     tool: name.to_owned(),
@@ -241,6 +260,7 @@ impl BackgroundJobs {
                 last_progress: None,
                 cancel: cancel.clone(),
                 cancelled: false,
+                queued,
                 outcome: None,
                 reported: false,
                 reporting: false,
@@ -253,6 +273,7 @@ impl BackgroundJobs {
         let jobs = Arc::downgrade(self);
         let job = id.clone();
         let approvals = self.approvals.clone();
+        let workspace = context.workspace.clone();
         tokio::spawn(async move {
             let started = Instant::now();
             let mut context = ToolContext::new(workspace, cancellation);
@@ -262,14 +283,35 @@ impl BackgroundJobs {
                 context.approvals = ToolApprovals::new(Arc::clone(gate), job.clone());
             }
             context.progress = progress;
-            let output = tool
-                .execute(arguments, context)
-                .await
-                .unwrap_or_else(ToolOutput::from);
+            let place = turn.place();
+            let output = match &place {
+                Some(place) if queued => {
+                    context.progress.report(&format!(
+                        "queued: waits for conversation {}'s running turn",
+                        place.handle()
+                    ));
+                    match place.wait_first(&context.cancellation).await {
+                        Ok(()) => {
+                            context.progress.take();
+                            context.progress.report(&format!(
+                                "started its turn in conversation {}",
+                                place.handle()
+                            ));
+                            tool.execute(arguments, context).await
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                _ => tool.execute(arguments, context).await,
+            }
+            .unwrap_or_else(ToolOutput::from);
+            // Free the conversation before the result is visible, so a call
+            // continuing it after `agent_wait` finds it idle.
+            drop(place);
             finish(&jobs, &job, output, started.elapsed());
             let _ = done_tx.send(true);
         });
-        Ok(json!({
+        let mut started = json!({
             "job": id,
             "agent": agent,
             "status": "running",
@@ -277,7 +319,16 @@ impl BackgroundJobs {
             "note": "The agent is working in the background. SCV reports the result in a new \
                      turn when it finishes. agent_status shows its progress and agent_cancel \
                      stops it."
-        }))
+        });
+        if queued {
+            started["queued"] = true.into();
+            started["note"] = "The conversation is busy, so this prompt is queued: it runs in \
+                the background after the turns ahead of it, and SCV reports the result in a new \
+                turn when it finishes. agent_status shows where it stands and agent_cancel \
+                withdraws it."
+                .into();
+        }
+        Ok(started)
     }
 
     /// Stop `job` for the call `call_id` and wait briefly for it to settle,
@@ -501,6 +552,25 @@ impl BackgroundJobs {
     }
 }
 
+/// How a job's call takes its conversation's turn.
+enum Turn {
+    /// A new conversation, which nothing else can reach yet.
+    New,
+    /// The conversation's next turn, which nothing was ahead of.
+    Next(Place),
+    /// A prompt queued behind the turns ahead of it.
+    Queued(Place),
+}
+
+impl Turn {
+    fn place(self) -> Option<Place> {
+        match self {
+            Self::New => None,
+            Self::Next(place) | Self::Queued(place) => Some(place),
+        }
+    }
+}
+
 fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Duration) {
     // The session ended first: its jobs were cancelled with it.
     let Some(jobs) = jobs.upgrade() else {
@@ -688,6 +758,30 @@ pub(crate) struct BackgroundCapable {
     pub(crate) jobs: Arc<BackgroundJobs>,
 }
 
+/// The `agent` tool for a queued prompt, whose turn has come by the time it
+/// runs, so no busy policy applies to it again.
+struct QueuedTool(Arc<AgentTool>);
+
+#[async_trait]
+impl Tool for QueuedTool {
+    fn spec(&self) -> ToolSpec {
+        self.0.spec()
+    }
+    fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
+        self.0.risk(arguments)
+    }
+    fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
+        self.0.approval_summary(arguments)
+    }
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.0.execute_when_idle(arguments, context).await
+    }
+}
+
 /// Split `background` off an agent call's arguments.
 fn split_background(arguments: &Value) -> (Value, bool) {
     let mut arguments = arguments.clone();
@@ -752,21 +846,88 @@ impl Tool for BackgroundCapable {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let (arguments, background) = split_background(&arguments);
-        if !background {
-            return self.inner.execute(arguments, context).await;
-        }
-        // Validate before returning a job handle, so a bad call fails now.
         let (agent, routed) = self.inner.route(&arguments)?;
-        agent.backend.risk(&routed)?;
-        let agent = agent.name.clone();
-        let started = self.jobs.start(
-            Arc::clone(&self.inner) as Arc<dyn Tool>,
-            AGENT_TOOL,
-            &agent,
-            arguments,
-            context.workspace,
-            &context.call_id,
-        )?;
+        // Validate before returning a job handle, so a bad call fails now.
+        if background {
+            agent.backend.risk(&routed)?;
+        }
+        let Some(handle) = parse_args::<AgentArgs>(&routed)?
+            .session
+            .filter(|session| conversation::is_handle(session))
+        else {
+            return if background {
+                self.start(agent, arguments, &context, Turn::New)
+            } else {
+                self.inner.execute(arguments, context).await
+            };
+        };
+        // Taken before anything runs or waits, so calls keep their order.
+        let place = self.jobs.lanes.join(&handle);
+        if place.ahead == 0 && !agent.backend.busy(&routed)? {
+            return if background {
+                self.start(agent, arguments, &context, Turn::Next(place))
+            } else {
+                // Held until the turn ends, so a later call finds it busy.
+                let output = self.inner.execute(arguments, context).await;
+                drop(place);
+                output
+            };
+        }
+        let behavior = match agent.on_busy(&routed)? {
+            BusyBehavior::Steer => {
+                if let Some(output) = agent.backend.steer(routed, context.clone()).await? {
+                    return Ok(output);
+                }
+                agent.busy.fallback()
+            }
+            behavior => behavior,
+        };
+        // Calls ahead of this one other than the running turn.
+        let waiting = place.ahead.saturating_sub(1);
+        match behavior {
+            BusyBehavior::Fail => Err(ToolError::failed(if waiting == 0 {
+                format!("session busy: conversation {handle} is still running a turn")
+            } else {
+                format!(
+                    "session busy: conversation {handle} is still running a turn, and \
+                     {waiting} more prompts wait for it"
+                )
+            })),
+            // A background call cannot hold its caller, so it queues instead.
+            BusyBehavior::Wait if !background => {
+                place.wait_first(&context.cancellation).await?;
+                let output = self.inner.execute_when_idle(arguments, context).await;
+                drop(place);
+                output
+            }
+            _ if waiting >= agent.busy.max_queued_turns => Err(ToolError::limit(format!(
+                "session busy: conversation {handle} is running a turn and {waiting} prompts \
+                 already wait for it, of the {} agent.max_queued_turns allows. Send this one \
+                 once they have run, or stop one with agent_cancel.",
+                agent.busy.max_queued_turns
+            ))),
+            _ => self.start(agent, arguments, &context, Turn::Queued(place)),
+        }
+    }
+}
+
+impl BackgroundCapable {
+    /// Start the call on `agent` as a background job of this session.
+    fn start(
+        &self,
+        agent: &Offered,
+        arguments: Value,
+        context: &ToolContext,
+        turn: Turn,
+    ) -> Result<ToolOutput, ToolError> {
+        let tool: Arc<dyn Tool> = if matches!(turn, Turn::Queued(_)) {
+            Arc::new(QueuedTool(Arc::clone(&self.inner)))
+        } else {
+            Arc::clone(&self.inner) as Arc<dyn Tool>
+        };
+        let started = self
+            .jobs
+            .start(tool, AGENT_TOOL, &agent.name, arguments, context, turn)?;
         Ok(ToolOutput::success(started.to_string()))
     }
 }

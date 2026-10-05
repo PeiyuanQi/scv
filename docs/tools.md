@@ -671,7 +671,9 @@ The model only ever sees handles. The CLI's own session IDs stay inside SCV,
 and a value that is not one of this session's handles, such as a raw vendor
 ID, is refused. A conversation keeps its agent and `cwd`: continuing it
 elsewhere is an error, so start a new one there instead. One turn runs at a
-time; a second call while a turn runs returns `session busy`. A turn that
+time; a call that continues a conversation while a turn runs, or while
+prompts wait for it, follows the session's busy policy (see
+[Busy conversations](#busy-conversations)). A turn that
 times out stays resumable once the CLI has reported its session, so the next
 turn can ask the agent to continue where it stopped. A first turn that fails
 before the CLI reports a session is forgotten.
@@ -729,7 +731,9 @@ jobs:
 `agent_wait` and `agent_status` are read-only. A session runs at most
 `agent.max_background` jobs at once (default 4; 0 turns background calls and
 all three tools off), and a start beyond that is refused with an error naming
-the limit and `agent_cancel`. It remembers its 16 newest finished jobs.
+the limit and `agent_cancel`. A busy conversation's queued prompts (see
+[Busy conversations](#busy-conversations)) do not count toward it. The
+session remembers its 16 newest finished jobs.
 
 When a job finishes and the model has not already seen its result through
 `agent_wait` or `agent_status`, the server reports it: once the session is idle
@@ -790,6 +794,44 @@ closing it (a TUI or `scv exec` exiting, an idle channel conversation ending)
 cancels every job still running and kills its processes. A channel
 conversation stays open while its jobs run, and a full channel session table
 never closes it to make room.
+
+### Busy conversations
+
+Each call that continues a conversation (`session`) takes its place in that
+conversation's line as it arrives, before anything runs, and keeps it until
+its turn ends. Only the first call in line runs a turn, so prompts reach the
+agent in the order the calls arrived, and a later call never overtakes one
+already waiting. A call that finds a turn running, or other calls waiting,
+does what its `on_busy` argument says, else its agent's
+`[agents.<name>] on_busy`, else `agent.on_busy`:
+
+- `queue` (the default) returns a background job handle at once, with
+  `"queued":true`, and runs the prompt in the background once the calls
+  ahead of it have run; `agent_status` shows it waiting, `agent_cancel`
+  withdraws it without sending it, and its result is reported like any
+  job's. At most `agent.max_queued_turns` prompts (default 4, at most 32)
+  wait per conversation, a call beyond that is refused, and queued prompts
+  do not count toward `agent.max_background`.
+- `wait` keeps the call, and so the caller's turn, until the calls ahead of
+  it have run, then runs its turn in the foreground. A `background: true`
+  call cannot keep its caller, so it queues instead.
+- `fail` refuses the call with `session busy`.
+- `steer` hands the prompt to the running turn, when the conversation's ACP
+  server advertised steering (see
+  [Agent Client Protocol transport](#agent-client-protocol-transport)), and
+  returns `{"agent","status":"steered","session"}`: the agent's answer comes
+  with that turn's result. When there is nothing to steer (a CLI run once
+  per turn, a nested SCV, an ACP server without steering, no turn running
+  yet) or the agent refuses, `steer_fallback` (default `queue`; `queue`,
+  `wait`, or `fail`) applies instead. An agent that does not answer the
+  steering request within 30 seconds fails the call, since it may still
+  take the prompt.
+
+A background call follows the same policy, so `background: true` never
+starts a second turn beside a running one. Without background jobs
+(`agent.max_background = 0`) nothing can queue, so `queue` refuses the call
+as busy. Queued prompts live only in the session's memory: a daemon restart
+or the end of the session drops them, as it cancels the session's jobs.
 
 ### Delegate first
 
@@ -993,6 +1035,16 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
   → session/new {cwd, mcpServers: []} → [set mode for permissions = "full"]
   → [session/set_config_option for model/effort] → session/prompt per call
 ```
+
+`initialize` records whether the server advertises
+`_meta.steering.supported`. Steering a running turn (see
+[Busy conversations](#busy-conversations)) sends the request
+`_session/steering {sessionId, prompt: [{type: "text", text}]}` while the
+turn's `session/prompt` is still unanswered. The turn's reader keeps
+handling updates and permission requests and takes the request's answer: a
+result other than `{"accepted": false}` means the prompt went into the turn,
+while an error, `{"accepted": false}`, or the turn ending first means it went
+nowhere. Between turns SCV sends no steering request.
 
 - An agent over ACP always takes `session`: the first call returns a handle
   such as `claude-1`, and passing it sends the next prompt to the same ACP

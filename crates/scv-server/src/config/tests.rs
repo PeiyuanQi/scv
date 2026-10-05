@@ -14,8 +14,9 @@ use scv_tools::web::SearchBackend;
 use super::{
     load::{is_secret_key, merge},
     validate::{
-        MAX_BACKGROUND_JOBS, MAX_PROVIDER_RETRIES, MAX_TOOL_TIMEOUT_SECONDS, MAX_USE_FOR_BYTES,
-        valid_domain_pattern, validate_project_keys, validate_project_not_weaker,
+        MAX_BACKGROUND_JOBS, MAX_PROVIDER_RETRIES, MAX_QUEUED_TURNS, MAX_TOOL_TIMEOUT_SECONDS,
+        MAX_USE_FOR_BYTES, valid_domain_pattern, validate_project_keys,
+        validate_project_not_weaker,
     },
     *,
 };
@@ -387,6 +388,50 @@ fn background_jobs_are_bounded_and_projects_may_only_lower_them() {
     let mut higher = user.clone();
     higher.agent.max_background = 5;
     assert!(validate_project_not_weaker(&user, &higher).is_err());
+}
+
+#[test]
+fn busy_delegation_defaults_to_a_bounded_queue_and_accepts_policy_values() {
+    let user = Config::default();
+    assert_eq!(user.agent.on_busy, scv_tools::BusyBehavior::Queue);
+    assert_eq!(user.agent.max_queued_turns, 4);
+    let parsed: Config = toml::from_str(
+        "[agent]\non_busy = \"steer\"\nsteer_fallback = \"fail\"\nmax_queued_turns = 2\n",
+    )
+    .unwrap();
+    assert_eq!(parsed.agent.on_busy, scv_tools::BusyBehavior::Steer);
+    assert_eq!(parsed.agent.steer_fallback, scv_tools::BusyBehavior::Fail);
+    assert_eq!(parsed.agent.max_queued_turns, 2);
+    let per_agent: Config = toml::from_str(
+        "[agents.claude]\non_busy = \"steer\"\nsteer_fallback = \"queue\"\nmax_queued_turns = 3\n",
+    )
+    .unwrap();
+    let adapters = per_agent.adapters();
+    assert_eq!(
+        adapters["claude"].busy.behavior,
+        scv_tools::BusyBehavior::Steer
+    );
+    assert_eq!(adapters["claude"].busy.max_queued_turns, 3);
+    let mut too_many = user.clone();
+    too_many.agent.max_queued_turns = MAX_QUEUED_TURNS + 1;
+    assert!(too_many.validate().is_err());
+    // A steer that cannot steer must do something else, and a per-agent
+    // queue has the same bound.
+    for invalid in [
+        "[agent]\nsteer_fallback = \"steer\"\n",
+        "[agents.claude]\nsteer_fallback = \"steer\"\n",
+        "[agents.claude]\nmax_queued_turns = 33\n",
+    ] {
+        let config: Config = toml::from_str(invalid).unwrap();
+        assert!(config.validate().is_err(), "{invalid}");
+    }
+    assert!(toml::from_str::<Config>("[agent]\non_busy = \"later\"\n").is_err());
+    // Without its own values an agent takes the [agent] ones.
+    let inherited: Config =
+        toml::from_str("[agent]\non_busy = \"wait\"\nmax_queued_turns = 2\n").unwrap();
+    let busy = inherited.adapters()["codex"].busy;
+    assert_eq!(busy.behavior, scv_tools::BusyBehavior::Wait);
+    assert_eq!(busy.max_queued_turns, 2);
 }
 
 #[test]

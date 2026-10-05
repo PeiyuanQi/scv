@@ -22,7 +22,7 @@ use scv_core::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRisk,
 use serde_json::{Map, Value, json};
 
 use crate::{
-    AgentDefaults,
+    AgentDefaults, BusyBehavior, BusyConfig,
     args::{Timeouts, bounded, parse_args, timeout_schema},
     delegate::{
         choice, conversation,
@@ -45,6 +45,31 @@ pub(crate) trait Backend: Send + Sync {
 
     /// What the user approves: what starts or continues, where, and for how long.
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError>;
+
+    /// Whether the conversation the call continues is running a turn.
+    fn busy(&self, _arguments: &Value) -> Result<bool, ToolError> {
+        Ok(false)
+    }
+
+    /// Add the call's prompt to the running turn of the conversation it
+    /// continues. `None` when that turn cannot take it, so the caller's
+    /// `steer_fallback` applies.
+    async fn steer(
+        &self,
+        _arguments: Value,
+        _context: ToolContext,
+    ) -> Result<Option<ToolOutput>, ToolError> {
+        Ok(None)
+    }
+
+    /// Wait until the conversation the call continues runs no turn.
+    async fn wait_idle(
+        &self,
+        _arguments: &Value,
+        _cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
 
     async fn execute(
         &self,
@@ -94,6 +119,8 @@ pub(crate) struct Offered {
     /// session was given, as an ACP server or a nested SCV does. A CLI run
     /// once per turn does not, so the defaults fill in on every turn.
     pub(crate) holds_settings: bool,
+    /// How a call to one of its busy conversations is handled.
+    pub(crate) busy: BusyConfig,
 }
 
 impl Offered {
@@ -128,6 +155,14 @@ impl Offered {
             }
         }
         arguments
+    }
+
+    /// What a call to one of this agent's busy conversations does: the
+    /// call's own `on_busy`, else the agent's.
+    pub(crate) fn on_busy(&self, routed: &Value) -> Result<BusyBehavior, ToolError> {
+        Ok(parse_args::<AgentArgs>(routed)?
+            .on_busy
+            .unwrap_or(self.busy.behavior))
     }
 }
 
@@ -183,6 +218,37 @@ impl AgentTool {
             }
         }
         Ok((agent, agent.with_defaults(arguments, &args)))
+    }
+
+    /// Run the call once its conversation runs no turn, for a call whose
+    /// turn has come in the conversation's lane, so no busy policy applies.
+    pub(crate) async fn execute_when_idle(
+        &self,
+        arguments: Value,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let (agent, arguments) = self.route(&arguments)?;
+        agent
+            .backend
+            .wait_idle(&arguments, &context.cancellation)
+            .await?;
+        self.run(agent, arguments, context).await
+    }
+
+    /// Run the routed call on `agent`'s backend and settle its result.
+    async fn run(
+        &self,
+        agent: &Offered,
+        arguments: Value,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let result = agent.backend.execute(arguments, context).await;
+        let others: Vec<&str> = self
+            .names()
+            .into_iter()
+            .filter(|name| *name != agent.name)
+            .collect();
+        choice::settle(result, &others)
     }
 
     fn choose(&self, args: &AgentArgs) -> Result<&Offered, ToolError> {
@@ -338,6 +404,18 @@ impl Tool for AgentTool {
                     )
                 }),
             );
+            properties.insert(
+                "on_busy".into(),
+                json!({
+                    "type":"string",
+                    "enum":["queue","wait","steer","fail"],
+                    "description":"What a call continuing a conversation does while it runs a turn \
+                        or other prompts wait for it: queue (returns a background job that runs \
+                        after them), wait (this call waits for them), steer (adds the prompt to \
+                        the running turn when the agent can take it), or fail. Omit it to use \
+                        the user's setting."
+                }),
+            );
         }
         if self.agents.iter().any(|agent| agent.accepts.model) {
             properties.insert(
@@ -415,13 +493,36 @@ impl Tool for AgentTool {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let (agent, arguments) = self.route(&arguments)?;
-        let result = agent.backend.execute(arguments, context).await;
-        let others: Vec<&str> = self
-            .names()
-            .into_iter()
-            .filter(|name| *name != agent.name)
-            .collect();
-        choice::settle(result, &others)
+        // Without background jobs (agent.max_background = 0) nothing can
+        // queue, so a busy conversation's call steers, waits, or fails.
+        // With them, the background wrapper decides before this runs.
+        if agent.backend.busy(&arguments)? {
+            let behavior = match agent.on_busy(&arguments)? {
+                BusyBehavior::Steer => {
+                    if let Some(output) = agent
+                        .backend
+                        .steer(arguments.clone(), context.clone())
+                        .await?
+                    {
+                        return Ok(output);
+                    }
+                    agent.busy.fallback()
+                }
+                behavior => behavior,
+            };
+            if behavior != BusyBehavior::Wait {
+                let handle = parse_args::<AgentArgs>(&arguments)?.session;
+                return Err(ToolError::failed(format!(
+                    "session busy: conversation {} is still running a turn",
+                    handle.as_deref().unwrap_or_default()
+                )));
+            }
+            agent
+                .backend
+                .wait_idle(&arguments, &context.cancellation)
+                .await?;
+        }
+        self.run(agent, arguments, context).await
     }
 }
 
@@ -464,6 +565,7 @@ impl AgentTool {
             use_for: None,
             defaults: AgentDefaults::default(),
             holds_settings: true,
+            busy: BusyConfig::default(),
         };
         let mut agents = vec![offered(name, backend, accepts)];
         agents.extend(
