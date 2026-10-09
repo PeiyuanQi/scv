@@ -64,13 +64,13 @@ fn fixture(limit: usize) -> Fixture {
     let jobs = Arc::new(BackgroundJobs::new(limit, Some(finished_tx)));
     let release = Arc::new(Notify::new());
     let cancelled = Arc::new(AtomicBool::new(false));
-    let tool = BackgroundCapable {
-        inner: offering(FakeAgent {
+    let tool = BackgroundCapable::plain(
+        offering(FakeAgent {
             release: Arc::clone(&release),
             cancelled: Arc::clone(&cancelled),
         }),
-        jobs: Arc::clone(&jobs),
-    };
+        Arc::clone(&jobs),
+    );
     Fixture {
         tool,
         jobs,
@@ -209,10 +209,10 @@ fn session(limit: usize, busy: BusyConfig) -> Session {
     };
     let jobs = Arc::new(BackgroundJobs::new(limit, None));
     Session {
-        tool: Arc::new(BackgroundCapable {
-            inner: Arc::new(AgentTool::new(vec![offered], &["fake".into()], timeouts)),
-            jobs: Arc::clone(&jobs),
-        }),
+        tool: Arc::new(BackgroundCapable::plain(
+            Arc::new(AgentTool::new(vec![offered], &["fake".into()], timeouts)),
+            Arc::clone(&jobs),
+        )),
         jobs,
         release,
         prompts,
@@ -488,6 +488,8 @@ fn job_1(status: JobStatus) -> JobChange {
         agent: "fake".into(),
         status,
         task: "work".into(),
+        journal: None,
+        outcome: None,
     }
 }
 
@@ -680,6 +682,7 @@ async fn a_failed_report_is_due_again_after_a_delay_then_reported_directly() {
             status: JobStatus::Completed,
             session: Some("fake-1".into()),
             reply: "all done".into(),
+            outcome: None,
         }]
     );
     assert_eq!(jobs.pending(), 0);
@@ -961,10 +964,7 @@ async fn nested_answer(gate: Option<Arc<dyn ApprovalGate>>) -> String {
         jobs = jobs.with_approvals(gate);
     }
     let jobs = Arc::new(jobs);
-    let tool = BackgroundCapable {
-        inner: offering(AskingAgent),
-        jobs: Arc::clone(&jobs),
-    };
+    let tool = BackgroundCapable::plain(offering(AskingAgent), Arc::clone(&jobs));
     tool.execute(json!({"prompt":"ask","background":true}), context())
         .await
         .unwrap();
@@ -1085,4 +1085,33 @@ fn a_task_is_the_first_line_of_the_prompt_shortened() {
     assert_eq!(task.chars().count(), TASK_CHARS + 1);
     assert!(task.ends_with('…'));
     assert_eq!(task_line(""), "");
+}
+
+/// Job-1's outcome, its journal still open when `pending`.
+fn reviewed_outcome(pending: bool) -> JobOutcome {
+    let mut outcome: JobOutcome = serde_json::from_value(json!({
+        "job":"job-1",
+        "review":{"outcome":"stopped","reason":"cancelled","round":1,"rounds":3,
+                  "journal":"rev-1-abcdef"},
+        "landing":{"mode":"none","status":"not_requested"}
+    }))
+    .unwrap();
+    outcome.review.journal_pending = pending;
+    outcome
+}
+
+#[test]
+fn a_cancels_change_pushed_out_unsent_leaves_its_outcome_to_an_update() {
+    let jobs = BackgroundJobs::new(2, None);
+    let mut change = job_1(JobStatus::Cancelled);
+    change.outcome = Some(reviewed_outcome(true));
+    jobs.owe_for_tests("cancel", change, None);
+    // Sixty-four later changes nobody takes push it out.
+    for n in 0..MAX_PENDING_CHANGES {
+        jobs.state()
+            .record(&format!("later-{n}"), job_1(JobStatus::Running));
+    }
+    assert!(jobs.take_changes("cancel").is_empty());
+    jobs.stop_for_tests(&reviewed_outcome(false));
+    assert_eq!(jobs.take_updates(), [reviewed_outcome(false)]);
 }

@@ -999,6 +999,156 @@ async fn new_lets_a_running_background_report_finish_and_sends_it_first() {
     );
 }
 
+/// A reviewed job's outcome as the server sends it, and SCV's lines for it.
+fn reviewed_outcome() -> (serde_json::Value, &'static str) {
+    (
+        json!({"job":"job-1",
+               "review":{"outcome":"approved","round":2,"rounds":3,"reviewer":"claude",
+                         "journal":"rev-1-abcdef"},
+               "landing":{"mode":"none","status":"not_requested"}}),
+        "job-1 · Review: approved · round 2 of 3 · reviewer claude\n\
+         job-1 · Landing: not requested",
+    )
+}
+
+/// The `agent` call that starts reviewed job `job-1`, then the turn's end.
+async fn start_reviewed_job(side: &mut BufReader<UnixStream>, reply: &str) {
+    let output = json!({"job":"job-1","agent":"codex","status":"running","background":true,
+                        "review":{"journal":"rev-1-abcdef"}})
+    .to_string();
+    let started = json!({"job":"job-1","tool":"agent","agent":"codex","status":"running",
+                         "task":"Fix it","journal":"rev-1-abcdef"});
+    send_frame(side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"call_id":"c","name":"agent","success":true,"output":output,"truncated":false,"jobs":[started]})).await;
+    finish_turn(side, reply).await;
+}
+
+#[tokio::test]
+async fn a_reviewed_jobs_outcome_reaches_the_owner_as_scvs_lines_before_the_report() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "fix it, reviewed")]);
+    let (outcome, lines) = reviewed_outcome();
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "fix it, reviewed");
+            start_reviewed_job(&mut side, "Started job-1.").await;
+            assert_eq!(peer.sent().await.text, "Started job-1.");
+            // The record a restart reads names the journal.
+            eventually(|| {
+                bench
+                    .state()
+                    .jobs
+                    .iter()
+                    .any(|job| job.journal == "rev-1-abcdef")
+            })
+            .await;
+            let origin = json!({"kind":"background","jobs":["job-1"],"outcomes":[outcome]});
+            send_frame(&mut side, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+            send_frame(&mut side, json!({"type":"assistant.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":11,"content":"The fix was approved."})).await;
+            send_frame(&mut side, json!({"type":"turn.completed","request_id":"background:1","session_id":"s","turn_id":"t2","seq":12,"steps":1,"usage":{},"origin":origin})).await;
+            assert_eq!(peer.sent().await.text, lines);
+            assert_eq!(peer.sent().await.text, "The fix was approved.");
+            eventually(|| bench.state().jobs.is_empty()).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_reviewed_jobs_lines_come_alone_for_a_cancelled_report_and_after_a_settling_turn() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "fix it, reviewed")]);
+    let (outcome, lines) = reviewed_outcome();
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "fix it, reviewed");
+            start_reviewed_job(&mut side, "Started job-1.").await;
+            assert_eq!(peer.sent().await.text, "Started job-1.");
+            // The owner stops the report turn: SCV's lines still arrive.
+            let origin = json!({"kind":"background","jobs":["job-1"],"outcomes":[outcome]});
+            send_frame(&mut side, json!({"type":"turn.started","request_id":"background:1","session_id":"s","turn_id":"t2","seq":10,"origin":origin})).await;
+            send_frame(&mut side, json!({"type":"turn.cancelled","request_id":"background:1","session_id":"s","turn_id":"t2","seq":11,"origin":origin})).await;
+            assert_eq!(peer.sent().await.text, lines);
+            // A job the model settles itself: the lines follow its reply.
+            peer.push(vec![message("m2", "owner", "and the other one?")]);
+            assert_eq!(next_turn(&mut side).await, "and the other one?");
+            let settled = json!({"job":"job-1","tool":"agent","agent":"codex","status":"completed","outcome":outcome});
+            send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":20,"call_id":"c2","name":"agent_wait","success":true,"output":"{}","truncated":false,"jobs":[settled]})).await;
+            finish_turn(&mut side, "Approved, see above.").await;
+            assert_eq!(peer.sent().await.text, "Approved, see above.");
+            assert_eq!(peer.sent().await.text, lines);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_cancel_stated_before_the_job_stopped_is_followed_by_its_update() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "fix it, reviewed")]);
+    let (outcome, lines) = reviewed_outcome();
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "fix it, reviewed");
+            start_reviewed_job(&mut side, "Started job-1.").await;
+            assert_eq!(peer.sent().await.text, "Started job-1.");
+            // The owner has it stopped; it is still stopping when the cancel
+            // returns, so its journal is still open.
+            peer.push(vec![message("m2", "owner", "stop it")]);
+            assert_eq!(next_turn(&mut side).await, "stop it");
+            let mut pending = outcome.clone();
+            pending["review"]["journal_pending"] = true.into();
+            let settled = json!({"job":"job-1","tool":"agent","agent":"codex","status":"cancelled","outcome":pending});
+            send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":20,"call_id":"c2","name":"agent_cancel","success":true,"output":"{}","truncated":false,"jobs":[settled]})).await;
+            finish_turn(&mut side, "Stopped it.").await;
+            assert_eq!(peer.sent().await.text, "Stopped it.");
+            let said = peer.sent().await.text;
+            assert!(said.contains("still open"), "{said}");
+            // Still tracked, and listened for, until its update.
+            eventually(|| bench.state().jobs.iter().any(|job| job.job == "job-1")).await;
+            send_frame(&mut side, json!({"type":"background.updated","session_id":"s","seq":30,"outcomes":[outcome]})).await;
+            assert_eq!(peer.sent().await.text, lines);
+            eventually(|| bench.state().jobs.is_empty()).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_final_update_is_never_followed_by_a_stale_still_open_notice() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    peer.push(vec![message("m1", "owner", "fix it, reviewed")]);
+    let (outcome, _) = reviewed_outcome();
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "fix it, reviewed");
+            start_reviewed_job(&mut side, "Started job-1.").await;
+            assert_eq!(peer.sent().await.text, "Started job-1.");
+            peer.push(vec![message("m2", "owner", "stop it")]);
+            assert_eq!(next_turn(&mut side).await, "stop it");
+            let mut pending = outcome.clone();
+            pending["review"]["journal_pending"] = true.into();
+            let mut last = outcome;
+            last["review"]["journal_incomplete"] = true.into();
+            // Should a final update ever arrive ahead of the snapshot it
+            // supersedes, the snapshot is dropped.
+            send_frame(&mut side, json!({"type":"background.updated","session_id":"s","seq":20,"outcomes":[last]})).await;
+            let settled = json!({"job":"job-1","tool":"agent","agent":"codex","status":"cancelled","outcome":pending});
+            send_frame(&mut side, json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t","seq":21,"call_id":"c2","name":"agent_cancel","success":true,"output":"{}","truncated":false,"jobs":[settled]})).await;
+            finish_turn(&mut side, "Stopped it.").await;
+            assert_eq!(peer.sent().await.text, "Stopped it.");
+            let said = peer.sent().await.text;
+            assert!(said.contains("INCOMPLETE"), "{said}");
+            eventually(|| bench.state().jobs.is_empty()).await;
+            // Nothing else follows, such as a stale notice.
+            peer.push(vec![message("m3", "owner", "thanks")]);
+            assert_eq!(next_turn(&mut side).await, "thanks");
+            finish_turn(&mut side, "welcome").await;
+            assert_eq!(peer.sent().await.text, "welcome");
+        })
+        .await;
+}
+
 #[tokio::test]
 async fn a_failed_report_turn_that_will_be_tried_again_sends_nothing_and_keeps_its_job() {
     let (bench, mut peer) = Bench::owned_by("owner");
@@ -1389,6 +1539,7 @@ async fn an_account_that_ran_as_an_ordinary_chat_cannot_become_a_mail_chat() {
                 tool: "agent".into(),
                 agent: "codex".into(),
                 task: REPORT.into(),
+                journal: String::new(),
                 started_at: 1,
             });
         },

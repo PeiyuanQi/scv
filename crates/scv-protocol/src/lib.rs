@@ -16,6 +16,7 @@ mod client;
 mod daemon;
 mod error;
 mod frame;
+mod review;
 mod server;
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,10 @@ pub use daemon::{
 };
 pub use error::{ErrorCode, ToolErrorKind};
 pub use frame::{Frame, FrameDecoder, Overflow, Step, encode_frame, trim_line};
+pub use review::{
+    JobOutcome, LandMode, LandingEvidence, LandingStatus, LandingSummary, OpenFinding, Refusal,
+    ReviewOutcome, ReviewSummary, ReviewerResult, TriedReviewer, describe_outcome, outcome_notice,
+};
 pub use server::ServerEvent;
 
 /// The protocol version. Client and server must speak the same one.

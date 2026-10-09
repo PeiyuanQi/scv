@@ -154,6 +154,10 @@ impl TurnStarter {
             kind: OriginKind::Background,
             jobs: reports.iter().map(|report| report.job.clone()).collect(),
             retry_seconds: None,
+            outcomes: reports
+                .iter()
+                .filter_map(|report| report.outcome.clone())
+                .collect(),
         };
         let prompt = background::report_prompt(&reports);
         let request_id = format!("background:{}", Uuid::new_v4());

@@ -158,6 +158,8 @@ fn a_call_that_starts_a_job_adds_only_its_jobs_to_the_0_2_2_frame() {
         agent: "codex".into(),
         status: JobStatus::Running,
         task: "Fix it".into(),
+        journal: None,
+        outcome: None,
     });
     let mut sent = serde_json::to_value(&event).unwrap();
     assert_eq!(sent["jobs"][0]["status"], "running");
@@ -232,6 +234,8 @@ fn a_0_3_0_client_reads_the_job_change_this_version_sends() {
         agent: "codex".into(),
         status: JobStatus::Completed,
         task: "Fix it".into(),
+        journal: None,
+        outcome: None,
     };
     let sent = serde_json::to_string(&change).unwrap();
     assert_eq!(

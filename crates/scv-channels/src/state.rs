@@ -258,6 +258,10 @@ pub(crate) struct RunningJob {
     /// The first line of the delegated prompt, shortened.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) task: String,
+    /// A reviewed job's journal ID, which the restart notice names; empty
+    /// for other jobs, as releases before 0.3.14 saved every job.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) journal: String,
     /// Unix seconds when it was first recorded.
     pub(crate) started_at: u64,
 }

@@ -48,7 +48,9 @@ pi, or a nested SCV, over the [Agent Client Protocol](https://agentclientprotoco
 where available. Your `prefer` list and `use_for` notes pick who does what,
 each agent's default model and effort (and a separate effort for hard tasks)
 set how, and `agent_wait`, `agent_status`, and `agent_cancel` manage
-background jobs. SCV learns each agent's models and effort levels from the
+background jobs. Ask for a review and a fresh agent on another harness checks
+the work on a structured verdict, round by round, before SCV reports it as
+approved, in its own words. SCV learns each agent's models and effort levels from the
 agent itself and passes them exactly, instead of guessing names that change
 with every release. A built-in `delegating` skill teaches it how to brief an
 agent and what to do when a call fails, and `scv agents check` shows every

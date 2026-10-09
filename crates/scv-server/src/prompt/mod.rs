@@ -24,6 +24,8 @@ pub(crate) struct PromptContext<'a> {
     pub(crate) agents: &'a [String],
     /// Whether agent calls can run in the background.
     pub(crate) background: bool,
+    /// Whether agent calls can run as reviewed jobs (`review`).
+    pub(crate) review: bool,
     /// The chat channel the session answers on.
     pub(crate) channel: Option<&'a str>,
     /// Whether the model can look through the chat's log (`chat_history`)
@@ -177,6 +179,26 @@ pub(crate) fn delegation_guidance(config: &Config, context: &PromptContext<'_>) 
              agent calls, and long bash commands keep the user waiting, so use them only for \
              results you need within this turn that arrive quickly.\n",
         );
+        if context.review {
+            text.push_str(
+                "\nAn agent call may set review to run the job with an independent reviewer: a \
+                 fresh agent checks the work and returns a structured verdict, and the builder \
+                 fixes blocking findings, for a bounded number of rounds. Set review only when \
+                 the user asks for a review or accepts your suggestion of one, never on your \
+                 own. Suggest it once per task for coding work with a checkable outcome that \
+                 will be landed, merged, released, or deployed, that touches security, \
+                 credentials, data deletion or migration, or concurrency, that spans several \
+                 files or components, or that already went wrong once; not for lookups, \
+                 research, summaries, small or known fixes, or status checks, and not where \
+                 the project's instructions or notes say not to. When the task itself lands, \
+                 publishes, or deploys, ask before starting, because the review must come \
+                 first; otherwise start the job as usual and offer a review in one line. SCV \
+                 states the outcome in its own Review and Landing lines: only an approved \
+                 review is approved, and landed work is not approved work. Never start another \
+                 reviewed call to get past an unresolved or escalated review unless the user \
+                 asks. The delegating skill's Review section has the details.\n",
+            );
+        }
     } else {
         text.push_str(
             "\n\nHand substantial work to an agent rather than doing it step by step with \

@@ -209,6 +209,19 @@ Daemon and component changes require focused coverage for:
   steer that cannot steer following the same policy, and ACP steering sent
   only into a running turn, answered before it reports `steered`, and
   falling back when refused or when the turn ends first;
+- reviewed jobs: the verdict, landing, and confirmation blocks parsed as
+  data (last block wins, bounded, schema and consistency rules, cut replies
+  malformed), the round limit never passed and never told to the reviewer,
+  the last builder turn always reviewed, reviewer routing per builder with
+  fallback only on an availability failure, a refusal handing the review to
+  Grok and never to the builder's own agent, a named reviewer never swapped,
+  one repair turn for a malformed verdict, a negative verdict counting
+  however its run ended, landing authorization and evidence labels, the
+  approving reviewer's one confirmation, every reviewer conversation
+  released and the builder's pinned, a cancel's outcome matching the
+  result and the journal, a journal ended even for a job cancelled while
+  queued and left without an end by a crash, and SCV's own lines in the TUI,
+  `scv exec`, chats, and the restart notice;
 - failed background reports: a job unreported until its report turn
   completes, a provider failure in a turn that ran no tool tried again after
   30 and then 120 seconds or as soon as a turn succeeds, the third failure (or

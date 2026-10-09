@@ -26,6 +26,7 @@ fn a_direct_report_names_the_error_and_quotes_each_reply() {
         status: scv_protocol::JobStatus::Completed,
         session: None,
         reply: format!("{job} landed.\n"),
+        outcome: None,
     };
     assert_eq!(
         direct_report("provider returned HTTP 503", 1, &[report("job-1")]),
@@ -42,5 +43,36 @@ fn a_direct_report_names_the_error_and_quotes_each_reply() {
     );
     assert!(
         both.ends_with("job-1 landed.\n\njob-2 (codex): completed\nTask: Land it\njob-2 landed.")
+    );
+}
+
+#[test]
+fn a_direct_report_of_a_reviewed_job_tells_scvs_lines_apart_from_the_reply() {
+    let report = JobReport {
+        job: "job-4".into(),
+        agent: "codex".into(),
+        task: "Fix it".into(),
+        status: scv_protocol::JobStatus::Completed,
+        session: None,
+        reply: "Fixed.".into(),
+        outcome: Some(
+            serde_json::from_value(serde_json::json!({
+                "job":"job-4",
+                "review":{"outcome":"unresolved","reason":"round_limit","round":3,"rounds":3,
+                          "reviewer":"claude","open_count":1,
+                          "open":[{"id":"3.1","title":"Sleep instead of a lock"}],
+                          "journal":"rev-1-abcdef"},
+                "landing":{"mode":"none","status":"not_requested"}
+            }))
+            .unwrap(),
+        ),
+    };
+    assert_eq!(
+        direct_report("provider returned HTTP 503", 1, &[report]),
+        "A background job finished, but the model could not report it, so here are SCV's \
+         Review and Landing lines and what the agent replied, unedited.\nError: provider \
+         returned HTTP 503\n\njob-4 (codex): completed\nTask: Fix it\nReview: NOT approved · \
+         unresolved after 3 of 3 rounds · 1 blocking finding open:\n  - \"Sleep instead of a \
+         lock\"\nLanding: not requested\nFixed."
     );
 }

@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.13`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.13` pins.
+The current workspace release is `0.3.14`. All crates share that version, and
+dependencies between workspace packages use exact `=0.3.14` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,43 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.3.14
+
+`0.3.14` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.13` checks the new release and can roll it back.
+It adds no configuration key, so going back to `0.3.13` needs no
+`config.toml` edit.
+
+- **Reviewed jobs.** An `agent` call may set `review`: the job's agent builds,
+  a fresh reviewer on another agent checks the work on a structured verdict,
+  and the builder fixes blocking findings for at most `review.rounds` rounds
+  (default 3, at most 20), optionally landing after approval
+  (`land: "after_approval"`, which the approving reviewer then confirms) or
+  before review (`land: "before_review"`). The main agent sets it only when the
+  user asks or accepts its suggestion. SCV states the outcome in its own Review
+  and Landing lines in the TUI, chats, and `scv exec`, apart from the model's
+  summary. Calls without `review` run as before. See
+  [Reviewed jobs](tools.md#reviewed-jobs).
+- **Review journals.** Each reviewed job writes
+  `state/reviews/<id>.jsonl`, kept 30 days; `scv config show` lists the
+  directory. Older releases ignore it.
+- **Protocol.** `JobReport.outcome`, `TurnOrigin.outcomes`,
+  `JobChange.journal`, and `JobChange.outcome` are additive, as is the new
+  `background.updated` event, the final outcome of a reviewed job whose
+  cancel was stated while it was still stopping; older clients ignore them
+  and show only the model's report. A chat bridge's saved `jobs` gain
+  `journal`, which older releases drop.
+
+What changes for code that embeds SCV's crates: `scv-protocol` adds
+`JobOutcome` and its parts, `describe_outcome`, `outcome_notice`, and
+`ServerEvent::BackgroundUpdated`, so an exhaustive `match` on `ServerEvent`
+needs the new variant;
+`JobReport`, `JobChange`, and `TurnOrigin` gain fields, and `scv-tools`'s
+`ToolsConfig` gains `reviews`, so struct literals need the new fields.
+`scv-tools` also gains a `test-support` feature: hooks with which other
+crates' tests drive the job store's delivery of reviewed jobs' outcomes. No
+build of SCV enables it.
 
 ## Upgrading to 0.3.13
 

@@ -89,7 +89,9 @@ struct Watcher {
 /// (`tool.completed.jobs`) until its model has seen the result, through a
 /// later call or a turn the nested SCV started to report it (`origin.jobs`),
 /// which counts until it ends. A report turn that failed and will be tried
-/// again (`origin.retry_seconds`) leaves its jobs counting.
+/// again (`origin.retry_seconds`) leaves its jobs counting, and so does a
+/// reviewed job whose cancel said its journal is still open, until its
+/// `background.updated`.
 #[derive(Debug, Default)]
 struct BackgroundWork {
     jobs: HashSet<String>,
@@ -104,6 +106,14 @@ impl BackgroundWork {
         match event {
             ServerEvent::ToolCompleted { jobs, .. } => {
                 for change in jobs {
+                    let owed = change
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|outcome| outcome.review.journal_pending);
+                    if owed {
+                        // Settled by its `background.updated`.
+                        continue;
+                    }
                     if !change.started() {
                         self.jobs.remove(&change.job);
                         for reported in self.reports.values_mut() {
@@ -112,6 +122,11 @@ impl BackgroundWork {
                     } else if self.jobs.len() < MAX_TRACKED {
                         self.jobs.insert(change.job.clone());
                     }
+                }
+            }
+            ServerEvent::BackgroundUpdated { outcomes, .. } => {
+                for outcome in outcomes {
+                    self.jobs.remove(&outcome.job);
                 }
             }
             ServerEvent::TurnStarted {

@@ -32,6 +32,12 @@ tracing.workspace = true
 uuid.workspace = true
 which.workspace = true
 
+[features]
+# Hooks with which other crates' tests drive the background job store's
+# delivery of reviewed jobs' outcomes. Only those tests enable it; no build
+# of SCV itself does.
+test-support = []
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

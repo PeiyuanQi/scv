@@ -681,6 +681,11 @@ before the CLI reports a session is forgotten.
 Each session remembers at most `agent.max_conversations` conversations
 (default 8; starting another forgets the least recently used idle one) and
 forgets one left unused for `agent.conversation_idle_seconds` (default 86400).
+A [reviewed job](#reviewed-jobs) holds its builder's conversation, and its
+approving reviewer's until the landing is confirmed, out of both. When every
+conversation is running a turn or held so, starting another fails with `all N
+conversations of this session are running a turn` (`or held by a reviewed
+job` when some are held).
 Handles end with the SCV session. `scv agents ps` shows a running turn's
 conversation and turn number, and lists a nested SCV or ACP agent that waits
 between turns of its conversation as `idle`, or `background` while a nested
@@ -710,8 +715,8 @@ default way to work (see [Delegate first](#delegate-first)). The job runs
 exactly as a foreground call would, on the agent the call chose and in its
 conversation (`session`, `cwd`, model, and timeout apply as usual), tracked
 like any delegation, and its final result is the structured result above. A
-call the `agent` tool refuses starts no job. Three tools manage a session's
-jobs:
+call with `review` runs as a [reviewed job](#reviewed-jobs). A call the
+`agent` tool refuses starts no job. Three tools manage a session's jobs:
 
 - `agent_wait {job, timeout_seconds?}` blocks until the job finishes or the
   timeout passes (default `tools.agent_timeout_seconds`, at most
@@ -772,7 +777,9 @@ and the job stays unreported:
 The server logs every failed report turn with its jobs and error. A job
 waiting to be reported again still counts as unreported: a planned restart
 waits for it (see [architecture](architecture.md#planned-restarts)), and
-`agent_status` still shows it.
+`agent_status` still shows it. So does a cancelled
+[reviewed job](#reviewed-jobs) whose final outcome is still owed, until it
+was sent (each job counted once).
 
 A job has no turn to carry an approval request to a person, so each request a
 nested agent relays (over ACP or from a nested SCV) gets the answer the
@@ -828,10 +835,354 @@ does what its `on_busy` argument says, else its agent's
   take the prompt.
 
 A background call follows the same policy, so `background: true` never
-starts a second turn beside a running one. Without background jobs
+starts a second turn beside a running one. A [reviewed call](#reviewed-jobs)
+never steers or waits: it queues, or fails with `fail`. Without background jobs
 (`agent.max_background = 0`) nothing can queue, so `queue` refuses the call
 as busy. Queued prompts live only in the session's memory: a daemon restart
 or the end of the session drops them, as it cancels the session's jobs.
+
+### Reviewed jobs
+
+An `agent` call may set `review` to run as a reviewed job: the agent (the
+builder) does the work, a fresh reviewer on another agent checks it and ends
+with a structured verdict, and the builder fixes the blocking findings, for
+at most the rounds the call names. It is one background job, with one `job`
+handle, `agent_status`, `agent_wait`, `agent_cancel`, and one report, and SCV
+states its outcome in its own Review and Landing lines. A call without
+`review` runs exactly as before. The property is offered only where
+background jobs are on, at least one offered agent can continue a
+conversation, and the session keeps journals (an SCV session always does).
+
+```json
+{"agent":"codex","cwd":"shop","prompt":"…self-contained brief…",
+ "review":{"rounds":3,"land":"after_approval","focus":"fix the race, no sleeps"}}
+```
+
+| `review` field | Default | Meaning |
+| --- | --- | --- |
+| `agent` | Routed (below) | The reviewer. Naming one turns off every fallback. |
+| `rounds` | 3 | The round limit, 1 to 20. |
+| `land` | No landing | `after_approval` or `before_review` (see *Landing*). |
+| `focus` | None | Extra instructions for every reviewer: at most 2 KiB of text, where line breaks and tabs are allowed and other control characters are not. |
+| `model`, `effort` | The reviewer's defaults | Only together with `agent`. |
+| `timeout_seconds` | `tools.agent_timeout_seconds` | Each reviewer turn, at most `tools.max_timeout_seconds`. |
+
+The call is checked before approval, and nothing launches when it fails: an
+explicit `background: false`, a builder that cannot continue a conversation
+(the error names the agents that can), `rounds` outside 1 to 20, an unknown
+`land`, an over-long `focus`, `model` or `effort` without `agent`,
+`agent.max_conversations` below 2, and any reviewer the order may launch
+that fails the same checks an ordinary call to it would (each is routed with
+a placeholder prompt). One approval covers the job: its summary adds the
+round limit, the landing mode in capitals when the job may land, and every
+reviewer launch the order may make, each with the approval text an ordinary
+call to that agent would show. The job takes one `agent.max_background`
+slot, or one `agent.max_queued_turns` place when it queues behind a busy
+builder conversation; reviewer turns take none. The start result adds
+`"review":{"reviewers":[…],"rounds":3,"land":"after_approval","journal":"rev-…"}`.
+
+#### Choosing the reviewer
+
+| Builder | Reviewer, the first available of |
+| --- | --- |
+| `claude` | `codex`, `grok`, a fresh `claude` conversation |
+| `codex` | `claude`, `grok`, a fresh `codex` conversation |
+| any other (`grok`, `dsh`, `pi`, `scv`) | `claude`, `codex`, `grok`, a fresh conversation of the builder's agent (for `grok`, the last two are the same) |
+
+Agents the session does not offer are dropped before approval. A fresh
+conversation of the builder's own agent shares the builder agent's private
+home and memory, so SCV labels it `same agent as builder`. SCV moves to the
+next agent, in the same round, only when the attempt is classed unavailable,
+exactly as an ordinary call's `fallback` is decided (see
+[Choosing an agent](#choosing-an-agent)): from its status and structured
+error, never its reply. Such an agent is skipped for the rest of the job.
+A refusal (`declined`) hands the review to `grok` for the rest of the job
+when `grok` is offered and is neither the agent that refused nor the
+builder's agent; otherwise, or when `grok` then declines or is unavailable,
+the round ends `no_verdict` (`reviewer_declined`). After a refusal the
+builder's own agent never reviews. What a reviewer that declined said goes
+into the result's `review.refusals`. A named reviewer is never swapped: its
+unavailability or refusal ends the round `no_verdict`. Nothing else moves to
+another agent: a timeout, a kill, a failure without an availability error,
+or a verdict of any kind.
+
+#### The loop
+
+A round is one builder turn, then one verdict on it from a reviewer
+conversation started for that round:
+
+1. The builder works in one conversation for the whole job: a new one, or
+   the call's `session`. Round 1 gets the prompt plus SCV's notice of the
+   review, the round limit, the landing mode, and the `scv-landing` block.
+   Later rounds get a fix prompt, `[SCV review, round k of R]`, listing the
+   open blocking findings by number and the last verdict's minor ones, and,
+   when commits already landed, that fixes go on top. The builder may answer
+   a finding with reasons instead of a change. A turn that does not
+   complete stops the job (`stopped`, `builder_<status>`); a first turn
+   without a conversation to continue stops it with `builder_no_session`.
+2. A new reviewer conversation, in the builder's `cwd`, gets SCV's rules,
+   the builder's prompt (8 KiB), `focus`, the landing mode, the builder's
+   latest reply (8 KiB, marked untrusted), and from round 2 the open findings
+   to settle. Every open finding is listed with its ID, severity, and title,
+   since the verdict must settle each by ID; when the list would pass
+   48 KiB, details are shortened first and then titles, never a finding
+   dropped (the builder's fix prompt lists them the same way). It is never
+   told the round limit. It finds the change itself:
+   the uncommitted changes, or with a clean tree the commits the builder
+   names or the landed commits; it reviews the whole change every round,
+   never approves an empty diff, and escalates when it cannot identify it.
+3. SCV reads its verdict. `approve` ends the review `approved`. `escalate`
+   ends it `escalated`. `changes` in the last round ends it `unresolved`
+   (`round_limit`), so the last builder turn always gets a verdict;
+   otherwise the next round begins.
+
+The job holds the builder conversation's place in its lane for every round,
+so other calls to it queue behind the whole job, and pins it against
+eviction and idle expiry. A reviewer conversation is released after its
+round on every path and its handle is never returned; the approving
+reviewer of an `after_approval` job is kept, pinned, until its confirmation
+ends. The builder's handle comes back in the result (`session` and
+`review.builder_session`). Each turn has its own timeout: builder and
+landing turns the call's `timeout_seconds`, reviewer and confirmation turns
+`review.timeout_seconds`, repair turns the lower of 300 seconds and that.
+
+#### The verdict
+
+The reviewer ends its reply with one fenced block, of which SCV reads only
+the last, at most 16 KiB; it never reads prose such as "LGTM":
+
+````text
+```scv-verdict
+{"verdict":"changes","summary":"The race is still masked by a sleep.",
+ "prior":[{"id":"1.1","status":"open","note":"cart.rs:88 still sleeps"}],
+ "findings":[{"severity":"minor","title":"Test name typo","location":"shop/tests/checkout.rs:41"}],
+ "evidence":["ran cargo test -p checkout 20x: 2 failures"]}
+```
+````
+
+- `verdict` is `approve`, `changes`, or `escalate`; `summary` is required.
+- `findings` are new findings only, at most 20, each `blocking` or `minor`
+  with a `title`; SCV numbers them `<round>.<n>`. Only blocking findings
+  start another round.
+- From round 2, `prior` settles every open finding by its ID exactly once:
+  `resolved`, still `open`, or `withdrawn` with a `note`.
+- `approve` needs `evidence`, no prior finding left open, and no new
+  blocking finding; with `land: "after_approval"` it also names the commits
+  it approved, `"approved":{"base":"<sha>","head":"<sha>"}`. `changes` needs
+  an open prior finding or a new blocking one.
+- When the builder reported a landing that round, `landing_check` says
+  whether the commits are on the ref: `{"status":"confirmed|not_found|mismatch|unverifiable","ref","commits","evidence","note"}`.
+
+Unknown fields are ignored, long strings are cut, and control characters
+are removed; anything else that breaks these rules, a missing block, or one
+a cut reply may have lost, is malformed. A reviewer whose turn completed and
+whose conversation can be continued gets one repair turn ("Reply with only
+that block"); still malformed, or one that cannot be continued, ends the
+round `no_verdict` (`malformed_verdict`). A repair turn that declines,
+times out, fails, or is unavailable ends the round `no_verdict` with that
+cause instead (`reviewer_declined` keeps its words in `review.refusals`),
+and no other reviewer is asked. A `changes` or `escalate` verdict counts
+however the run ended, so no fallback gets around it; an `approve` counts
+only from a run that completed.
+
+#### Landing
+
+| `land` | The builder may land |
+| --- | --- |
+| omitted | Not in this job. |
+| `after_approval` | After an approving verdict, in one more builder turn, which the approving reviewer then confirms. |
+| `before_review` | In each round's builder turn, before that round's review. |
+
+A builder turn that lands ends its reply with a fenced block, the last of
+which SCV reads (at most 4 KiB):
+
+````text
+```scv-landing
+{"status":"landed","ref":"origin/main","commits":["4f2a9c1e0b7d"],"detail":"squash-merged PR #77"}
+```
+````
+
+`status` is `landed` (with a `ref` and 1 to 20 commits of 7 to 40 lowercase
+hex characters), `not_landed`, or `failed` (partial state possible); an
+`https://` `url` is kept in the result, never in SCV's lines. A turn that may
+land and does not end with a valid block, or does not complete, leaves the
+landing `unknown`; the block is read before the status, so a landing that a
+failure followed is still recorded. In a turn that may not land, a `landed`
+or `failed` report is recorded as NOT authorized. Landed history is never
+rewritten: fixes are new commits on top, landed again only with
+`before_review`.
+
+After an `after_approval` landing turn that reports `landed`, the approving
+reviewer gets one confirmation turn in its own conversation. It checks the
+repository, not the report: the commits are on the ref, together they carry
+exactly the approved `base..head` (commit IDs may differ after a squash merge
+or a clean rebase; the content may not), and nothing else landed with them.
+It ends with an `scv-landing-check` block, the `landing_check` object. The
+confirmation is not a round, never changes the review outcome, and never
+leads to a fix, revert, or re-landing. Only a confirmation run that
+completed counts: one that times out, declines, is unavailable, fails, or is
+stopped leaves the landing NOT confirmed whatever its block says (the
+journal keeps the block), as do a malformed block and a reviewer that
+cannot be continued, with no repair and no other agent. A negative block
+from a failed round verdict still counts because a fallback reviewer could
+otherwise get around it; the confirmation has no fallback, so nothing is
+gained by trusting a run that did not finish. A landing turn that does not complete or reports
+`not_landed` or `failed` gets no confirmation, and the result's `fallback`
+or refusal `note` is replaced by one saying the approved work did not land
+and must not be landed through another agent unless the user asks.
+
+SCV runs no `git`, so a `landed` status is labelled by who backs it:
+`confirmed by reviewer <agent>` when checks found every landed commit on the
+ref, `reviewer <agent> could NOT confirm: <why>` when one found them missing
+or different, `NOT confirmed: <why>` when a due check produced no result,
+and `builder-reported, not verified` when no check was due. A check is due
+once the turn that landed completes: the round's review for a round turn,
+the confirmation for the landing turn. One the job never reached, because it
+was cancelled or its journal could not be written, is NOT confirmed (`the
+confirmation did not run: the journal could not be written`), never
+builder-reported. No check is due only when the turn that landed did not
+complete, which stops the job before any review.
+
+#### What SCV reports
+
+The job's result is the builder's last agent result plus `review` (the
+outcome, reason, round, rounds, reviewer, fallback, tried, refusals,
+summary, open findings, the last verdict's numbered `findings`,
+`builder_session`, and `journal`) and `landing` (the landing summary and any
+`url`). The job's `status` is how its last builder turn ended (`cancelled`
+when the job was cancelled), apart from the review outcome:
+
+| Outcome | When |
+| --- | --- |
+| `approved` | A reviewer approved round *k*: the only approval |
+| `unresolved` | The last round still had open blocking findings |
+| `escalated` | The reviewer said the user must decide |
+| `no_verdict` | No reviewer was available or had room, or it declined, timed out, was stopped, failed, or stayed malformed |
+| `stopped` | A builder turn did not complete, the job was cancelled, or the journal could not be written before the outcome was decided (`journal_error`) |
+
+While it runs, `agent_status` adds
+`"review":{"round","rounds","phase","reviewer","land","builder_session","journal"}`,
+with `phase` one of `builder`, `reviewer`, `repair`, `landing`, or
+`confirmation`, and the progress line names the phase. The report, its turn's
+`origin.outcomes`, the change that settles the job, and a direct
+`background.reported` all carry the outcome (see
+[protocol](protocol.md#reviewed-job-outcomes)), so SCV's own lines reach the
+user apart from the model's summary, which is told to repeat them as given:
+
+```text
+job-4 · Review: approved · round 2 of 3 · reviewer claude
+job-4 · Landing: landed · 4f2a9c1 → origin/main · confirmed by reviewer claude
+job-7 · Review: NOT approved · unresolved after 3 of 3 rounds · 1 blocking finding open:
+  - "Sleep instead of a lock" (shop/src/cart.rs:88)
+job-7 · Landing: not attempted · review not approved
+job-9 · Review: NOT approved · no verdict in round 2 of 3 · reviewer grok (codex unavailable) timed out
+job-9 · Landing: landed before review · 4f2a9c1 → origin/main · confirmed by reviewer grok
+```
+
+The Review line is `approved · round k of R · reviewer <agent>`, or `NOT
+approved` with `unresolved after R of R rounds` and up to five open
+findings, `escalated in round k of R · reviewer <agent>: "<summary>"`, `no
+verdict in round k of R · <why>`, or `stopped in round k of R · <why>`
+(`stopped before round 1` when no builder turn ran). The Landing line is
+`not requested`, `not attempted · <why>`, `landed[ before review] · <commits>
+→ <ref> · <evidence>[ · NOT authorized by this call]`, `not landed ·
+builder-reported: "<detail>"`, `failed · builder-reported · partial state
+possible: "<detail>"`, or `unknown · <why> · check before relying on it`.
+A Review line whose journal is incomplete ends `· journal <id> INCOMPLETE: a
+write failed`. The TUI shows the lines as system items when a report turn
+starts and when a call settles the job, `scv exec` prints them on stderr, and
+chats send them as SCV's own message (see
+[channels](channels.md#background-reports)). These lines hold SCV's words
+only. The report the model reads, and the direct report a user gets when the
+model cannot write one, also quote what each reviewer that declined said,
+attributed and marked untrusted (at most 300 characters each), so the user
+can be told.
+
+`agent_cancel` stops the running turn and records the review as it stood:
+an outcome the loop already fixed (an approving verdict) stands, otherwise
+the review is `stopped` (`cancelled`); a turn that may land leaves the
+landing `unknown`, and a running or still due confirmation leaves it NOT
+confirmed. The cancel's change, the result, and the journal always agree. A
+journal write can still fail while the job stops, so the cancel's change
+states the outcome once the job has stopped, within the cancel's usual wait
+of up to 10 seconds, `journal_incomplete` included. The decision itself is
+fixed the moment the cancel arrives and never changes after; only the
+journal goes on until the job really ends, recording whatever the stopping
+turn still reports, such as a landing, which the outcome keeps as `unknown`.
+The cancel never touches the journal, so a journal write stuck on a slow
+disk cannot hold it past its wait.
+
+The session is owed the job's final outcome, once the job has stopped, and
+gets it exactly once:
+
+- in the cancel's own change, when the job has stopped by the time the
+  change is sent, even after the wait: the change then says the final
+  outcome, never the earlier snapshot;
+- otherwise the change says the journal is still open (`journal_pending`;
+  its Review line ends `still open: the job is still stopping, an update
+  follows`), and once the job stops the session gets the final outcome in a
+  `background.updated` event (see
+  [protocol](protocol.md#reviewed-job-outcomes)), the same decision with the
+  journal complete or INCOMPLETE.
+
+What is owed counts as delivered only once its event was actually sent. A
+change that never goes out, because its turn was cancelled or aborted
+first, the `agent_cancel` call itself was cut off, or it was dropped among
+too many waiting to be sent, leaves the final outcome to a
+`background.updated`, as does an update that could not be sent. What is
+owed is kept apart from the session's list of jobs, so dropping old
+finished jobs never loses it, and a job being cancelled is never dropped
+before its cancel describes it. Until it was sent, the job keeps the
+session busy for a planned restart. A client that has a job's final outcome
+ignores a later snapshot of the same session saying its journal is still
+open; job handles start over with each session, so that memory does too. A job
+cancelled while queued, before its loop ran, also ends with a result
+carrying its `review` and `landing` (`stopped before round 1`).
+
+#### The journal
+
+Each reviewed job writes one append-only JSONL file,
+`$SCV_HOME/state/reviews/rev-<unix seconds>-<6 hex>.jsonl` (directory `0700`,
+file `0600`, never through a symlink), synced after every event:
+`review.started` (the job, session, builder, reviewer order, rounds, landing
+mode, focus, and prompt), `builder.started` and `builder.finished`,
+`reviewer.started` and `reviewer.finished` (kind `review`, `repair`, or
+`confirmation`), `verdict`, `landing`, `landing_check`, and
+`review.finished` (outcome, reason, round, job status, and the landing).
+Every line is `{"v":1,"seq":n,"ts":<unix ms>,"event":…}` with the event's
+fields; replies are bounded (builder 8 KiB, reviewer 16 KiB) and no vendor
+session ID is written. A journal that cannot be created, or whose first
+event cannot be written, refuses the call before its job starts. A later
+write that fails stops the job at once, and is never hidden: if the outcome
+was not yet decided, the review is `stopped` (`journal_error`); if it was,
+such as an approval before the landing turn, that outcome stands, since the
+journal already holds the verdict that earned it, and the outcome carries
+`journal_incomplete` and its Review line says the journal is INCOMPLETE.
+Either way the journal itself may then lack its last events, `review.finished`
+included. A job cancelled while queued, or dropped with its session, still
+ends its journal. Starting a review removes journals older
+than 30 days. Read them with `cat`, `less`, or `jq`; `scv config show` lists
+the directory. A journal without `review.finished` was cut off by a crash
+or restart: its result is unknown, and nothing resumes it. To go on, the
+user asks for a new reviewed call whose brief restates the open findings and
+anything already landed.
+
+#### Limits and safety
+
+- The reviewer may read, fetch, build, and run tests, which may write build
+  artifacts. SCV tells it never to edit source, commit, land, push, publish,
+  deploy, or message anyone, including in the confirmation turn. That is a
+  prompt rule, not a boundary SCV enforces or detects: delegated agents run
+  unsandboxed as the user (see [security](security.md#delegated-runs)).
+- Both roles' output is untrusted: verdicts and landing reports are parsed
+  as bounded data and quoted to the other role marked as untrusted. A
+  builder's report can still try to mislead its reviewer, who is told to
+  check claims against the files and history.
+- Approval grants nothing more: publishing still asks through `scv
+  confirm`, and both roles' nested approvals get the session's unattended
+  answer like any job's.
+- SCV never extends the rounds. More rounds, or a fix after a failed
+  confirmation, is a new reviewed call the user asks for.
 
 ### Delegate first
 
@@ -857,7 +1208,12 @@ tells the user what the agent said and calls the `agent` tool with agent
 `grok` and the same request; a safety or guardrail refusal is not a reason to
 skip Grok. If `grok` itself declines, or it is not offered, it tells the user
 rather than passing the request to another agent on its own, and uses a
-specific agent if the user then asks for one. The wording explains why rather than
+specific agent if the user then asks for one. Where calls can set `review`,
+it adds that a review runs only when the user asks for one or accepts the
+main agent's suggestion, when to suggest one (once per task), that a task
+which lands, publishes, or deploys is asked about before it starts, and that
+only an approved review is approved and landed work is not approved work
+(see [Reviewed jobs](#reviewed-jobs)). The wording explains why rather than
 issuing capitalised rules.
 Without background jobs the section only asks for self-contained briefs.
 A session started for a chat channel also gets a *Chat channel* section (see
@@ -977,7 +1333,9 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   that started each (`tool.completed.jobs`) until the nested model has seen
   its result, through a later call or a report turn, which counts until it
   ends; a report turn that failed and will be tried again
-  (`origin.retry_seconds`) leaves its jobs counting. Only job handles and
+  (`origin.retry_seconds`) leaves its jobs counting, and so does a reviewed
+  job whose cancel said its journal is still open, until its
+  `background.updated`. Only job handles and
   statuses count, so a nested SCV 0.3.0, whose job
   changes name one tool per agent (`agent_codex`), is followed the same way.
   A planned restart waits for them as for a running turn (see

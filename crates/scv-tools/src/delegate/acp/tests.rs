@@ -441,15 +441,15 @@ async fn steering_sends_the_running_turn_a_request_and_waits_for_its_answer() {
     });
     until(|| calls(dir.path()).contains("hang")).await;
     // A call that steers through the `agent` tool reaches the running turn.
-    let agent = crate::delegate::background::BackgroundCapable {
-        inner: Arc::new(AgentTool::beside(
+    let agent = crate::delegate::background::BackgroundCapable::plain(
+        Arc::new(AgentTool::beside(
             "claude",
             Arc::clone(&tool) as Arc<dyn crate::delegate::agent::Backend>,
             tool.accepts(),
             &[],
         )),
-        jobs: Arc::new(crate::delegate::background::BackgroundJobs::new(1, None)),
-    };
+        Arc::new(crate::delegate::background::BackgroundJobs::new(1, None)),
+    );
     let steered = agent
         .execute(
             json!({"prompt":"please adjust","session":session,"on_busy":"steer"}),
@@ -874,10 +874,10 @@ async fn killing_a_background_job_s_agent_finishes_the_job_and_frees_its_slot() 
         None,
     );
     let accepts = backend.accepts();
-    let tool = crate::delegate::background::BackgroundCapable {
-        inner: Arc::new(AgentTool::beside("claude", Arc::new(backend), accepts, &[])),
-        jobs: Arc::clone(&jobs),
-    };
+    let tool = crate::delegate::background::BackgroundCapable::plain(
+        Arc::new(AgentTool::beside("claude", Arc::new(backend), accepts, &[])),
+        Arc::clone(&jobs),
+    );
     tool.execute(
         json!({"prompt":"hang","background":true}),
         context(dir.path(), None),

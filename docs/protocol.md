@@ -39,7 +39,7 @@ update must be restarted after it.
 ### `initialize`
 
 ```json
-{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.13"}}
+{"type":"initialize","request_id":"1","protocol_version":3,"client":{"name":"scv-tui","version":"0.3.14"}}
 ```
 
 ### `daemon.control`
@@ -59,7 +59,7 @@ an agent session. The `command` object is tagged by `action`:
 {"type":"daemon.control","request_id":"d7","command":{"action":"delegation_kill","handle":"codex-3f9a2c","orphans":false}}
 {"type":"daemon.control","request_id":"d8","command":{"action":"delegation_kill","orphans":true}}
 {"type":"daemon.control","request_id":"d9","command":{"action":"restart_when_idle","version":"0.1.37","commit":"abc1234","parent":"0a1b2c3d/<session>/codex-3f9a2c","max_wait_seconds":600}}
-{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.13 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
+{"type":"daemon.control","request_id":"d10","command":{"action":"confirm_ask","question":"Publish SCV 0.3.14 to crates.io?","parent":"0a1b2c3d/<session>/codex-3f9a2c","timeout_seconds":1800}}
 {"type":"daemon.control","request_id":"d11","command":{"action":"confirm_status","id":"5f0c9a1e2b3d"}}
 {"type":"daemon.control","request_id":"p1","command":{"action":"project_create","name":"release","workspace":"/workspace/project"}}
 {"type":"daemon.control","request_id":"p2","command":{"action":"project_tasks","project":"release"}}
@@ -313,16 +313,16 @@ clears its transcript only after that event.
 ### Handshake and session
 
 ```json
-{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.13"}}
+{"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.14"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
 ```
 
 ### `daemon.status`
 
 ```json
-{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.13","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
-{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.13","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
-{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.13","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
+{"type":"daemon.status","request_id":"d1","status":{"version":"0.3.14","pid":1234,"components":[{"id":"wechat:default","channel":"wechat","account":"default","bot_id":"bot-example","user_id":"user-example","enabled":true,"state":"connected","last_success_unix_seconds":1750000000,"error":null,"restarts":0,"remote_tools":"none"}],"delegations":{"active":1,"idle":0,"reaped":0}}}
+{"type":"daemon.status","request_id":"d6","status":{"version":"0.3.14","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0,"entries":[{"handle":"codex-3f9a2c","agent":"codex","session":"5d1c…","depth":1,"pid":4321,"owner_pid":1234,"processes":3,"cwd":"/workspace/scv","started_unix_seconds":1750000000,"orphaned":false,"conversation":"codex-2","turn":3}]}}}
+{"type":"daemon.status","request_id":"d10","status":{"version":"0.3.14","pid":1234,"components":[],"delegations":{"active":1,"idle":0,"reaped":0},"confirm":{"id":"5f0c9a1e2b3d","state":"pending","chat":"wechat:default","deadline_unix_seconds":1750001800}}}
 ```
 
 Version and PID identify the responding server, not the installed client.
@@ -456,6 +456,24 @@ finishes: a client keeps the session open until then, since closing it
 cancels the session's jobs. The field is omitted when a call touched no job,
 and by servers before 0.3.0.
 
+A [reviewed job](tools.md#reviewed-jobs) adds two optional fields: the entry
+that starts it carries `journal`, its review journal's ID (such as
+`rev-1759961234-3fa9c1`), and the entry that settles it carries `outcome`, a
+[`JobOutcome`](#reviewed-job-outcomes). An `agent_cancel` entry's outcome is
+the review as the cancel left it: `approved` if a verdict had already
+approved, otherwise `stopped`. It is stated once the job has stopped, so a
+journal failure while it stopped shows in it; a job still stopping when the
+cancel's wait ends gets `journal_pending` instead, and a `background.updated`
+event later (see [Reviewed-job outcomes](#reviewed-job-outcomes)). A client
+shows the outcome as SCV's own lines after the turn's reply, and keeps
+tracking a job whose outcome has `journal_pending` until its update. Both fields are omitted for other jobs and by
+servers before 0.3.14.
+
+```json
+{"type":"tool.completed",…,"name":"agent","jobs":[{"job":"job-4","tool":"agent","agent":"codex","status":"running","task":"Fix the flaky checkout test","journal":"rev-1759961234-3fa9c1"}]}
+{"type":"tool.completed",…,"name":"agent_cancel","jobs":[{"job":"job-4","tool":"agent","agent":"codex","status":"cancelled","task":"Fix the flaky checkout test","outcome":{"job":"job-4","review":{"outcome":"stopped","reason":"cancelled","round":2,"rounds":3,"reviewer":"claude","journal":"rev-1759961234-3fa9c1"},"landing":{"mode":"none","status":"not_requested"}}}]}
+```
+
 A successful `chat_attach` call's output is
 `{"attached":{"path":…,"name":…,"size":…,"caption":…},"note":…}`, where
 `path` is a private copy in the channels' media outbox. A chat client reads it
@@ -526,15 +544,82 @@ two things follows (see [tools](tools.md#background-jobs) for when):
 `background.reported` (`scv_protocol::JobReport` for each of `reports`) names
 no request and belongs to no turn; `attempts` counts the failed report turns,
 and each report's `reply` is the agent's bounded reply, untrusted
-delegated-agent output. `scv_protocol::describe_reports` renders reports the
-way the model's prompt does.
+delegated-agent output. A reviewed job's report also carries its `outcome`.
+`scv_protocol::describe_reports` renders reports the way the model's prompt
+does, a reviewed job's outcome lines after its task.
 
-Its `request_id` is server-generated, so a client tells its own turns' events
-apart by `request_id`. A `turn.start` sent while it runs is queued as usual.
-The optional fields and the new event keep protocol version 3: v3 clients that
-predate `origin` read the turn as an ordinary one, ones that predate
-`background.reported` skip it as an unknown event, and servers before 0.3.11
-settled the jobs of every failed report turn.
+A server-started turn's `request_id` is server-generated, so a client tells
+its own turns' events apart by `request_id`. A `turn.start` sent while a
+server-started turn runs is queued as usual. The optional fields and the new
+events keep protocol version 3: v3 clients that predate `origin` read the turn
+as an ordinary one, ones that predate `background.reported` or
+`background.updated` skip them as unknown events, servers before 0.3.11
+settled the jobs of every failed report turn, and clients before 0.3.14
+ignore `outcomes`, `outcome`, and `journal`, showing only the model's report.
+
+A report turn that covers reviewed jobs carries their outcomes in
+`origin.outcomes`, on its `turn.started` and its terminal event, so a client
+can show SCV's own lines before the model's report:
+
+```json
+{"type":"turn.started","request_id":"background:…","session_id":"...","turn_id":"...","seq":40,"origin":{"kind":"background","jobs":["job-4"],"outcomes":[{"job":"job-4","review":{"outcome":"approved","round":2,"rounds":3,"reviewer":"claude","tried":[{"agent":"claude","result":"verdict"}],"summary":"The race is gone.","journal":"rev-1759961234-3fa9c1"},"landing":{"mode":"after_approval","status":"landed","ref":"origin/main","commits":["4f2a9c1e0b7d"],"evidence":"reviewer_confirmed","checked_by":"claude"}}]}}
+```
+
+#### Reviewed-job outcomes
+
+`scv_protocol::JobOutcome` is what SCV itself decided about a reviewed job,
+from its own state; reviewer and builder text appears only as bounded,
+cleaned fields. It holds the `job`, a `review` (`ReviewSummary`), and a
+`landing` (`LandingSummary`):
+
+| Field | Content |
+| --- | --- |
+| `review.outcome` | `approved` (the only approval), `unresolved`, `escalated`, `no_verdict`, or `stopped`; a newer value parses as `unknown` |
+| `review.reason` | Why, such as `round_limit`, `reviewer_timeout`, `reviewer_declined`, `no_reviewer_available`, `no_conversation_slot`, `malformed_verdict`, `builder_failed`, `cancelled`, or `journal_error` |
+| `review.round`, `review.rounds` | The round it ended in (0 before the first builder turn) and the call's limit |
+| `review.reviewer`, `review.fallback` | The agent of the last reviewer attempt, and why it is not the first in the order, such as `codex unavailable` or `same agent as builder: codex, grok unavailable` |
+| `review.tried` | Each reviewer agent tried, with its latest `result`: `verdict`, `unavailable`, `declined`, `failed`, or `no_slot` |
+| `review.refusals` | At most two `{agent, reply}` of reviewers that declined, each reply at most 500 characters |
+| `review.summary` | The last verdict's summary, at most 300 characters |
+| `review.open_count`, `review.open` | Blocking findings still open, and the first five as `{id, title, location}` |
+| `review.journal`, `review.journal_incomplete` | The journal's ID, and whether a write failed after the outcome was decided (the outcome stands; a failure before it is `stopped`, `journal_error`) |
+| `review.journal_pending` | Stated while the job was still stopping, its journal still open: the decision is final, and a `background.updated` follows |
+| `landing.mode` | `none`, `after_approval`, or `before_review` |
+| `landing.status` | `not_requested`, `not_attempted`, `landed`, `not_landed`, `failed`, or `unknown` (also any value a client does not know) |
+| `landing.ref`, `landing.commits` | The last ref and every commit reported landed |
+| `landing.evidence`, `landing.checked_by` | For `landed`: `builder_reported`, `reviewer_confirmed`, `reviewer_disputed`, or `unconfirmed`, and the reviewer behind it |
+| `landing.landed_before_review`, `landing.unauthorized` | Commits landed in a round's builder turn; a landing the call did not allow |
+| `landing.reason`, `landing.detail` | SCV's own words for the status or evidence; the builder's one-line detail, at most 300 characters |
+
+Every optional field is omitted when empty. `scv_protocol::outcome_notice`
+renders an outcome as SCV's lines, always a Review line then a Landing line,
+each prefixed with the job, as clients show them; they hold SCV's words only.
+`scv_protocol::describe_outcome`, which reports use, gives the same lines
+without the prefix and also quotes each declining reviewer's words,
+attributed and marked untrusted:
+
+```text
+job-4 · Review: approved · round 2 of 3 · reviewer claude
+job-4 · Landing: landed · 4f2a9c1 → origin/main · confirmed by reviewer claude
+```
+
+The [tools](tools.md#what-scv-reports) document lists every line. An outcome a
+client does not know reads `Review: unknown outcome · see journal <id>`.
+
+`background.updated` carries the final outcomes of reviewed jobs that
+`agent_cancel` stopped and whose final outcome no `tool.completed` delivered:
+its change said `journal_pending`, or never went out, as when its turn was
+cancelled first. It is sent once the job has stopped, after any such change,
+never ahead of it: the same decision, the journal complete or
+`journal_incomplete`. A change sent after the job stopped says the final
+outcome itself, and no update follows. It names no request, belongs to no
+turn, and settles the jobs it names; a client shows the outcomes as SCV's
+own lines, and ignores a later `journal_pending` snapshot of a job it already
+has the final outcome of. Older clients skip it as an unknown event.
+
+```json
+{"type":"background.updated","session_id":"...","seq":52,"outcomes":[{"job":"job-4","review":{"outcome":"stopped","reason":"cancelled","round":1,"rounds":3,"reviewer":"claude","journal":"rev-1759961234-3fa9c1","journal_incomplete":true},"landing":{"mode":"none","status":"not_requested"}}]}
+```
 
 ### Errors
 

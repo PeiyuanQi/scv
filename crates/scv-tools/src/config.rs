@@ -41,6 +41,9 @@ pub struct ToolsConfig {
     /// The session's background job store, when the server reports finished
     /// jobs; otherwise the registry makes its own.
     pub background: Option<Arc<background::BackgroundJobs>>,
+    /// Where reviewed jobs keep their journals (`$SCV_HOME/state/reviews`);
+    /// `None` leaves `review` out of the `agent` tool.
+    pub reviews: Option<PathBuf>,
     /// Offers `chat_attach` when the session answers on a chat channel.
     pub chat_attach: Option<chat_attach::ChatAttachConfig>,
     /// Offers `chat_history` and `chat_keep` when the session answers a
@@ -69,6 +72,7 @@ impl Default for ToolsConfig {
             delegation: None,
             max_background: 2,
             background: None,
+            reviews: None,
             chat_attach: None,
             chat_history: None,
             precheck_agent_models: true,

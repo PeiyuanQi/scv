@@ -1917,6 +1917,7 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
                     tool: "agent_claude".into(),
                     agent: String::new(),
                     task: "Review the PR".into(),
+                    journal: String::new(),
                     started_at: 1,
                 }],
                 ..Default::default()

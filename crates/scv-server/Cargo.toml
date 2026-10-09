@@ -30,3 +30,8 @@ tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+# The background job store's test hooks, for the connection's tests of how
+# reviewed jobs' outcomes are delivered.
+scv-tools = { workspace = true, features = ["test-support"] }

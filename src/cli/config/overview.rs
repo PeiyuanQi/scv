@@ -39,6 +39,10 @@ pub(crate) fn render(
             "chat log of the owners' direct chats, and files kept from them",
         ),
         (layout.state(), "runtime state SCV writes; not for editing"),
+        (
+            layout.reviews(),
+            "journals of reviewed agent jobs, kept 30 days; read them with cat or jq",
+        ),
     ];
     if let Some(explicit) = &overrides.config_file {
         files.push((explicit.clone(), "extra settings from SCV_CONFIG"));

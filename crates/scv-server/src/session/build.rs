@@ -127,6 +127,7 @@ pub(crate) async fn build_session(
             depth: delegation_depth,
         });
         tools.background = background.clone();
+        tools.reviews = Some(layout.reviews());
         if client.channel.is_some() {
             // Of the kept files, only this chat's own may be sent back.
             let kept = client.chat.as_ref().map(|conversation| {
@@ -167,6 +168,13 @@ pub(crate) async fn build_session(
             &PromptContext {
                 agents: &agents,
                 background: tools.get("agent_status").is_some(),
+                review: tools.get("agent").is_some_and(|agent| {
+                    agent
+                        .spec()
+                        .parameters
+                        .pointer("/properties/review")
+                        .is_some()
+                }),
                 channel: client.channel.as_deref(),
                 chat_history: tools.get("chat_history").is_some(),
             },

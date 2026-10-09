@@ -520,6 +520,7 @@ fn server_started_turns_carry_their_origin_and_client_turns_omit_it() {
             kind: OriginKind::Background,
             jobs: vec!["job-1".into()],
             retry_seconds: None,
+            outcomes: Vec::new(),
         }),
     };
     let json = serde_json::to_value(&started).unwrap();
@@ -550,6 +551,7 @@ fn a_failed_report_turn_says_when_it_is_tried_again() {
         kind: OriginKind::Background,
         jobs: vec!["job-1".into()],
         retry_seconds,
+        outcomes: Vec::new(),
     };
     let failed = |retry_seconds| ServerEvent::TurnFailed {
         request_id: "background:1".into(),
@@ -588,6 +590,7 @@ fn jobs_the_model_could_not_report_are_reported_directly() {
             status: JobStatus::Completed,
             session: Some("codex-1".into()),
             reply: "Landed 0.9.9.\n".into(),
+            outcome: None,
         },
         JobReport {
             job: "job-2".into(),
@@ -596,6 +599,7 @@ fn jobs_the_model_could_not_report_are_reported_directly() {
             status: JobStatus::Failed,
             session: None,
             reply: "  ".into(),
+            outcome: None,
         },
     ];
     let reported = ServerEvent::BackgroundReported {
@@ -640,6 +644,8 @@ fn tool_calls_report_the_jobs_they_start_and_settle() {
         agent: "codex".into(),
         status: JobStatus::Running,
         task: "Land the fix".into(),
+        journal: None,
+        outcome: None,
     };
     assert!(started.started());
     assert_eq!(started.agent_name(), "codex");

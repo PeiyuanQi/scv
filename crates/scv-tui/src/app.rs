@@ -1,7 +1,10 @@
 //! [`App`]: everything the terminal UI shows, updated from server events.
 //! The server owns the conversation; this is a display copy.
 
-use std::{collections::VecDeque, time::Instant};
+use std::{
+    collections::{HashSet, VecDeque},
+    time::Instant,
+};
 
 use anyhow::Result;
 use scv_protocol::{QueueEntry, ServerEvent, ToolErrorKind, TurnOrigin, Usage};
@@ -54,6 +57,10 @@ pub(crate) struct App {
     pub(crate) queue_editing: Option<QueueEntry>,
     pub(crate) queue_selected: Option<usize>,
     pub(crate) last_seq: u64,
+    /// This session's reviewed jobs whose final outcome arrived in a
+    /// `background.updated`: a snapshot saying their journal is still open
+    /// is stale. Cleared with the session, since job handles restart.
+    pub(crate) updated_jobs: HashSet<String>,
     /// Events of types this client does not know since `last_seq`; each may
     /// have used a sequence number.
     pub(crate) skipped_events: u64,
@@ -87,6 +94,7 @@ impl App {
             queue_editing: None,
             queue_selected: None,
             last_seq: 0,
+            updated_jobs: HashSet::new(),
             skipped_events: 0,
             connected: true,
             quit: false,
@@ -125,6 +133,8 @@ impl App {
         self.queue_editing = None;
         self.queue_selected = None;
         self.last_seq = 0;
+        // Job handles restart with each session.
+        self.updated_jobs.clear();
         self.skipped_events = 0;
         self.connected = true;
         self.history_index = None;
@@ -284,8 +294,21 @@ impl App {
                 success,
                 output,
                 error,
+                jobs,
                 ..
-            } => self.tool_completed(&call_id, success, error, output),
+            } => {
+                self.tool_completed(&call_id, success, error, output);
+                // SCV's own lines for reviewed jobs the call settled, but
+                // never a stale "still open" after the final outcome.
+                for outcome in jobs.iter().filter_map(|change| change.outcome.as_ref()) {
+                    if outcome.review.journal_pending && self.updated_jobs.contains(&outcome.job) {
+                        continue;
+                    }
+                    self.push_item(TranscriptItem::System(scv_protocol::outcome_notice(
+                        outcome,
+                    )));
+                }
+            }
             ServerEvent::ContextCompacted {
                 after_tokens,
                 removed_messages,
@@ -332,11 +355,27 @@ impl App {
                 message,
                 reports,
                 ..
-            } => self.push_item(TranscriptItem::System(format!(
-                "The model could not report finished background work ({code}: {message}). \
-                 The agent's reply, unedited:\n{}",
-                scv_protocol::describe_reports(&reports).trim_end()
-            ))),
+            } => {
+                let follows = if reports.iter().any(|report| report.outcome.is_some()) {
+                    "SCV's Review and Landing lines, then the agent's reply, unedited"
+                } else {
+                    "The agent's reply, unedited"
+                };
+                self.push_item(TranscriptItem::System(format!(
+                    "The model could not report finished background work ({code}: {message}). \
+                     {follows}:\n{}",
+                    scv_protocol::describe_reports(&reports).trim_end()
+                )));
+            }
+            // Reviewed jobs whose outcome was shown before they stopped.
+            ServerEvent::BackgroundUpdated { outcomes, .. } => {
+                for outcome in &outcomes {
+                    self.updated_jobs.insert(outcome.job.clone());
+                    self.push_item(TranscriptItem::System(scv_protocol::outcome_notice(
+                        outcome,
+                    )));
+                }
+            }
             ServerEvent::SessionCleared { .. } => {
                 self.items.clear();
                 self.prompt_history.clear();
@@ -403,6 +442,12 @@ impl App {
                 "Background work finished ({}); SCV is reporting it.",
                 origin.jobs.join(", ")
             )));
+            // SCV's own lines for reviewed jobs, before the model's text.
+            for outcome in &origin.outcomes {
+                self.push_item(TranscriptItem::System(scv_protocol::outcome_notice(
+                    outcome,
+                )));
+            }
         }
     }
 
@@ -579,7 +624,8 @@ fn event_seq(event: &ServerEvent) -> Option<u64> {
         | ServerEvent::TurnCompleted { seq, .. }
         | ServerEvent::TurnCancelled { seq, .. }
         | ServerEvent::TurnFailed { seq, .. }
-        | ServerEvent::BackgroundReported { seq, .. } => Some(*seq),
+        | ServerEvent::BackgroundReported { seq, .. }
+        | ServerEvent::BackgroundUpdated { seq, .. } => Some(*seq),
         ServerEvent::QueueSnapshot { seq, .. }
         | ServerEvent::QueueEnqueued { seq, .. }
         | ServerEvent::QueueUpdated { seq, .. }

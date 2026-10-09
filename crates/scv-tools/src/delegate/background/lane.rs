@@ -17,7 +17,7 @@ use crate::sync::lock;
 
 /// One session's lanes, by conversation handle.
 #[derive(Debug, Default)]
-pub(super) struct Lanes {
+pub(in crate::delegate) struct Lanes {
     state: Mutex<State>,
     /// Woken whenever a call leaves a lane.
     changed: Notify,
@@ -32,17 +32,17 @@ struct State {
 
 /// One call's place in its conversation's lane, given up when dropped.
 #[derive(Debug)]
-pub(super) struct Place {
+pub(in crate::delegate) struct Place {
     lanes: Arc<Lanes>,
     handle: String,
     id: u64,
     /// Calls that were in the lane when this one joined.
-    pub(super) ahead: usize,
+    pub(in crate::delegate) ahead: usize,
 }
 
 impl Lanes {
     /// Join the end of `handle`'s lane.
-    pub(super) fn join(self: &Arc<Self>, handle: &str) -> Place {
+    pub(in crate::delegate) fn join(self: &Arc<Self>, handle: &str) -> Place {
         let mut state = lock(&self.state);
         state.next += 1;
         let id = state.next;
@@ -60,7 +60,7 @@ impl Lanes {
 
 impl Place {
     /// The conversation this place is in.
-    pub(super) fn handle(&self) -> &str {
+    pub(in crate::delegate) fn handle(&self) -> &str {
         &self.handle
     }
 
@@ -73,7 +73,7 @@ impl Place {
     }
 
     /// Wait until every call ahead of this one has left the lane.
-    pub(super) async fn wait_first(
+    pub(in crate::delegate) async fn wait_first(
         &self,
         cancellation: &CancellationToken,
     ) -> Result<(), ToolError> {

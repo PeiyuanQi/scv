@@ -1,6 +1,6 @@
 ---
 name: delegating
-description: How to hand work to another agent with the agent tool. Covers choosing the agent, model, and effort; writing the brief; running in the background; continuing a conversation; and what to do when a call fails. Read it before your first agent call in a session.
+description: How to hand work to another agent with the agent tool. Covers choosing the agent, model, and effort; writing the brief; running in the background; continuing a conversation; having the work reviewed; and what to do when a call fails. Read it before your first agent call in a session.
 ---
 
 # Delegating to agents
@@ -93,6 +93,71 @@ own:
   handle, so the agent keeps its context. Handles last only as long as this
   session, and SCV forgets a conversation left idle for a day. For a project,
   write down what matters in its notes.
+
+## Review
+
+Where the `agent` tool takes `review`, a call can run as a reviewed job. The
+agent builds; a fresh reviewer on another agent checks the work and ends
+with a structured verdict; the agent fixes the blocking findings; and this
+repeats for at most `review.rounds` rounds (default 3, at most 20). It is
+one background job with one job handle, and SCV reports its outcome in its
+own Review and Landing lines, ahead of your summary.
+
+- **Only with the user's yes.** Set `review` when the user asks for a review
+  in any words ("have Claude review it"), with any reviewer or round count
+  they named, or when they accept your suggestion. Never set it on your own.
+- **When to suggest it:** code that will be landed, merged, released, or
+  deployed; security, credentials, data deletion or migration, or
+  concurrency; work across several files or components in a project with
+  checks; work that already failed or was wrong once. Not for lookups,
+  research, summaries, small or known fixes, status checks, or anything
+  without a checkable outcome. Suggest it once per task, and don't repeat
+  an offer the user declined. A line in the project's instructions or notes
+  such as "don't suggest reviews here" stops suggestions; an explicit
+  request still starts one.
+- **Ask first when the task lands, publishes, or deploys**, because the
+  review has to come first: "This lands on main. I suggest an independent
+  review first: a fresh claude checks codex's work, up to 3 rounds, and codex
+  lands only after approval. Run it with review?" A yes sets `"land":
+  "after_approval"`; "land now and review after" sets `"land":
+  "before_review"`; a no starts an ordinary job.
+- **Otherwise start the job and offer once.** Start it as usual and add a
+  one-line offer. A later yes makes a reviewed call on that job's
+  conversation: once its result names the `session`, or right away when the
+  job continued a conversation you already had, where it queues behind it.
+- **Landing.** Leave `land` out unless the user's request includes landing.
+  `after_approval` lets the agent land in one extra turn after the review
+  approves, and the approving reviewer then checks what landed.
+  `before_review` lets it land each round's work before it is reviewed: use
+  it only when the user asked to land first, such as for an urgent fix.
+  Publishing still asks the user through its own approval.
+- **The reviewer.** Leave `review.agent` out: codex reviews claude's work,
+  and claude reviews codex's and everyone else's, then codex; grok steps in
+  when those are unavailable or one declines; a fresh conversation of the
+  builder's own agent is the last resort. Set `review.agent` only when the
+  user named one; it is then never swapped. `review.model` and
+  `review.effort` go only with it. Put what the reviewer should look at in
+  particular in `review.focus`.
+- **The brief** is the usual self-contained brief with its "done when" and
+  any landing steps. SCV adds the review instructions itself. The builder
+  must be an agent that can continue a conversation.
+- **Reading the outcome.** Repeat SCV's Review and Landing lines as given.
+  Only `approved` is approved. `unresolved`, `escalated`, `no_verdict`, and
+  `stopped` are not approved, and landed work is not approved work. If a
+  reviewer declined, tell the user what it said (`review.refusals` in the
+  result). A landing that the reviewer could NOT confirm, or that is NOT
+  confirmed, is reported as such: don't fix, revert, or land anything on
+  your own.
+- **After it ends.** Never extend the rounds or start another reviewed call
+  to get past `unresolved` or `escalated`. The user decides whether to take
+  the work as it stands or run another review. Another reviewed call
+  continues the builder's conversation (`review.builder_session` in the
+  result), and its brief restates the open findings and anything already
+  landed.
+- **The journal.** Every step is in `$SCV_HOME/state/reviews/<journal>.jsonl`,
+  named in the start result and the outcome. Read it with bash when the user
+  asks what happened. A journal without `review.finished` was cut off by a
+  restart, so its result is unknown.
 
 ## When a call fails
 

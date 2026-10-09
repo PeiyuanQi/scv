@@ -69,6 +69,7 @@ six places:
     ├── config.lock
     ├── delegations/<handle>.json
     ├── conversations/
+    ├── reviews/rev-<seconds>-<hex>.jsonl  one journal per reviewed job, kept 30 days (0700/0600)
     ├── imports/<agent>.json
     ├── agent-options/<agent>.json  models and efforts the agent's ACP server offers
     ├── daemon.json    the running daemon, removed on a clean stop
@@ -103,9 +104,10 @@ The rules behind it:
   `agents/codex/auth.json`). `scv agents login|logout` manage them, and
   `scv config show` reports each file without reading it.
 - **State is not configuration.** `state/` holds only what SCV writes and
-  reads back: the daemon socket, delegated-run records, the model and effort
-  values each agent offers, channel delivery checkpoints, chat media, and
-  locks. Nothing there is meant to be edited.
+  reads back: the daemon socket, delegated-run records, review journals, the
+  model and effort values each agent offers, channel delivery checkpoints,
+  chat media, and locks. Nothing there is meant to be edited; review journals
+  are there to be read (see [Reviewed jobs](tools.md#the-journal)).
 - **History is kept.** `history/` holds the owners' conversations and the
   files they kept, meant to last (see [chat history](channels.md#chat-history));
   back it up like any other personal data.
@@ -382,7 +384,9 @@ configuration may only lower them. `agent.max_background` (default 4, at most
 16) bounds how many background agent jobs (`background: true`) a session runs
 at once; `0` turns background delegation off, and project configuration may
 only lower it. The default leaves room for a main agent that hands most work to
-background jobs; see [Background jobs](tools.md#background-jobs).
+background jobs; see [Background jobs](tools.md#background-jobs). A
+[reviewed job](tools.md#reviewed-jobs) takes one background slot and needs
+`agent.max_conversations` of at least 2; it adds no setting of its own.
 `agent.on_busy` (default `queue`; `wait`, `steer`, or `fail`) decides what a
 call continuing a delegated conversation does while a turn runs or prompts
 wait for it, `agent.steer_fallback` (default `queue`; `wait` or `fail`) what

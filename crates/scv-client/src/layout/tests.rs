@@ -14,6 +14,7 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
         layout.socket(),
         layout.delegations(),
         layout.conversations(),
+        layout.reviews(),
         layout.imports(),
         layout.channel_state("feishu"),
         layout.mail_state("default"),
@@ -33,6 +34,7 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
         assert!(ENTRIES.contains(&top), "{}", path.display());
     }
     assert_eq!(layout.socket(), Path::new("/h/state/server.sock"));
+    assert_eq!(layout.reviews(), Path::new("/h/state/reviews"));
 }
 
 /// Files an earlier release wrote, which a planned restart and its rollback

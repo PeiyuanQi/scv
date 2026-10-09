@@ -44,6 +44,7 @@ impl Config {
             delegation: None,
             max_background: self.agent.max_background,
             background: None,
+            reviews: None,
             chat_attach: None,
             chat_history: None,
             precheck_agent_models: true,

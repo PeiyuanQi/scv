@@ -161,6 +161,7 @@ fn a_running_job_names_its_agent_and_0_3_0_state_still_reads() {
         tool: "agent".into(),
         agent: "claude".into(),
         task: "Publish".into(),
+        journal: String::new(),
         started_at: 2,
     };
     assert_eq!(job.agent_name(), "claude");

@@ -12,6 +12,7 @@
 //! - [`options`]: the model and effort values each ACP agent offers, as
 //!   SCV last saw them.
 //! - [`background`]: jobs that run while the conversation goes on.
+//! - [`review`]: background jobs whose work an independent reviewer checks.
 //! - [`conversation`]: handles that continue an agent's conversation.
 //! - [`records`]: the on-disk record of every delegated process, for
 //!   listing, stopping, and cleanup.
@@ -34,5 +35,6 @@ pub(crate) mod output;
 pub(crate) mod progress;
 pub mod records;
 pub(crate) mod request;
+pub(crate) mod review;
 pub(crate) mod scv;
 pub mod stores;
