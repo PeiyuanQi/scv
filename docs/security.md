@@ -151,6 +151,24 @@ killing, SCV checks a recorded process's PID and start time so a reused PID is
 never signalled, and a process group only when its leader matches or has
 exited.
 
+A [reviewed job](tools.md#reviewed-jobs)'s reviewer is told it may read,
+fetch, build, and run checks but must not edit source, commit, land, push,
+publish, deploy, or message anyone. Like the cleanup above, that rule is
+cooperative: the reviewer is a delegated agent like any other, running as
+the user and, with `permissions = "full"`, without its CLI's own prompts, so
+SCV neither enforces nor detects the rule and claims no read-only isolation.
+"Fresh" means a fresh conversation: a reviewer of the builder's own agent
+shares that agent's private home and memory, and is labelled so. Both roles'
+output is untrusted. Verdicts and landing reports are parsed only from their
+last fenced block, bounded, and checked against a schema, never from prose;
+SCV runs no `git`, so a landing is only ever the builder's claim or a
+reviewer's check of it, labelled as such. Text quoted from one role to the
+other is bounded and marked untrusted, but prompt injection through a reply
+or the files cannot be ruled out. The single approval of a reviewed call
+names every reviewer launch it may make, and approval or a landing never
+grants a publish, which still asks the owner. Review journals are private
+files under `state/reviews`, created without following symlinks.
+
 Delegation depth is bounded by `agent.max_delegation_depth`, and at any depth
 above zero the `scv` CLI refuses to run, start, stop, restart, or update a
 daemon or manage channels, so an SCV started by a delegated agent cannot manage

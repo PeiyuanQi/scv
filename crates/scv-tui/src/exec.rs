@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
-use scv_protocol::{ClientMessage, ServerEvent, describe_reports};
+use scv_protocol::{ClientMessage, ServerEvent, describe_reports, outcome_notice};
 
 use crate::client::{Client, LaunchOptions, new_id};
 
@@ -39,6 +39,8 @@ pub async fn run_exec(
         // are settled, since closing the session cancels them.
         let mut background: HashSet<String> = HashSet::new();
         let mut reporting: HashSet<String> = HashSet::new();
+        // Reviewed jobs whose final outcome a `background.updated` gave.
+        let mut updated: HashSet<String> = HashSet::new();
         loop {
             let event = client
                 .read_event()
@@ -80,15 +82,27 @@ pub async fn run_exec(
                     jobs,
                     ..
                 } => {
-                    for change in jobs {
-                        if change.started() {
-                            background.insert(change.job);
-                        } else {
-                            background.remove(&change.job);
-                        }
-                    }
                     if !success {
                         eprintln!("\n{name} failed: {output}");
+                    }
+                    for change in jobs {
+                        // A job whose journal is still open is settled by
+                        // its `background.updated`, unless that came first.
+                        let pending = change
+                            .outcome
+                            .as_ref()
+                            .is_some_and(|outcome| outcome.review.journal_pending);
+                        if pending && updated.contains(&change.job) {
+                            continue;
+                        }
+                        if let Some(outcome) = &change.outcome {
+                            eprintln!("{}", outcome_notice(outcome));
+                        }
+                        if change.started() {
+                            background.insert(change.job);
+                        } else if !pending {
+                            background.remove(&change.job);
+                        }
                     }
                 }
                 ServerEvent::TurnStarted {
@@ -101,6 +115,9 @@ pub async fn run_exec(
                         printed_delta = false;
                     }
                     eprintln!("[background report: {}]", origin.jobs.join(", "));
+                    for outcome in &origin.outcomes {
+                        eprintln!("{}", outcome_notice(outcome));
+                    }
                     reporting.insert(started);
                 }
                 ServerEvent::BackgroundReported {
@@ -113,14 +130,29 @@ pub async fn run_exec(
                         println!();
                         printed_delta = false;
                     }
+                    let follows = if reports.iter().any(|report| report.outcome.is_some()) {
+                        "SCV's Review and Landing lines and the agent's reply follow"
+                    } else {
+                        "the agent's reply follows"
+                    };
                     eprintln!(
                         "[background report could not be written by the model ({code}): {message}; \
-                         the agent's reply follows]"
+                         {follows}]"
                     );
                     print!("{}", describe_reports(&reports));
                     stdout().flush()?;
                     for report in &reports {
                         background.remove(&report.job);
+                    }
+                }
+                ServerEvent::BackgroundUpdated { outcomes, .. } => {
+                    for outcome in &outcomes {
+                        eprintln!("{}", outcome_notice(outcome));
+                        background.remove(&outcome.job);
+                        updated.insert(outcome.job.clone());
+                    }
+                    if own_done && background.is_empty() && reporting.is_empty() {
+                        break;
                     }
                 }
                 ServerEvent::TurnCompleted {

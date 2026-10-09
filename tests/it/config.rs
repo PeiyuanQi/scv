@@ -423,6 +423,8 @@ fn config_show_names_each_setting_origin_and_hides_secrets() {
         "providers.relay.reasoning_effort = \"high\"  [config.toml]",
         "In effect: profile \"relay\", model \"env-model\", reasoning effort \"high\" at \"https://relay.invalid/v1\"",
         "left by an older SCV layout",
+        "state/reviews ",
+        "missing (journals of reviewed agent jobs, kept 30 days; read them with cat or jq)",
     ] {
         assert!(
             shown.contains(expected),

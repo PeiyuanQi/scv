@@ -25,7 +25,7 @@ use tokio::{
 
 /// A provider answering each request with the next body, passing on every
 /// request body it received.
-fn serve_provider(listener: TcpListener, bodies: Vec<String>) -> mpsc::Receiver<String> {
+pub(super) fn serve_provider(listener: TcpListener, bodies: Vec<String>) -> mpsc::Receiver<String> {
     serve_responses(
         listener,
         bodies.iter().map(|body| sse_response(body)).collect(),
@@ -97,15 +97,19 @@ fn home_with_fake_codex_and(extra: &str) -> (tempfile::TempDir, std::path::PathB
     (home, home_path)
 }
 
-struct Server {
-    _child: tokio::process::Child,
+pub(super) struct Server {
+    child: tokio::process::Child,
     input: tokio::process::ChildStdin,
     lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     session: String,
 }
 
 impl Server {
-    async fn start(home: &Path, address: std::net::SocketAddr, workspace: &Path) -> Self {
+    pub(super) async fn start(
+        home: &Path,
+        address: std::net::SocketAddr,
+        workspace: &Path,
+    ) -> Self {
         Self::start_on(home, address, workspace, None).await
     }
 
@@ -138,7 +142,7 @@ impl Server {
         let input = child.stdin.take().unwrap();
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let mut server = Self {
-            _child: child,
+            child,
             input,
             lines,
             session: String::new(),
@@ -184,8 +188,13 @@ impl Server {
         self.input.flush().await.unwrap();
     }
 
+    /// Stop the server at once, as a crash would.
+    pub(super) async fn kill(&mut self) {
+        self.child.kill().await.unwrap();
+    }
+
     /// The next event, approving every approval request on the way.
-    async fn next(&mut self) -> Option<ServerEvent> {
+    pub(super) async fn next(&mut self) -> Option<ServerEvent> {
         let line = timeout(Duration::from_secs(30), self.lines.next_line())
             .await
             .ok()?
@@ -203,7 +212,7 @@ impl Server {
         Some(event)
     }
 
-    async fn turn(&mut self, prompt: &str) {
+    pub(super) async fn turn(&mut self, prompt: &str) {
         let session_id = self.session.clone();
         self.send(ClientMessage::TurnStart {
             request_id: "turn".into(),
@@ -460,6 +469,7 @@ async fn a_report_that_fails_after_running_a_tool_is_sent_to_the_client_directly
             status: scv_protocol::JobStatus::Completed,
             session: Some("codex-1".into()),
             reply: "landed 0.9.9".into(),
+            outcome: None,
         }]
     );
 
@@ -627,6 +637,8 @@ async fn tool_calls_carry_the_jobs_they_start_and_settle() {
         agent: "codex".into(),
         status,
         task: "Land the fix".into(),
+        journal: None,
+        outcome: None,
     };
     assert_eq!(
         changes,

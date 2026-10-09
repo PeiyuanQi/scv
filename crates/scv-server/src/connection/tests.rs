@@ -13,6 +13,8 @@ use tokio::sync::oneshot;
 use super::*;
 use crate::test_support::{DropSignal, test_registry};
 
+mod updates;
+
 async fn read_bounded_frame<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max_bytes: usize,

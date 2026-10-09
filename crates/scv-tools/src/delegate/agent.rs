@@ -190,15 +190,31 @@ impl AgentTool {
         }
     }
 
-    fn find(&self, name: &str) -> Option<&Offered> {
+    /// The offered agent `name`.
+    pub(crate) fn find(&self, name: &str) -> Option<&Offered> {
         self.agents.iter().find(|agent| agent.name == name)
     }
 
-    fn names(&self) -> Vec<&str> {
+    /// Every offered agent's name, sorted.
+    pub(crate) fn names(&self) -> Vec<&str> {
         self.agents
             .iter()
             .map(|agent| agent.name.as_str())
             .collect()
+    }
+
+    /// The offered agents that can continue a conversation.
+    pub(crate) fn continuing(&self) -> Vec<&str> {
+        self.agents
+            .iter()
+            .filter(|agent| agent.accepts.session)
+            .map(|agent| agent.name.as_str())
+            .collect()
+    }
+
+    /// A call's default and longest timeout.
+    pub(crate) fn timeouts(&self) -> Timeouts {
+        self.timeouts
     }
 
     /// The agent that runs a call, once the call's options are checked

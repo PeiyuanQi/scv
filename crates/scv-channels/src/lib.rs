@@ -150,6 +150,14 @@ pub(crate) fn stopped_jobs_notice(
         if !job.task.is_empty() {
             notice.push_str(&format!(": {}", job.task));
         }
+        // It may have approved, or landed, before the stop: no claim either way.
+        if !job.journal.is_empty() {
+            notice.push_str(&format!(
+                "\n  Review: interrupted by a restart · result unknown, check journal {} before \
+                 relying on it",
+                job.journal
+            ));
+        }
     }
     notice.push_str("\nAsk again if you still need it.");
     notice
@@ -864,6 +872,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 tool: info.tool,
                 agent: info.agent,
                 task: info.task,
+                journal: info.journal,
                 started_at,
             });
         }

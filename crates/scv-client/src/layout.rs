@@ -11,9 +11,9 @@
 //!   account, and conversation, and files the owner asked to keep (see
 //!   [`crate::history`]);
 //! - `state/`: runtime data SCV writes: the daemon socket and lock, delegated
-//!   run records, conversation markers, import records, the model and effort
-//!   values each agent offers, channel delivery state and locks, and chat
-//!   media.
+//!   run records, conversation markers, review journals, import records, the
+//!   model and effort values each agent offers, channel delivery state and
+//!   locks, and chat media.
 //!
 //! Anything else in the home is not read by SCV; [`Layout::strays`] lists it.
 //!
@@ -167,6 +167,12 @@ impl Layout {
     /// Markers of live delegated conversations, for `scv agents gc`.
     pub fn conversations(&self) -> PathBuf {
         self.state().join("conversations")
+    }
+
+    /// Journals of reviewed delegated jobs, one JSONL file per review, kept
+    /// 30 days.
+    pub fn reviews(&self) -> PathBuf {
+        self.state().join("reviews")
     }
 
     /// The model and effort values `agent`'s ACP server last offered.

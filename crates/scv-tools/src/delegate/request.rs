@@ -30,7 +30,7 @@ pub(crate) struct AgentArgs {
 
 /// Models often send an optional string they mean to leave unset as `""`, so
 /// a blank value selects the default rather than failing the call.
-fn blank_as_none<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn blank_as_none<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     let value = Option::<String>::deserialize(deserializer)?;

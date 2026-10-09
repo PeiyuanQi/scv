@@ -648,3 +648,54 @@ fn the_registry_offers_scv_only_below_the_depth_limit() {
         }
     }
 }
+
+#[test]
+fn background_work_counts_a_job_whose_final_outcome_is_still_owed() {
+    let event = |value: Value| serde_json::from_value::<ServerEvent>(value).unwrap();
+    let completed = |job: Value| {
+        event(
+            json!({"type":"tool.completed","request_id":"r","session_id":"s","turn_id":"t",
+            "seq":1,"call_id":"c","name":"agent","success":true,"output":"{}","truncated":false,
+            "jobs":[job]}),
+        )
+    };
+    let outcome = |pending: bool| {
+        json!({"job":"job-1",
+               "review":{"outcome":"stopped","reason":"cancelled","round":1,"rounds":3,
+                         "journal":"rev-1-abcdef","journal_pending":pending},
+               "landing":{"mode":"none","status":"not_requested"}})
+    };
+    let mut work = BackgroundWork::default();
+    work.observe(&completed(
+        json!({"job":"job-1","tool":"agent","agent":"codex","status":"running"}),
+    ));
+    // Its cancel said the journal is still open: it keeps counting.
+    assert_eq!(
+        work.observe(&completed(
+            json!({"job":"job-1","tool":"agent","agent":"codex",
+            "status":"cancelled","outcome":outcome(true)})
+        )),
+        None
+    );
+    assert_eq!(work.count(), 1);
+    assert_eq!(
+        work.observe(&event(
+            json!({"type":"background.updated","session_id":"s","seq":3,
+            "outcomes":[outcome(false)]})
+        )),
+        Some(0)
+    );
+    // A cancel that says the final outcome settles it at once.
+    work.observe(&completed(
+        json!({"job":"job-2","tool":"agent","agent":"codex","status":"running"}),
+    ));
+    let mut last = outcome(false);
+    last["job"] = "job-2".into();
+    assert_eq!(
+        work.observe(&completed(
+            json!({"job":"job-2","tool":"agent","agent":"codex",
+            "status":"cancelled","outcome":last})
+        )),
+        Some(0)
+    );
+}

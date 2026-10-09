@@ -216,6 +216,7 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
         tool: "agent".into(),
         agent: agent.into(),
         task: task.into(),
+        journal: String::new(),
         started_at: 1,
     };
     // As 0.3.0 saved it, with the agent in the tool's name.
@@ -234,7 +235,11 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
         jobs: vec![
             job("alice", "job-1", "codex", "Fix the build"),
             saved_by_0_3_0,
-            job("alice", "job-2", "claude", "Publish"),
+            // A reviewed job, which may have approved or landed already.
+            state::RunningJob {
+                journal: "rev-1759961234-3fa9c1".into(),
+                ..job("alice", "job-2", "claude", "Publish")
+            },
         ],
         ..Default::default()
     };
@@ -254,7 +259,9 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
             (
                 "alice",
                 "An unexpected interruption stopped background work that was still running:\n\
-                 - job-1 (codex): Fix the build\n- job-2 (claude): Publish\n\
+                 - job-1 (codex): Fix the build\n- job-2 (claude): Publish\n  \
+                 Review: interrupted by a restart · result unknown, check journal \
+                 rev-1759961234-3fa9c1 before relying on it\n\
                  Ask again if you still need it."
             ),
             (
@@ -281,6 +288,7 @@ fn recovery_tells_a_thread_which_of_its_jobs_stopped_inside_the_thread() {
         tool: "agent".into(),
         agent: "codex".into(),
         task: String::new(),
+        journal: String::new(),
         started_at: 1,
     };
     let thread = "owner\0thread\0omt_1";
@@ -397,6 +405,7 @@ fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_label()
             tool: "agent".into(),
             agent: "codex".into(),
             task: String::new(),
+            journal: String::new(),
             started_at: 1,
         }],
         ..Default::default()

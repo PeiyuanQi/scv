@@ -973,6 +973,7 @@ impl Connection {
     /// A background job finished: report it now when the session is idle,
     /// else once the user's own work is done.
     async fn on_background(&mut self) -> Result<()> {
+        self.send_updates().await?;
         self.background_ready = true;
         if self.active.is_none()
             && let Some(current) = self.session.as_ref()
@@ -984,6 +985,37 @@ impl Connection {
             self.active = turn;
         }
         Ok(())
+    }
+
+    /// Send the final outcomes of reviewed jobs whose outcome the client
+    /// was given while their journal was still open. Not a turn: it goes
+    /// out at once, during a turn too.
+    async fn send_updates(&self) -> Result<()> {
+        let Some(current) = self.session.as_ref() else {
+            return Ok(());
+        };
+        let Some(jobs) = current.background.as_ref() else {
+            return Ok(());
+        };
+        let outcomes = jobs.take_updates();
+        if outcomes.is_empty() {
+            return Ok(());
+        }
+        let named: Vec<String> = outcomes.iter().map(|outcome| outcome.job.clone()).collect();
+        let updated = ServerEvent::BackgroundUpdated {
+            session_id: current.id.clone(),
+            seq: next_seq(&current.seq),
+            outcomes,
+        };
+        let sent = send_event(
+            &self.output,
+            updated,
+            current.config.protocol.max_server_frame_bytes,
+        )
+        .await;
+        // Owed until it is actually sent.
+        jobs.updated(&named, sent.is_ok());
+        sent
     }
 
     /// When a background report whose turn failed is due again.
@@ -1067,6 +1099,14 @@ impl Connection {
         let Some(mut done) = done else {
             return Ok(());
         };
+        // Any job change the turn could not send is owed by an update now.
+        if let Some(jobs) = self
+            .session
+            .as_ref()
+            .and_then(|current| current.background.as_ref())
+        {
+            jobs.turn_ended();
+        }
         let delivered = self.settle_report(&mut done).await?;
         let succeeded = done.result.is_ok();
         if let Some(current) = self.session.as_ref() {

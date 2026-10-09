@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    DaemonStatus, ErrorCode, JobChange, JobReport, PeerInfo, QueueEntry, ToolErrorKind, TurnOrigin,
-    Usage,
+    DaemonStatus, ErrorCode, JobChange, JobOutcome, JobReport, PeerInfo, QueueEntry, ToolErrorKind,
+    TurnOrigin, Usage,
 };
 
 /// A message from server to client. Serialized as one JSON object per line,
@@ -426,6 +426,22 @@ pub enum ServerEvent {
         attempts: u32,
         /// The jobs' results.
         reports: Vec<JobReport>,
+    },
+    /// The final outcome of reviewed jobs whose outcome the client was
+    /// already given while their journal was still open
+    /// ([`ReviewSummary::journal_pending`](crate::ReviewSummary::journal_pending)):
+    /// a job `agent_cancel` stopped that had not stopped by the end of the
+    /// cancel's wait. Its decision is unchanged; the update says whether the
+    /// journal then ended complete. It names no request and belongs to no
+    /// turn, and it settles the jobs it names.
+    #[serde(rename = "background.updated")]
+    BackgroundUpdated {
+        /// The session this concerns.
+        session_id: String,
+        /// The session's event sequence number: consecutive, so a gap means events were lost.
+        seq: u64,
+        /// Each job's final outcome.
+        outcomes: Vec<JobOutcome>,
     },
     /// A request failed, or a connection-level error.
     #[serde(rename = "error")]

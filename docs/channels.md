@@ -946,6 +946,28 @@ Several jobs reported together share one message ("2 background jobs
 finished, but the model could not report them"), and the tries are named only
 after more than one.
 
+For a [reviewed job](tools.md#reviewed-jobs) the owner never depends on the
+model's wording: the bridge sends SCV's own Review and Landing lines as SCV's
+message, once, from the outcome the server sends (see
+[protocol](protocol.md#reviewed-job-outcomes)):
+
+- with a report turn that completes, just before the model's report, and
+  alone when the report is empty or the owner cancelled the report turn; a
+  failed report turn sends nothing, since another try or the direct report
+  follows;
+- for a job the model settled itself with `agent_wait`, `agent_status`, or
+  `agent_cancel`, right after that turn's reply; a job `agent_cancel` left
+  still stopping, its journal still open, stays recorded until its
+  `background.updated` arrives, whose final lines go out as another SCV
+  message;
+- in a direct report, whose message then says that SCV's Review and Landing
+  lines and the agent's unedited reply follow.
+
+```text
+job-4 · Review: approved · round 2 of 3 · reviewer claude
+job-4 · Landing: landed · 4f2a9c1 → origin/main · confirmed by reviewer claude
+```
+
 This is what lets the owner keep chatting while work runs: an owner session
 starts with `auto_approve: true`, so the background agents it starts get the
 approvals the owner's own turns get, and its system prompt tells the model to
@@ -966,11 +988,18 @@ task the daemon named, the first line of the delegated prompt) until the job
 is reported or its session closes. A job saved by SCV 0.3.0 names its agent
 only in the tool (`agent_codex`), and one saved now still carries the tool,
 so either release reads the other's state; a release before threads reads a
-thread's job as its direct chat's.
+thread's job as its direct chat's. A reviewed job's record also names its
+journal (`journal`, which releases before 0.3.14 ignore).
 A restart ends every session and so every job: on the account's next run, each
 chat, and each thread, whose jobs were recorded gets one message listing the
 jobs that stopped, each with its agent, such as `- job-1 (codex): Land the
-fix`.
+fix`. A reviewed job may already have approved, or landed, before the stop,
+so its entry claims neither and names the journal to check:
+
+```text
+- job-4 (codex): Fix the flaky checkout test
+  Review: interrupted by a restart · result unknown, check journal rev-1759961234-3fa9c1 before relying on it
+```
 
 ## Restarts and notices
 

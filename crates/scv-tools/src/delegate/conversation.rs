@@ -36,6 +36,10 @@ pub(crate) const MIN_GC_AGE: Duration = Duration::from_secs(3600);
 /// Longest handle accepted from the model.
 const MAX_HANDLE_BYTES: usize = 64;
 
+/// How the error for a session whose conversations are all in use begins
+/// after its count, which a reviewed job reads as "no room for a reviewer".
+pub(crate) const ALL_IN_USE: &str = "conversations of this session are running a turn";
+
 #[derive(Debug, Clone, Copy)]
 pub struct ConversationLimits {
     /// Conversations remembered per session; starting another forgets the
@@ -67,6 +71,11 @@ struct Conversation {
     busy: bool,
     last_used: Instant,
     attachment: Option<Attachment>,
+    /// Reviewed jobs holding it ([`PinGuard`]): it is neither evicted nor
+    /// expired.
+    pins: u32,
+    /// Released while a turn ran: it goes when that turn ends.
+    released: bool,
 }
 
 #[derive(Debug, Default)]
@@ -110,6 +119,22 @@ pub(crate) struct TurnGuard {
     finished: bool,
 }
 
+/// A reviewed job's hold on a conversation, keeping it out of eviction and
+/// idle expiry until dropped.
+#[derive(Debug)]
+pub(crate) struct PinGuard {
+    store: Arc<ConversationStore>,
+    handle: String,
+}
+
+impl Drop for PinGuard {
+    fn drop(&mut self) {
+        if let Some(conversation) = lock(&self.store.inner).conversations.get_mut(&self.handle) {
+            conversation.pins = conversation.pins.saturating_sub(1);
+        }
+    }
+}
+
 /// Whether `value` has the shape of an SCV conversation handle
 /// (`<agent>-<number>`). CLI session IDs never do.
 pub(crate) fn is_handle(value: &str) -> bool {
@@ -141,6 +166,44 @@ impl ConversationStore {
             inner: Mutex::new(Inner::default()),
             changed: Notify::new(),
         }
+    }
+
+    /// How many conversations the session remembers, and for how long.
+    pub(crate) fn limits(&self) -> ConversationLimits {
+        self.limits
+    }
+
+    /// Keep conversation `handle` from eviction and idle expiry until the
+    /// guard drops; `None` when the session does not have it.
+    pub(crate) fn pin(self: &Arc<Self>, handle: &str) -> Option<PinGuard> {
+        let mut inner = lock(&self.inner);
+        let conversation = inner.conversations.get_mut(handle)?;
+        conversation.pins += 1;
+        Some(PinGuard {
+            store: Arc::clone(self),
+            handle: handle.to_owned(),
+        })
+    }
+
+    /// End conversation `handle`, as for a reviewer whose round is over:
+    /// its marker goes and its attachment drops, which stops a live ACP
+    /// server or nested SCV. One running a turn goes when the turn ends.
+    pub(crate) fn release(&self, handle: &str) {
+        let mut inner = lock(&self.inner);
+        let Some(conversation) = inner.conversations.get_mut(handle) else {
+            return;
+        };
+        if conversation.busy {
+            conversation.released = true;
+            return;
+        }
+        let removed = inner.conversations.remove(handle);
+        drop(inner);
+        self.remove_marker(
+            removed
+                .and_then(|conversation| conversation.vendor)
+                .as_deref(),
+        );
     }
 
     /// Whether conversation `handle` is running a turn.
@@ -193,7 +256,9 @@ impl ConversationStore {
             .conversations
             .iter()
             .filter(|(_, conversation)| {
-                !conversation.busy && now.duration_since(conversation.last_used) >= self.limits.idle
+                !conversation.busy
+                    && conversation.pins == 0
+                    && now.duration_since(conversation.last_used) >= self.limits.idle
             })
             .map(|(handle, _)| handle.clone())
             .collect();
@@ -272,12 +337,17 @@ impl ConversationStore {
             let Some(oldest) = inner
                 .conversations
                 .iter()
-                .filter(|(_, conversation)| !conversation.busy)
+                .filter(|(_, conversation)| !conversation.busy && conversation.pins == 0)
                 .min_by_key(|(_, conversation)| conversation.last_used)
                 .map(|(handle, _)| handle.clone())
             else {
+                let held = if inner.conversations.values().any(|c| c.pins > 0) {
+                    " or held by a reviewed job"
+                } else {
+                    ""
+                };
                 return Err(ToolError::limit(format!(
-                    "all {} conversations of this session are running a turn",
+                    "all {} {ALL_IN_USE}{held}",
                     inner.conversations.len()
                 )));
             };
@@ -299,6 +369,8 @@ impl ConversationStore {
                 busy: true,
                 last_used: now,
                 attachment: None,
+                pins: 0,
+                released: false,
             },
         );
         if let Some(vendor) = &vendor {
@@ -396,6 +468,17 @@ impl TurnGuard {
         }
         let vendor = reported.or_else(|| self.vendor.clone());
         let conversation = inner.conversations.get_mut(&self.handle)?;
+        if conversation.released {
+            let removed = inner.conversations.remove(&self.handle);
+            drop(inner);
+            self.store.remove_marker(
+                removed
+                    .and_then(|conversation| conversation.vendor)
+                    .as_deref(),
+            );
+            self.store.remove_marker(vendor.as_deref());
+            return None;
+        }
         if let Some(attachment) = self.attachment.take() {
             conversation.attachment = Some(attachment);
         }
@@ -428,6 +511,15 @@ impl Drop for TurnGuard {
                 self.store.remove_marker(self.vendor.as_deref());
             } else if let Some(conversation) = inner.conversations.get_mut(&self.handle) {
                 conversation.busy = false;
+                if conversation.released {
+                    let removed = inner.conversations.remove(&self.handle);
+                    drop(inner);
+                    self.store.remove_marker(
+                        removed
+                            .and_then(|conversation| conversation.vendor)
+                            .as_deref(),
+                    );
+                }
             }
         }
         // However the turn ended, its conversation runs none now.

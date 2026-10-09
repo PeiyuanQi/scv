@@ -103,7 +103,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.13` and exact workspace dependency pins.
+`0.3.14` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -165,6 +165,7 @@ What lives where in the largest crates:
 | | `delegate/acp/`, `delegate/scv.rs`, `delegate/live.rs` | Long-running delegations over ACP (`rpc`, `session`, `permission`, `progress`, `tool`) and the SCV protocol, on one live-child runtime |
 | | `delegate/adapters.rs`, `delegate/choice.rs`, `delegate/options.rs` | One descriptor per delegated agent CLI, how the `agent` tool describes each agent and names the others after a failure, and the model and effort values each ACP agent last offered (public as `scv_tools::agent_options`) |
 | | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs and the per-conversation line busy calls wait in (`background/lane.rs`), multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
+| | `delegate/review.rs` | Reviewed jobs: the builder and fresh-reviewer loop, reviewer routing, the landing confirmation, and its parts: the verdict and landing blocks (`blocks`), the live state every surface reads (`state`), SCV's prompt texts (`prompts`), and the journal (`journal`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
@@ -182,7 +183,7 @@ What lives where in the largest crates:
 | | `context.rs`, `history.rs` | Choosing the history that fits the context window, and trimming stored history |
 | | `runtime.rs` | `AgentRuntime` and its turn loop |
 | `scv-protocol` | `client.rs`, `server.rs` | `ClientMessage` and `ServerEvent` |
-| | `daemon.rs`, `attachment.rs`, `background.rs` | Daemon control and status, attached files, and background-job reporting |
+| | `daemon.rs`, `attachment.rs`, `background.rs`, `review.rs` | Daemon control and status, attached files, background-job reporting, and reviewed jobs' outcomes with SCV's lines for them (`describe_outcome`, `outcome_notice`) |
 | | `error.rs` | `ErrorCode` (why a request or turn failed) and `ToolErrorKind` (why a tool call did) |
 | `scv-provider-openai` | `request.rs` | `OpenAiProvider`: requests, retries, and error reporting |
 | | `stream.rs`, `wire.rs`, `encode.rs` | Assembling a response from its event stream, the wire shapes, and replaying history as input |
@@ -274,7 +275,8 @@ an owner's chat request to change, publish, and deploy SCV itself.
    row: the delegation named by the request's `SCV_PARENT` chain is no longer
    at work, its daemon session has no running turn, running or unreported
    background job (one whose report turn failed and waits to be tried again
-   included), and (through the channel hub) no unstored report; and no
+   included, and a cancelled reviewed job whose final outcome has not been
+   sent), and (through the channel hub) no unstored report; and no
    chat bridge holds an owner message it has not answered durably, and no
    email account is carrying out a mail action. A
    per-turn CLI run is at work while it has live processes. A live child (a
@@ -445,7 +447,9 @@ that still run or wait to be reported (`background_jobs`), which keeps the
 child at work between turns. As for a chat session, a job counts from the
 `tool.completed.jobs` entry of the call that started it until the nested
 model sees its result, through a later call or a report turn
-(`origin.jobs`), which counts until it ends. An ACP agent has no such jobs
+(`origin.jobs`), which counts until it ends; a reviewed job whose cancel
+said its journal is still open counts until its `background.updated`. An
+ACP agent has no such jobs
 in its protocol, and nothing reads from it between turns. `delegate/acp/`
 runs an Agent Client Protocol (JSON-RPC 2.0) client on the same runtime for
 the agents whose adapter-table entry names an ACP server

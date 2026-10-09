@@ -763,6 +763,7 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
             kind: scv_protocol::OriginKind::Background,
             jobs: vec!["job-1".into()],
             retry_seconds: None,
+            outcomes: Vec::new(),
         }),
     });
     assert!(app.turn.is_some());
@@ -781,6 +782,7 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
             kind: scv_protocol::OriginKind::Background,
             jobs: vec!["job-1".into()],
             retry_seconds: None,
+            outcomes: Vec::new(),
         }),
     });
     assert!(app.turn.is_none());
@@ -804,6 +806,7 @@ fn a_failed_report_says_when_it_is_tried_again_and_a_direct_report_shows_the_rep
             kind: scv_protocol::OriginKind::Background,
             jobs: vec!["job-1".into()],
             retry_seconds,
+            outcomes: Vec::new(),
         })
     };
     let failed = |seq, retry_seconds| ServerEvent::TurnFailed {
@@ -834,6 +837,7 @@ fn a_failed_report_says_when_it_is_tried_again_and_a_direct_report_shows_the_rep
             status: scv_protocol::JobStatus::Completed,
             session: None,
             reply: "landed\nall green".into(),
+            outcome: None,
         }],
     });
     assert_eq!(app.last_seq, 2);
@@ -891,4 +895,214 @@ fn agent_calls_are_labelled_with_the_agent_they_run_on() {
         label("bash", serde_json::json!({"agent":"codex","command":"ls"})),
         "bash"
     );
+}
+
+/// An app whose transcript keeps everything a test pushes.
+fn roomy_app() -> App {
+    App::new(SessionInfo {
+        id: "s".into(),
+        cwd: "/tmp".into(),
+        model: "test".into(),
+        context_max_tokens: 100,
+        max_server_frame_bytes: DEFAULT_SERVER_FRAME_LIMIT,
+        max_transcript_bytes: 64 * 1024,
+        max_transcript_items: 100,
+        max_prompt_history_bytes: 1024,
+        max_prompt_history_items: 10,
+    })
+}
+
+/// A reviewed job's outcome: approved in round 2, nothing landed.
+fn reviewed(job: &str) -> scv_protocol::JobOutcome {
+    serde_json::from_value(serde_json::json!({
+        "job": job,
+        "review": {"outcome":"approved","round":2,"rounds":3,"reviewer":"claude",
+                   "journal":"rev-1-abcdef"},
+        "landing": {"mode":"none","status":"not_requested"}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn reviewed_jobs_show_scvs_own_lines_before_the_report_and_when_a_call_settles_them() {
+    let notice = "job-4 · Review: approved · round 2 of 3 · reviewer claude\n\
+                  job-4 · Landing: not requested";
+    let mut app = roomy_app();
+    app.handle_server_event(ServerEvent::TurnStarted {
+        request_id: "background:1".into(),
+        session_id: "s".into(),
+        turn_id: "t2".into(),
+        seq: 1,
+        origin: Some(scv_protocol::TurnOrigin {
+            kind: scv_protocol::OriginKind::Background,
+            jobs: vec!["job-4".into()],
+            retry_seconds: None,
+            outcomes: vec![reviewed("job-4")],
+        }),
+    });
+    let texts: Vec<&str> = app
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::System(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "Background work finished (job-4); SCV is reporting it.",
+            notice
+        ]
+    );
+    // A job the model settled with a call.
+    let mut app = roomy_app();
+    let mut settled: scv_protocol::JobChange = serde_json::from_value(serde_json::json!({
+        "job":"job-4","tool":"agent","agent":"codex","status":"completed"
+    }))
+    .unwrap();
+    settled.outcome = Some(reviewed("job-4"));
+    app.handle_server_event(ServerEvent::ToolCompleted {
+        request_id: "r".into(),
+        session_id: "s".into(),
+        turn_id: "t".into(),
+        seq: 3,
+        call_id: "c".into(),
+        name: "agent_wait".into(),
+        success: true,
+        output: "{}".into(),
+        truncated: false,
+        error: None,
+        jobs: vec![settled],
+    });
+    assert!(matches!(
+        app.items.back(),
+        Some(TranscriptItem::System(text)) if text == notice
+    ));
+    // The fallback tells SCV's lines apart from the agent's words.
+    app.handle_server_event(ServerEvent::BackgroundReported {
+        session_id: "s".into(),
+        seq: 4,
+        code: scv_protocol::ErrorCode::ProviderError,
+        message: "provider returned HTTP 503".into(),
+        attempts: 3,
+        reports: vec![scv_protocol::JobReport {
+            job: "job-4".into(),
+            agent: "codex".into(),
+            task: String::new(),
+            status: scv_protocol::JobStatus::Completed,
+            session: None,
+            reply: "fixed".into(),
+            outcome: Some(reviewed("job-4")),
+        }],
+    });
+    assert!(matches!(
+        app.items.back(),
+        Some(TranscriptItem::System(text)) if text.ends_with(
+            "SCV's Review and Landing lines, then the agent's reply, unedited:\n\
+             job-4 (codex): completed\nReview: approved · round 2 of 3 · reviewer claude\n\
+             Landing: not requested\nfixed"
+        )
+    ));
+}
+
+#[test]
+fn a_reviewed_jobs_later_update_shows_as_scvs_lines() {
+    let mut app = roomy_app();
+    app.handle_server_event(ServerEvent::BackgroundUpdated {
+        session_id: "s".into(),
+        seq: 5,
+        outcomes: vec![reviewed("job-4")],
+    });
+    assert_eq!(app.last_seq, 5);
+    assert!(matches!(
+        app.items.back(),
+        Some(TranscriptItem::System(text)) if text
+            == "job-4 · Review: approved · round 2 of 3 · reviewer claude\njob-4 · Landing: not requested"
+    ));
+}
+
+#[test]
+fn a_stale_still_open_notice_after_a_final_update_is_not_shown() {
+    let mut app = roomy_app();
+    app.handle_server_event(ServerEvent::BackgroundUpdated {
+        session_id: "s".into(),
+        seq: 5,
+        outcomes: vec![reviewed("job-4")],
+    });
+    let shown = app.items.len();
+    let mut pending = reviewed("job-4");
+    pending.review.journal_pending = true;
+    let mut settled: scv_protocol::JobChange = serde_json::from_value(serde_json::json!({
+        "job":"job-4","tool":"agent","agent":"codex","status":"cancelled"
+    }))
+    .unwrap();
+    settled.outcome = Some(pending);
+    app.handle_server_event(ServerEvent::ToolCompleted {
+        request_id: "r".into(),
+        session_id: "s".into(),
+        turn_id: "t".into(),
+        seq: 6,
+        call_id: "c".into(),
+        name: "agent_cancel".into(),
+        success: true,
+        output: "{}".into(),
+        truncated: false,
+        error: None,
+        jobs: vec![settled],
+    });
+    assert!(
+        app.items.iter().skip(shown).all(
+            |item| !matches!(item, TranscriptItem::System(text) if text.contains("still open"))
+        )
+    );
+}
+
+#[test]
+fn a_reconnected_sessions_reused_job_handle_is_not_taken_for_the_old_one() {
+    let mut app = roomy_app();
+    app.handle_server_event(ServerEvent::BackgroundUpdated {
+        session_id: "s".into(),
+        seq: 1,
+        outcomes: vec![reviewed("job-1")],
+    });
+    app.disconnect();
+    app.reconnect(SessionInfo {
+        id: "new-session".into(),
+        cwd: "/tmp".into(),
+        model: "test".into(),
+        context_max_tokens: 100,
+        max_server_frame_bytes: DEFAULT_SERVER_FRAME_LIMIT,
+        max_transcript_bytes: 64 * 1024,
+        max_transcript_items: 100,
+        max_prompt_history_bytes: 1024,
+        max_prompt_history_items: 10,
+    });
+    let shown = app.items.len();
+    // The new session's job-1 is another job: its notice shows.
+    let mut pending = reviewed("job-1");
+    pending.review.journal = "rev-new-session".into();
+    pending.review.journal_pending = true;
+    let mut change: scv_protocol::JobChange = serde_json::from_value(serde_json::json!({
+        "job":"job-1","tool":"agent","agent":"codex","status":"cancelled"
+    }))
+    .unwrap();
+    change.outcome = Some(pending);
+    app.handle_server_event(ServerEvent::ToolCompleted {
+        request_id: "r".into(),
+        session_id: "new-session".into(),
+        turn_id: "t".into(),
+        seq: 1,
+        call_id: "c".into(),
+        name: "agent_cancel".into(),
+        success: true,
+        output: "{}".into(),
+        truncated: false,
+        error: None,
+        jobs: vec![change],
+    });
+    assert!(app.items.iter().skip(shown).any(|item| matches!(
+        item,
+        TranscriptItem::System(text) if text.contains("rev-new-session") && text.contains("still open")
+    )));
 }

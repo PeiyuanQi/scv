@@ -63,6 +63,9 @@ pub(crate) struct Session {
     /// Background jobs this session started that are not settled yet:
     /// running, or finished and not yet reported.
     background: HashMap<String, JobInfo>,
+    /// Reviewed jobs whose final outcome a `background.updated` gave: a
+    /// later snapshot saying their journal is still open is stale.
+    updated: HashSet<String>,
     /// A read or write failed, so the session cannot be reused.
     broken: bool,
 }
@@ -101,6 +104,7 @@ impl Session {
             reports: VecDeque::new(),
             files: Vec::new(),
             background: HashMap::new(),
+            updated: HashSet::new(),
             broken: false,
         };
         session
@@ -251,6 +255,13 @@ impl Session {
                 ..
             } => {
                 for change in jobs {
+                    let pending = change
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|outcome| outcome.review.journal_pending);
+                    if pending && self.updated.contains(&change.job) {
+                        continue;
+                    }
                     if change.started() {
                         self.background.insert(
                             change.job.clone(),
@@ -258,10 +269,19 @@ impl Session {
                                 tool: change.tool.clone(),
                                 agent: change.agent_name().to_owned(),
                                 task: change.task.clone(),
+                                journal: change.journal.clone().unwrap_or_default(),
                             },
                         );
-                    } else {
+                    } else if !pending {
+                        // One whose journal is still open stays until its
+                        // `background.updated`.
                         self.background.remove(&change.job);
+                    }
+                    // SCV's own lines for a reviewed job the call settled,
+                    // sent after the turn's reply.
+                    if let Some(outcome) = &change.outcome {
+                        self.reports
+                            .push_back(Response::System(scv_protocol::outcome_notice(outcome)));
                     }
                 }
                 if let Some(file) = scv_protocol::reply_attachment(name, *success, output) {
@@ -322,6 +342,15 @@ impl Session {
                     self.reports.push_back(Response::System(text));
                 }
             }
+            // Reviewed jobs whose outcome was sent before they stopped.
+            ServerEvent::BackgroundUpdated { outcomes, .. } => {
+                for outcome in outcomes {
+                    self.background.remove(&outcome.job);
+                    self.updated.insert(outcome.job.clone());
+                    self.reports
+                        .push_back(Response::System(scv_protocol::outcome_notice(outcome)));
+                }
+            }
             ServerEvent::TurnStarted {
                 request_id,
                 turn_id,
@@ -375,9 +404,13 @@ impl Session {
                     append_capped(&mut answer.text, &content, MAX_REPORT_BYTES);
                 }
             }
-            ServerEvent::TurnCompleted { .. } => {
+            ServerEvent::TurnCompleted { origin, .. } => {
                 self.stale.remove(&request);
-                if let Some(answer) = self.server_turns.remove(&request)
+                let answer = self.server_turns.remove(&request);
+                // SCV's own lines for reviewed jobs come just before the
+                // model's report of them.
+                self.push_outcomes(origin.as_ref());
+                if let Some(answer) = answer
                     && (!answer.text.trim().is_empty() || !answer.files.is_empty())
                 {
                     self.reports.push_back(Response::Model(answer));
@@ -389,13 +422,24 @@ impl Session {
                 self.stale.remove(&request);
                 self.server_turns.remove(&request);
             }
-            ServerEvent::TurnCancelled { .. } => {
+            // A cancelled report sends SCV's lines alone.
+            ServerEvent::TurnCancelled { origin, .. } => {
                 self.stale.remove(&request);
-                self.server_turns.remove(&request);
+                if self.server_turns.remove(&request).is_some() {
+                    self.push_outcomes(origin.as_ref());
+                }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Queue SCV's own lines for the reviewed jobs a report turn covered.
+    fn push_outcomes(&mut self, origin: Option<&scv_protocol::TurnOrigin>) {
+        for outcome in origin.iter().flat_map(|origin| &origin.outcomes) {
+            self.reports
+                .push_back(Response::System(scv_protocol::outcome_notice(outcome)));
+        }
     }
 
     /// Abandon the current turn (its time ran out): ask the server to cancel
@@ -553,6 +597,8 @@ pub(crate) struct JobInfo {
     pub(crate) agent: String,
     /// The first line of the delegated prompt, shortened.
     pub(crate) task: String,
+    /// A reviewed job's journal ID; empty for other jobs.
+    pub(crate) journal: String,
 }
 
 /// Answers from a background report turn, like any reply, are bounded.
@@ -575,9 +621,14 @@ pub(crate) fn direct_report(error: &str, attempts: u32, reports: &[JobReport]) -
     } else {
         String::new()
     };
+    let what = if reports.iter().any(|report| report.outcome.is_some()) {
+        "here are SCV's Review and Landing lines and what the agent replied, unedited"
+    } else {
+        "here is what the agent replied, unedited"
+    };
     format!(
-        "{finished}, but the model could not report {them}{tries}, so here is what the agent \
-         replied, unedited.\nError: {error}\n\n{}",
+        "{finished}, but the model could not report {them}{tries}, so {what}.\nError: \
+         {error}\n\n{}",
         scv_protocol::describe_reports(reports).trim_end()
     )
 }

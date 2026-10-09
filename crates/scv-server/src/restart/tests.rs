@@ -892,3 +892,104 @@ async fn a_planned_restart_lowers_the_mail_drain_when_handing_over_fails() {
     registration.end_execution();
     restarter.cancel.cancel();
 }
+
+/// Job-1's final outcome, and the change `agent_cancel` made while it was
+/// still stopping.
+fn owed_outcome() -> (scv_protocol::JobChange, scv_protocol::JobOutcome) {
+    let last: scv_protocol::JobOutcome = serde_json::from_value(serde_json::json!({
+        "job":"job-1",
+        "review":{"outcome":"approved","round":1,"rounds":3,"journal":"rev-1-abcdef",
+                  "journal_incomplete":true},
+        "landing":{"mode":"none","status":"not_requested"}
+    }))
+    .unwrap();
+    let mut pending = last.clone();
+    pending.review.journal_incomplete = false;
+    pending.review.journal_pending = true;
+    let change = serde_json::from_value(serde_json::json!({
+        "job":"job-1","tool":"agent","agent":"codex","status":"cancelled","outcome":pending
+    }))
+    .unwrap();
+    (change, last)
+}
+
+#[test]
+fn a_final_outcome_still_owed_keeps_the_session_busy_until_it_is_sent() {
+    let jobs = Arc::new(BackgroundJobs::new(2, None));
+    let _tracker = SessionTracker::new("owed-session", Some(&jobs));
+    assert!(!session_busy("owed-session"));
+    // Through an update: the pending change, then the final outcome.
+    let (change, last) = owed_outcome();
+    jobs.owe_for_tests("cancel", change, None);
+    assert!(session_busy("owed-session"));
+    jobs.take_changes("cancel");
+    assert!(session_busy("owed-session"), "being sent");
+    jobs.published("cancel", true);
+    assert!(
+        session_busy("owed-session"),
+        "the final outcome is still owed"
+    );
+    jobs.stop_for_tests(&last);
+    assert_eq!(jobs.take_updates(), std::slice::from_ref(&last));
+    assert!(session_busy("owed-session"), "the update is being sent");
+    jobs.updated(&["job-1".to_owned()], true);
+    assert!(!session_busy("owed-session"));
+    // Through a change that could not be sent, as the turn ended first.
+    let (change, last) = owed_outcome();
+    jobs.owe_for_tests("cancel", change, Some(last));
+    jobs.turn_ended();
+    assert!(session_busy("owed-session"));
+    jobs.take_updates();
+    jobs.updated(&["job-1".to_owned()], true);
+    assert!(!session_busy("owed-session"));
+}
+
+#[tokio::test]
+async fn a_restart_waits_until_a_cancels_final_outcome_is_queued_to_the_client() {
+    use crate::{events::ProtocolSink, outbound::outbound_channel, session::TurnMeta};
+    use scv_core::{CoreEvent, EventSink, ToolOutput};
+
+    let jobs = Arc::new(BackgroundJobs::new(2, None));
+    let _tracker = SessionTracker::new("owed-backpressure", Some(&jobs));
+    let (output, mut frames) = outbound_channel(64 * 1024);
+    // The client reads nothing for now: the queue is full.
+    let held = Arc::clone(&output.budget)
+        .acquire_many_owned(64 * 1024)
+        .await
+        .unwrap();
+    let sink = ProtocolSink {
+        meta: TurnMeta {
+            request_id: "turn".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            max_server_frame: 1024 * 1024,
+        },
+        output,
+        cancellation: CancellationToken::new(),
+        background: Some(Arc::clone(&jobs)),
+        acted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let (mut change, last) = owed_outcome();
+    change.outcome = Some(last.clone());
+    jobs.owe_for_tests("cancel", change, Some(last));
+    let sending = tokio::spawn(async move {
+        sink.emit(CoreEvent::ToolCompleted {
+            call_id: "cancel".into(),
+            name: "agent_cancel".into(),
+            output: ToolOutput::success("{}"),
+        })
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert!(session_busy("owed-backpressure"), "not queued yet");
+    drop(held);
+    sending.await.unwrap().unwrap();
+    assert!(!session_busy("owed-backpressure"));
+    let frame = frames.recv().await.unwrap();
+    let event: scv_protocol::ServerEvent = serde_json::from_slice(&frame.bytes).unwrap();
+    assert!(
+        matches!(event, scv_protocol::ServerEvent::ToolCompleted { jobs, .. }
+        if jobs[0].outcome.as_ref().is_some_and(|outcome| outcome.review.journal_incomplete))
+    );
+}

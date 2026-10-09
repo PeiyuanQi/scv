@@ -17,10 +17,17 @@
 //! ahead, the call's busy policy decides: it steers the running turn, waits
 //! in the foreground, fails, or becomes a queued job that runs once its
 //! place comes up.
+//!
+//! A call with `review` runs as a reviewed job ([`review`](super::review)):
+//! the same job, whose one call runs the whole builder and reviewer loop and
+//! whose changes and report carry SCV's outcome.
 
-mod lane;
+pub(in crate::delegate) mod lane;
+mod owed;
 
 use std::{
+    collections::HashSet,
+    path::PathBuf,
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
@@ -30,7 +37,7 @@ use scv_core::{
     ApprovalGate, ProgressSink, Tool, ToolApprovals, ToolContext, ToolError, ToolOutput, ToolRisk,
     ToolSpec,
 };
-use scv_protocol::{JobChange, JobReport, JobStatus, describe_reports};
+use scv_protocol::{JobChange, JobOutcome, JobReport, JobStatus, describe_reports};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
@@ -42,9 +49,10 @@ use crate::{
     args::{Timeouts, bounded, parse_args, timeout_schema},
     delegate::{
         agent::{AGENT_TOOL, AgentTool, Offered},
-        conversation,
+        conversation::{self, ConversationStore},
         output::AgentReply,
         request::AgentArgs,
+        review::{self, Record, ReviewedTool},
     },
     sync::lock,
 };
@@ -97,9 +105,24 @@ struct JobsState {
     jobs: Vec<Job>,
     /// Changes by the ID of the call that made them, oldest first.
     changes: Vec<(String, JobChange)>,
+    /// The final outcomes of cancelled reviewed jobs the session is owed.
+    owed: owed::Owed,
 }
 
 impl JobsState {
+    /// Bring the outcome in the change the call `call_id` made for
+    /// `outcome`'s job up to date, if no client has taken it yet.
+    fn refresh(&mut self, call_id: &str, outcome: JobOutcome) {
+        if let Some((_, change)) = self
+            .changes
+            .iter_mut()
+            .rev()
+            .find(|(call, change)| call == call_id && change.job == outcome.job)
+        {
+            change.outcome = Some(outcome);
+        }
+    }
+
     /// Keep `change` for the call `call_id`, which a client learns of with
     /// that call's `tool.completed`. A call without an ID has no event.
     fn record(&mut self, call_id: &str, change: JobChange) {
@@ -107,7 +130,8 @@ impl JobsState {
             return;
         }
         if self.changes.len() >= MAX_PENDING_CHANGES {
-            self.changes.remove(0);
+            let (call, dropped) = self.changes.remove(0);
+            self.owed.evicted(&call, &dropped.job);
         }
         self.changes.push((call_id.to_owned(), change));
     }
@@ -144,6 +168,74 @@ struct Job {
     /// After a failed report turn: when the next one is due.
     report_due: Option<tokio::time::Instant>,
     done: watch::Receiver<bool>,
+    /// A reviewed job's record, whose outcome its changes and report state.
+    review: Option<Arc<Record>>,
+    /// `agent_cancel` waits for it, and describes it after: never pruned
+    /// meanwhile.
+    cancelling: bool,
+}
+
+/// `agent_cancel` waiting for a job to stop. Settled after the wait, or,
+/// if the call is dropped first, as when its turn is aborted, its change
+/// withdrawn and any outcome it owed left to an update.
+struct Waiting<'a> {
+    jobs: &'a BackgroundJobs,
+    job: String,
+    call: String,
+    /// The job is reviewed: the session is owed its final outcome.
+    owed: bool,
+    settled: bool,
+}
+
+impl Waiting<'_> {
+    /// The wait is over: the change the call made says the final outcome
+    /// if the job stopped, else the outcome as decided, its journal still
+    /// open; [`BackgroundJobs::take_changes`] says the final one if the job
+    /// stops before the change is sent.
+    fn settle(mut self) {
+        self.settled = true;
+        let mut state = self.jobs.state();
+        let Some(entry) = state.jobs.iter_mut().find(|entry| entry.id == self.job) else {
+            return;
+        };
+        entry.cancelling = false;
+        if !self.owed {
+            return;
+        }
+        let pending = entry.outcome.is_none().then(|| entry.outcome()).flatten();
+        let pending = pending.map(|mut outcome| {
+            outcome.review.journal_pending = true;
+            outcome
+        });
+        if let Some(outcome) = state.owed.waited(&self.job, &self.call, pending) {
+            state.refresh(&self.call, outcome);
+        }
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut state = self.jobs.state();
+        if let Some(entry) = state.jobs.iter_mut().find(|entry| entry.id == self.job) {
+            entry.cancelling = false;
+        }
+        if !self.owed {
+            return;
+        }
+        // Its call is gone, so its change is never sent.
+        let (call, job) = (&self.call, &self.job);
+        state
+            .changes
+            .retain(|(recorded, change)| !(recorded == call && &change.job == job));
+        let due = state.owed.abandoned(job, call);
+        drop(state);
+        if due {
+            self.jobs.wake();
+        }
+    }
 }
 
 struct Outcome {
@@ -205,7 +297,16 @@ impl BackgroundJobs {
     /// `context` (whose workspace and call ID it takes; the job has its own
     /// cancellation), on `agent`, and return its job's
     /// `{"job","agent","status":"running","background":true}` description.
-    fn start(
+    /// A reviewed job's `review` records its start in its journal first, and
+    /// the call fails if it cannot. That write happens outside the job
+    /// table's lock, so a slow disk never holds up the session's other job
+    /// calls: the job's number is taken first, and a failed write leaves it
+    /// unused.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a job's call, its context, its turn, and its review, each its own"
+    )]
+    pub(in crate::delegate) fn start(
         self: &Arc<Self>,
         tool: Arc<dyn Tool>,
         name: &str,
@@ -213,6 +314,7 @@ impl BackgroundJobs {
         arguments: Value,
         context: &ToolContext,
         turn: Turn,
+        review: Option<&Arc<ReviewedTool>>,
     ) -> Result<Value, ToolError> {
         let task = task_line(
             arguments
@@ -221,22 +323,27 @@ impl BackgroundJobs {
                 .unwrap_or_default(),
         );
         let queued = matches!(turn, Turn::Queued(_));
+        let reserved = match review {
+            Some(review) => {
+                let id = {
+                    let mut state = self.state();
+                    self.room(&state, queued)?;
+                    state.next += 1;
+                    format!("job-{}", state.next)
+                };
+                review.begin(&id)?;
+                Some(id)
+            }
+            None => None,
+        };
         let (id, progress, done_tx, cancellation) = {
             let mut state = self.state();
-            let running = state
-                .jobs
-                .iter()
-                .filter(|job| job.outcome.is_none() && !job.queued)
-                .count();
-            if !queued && running >= self.limit {
-                return Err(ToolError::limit(format!(
-                    "{running} background jobs are already running, the limit \
-                     (agent.max_background). Start this one after a job finishes, or \
-                     stop one with agent_cancel if the user no longer needs it."
-                )));
-            }
-            state.next += 1;
-            let id = format!("job-{}", state.next);
+            // Checked again: another call may have started a job meanwhile.
+            self.room(&state, queued)?;
+            let id = reserved.unwrap_or_else(|| {
+                state.next += 1;
+                format!("job-{}", state.next)
+            });
             let progress = ProgressSink::buffered();
             let (done_tx, done) = watch::channel(false);
             let cancel = self.cancellation.child_token();
@@ -248,6 +355,8 @@ impl BackgroundJobs {
                     agent: agent.to_owned(),
                     status: JobStatus::Running,
                     task: task.clone(),
+                    journal: review.map(|review| review.journal_id()),
+                    outcome: None,
                 },
             );
             state.jobs.push(Job {
@@ -267,6 +376,8 @@ impl BackgroundJobs {
                 report_attempts: 0,
                 report_due: None,
                 done,
+                review: review.map(|review| Arc::clone(review.record())),
+                cancelling: false,
             });
             (id, progress, done_tx, cancel)
         };
@@ -274,6 +385,7 @@ impl BackgroundJobs {
         let job = id.clone();
         let approvals = self.approvals.clone();
         let workspace = context.workspace.clone();
+        let reviewed = review.map(Arc::clone);
         tokio::spawn(async move {
             let started = Instant::now();
             let mut context = ToolContext::new(workspace, cancellation);
@@ -299,7 +411,12 @@ impl BackgroundJobs {
                             ));
                             tool.execute(arguments, context).await
                         }
-                        Err(error) => Err(error),
+                        // A reviewed job ends its review even when its loop
+                        // never ran, so its result says how it ended.
+                        Err(error) => match &reviewed {
+                            Some(review) => Ok(review.unstarted(&error)),
+                            None => Err(error),
+                        },
                     }
                 }
                 _ => tool.execute(arguments, context).await,
@@ -331,11 +448,36 @@ impl BackgroundJobs {
         Ok(started)
     }
 
+    /// Refuse a job beyond `agent.max_background`; a queued prompt counts
+    /// toward `agent.max_queued_turns` instead.
+    fn room(&self, state: &JobsState, queued: bool) -> Result<(), ToolError> {
+        let running = state
+            .jobs
+            .iter()
+            .filter(|job| job.outcome.is_none() && !job.queued)
+            .count();
+        if !queued && running >= self.limit {
+            return Err(ToolError::limit(format!(
+                "{running} background jobs are already running, the limit \
+                 (agent.max_background). Start this one after a job finishes, or \
+                 stop one with agent_cancel if the user no longer needs it."
+            )));
+        }
+        Ok(())
+    }
+
     /// Stop `job` for the call `call_id` and wait briefly for it to settle,
     /// then describe it. A stopped job needs no report turn: the model asked
     /// for the stop.
+    ///
+    /// A reviewed job's decision is fixed at once, but its journal goes on
+    /// until it really stops, so the session is owed its final outcome
+    /// ([`owed`]): the call's change says it if the job stops before the
+    /// change is sent, and otherwise says the journal is still open, and a
+    /// `background.updated` follows ([`Self::take_updates`]). The wait
+    /// reads only the job's live state, never its journal.
     async fn cancel(&self, job: &str, call_id: &str) -> Result<Value, ToolError> {
-        let mut done = {
+        let (mut done, owed) = {
             let mut state = self.state();
             let index = state
                 .jobs
@@ -353,16 +495,93 @@ impl BackgroundJobs {
             }
             entry.cancelled = true;
             entry.cancel.cancel();
+            entry.cancelling = true;
             let done = entry.done.clone();
+            let mut owed = false;
             if !entry.reported {
                 entry.reported = true;
                 let change = entry.change(JobStatus::Cancelled);
+                owed = entry.review.is_some();
                 state.record(call_id, change);
+                if owed {
+                    state.owed.cancelling(job, call_id);
+                }
             }
-            done
+            (done, owed)
+        };
+        let waiting = Waiting {
+            jobs: self,
+            job: job.to_owned(),
+            call: call_id.to_owned(),
+            owed,
+            settled: false,
         };
         let _ = tokio::time::timeout(CANCEL_SETTLE, done.wait_for(|finished| *finished)).await;
+        waiting.settle();
         self.describe(Some(job), call_id)
+    }
+
+    /// The final outcomes of cancelled reviewed jobs the session is owed
+    /// and has not been sent, for the server's `background.updated`. Each
+    /// is being sent until [`Self::updated`] says how that went.
+    pub fn take_updates(&self) -> Vec<JobOutcome> {
+        self.state().owed.take_updates()
+    }
+
+    /// The update naming `jobs` reached the client, when `delivered`, which
+    /// ends what was owed; or it could not be sent, which leaves them due.
+    pub fn updated(&self, jobs: &[String], delivered: bool) {
+        self.state().owed.updated(jobs, delivered);
+    }
+
+    /// The `tool.completed` of the call `call_id`, carrying the changes
+    /// [`Self::take_changes`] gave, reached the client, when `delivered`, or
+    /// could not be sent, as when its turn was cancelled first. A change
+    /// that did not deliver a reviewed job's final outcome leaves it to a
+    /// `background.updated`.
+    pub fn published(&self, call_id: &str, delivered: bool) {
+        let due = self.state().owed.sent(call_id, delivered);
+        if due {
+            self.wake();
+        }
+    }
+
+    /// A turn ended: no change of its calls can be sent any more, so what
+    /// such a change owed goes to a `background.updated`.
+    pub fn turn_ended(&self) {
+        let due = self.state().owed.turn_ended();
+        if due {
+            self.wake();
+        }
+    }
+
+    /// For tests of how a client of this store delivers reviewed jobs'
+    /// outcomes, such as the server's, with the `test-support` feature: owe
+    /// the session the final outcome of `change.job`, through `change`,
+    /// recorded for the call `call_id` once `agent_cancel` waited, which says
+    /// the journal is still open; `last` is the final outcome if the job has
+    /// stopped.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owe_for_tests(&self, call_id: &str, change: JobChange, last: Option<JobOutcome>) {
+        let mut state = self.state();
+        state.owed.owe(call_id, &change, last);
+        state.record(call_id, change);
+    }
+
+    /// For the same tests: the job of `outcome` stops with it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stop_for_tests(&self, outcome: &JobOutcome) {
+        let due = self.state().owed.stopped(&outcome.job, outcome);
+        if due {
+            self.wake();
+        }
+    }
+
+    /// Wake the session, as when a job finishes, for what is now due.
+    fn wake(&self) {
+        if let Some(finished) = &self.finished {
+            let _ = finished.send(());
+        }
     }
 
     /// Wait up to `limit` for `job` and describe it for the call `call_id`;
@@ -421,7 +640,10 @@ impl BackgroundJobs {
     }
 
     /// The jobs the call `call_id` started or showed the model the result of,
-    /// for its `tool.completed`.
+    /// for its `tool.completed`, which then reports how its sending went
+    /// ([`Self::published`]). A cancelled reviewed job's change says its
+    /// final outcome if the job has stopped by now, superseding the
+    /// snapshot taken when the cancel's wait ended.
     pub fn take_changes(&self, call_id: &str) -> Vec<JobChange> {
         let mut state = self.state();
         let mut taken = Vec::new();
@@ -433,6 +655,9 @@ impl BackgroundJobs {
                 true
             }
         });
+        for change in &mut taken {
+            state.owed.take(call_id, change);
+        }
         taken
     }
 
@@ -533,13 +758,19 @@ impl BackgroundJobs {
     }
 
     /// Jobs still running or whose result is not reported yet, including
-    /// those a report turn is reporting now.
+    /// those a report turn is reporting now, and cancelled reviewed jobs
+    /// whose final outcome the session is still owed, until it was sent;
+    /// each job once.
     pub fn pending(&self) -> usize {
-        self.state()
+        let state = self.state();
+        let mut pending: HashSet<&str> = state
             .jobs
             .iter()
             .filter(|job| job.outcome.is_none() || !job.reported)
-            .count()
+            .map(|job| job.id.as_str())
+            .collect();
+        pending.extend(state.owed.jobs());
+        pending.len()
     }
 
     /// Whether any job is still running.
@@ -553,7 +784,7 @@ impl BackgroundJobs {
 }
 
 /// How a job's call takes its conversation's turn.
-enum Turn {
+pub(in crate::delegate) enum Turn {
     /// A new conversation, which nothing else can reach yet.
     New,
     /// The conversation's next turn, which nothing was ahead of.
@@ -578,11 +809,17 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
     };
     {
         let mut state = jobs.state();
+        let mut last = None;
         if let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) {
             job.last_progress = job.progress.take().or(job.last_progress.take());
             job.outcome = Some(Outcome { output, elapsed });
             // Stopped on request: the model already knows.
             job.reported |= job.cancelled;
+            last = job.outcome();
+        }
+        // What a cancel owed of it is now final.
+        if let Some(last) = last {
+            state.owed.stopped(id, &last);
         }
         // Keep every running job and the newest finished ones.
         let finished = state
@@ -592,7 +829,7 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
             .count();
         let mut excess = finished.saturating_sub(MAX_FINISHED);
         state.jobs.retain(|job| {
-            if excess > 0 && job.outcome.is_some() && job.reported {
+            if excess > 0 && job.outcome.is_some() && job.reported && !job.cancelling {
                 excess -= 1;
                 false
             } else {
@@ -628,10 +865,27 @@ impl Job {
                     .unwrap_or(outcome.output.content.as_str()),
                 REPORT_REPLY_CHARS,
             ),
+            outcome: self.outcome(),
         })
     }
 
-    /// This job with `status`, as its clients learn of it.
+    /// A reviewed job's outcome as it stands. A cancelled job's is what it
+    /// was when the cancel arrived.
+    fn outcome(&self) -> Option<JobOutcome> {
+        self.review.as_ref().map(|record| {
+            let (review, landing) = record
+                .live
+                .snapshot(self.cancelled || self.cancel.is_cancelled());
+            JobOutcome {
+                job: self.id.clone(),
+                review,
+                landing,
+            }
+        })
+    }
+
+    /// This job with `status`, as its clients learn of it: a reviewed job's
+    /// settling change carries its outcome.
     fn change(&self, status: JobStatus) -> JobChange {
         JobChange {
             job: self.id.clone(),
@@ -639,6 +893,12 @@ impl Job {
             agent: self.agent.clone(),
             status,
             task: self.task.clone(),
+            journal: None,
+            outcome: if status == JobStatus::Running {
+                None
+            } else {
+                self.outcome()
+            },
         }
     }
 
@@ -661,6 +921,9 @@ impl Job {
                 );
                 if let Some(progress) = &self.last_progress {
                     value.insert("progress".into(), progress.clone().into());
+                }
+                if let Some(record) = &self.review {
+                    value.insert("review".into(), record.live.status());
                 }
             }
             Some(outcome) => {
@@ -730,12 +993,29 @@ fn unknown_job(job: &str) -> ToolError {
     ))
 }
 
+/// What the model is told when a report includes reviewed jobs, whose
+/// outcome SCV states itself.
+const REVIEWED_NOTE: &str = " SCV shows the user its own Review and Landing lines for \
+     reviewed jobs. If you mention the outcome, repeat them as given; never call unapproved \
+     work approved or done, and never call landed work approved. If a reviewer declined, tell \
+     the user what it said. If a landing is NOT confirmed, or the reviewer could NOT confirm \
+     it, say so plainly, and don't fix, revert, or land anything on your own.";
+
+fn reviewed_note(reports: &[JobReport]) -> &'static str {
+    if reports.iter().any(|report| report.outcome.is_some()) {
+        REVIEWED_NOTE
+    } else {
+        ""
+    }
+}
+
 /// The server-started turn that reports finished jobs to the model.
 pub fn report_prompt(reports: &[JobReport]) -> String {
     format!(
         "[SCV background report] Delegated work you started in the background has \
          finished. The user did not send this message: tell them briefly what \
-         happened and the key result.\n\n{}",
+         happened and the key result.{}\n\n{}",
+        reviewed_note(reports),
         describe_reports(reports)
     )
 }
@@ -747,15 +1027,24 @@ pub fn delivered_note(reports: &[JobReport], error: &str) -> String {
         "[SCV background report, already delivered] Delegated work you started in \
          the background has finished. Your report of it failed ({error}), so SCV \
          sent the user the results below directly. The user did not send this \
-         message; repeat the results only if they ask.\n\n{}",
+         message; repeat the results only if they ask.{}\n\n{}",
+        reviewed_note(reports),
         describe_reports(reports)
     )
 }
 
-/// The `agent` tool, able to run a call in the background as well.
+/// The `agent` tool, able to run a call in the background as well, and to
+/// run one as a reviewed job.
 pub(crate) struct BackgroundCapable {
     pub(crate) inner: Arc<AgentTool>,
     pub(crate) jobs: Arc<BackgroundJobs>,
+    /// The session's conversations, which a reviewed job pins and releases.
+    pub(crate) conversations: Arc<ConversationStore>,
+    /// Where reviewed jobs keep their journals; without it, `review` is not
+    /// offered.
+    pub(crate) reviews: Option<PathBuf>,
+    /// The SCV session, which a review's journal names.
+    pub(crate) session: Option<String>,
 }
 
 /// The `agent` tool for a queued prompt, whose turn has come by the time it
@@ -782,20 +1071,45 @@ impl Tool for QueuedTool {
     }
 }
 
-/// Split `background` off an agent call's arguments.
-fn split_background(arguments: &Value) -> (Value, bool) {
-    let mut arguments = arguments.clone();
-    let background = arguments
-        .as_object_mut()
-        .and_then(|object| object.remove("background"))
-        .is_some_and(|value| value.as_bool() == Some(true));
-    (arguments, background)
+/// An agent call's arguments with `background` and `review` split off.
+struct Split {
+    arguments: Value,
+    /// `background` as the call gave it.
+    background: Option<bool>,
+    /// The `review` object, when the call gave one.
+    review: Option<Value>,
+}
+
+impl Split {
+    fn new(arguments: &Value) -> Self {
+        let mut arguments = arguments.clone();
+        let object = arguments.as_object_mut();
+        let (background, review) = match object {
+            Some(object) => (
+                object
+                    .remove("background")
+                    .map(|value| value.as_bool() == Some(true)),
+                object.remove("review").filter(|review| !review.is_null()),
+            ),
+            None => (None, None),
+        };
+        Self {
+            arguments,
+            background,
+            review,
+        }
+    }
+
+    fn background(&self) -> bool {
+        self.background == Some(true)
+    }
 }
 
 #[async_trait]
 impl Tool for BackgroundCapable {
     fn spec(&self) -> ToolSpec {
         let mut spec = self.inner.spec();
+        let reviewed = self.offers_review();
         if let Some(properties) = spec
             .parameters
             .get_mut("properties")
@@ -812,6 +1126,9 @@ impl Tool for BackgroundCapable {
                         within this turn."
                 }),
             );
+            if reviewed {
+                properties.insert("review".into(), review::schema(&self.inner));
+            }
         }
         spec.description.push_str(&format!(
             " Set background to true for anything beyond a quick task: the call returns a job \
@@ -821,17 +1138,34 @@ impl Tool for BackgroundCapable {
              asking a person.",
             self.jobs.limit()
         ));
+        if reviewed {
+            spec.description.push_str(
+                " A call with review runs as a reviewed background job: an independent \
+                 reviewer checks the work in up to review.rounds rounds.",
+            );
+        }
         spec
     }
 
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
-        self.inner.risk(&split_background(arguments).0)
+        let split = Split::new(arguments);
+        if let Some(review) = &split.review {
+            self.plan(&split, review)?;
+        }
+        self.inner.risk(&split.arguments)
     }
 
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
-        let (arguments, background) = split_background(arguments);
-        let mut summary = self.inner.approval_summary(&arguments)?;
-        if background {
+        let split = Split::new(arguments);
+        let mut summary = self.inner.approval_summary(&split.arguments)?;
+        if let Some(review) = &split.review {
+            let plan = self.plan(&split, review)?;
+            summary.push_str(
+                " Runs in the background: the call returns at once and the result is \
+                 reported when the review ends.",
+            );
+            summary.push_str(&review::approval_summary(&plan, &self.inner)?);
+        } else if split.background() {
             summary.push_str(
                 " Runs in the background: the call returns at once and the result is \
                  reported when the agent finishes.",
@@ -845,7 +1179,12 @@ impl Tool for BackgroundCapable {
         arguments: Value,
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let (arguments, background) = split_background(&arguments);
+        let split = Split::new(&arguments);
+        if let Some(review) = &split.review {
+            return self.start_reviewed(&split, review, &context);
+        }
+        let background = split.background();
+        let arguments = split.arguments;
         let (agent, routed) = self.inner.route(&arguments)?;
         // Validate before returning a job handle, so a bad call fails now.
         if background {
@@ -882,17 +1221,7 @@ impl Tool for BackgroundCapable {
             }
             behavior => behavior,
         };
-        // Calls ahead of this one other than the running turn.
-        let waiting = place.ahead.saturating_sub(1);
         match behavior {
-            BusyBehavior::Fail => Err(ToolError::failed(if waiting == 0 {
-                format!("session busy: conversation {handle} is still running a turn")
-            } else {
-                format!(
-                    "session busy: conversation {handle} is still running a turn, and \
-                     {waiting} more prompts wait for it"
-                )
-            })),
             // A background call cannot hold its caller, so it queues instead.
             BusyBehavior::Wait if !background => {
                 place.wait_first(&context.cancellation).await?;
@@ -900,18 +1229,175 @@ impl Tool for BackgroundCapable {
                 drop(place);
                 output
             }
-            _ if waiting >= agent.busy.max_queued_turns => Err(ToolError::limit(format!(
-                "session busy: conversation {handle} is running a turn and {waiting} prompts \
-                 already wait for it, of the {} agent.max_queued_turns allows. Send this one \
-                 once they have run, or stop one with agent_cancel.",
-                agent.busy.max_queued_turns
-            ))),
-            _ => self.start(agent, arguments, &context, Turn::Queued(place)),
+            BusyBehavior::Fail => Err(busy(&handle, &place)),
+            _ => {
+                queue_room(agent, &handle, &place)?;
+                self.start(agent, arguments, &context, Turn::Queued(place))
+            }
         }
     }
 }
 
+/// The `session busy` error for a call to conversation `handle` that found
+/// a turn running, or calls waiting, at `place`.
+fn busy(handle: &str, place: &Place) -> ToolError {
+    // Calls ahead of this one other than the running turn.
+    let waiting = place.ahead.saturating_sub(1);
+    ToolError::failed(if waiting == 0 {
+        format!("session busy: conversation {handle} is still running a turn")
+    } else {
+        format!(
+            "session busy: conversation {handle} is still running a turn, and {waiting} more \
+             prompts wait for it"
+        )
+    })
+}
+
+/// Refuse a prompt queued at `place` beyond `agent.max_queued_turns`.
+fn queue_room(agent: &Offered, handle: &str, place: &Place) -> Result<(), ToolError> {
+    let waiting = place.ahead.saturating_sub(1);
+    if waiting >= agent.busy.max_queued_turns {
+        return Err(ToolError::limit(format!(
+            "session busy: conversation {handle} is running a turn and {waiting} prompts \
+             already wait for it, of the {} agent.max_queued_turns allows. Send this one \
+             once they have run, or stop one with agent_cancel.",
+            agent.busy.max_queued_turns
+        )));
+    }
+    Ok(())
+}
+
 impl BackgroundCapable {
+    /// `inner` with `jobs` and a store of its own, without reviews: for
+    /// tests of plain background calls.
+    #[cfg(test)]
+    pub(crate) fn plain(inner: Arc<AgentTool>, jobs: Arc<BackgroundJobs>) -> Self {
+        Self {
+            inner,
+            jobs,
+            conversations: Arc::new(ConversationStore::new(
+                conversation::ConversationLimits {
+                    max: 8,
+                    idle: Duration::from_secs(86400),
+                },
+                None,
+            )),
+            reviews: None,
+            session: None,
+        }
+    }
+
+    /// Whether calls may set `review`: background jobs exist (this tool),
+    /// the session keeps journals, and an offered agent can continue a
+    /// conversation.
+    fn offers_review(&self) -> bool {
+        self.reviews.is_some() && !self.inner.continuing().is_empty()
+    }
+
+    /// Check a reviewed call, before approval and again before it starts.
+    fn plan(&self, split: &Split, review: &Value) -> Result<review::Plan, ToolError> {
+        if !self.offers_review() {
+            return Err(ToolError::invalid_arguments(
+                "review is not available in this session",
+            ));
+        }
+        if split.background == Some(false) {
+            return Err(ToolError::invalid_arguments(
+                "a reviewed call runs as a background job; omit background or set it to true",
+            ));
+        }
+        let (builder, routed) = self.inner.route(&split.arguments)?;
+        builder.backend.risk(&routed)?;
+        review::plan(
+            &self.inner,
+            builder,
+            &routed,
+            review,
+            self.conversations.limits().max,
+        )
+    }
+
+    /// Start a reviewed call as a background job. A busy builder
+    /// conversation queues it, or fails it with `on_busy: fail`; it never
+    /// waits, since it is a background job, and never steers, since its
+    /// prompt opens a review of its own.
+    fn start_reviewed(
+        &self,
+        split: &Split,
+        review: &Value,
+        context: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let plan = self.plan(split, review)?;
+        let arguments = split.arguments.clone();
+        let (agent, routed) = self.inner.route(&arguments)?;
+        let turn = match parse_args::<AgentArgs>(&routed)?
+            .session
+            .filter(|session| conversation::is_handle(session))
+        {
+            None => Turn::New,
+            Some(handle) => {
+                let place = self.jobs.lanes.join(&handle);
+                if place.ahead == 0 && !agent.backend.busy(&routed)? {
+                    Turn::Next(place)
+                } else if agent.on_busy(&routed)? == BusyBehavior::Fail {
+                    return Err(busy(&handle, &place));
+                } else {
+                    queue_room(agent, &handle, &place)?;
+                    Turn::Queued(place)
+                }
+            }
+        };
+        let dir = self.reviews.as_deref().ok_or_else(|| {
+            ToolError::invalid_arguments("review is not available in this session")
+        })?;
+        let reviewers: Vec<String> = plan
+            .reviewer_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let (rounds, land) = (plan.rounds, plan.land);
+        let tool = Arc::new(ReviewedTool::new(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.jobs.lanes),
+            Arc::clone(&self.conversations),
+            plan,
+            arguments.clone(),
+            self.session.clone(),
+            dir,
+        )?);
+        let queued = matches!(turn, Turn::Queued(_));
+        let mut started = self.jobs.start(
+            Arc::clone(&tool) as Arc<dyn Tool>,
+            AGENT_TOOL,
+            &agent.name,
+            arguments,
+            context,
+            turn,
+            Some(&tool),
+        )?;
+        let first = reviewers.first().cloned().unwrap_or_default();
+        started["review"] = json!({
+            "reviewers": reviewers,
+            "rounds": rounds,
+            "land": review::land_name(land),
+            "journal": tool.journal_id(),
+        });
+        started["note"] = format!(
+            "{}The agent works on it, then a fresh {first} reviews it (or the next reviewer \
+             available), for up to {rounds} rounds. SCV reports the result, with its own Review \
+             and Landing lines, in a new turn when the review ends. agent_status shows the \
+             round and phase; agent_cancel stops the whole review.",
+            if queued {
+                "The conversation is busy, so this reviewed call is queued behind the turns \
+                 ahead of it. "
+            } else {
+                ""
+            }
+        )
+        .into();
+        Ok(ToolOutput::success(started.to_string()))
+    }
+
     /// Start the call on `agent` as a background job of this session.
     fn start(
         &self,
@@ -925,9 +1411,15 @@ impl BackgroundCapable {
         } else {
             Arc::clone(&self.inner) as Arc<dyn Tool>
         };
-        let started = self
-            .jobs
-            .start(tool, AGENT_TOOL, &agent.name, arguments, context, turn)?;
+        let started = self.jobs.start(
+            tool,
+            AGENT_TOOL,
+            &agent.name,
+            arguments,
+            context,
+            turn,
+            None,
+        )?;
         Ok(ToolOutput::success(started.to_string()))
     }
 }

@@ -67,6 +67,11 @@ pub(crate) struct ProtocolSink {
 impl EventSink for ProtocolSink {
     async fn emit(&self, event: CoreEvent) -> Result<(), AgentError> {
         let seq = next_seq(&self.meta.seq);
+        // A call's job changes count as delivered only once its event is.
+        let completed = match &event {
+            CoreEvent::ToolCompleted { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        };
         let event = match event {
             CoreEvent::AssistantDelta { content } => ServerEvent::AssistantDelta {
                 request_id: self.meta.request_id.clone(),
@@ -160,13 +165,17 @@ impl EventSink for ProtocolSink {
                 history_bytes,
             },
         };
-        send_turn_event(
+        let sent = send_turn_event(
             &self.output,
             event,
             self.meta.max_server_frame,
             &self.cancellation,
         )
-        .await
+        .await;
+        if let (Some(call_id), Some(jobs)) = (completed, &self.background) {
+            jobs.published(&call_id, sent.is_ok());
+        }
+        sent
     }
 }
 

@@ -46,7 +46,8 @@ DeepSeek Harness、pi 或一个嵌套的 SCV。条件允许时，它们通过
 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）运行。
 由你的 `prefer` 列表和 `use_for` 备注决定谁做什么，每个智能体的默认模型和推理强度
 （以及困难任务单独使用的推理强度）决定怎么做；`agent_wait`、`agent_status`
-和 `agent_cancel` 管理后台任务。SCV 直接从每个智能体获知它支持的模型和推理强度，
+和 `agent_cancel` 管理后台任务。你要求审查时，另一个工具上的全新智能体会按结构化结论
+逐轮检查这项工作，SCV 用它自己的话报告是否通过。SCV 直接从每个智能体获知它支持的模型和推理强度，
 并原样传递，而不是去猜那些随版本变化的名字。内置的 `delegating` 技能教它
 如何给智能体写任务说明，以及调用失败时该怎么办；`scv agents check` 可以
 逐个确认每个智能体都能正常工作。

@@ -23,6 +23,7 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
         &PromptContext {
             agents: &agents,
             background: true,
+            review: false,
             channel: None,
             chat_history: false,
         },
@@ -85,6 +86,7 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
         &PromptContext {
             agents: &agents,
             background: false,
+            review: false,
             channel: None,
             chat_history: false,
         },
@@ -100,6 +102,7 @@ fn the_prompt_teaches_delegate_first_only_when_agents_can_run_in_the_background(
         &PromptContext {
             agents: &[],
             background: false,
+            review: false,
             channel: None,
             chat_history: false,
         },
@@ -124,6 +127,7 @@ fn the_prompt_names_per_agent_task_defaults() {
         &PromptContext {
             agents: &agents,
             background: false,
+            review: false,
             channel: None,
             chat_history: false,
         },
@@ -156,6 +160,7 @@ fn defaults_without_a_note_apply_whenever_that_agent_runs() {
         &PromptContext {
             agents: &agents,
             background: true,
+            review: false,
             channel: None,
             chat_history: false,
         },
@@ -179,6 +184,7 @@ fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
         &PromptContext {
             agents: &agents,
             background: true,
+            review: false,
             channel: Some("WeChat"),
             chat_history: false,
         },
@@ -203,6 +209,7 @@ fn chat_sessions_are_told_their_channel_and_how_replies_are_read() {
         &PromptContext {
             agents: &[],
             background: false,
+            review: false,
             channel: Some("Feishu"),
             chat_history: false,
         },
@@ -225,6 +232,7 @@ fn the_prompt_states_the_models_own_reasoning_effort_when_one_is_set() {
     let context = |agents| PromptContext {
         agents,
         background: true,
+        review: false,
         channel: None,
         chat_history: false,
     };
@@ -248,4 +256,38 @@ fn the_prompt_states_the_models_own_reasoning_effort_when_one_is_set() {
         )),
         "{prompt}"
     );
+}
+
+#[test]
+fn the_prompt_explains_reviewed_jobs_only_where_calls_can_set_review() {
+    let config = Config::default();
+    let agents = ["claude".to_owned(), "codex".to_owned()];
+    let context = |review| PromptContext {
+        agents: &agents,
+        background: true,
+        review,
+        channel: None,
+        chat_history: false,
+    };
+    let reviewed = prompt_for(&config, &context(true));
+    assert!(
+        reviewed.contains(
+            "Set review only when the user asks for a review or accepts your suggestion of \
+             one, never on your own."
+        ),
+        "{reviewed}"
+    );
+    assert!(
+        reviewed
+            .contains("only an approved review is approved, and landed work is not approved work"),
+        "{reviewed}"
+    );
+    assert!(
+        reviewed.contains("When the task itself lands, publishes, or deploys, ask before starting"),
+        "{reviewed}"
+    );
+    for loud in ["CRITICAL", "MUST", "IMPORTANT", "NEVER"] {
+        assert!(!reviewed.contains(loud), "{loud}");
+    }
+    assert!(!prompt_for(&config, &context(false)).contains("set review"));
 }

@@ -113,6 +113,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
         &PromptContext {
             agents: &agents,
             background: true,
+            review: false,
             channel: None,
             chat_history: false,
         },
@@ -132,6 +133,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
         &PromptContext {
             agents: &[],
             background: false,
+            review: false,
             channel: None,
             chat_history: false,
         },
@@ -190,6 +192,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
         &PromptContext {
             agents: &[],
             background: false,
+            review: false,
             channel: None,
             chat_history: false,
         },

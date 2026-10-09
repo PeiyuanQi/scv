@@ -4,6 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::review::{JobOutcome, describe_outcome};
+
 /// Why the server started a turn on its own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnOrigin {
@@ -23,6 +25,11 @@ pub struct TurnOrigin {
     /// jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_seconds: Option<u64>,
+    /// The outcomes of the reviewed jobs among `jobs`, which clients show
+    /// as SCV's own lines before the model's report. Absent from servers
+    /// before 0.3.14.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcomes: Vec<JobOutcome>,
 }
 
 /// What a server-started turn is for.
@@ -106,6 +113,14 @@ pub struct JobChange {
     /// The first line of the delegated prompt, shortened; empty when unknown.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub task: String,
+    /// On a reviewed job's start: its review journal's ID, such as
+    /// `rev-1759961234-3fa9c1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
+    /// On the change that settles a reviewed job: its outcome, which clients
+    /// show as SCV's own lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<JobOutcome>,
 }
 
 impl JobChange {
@@ -141,10 +156,14 @@ pub struct JobReport {
     pub session: Option<String>,
     /// The agent's reply, bounded: untrusted delegated-agent output.
     pub reply: String,
+    /// A reviewed job's outcome, which SCV states in its own words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<JobOutcome>,
 }
 
 /// `reports` as people and the model read them: for each job, a line naming
-/// it, its agent, conversation, and status, then its task and its reply.
+/// it, its agent, conversation, and status, then its task, a reviewed job's
+/// outcome lines ([`describe_outcome`]), and its reply.
 pub fn describe_reports(reports: &[JobReport]) -> String {
     let mut text = String::new();
     for report in reports {
@@ -158,6 +177,9 @@ pub fn describe_reports(reports: &[JobReport]) -> String {
         text.push_str(&format!("): {}\n", report.status));
         if !report.task.is_empty() {
             text.push_str(&format!("Task: {}\n", report.task));
+        }
+        if let Some(outcome) = &report.outcome {
+            text.push_str(&describe_outcome(outcome));
         }
         let reply = report.reply.trim();
         if !reply.is_empty() {

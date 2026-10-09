@@ -110,6 +110,12 @@ pub fn builtin_registry(
     registry.register(Arc::new(background::BackgroundCapable {
         inner: agent,
         jobs: Arc::clone(&jobs),
+        conversations,
+        reviews: config.reviews.clone(),
+        session: config
+            .delegation
+            .as_ref()
+            .map(|context| context.session.clone()),
     }))?;
     registry.register(Arc::new(background::WaitTool {
         jobs: Arc::clone(&jobs),
