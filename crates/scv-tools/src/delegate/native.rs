@@ -15,7 +15,7 @@ use serde_json::Value;
 use tokio::{sync::Mutex, time::Instant};
 
 use crate::{
-    AgentAdapterConfig, DelegationContext,
+    AgentAdapterConfig, AgentAuthPlan, DelegationContext,
     args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
         adapters::{self, OutputFormat, Resume},
@@ -51,6 +51,7 @@ pub(crate) struct NativeAgentTool {
     home: Option<PathBuf>,
     delegation: Option<DelegationContext>,
     conversations: Arc<ConversationStore>,
+    auth: AgentAuthPlan,
 }
 
 impl NativeAgentTool {
@@ -96,6 +97,12 @@ impl NativeAgentTool {
             ));
         }
         let mut command = self.args.clone();
+        if let AgentAuthPlan::Claude { settings, .. } = &self.auth {
+            command.push("--settings".into());
+            command.push(serde_json::to_string(settings).map_err(|error| {
+                ToolError::failed(format!("encode Claude Code settings: {error}"))
+            })?);
+        }
         command.extend(self.full_permission_args.iter().flatten().cloned());
         command.extend(self.output.args().iter().map(|arg| (*arg).to_owned()));
         for (field, value, template, placeholder) in [
@@ -152,6 +159,7 @@ impl NativeAgentTool {
             home: config.home,
             delegation,
             conversations,
+            auth: config.auth,
         }
     }
 
@@ -275,6 +283,22 @@ impl Backend for NativeAgentTool {
                 self.name, self.command
             ))
         })?;
+        if let AgentAuthPlan::Claude { mode, home, .. } = &self.auth {
+            let status = crate::stores::claude_status(*mode, home)
+                .map_err(|error| ToolError::unavailable(format!("{error:#}")))?;
+            if !status.ready {
+                let billing = match mode {
+                    adapters::AgentAuth::ClaudeApiKey => "API key billing",
+                    adapters::AgentAuth::ClaudeSubscription => "Claude subscription",
+                    adapters::AgentAuth::None => "unknown billing",
+                };
+                return Err(ToolError::unavailable(format!(
+                    "{billing} identity for {} is unavailable: {}",
+                    self.name,
+                    status.lines.join("; ")
+                )));
+            }
+        }
         let agent = self.name.as_str();
         let turn = if self.resume.is_supported() {
             Some(self.conversations.begin(
@@ -300,6 +324,11 @@ impl Backend for NativeAgentTool {
             |pending| pending.handle.clone(),
         );
         let fixed_len = self.args.len()
+            + if matches!(self.auth, AgentAuthPlan::Claude { .. }) {
+                2
+            } else {
+                0
+            }
             + self.full_permission_args.as_ref().map_or(0, Vec::len)
             + self.output.args().len();
         let (fixed, rest) = command_args.split_at(fixed_len);
@@ -371,7 +400,12 @@ impl Backend for NativeAgentTool {
                 timeout: requested,
                 output_limit: self.output_limit,
             },
-            AgentStream::new(self.output, self.output_limit).with_progress(context.progress),
+            AgentStream::new(self.output, self.output_limit)
+                .with_auth(match &self.auth {
+                    AgentAuthPlan::Claude { mode, .. } => *mode,
+                    AgentAuthPlan::None => adapters::AgentAuth::None,
+                })
+                .with_progress(context.progress),
             registration,
             context.cancellation,
         )

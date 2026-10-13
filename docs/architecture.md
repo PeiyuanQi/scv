@@ -753,3 +753,9 @@ source code from them.
 User configuration supports named provider profiles with per-profile endpoints,
 credentials, and headers; project configuration cannot redirect that trust
 boundary.
+
+Claude Code is represented by two adapter descriptors in one family:
+claude for API-key billing and claude-ai for Claude subscription billing.
+Their homes, settings tables, conversation handles, and credential checks stay
+separate. The adapter layer owns the pinned settings passed to both the native
+CLI and ACP transports.

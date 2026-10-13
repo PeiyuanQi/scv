@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use crate::{
-    AcpAgentLaunch, AgentAdapterConfig, DelegationContext,
+    AcpAgentLaunch, AgentAdapterConfig, AgentAuthPlan, DelegationContext,
     args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
         agent::{Accepts, Backend},
@@ -40,6 +40,7 @@ pub(crate) struct AcpAgentTool {
     pub(super) launch: AcpAgentLaunch,
     pub(super) resolved: Option<PathBuf>,
     pub(super) environment: Vec<(OsString, OsString)>,
+    pub(super) auth: AgentAuthPlan,
     /// `permissions = "full"`.
     pub(super) full: bool,
     /// `model` and `effort` as the adapter offers them, and always
@@ -86,6 +87,7 @@ impl AcpAgentTool {
             launch,
             resolved,
             environment: adapter.environment.clone(),
+            auth: adapter.auth.clone(),
             full: adapter.full_permission_args.is_some(),
             accepts: Accepts {
                 model: !adapter.model_args.is_empty() || session_options,

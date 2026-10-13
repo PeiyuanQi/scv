@@ -223,7 +223,9 @@ request.
 ## Delegated agents (`agent`)
 
 One tool, `agent`, hands work to another agent, and its `agent` argument names
-which one. SCV knows five agent CLIs: Claude Code (`claude`), Codex (`codex`),
+which one. SCV knows two Claude Code billing variants: claude (Anthropic
+API-key billing) and claude-ai (the owner's Claude subscription), plus Codex
+(`codex`),
 Grok Build (`grok`), DeepSeek Harness (`dsh`), and pi (`pi`), plus a nested
 SCV (`scv`, see [Nested SCV](#nested-scv-scv)). Claude Code, Codex, Grok
 Build, and DeepSeek Harness run over the
@@ -235,9 +237,8 @@ session offers only the agents whose executable resolves when the session
 starts, so an agent installed later appears in new sessions. An agent whose
 sign-in SCV checks by reading a local file (Grok, DeepSeek Harness, pi, and
 the nested SCV; see [Signing in](#signing-in-delegated-agents)) is also left
-out while that check says it is signed out. Claude Code and Codex report
-sign-in only through their own CLI, which is too slow to run at every session
-start, so they stay offered and a signed-out call fails with the sign-in hint.
+out while that check says it is signed out. Claude identities are checked from
+their private files; SCV never runs Claude auth status as a billing gate.
 A session that offers no agent has no `agent` tool.
 
 Behind the tool, each agent runs on one of three backends: its CLI once per
@@ -1724,3 +1725,15 @@ Tool-enabled sessions also map workspace project skills (`.agents/skills` and
 project with the `agent` tool and `cwd`; see
 [Project skills](configuration.md#project-skills). Skill
 metadata and content remain untrusted instructions.
+
+Claude Code has two explicit billing identities. claude is API-key billing
+using SCV's private .anthropic-api-key file; claude-ai is the owner's Claude
+subscription and keeps its OAuth files under its separate private home.
+SCV pins credentials and the Anthropic route on every CLI and ACP launch.
+Project Claude settings cannot replace those pins, and ambiguous or conflicting
+credential files remove the agent from the offered set.
+
+When review is requested, Claude-family work is reviewed by codex and then
+grok; codex work is reviewed by claude-ai, claude, then grok; other work is
+reviewed by claude-ai, claude, codex, then grok. Claude siblings are never
+used to review one another.

@@ -321,6 +321,11 @@ rules coding agents follow in this repository.
 
 ## License
 
+Claude Code support has two explicit choices: claude uses an Anthropic API key
+stored in SCV's private agent home, while claude-ai uses the owner's Claude
+subscription login in its own private home. SCV pins the selected billing
+identity for every launch.
+
 SCV is licensed under the
 [Apache License 2.0](https://github.com/PeiyuanQi/scv/blob/main/LICENSE). See
 [NOTICE](https://github.com/PeiyuanQi/scv/blob/main/NOTICE).

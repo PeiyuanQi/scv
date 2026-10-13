@@ -14,9 +14,10 @@ fn signed_out_agents_with_a_local_sign_in_check_are_not_offered() {
     for hidden in ["dsh", "pi", "grok", "scv"] {
         assert!(!offered.contains_key(hidden), "{hidden} offered");
     }
-    // Claude and Codex report sign-in through their own CLI, which is
-    // too slow to run at every session start, so they stay offered.
-    assert!(offered.contains_key("claude"));
+    // Codex reports sign-in through its own CLI, which is too slow to run at
+    // every session start, so it stays offered. Claude is file-checked and
+    // stays hidden until its API-key identity is ready.
+    assert!(!offered.contains_key("claude"));
     assert!(offered.contains_key("codex"));
     // A stored dsh key makes it available.
     let dsh = home.path().join("agents/dsh/.dsh");

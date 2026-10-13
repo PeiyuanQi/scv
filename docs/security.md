@@ -667,3 +667,14 @@ Security reports follow the private process in `SECURITY.md`; public issues
 should not contain unreleased vulnerability details.
 
 User configuration may contain provider credentials and must be mode 0600 on Unix. Project configuration cannot select provider profiles, endpoints, headers, or credentials.
+
+### Pinned Claude Code credentials
+
+SCV keeps claude and claude-ai in separate private homes and separate
+configuration tables. Every launch passes a programmatic settings object that
+pins the Anthropic API route, clears alternate credential and cloud-provider
+variables, and selects the intended billing identity. The API-key variant reads
+only its mode-0600 key file through Claude Code's helper. The subscription
+variant leaves OAuth credentials owned by Claude Code. SCV never uses Claude's
+auth-status command as a billing gate, and fails closed when either identity is
+missing, malformed, conflicting, or ambiguous.

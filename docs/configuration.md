@@ -268,6 +268,14 @@ effort_args = ["--effort", "{effort}"]
 # steer_fallback = "queue"
 # max_queued_turns = 4
 
+[agents.claude-ai]
+command = "claude"
+args = ["-p"]
+permissions = "default"
+model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
+# Subscription credentials remain owned by Claude Code.
+
 [agents.codex]
 command = "codex"
 args = ["exec"]

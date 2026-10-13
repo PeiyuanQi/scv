@@ -68,6 +68,9 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
         }
     }
     let _lock = SocketLock::acquire(path)?;
+    for warning in instance.claude_warnings() {
+        tracing::warn!("{warning}");
+    }
     // Nothing reads an older release's files; say so once rather than let
     // them look like live configuration.
     if let Ok(strays) = layout.strays() {

@@ -11,7 +11,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    delegate::{adapters::OutputFormat, progress::progress_lines},
+    delegate::{
+        adapters::{AgentAuth, OutputFormat},
+        progress::progress_lines,
+    },
     process::OutputSink,
 };
 
@@ -92,6 +95,7 @@ pub(crate) struct AgentStream {
     completed: bool,
     /// The model stopped with a `refusal` stop reason.
     refused: bool,
+    auth: AgentAuth,
     usage: Option<AgentUsage>,
     /// The CLI's own session ID, for continuing the conversation.
     session: Option<String>,
@@ -118,6 +122,7 @@ impl AgentStream {
             failed: false,
             completed: false,
             refused: false,
+            auth: AgentAuth::None,
             usage: None,
             session: None,
             progress: ProgressSink::default(),
@@ -128,6 +133,11 @@ impl AgentStream {
     /// to `progress` as its events arrive.
     pub(crate) fn with_progress(mut self, progress: ProgressSink) -> Self {
         self.progress = progress;
+        self
+    }
+
+    pub(crate) fn with_auth(mut self, auth: AgentAuth) -> Self {
+        self.auth = auth;
         self
     }
 
@@ -202,6 +212,31 @@ impl AgentStream {
         match self.format {
             OutputFormat::Text => {}
             OutputFormat::ClaudeStreamJson => match kind {
+                "system" if event.get("subtype").and_then(Value::as_str) == Some("init") => {
+                    let expected = match self.auth {
+                        AgentAuth::ClaudeApiKey => Some("apiKeyHelper"),
+                        AgentAuth::ClaudeSubscription => Some("none"),
+                        AgentAuth::None => None,
+                    };
+                    if let Some(expected) = expected {
+                        let actual = event
+                            .get("apiKeySource")
+                            .and_then(Value::as_str)
+                            .unwrap_or("missing");
+                        if actual != expected {
+                            self.failed = true;
+                            self.error = Some(match self.auth {
+                                AgentAuth::ClaudeApiKey => format!(
+                                    "claude reported credential source {actual}, not the Claude API key; the run was stopped"
+                                ),
+                                AgentAuth::ClaudeSubscription => format!(
+                                    "claude-ai reported credential source {actual}, not the Claude subscription; the run was stopped"
+                                ),
+                                AgentAuth::None => unreachable!(),
+                            });
+                        }
+                    }
+                }
                 "result" => {
                     if let Some(result) = event.get("result").and_then(Value::as_str) {
                         self.reply = Some(result.to_owned());

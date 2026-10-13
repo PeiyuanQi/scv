@@ -339,6 +339,26 @@ fn agent_choice_settings_are_validated_and_user_only() {
 }
 
 #[test]
+fn claude_variants_accept_defaults_and_reject_unpinned_flags() {
+    let config: Config =
+        toml::from_str("[agents.claude-ai]\ncommand = \"claude\"\nargs = [\"-p\"]\n").unwrap();
+    assert!(config.validate().is_ok());
+    assert!(config.agent.prefer.is_empty());
+    let mut bad = Config::default();
+    bad.agents
+        .0
+        .get_mut("claude")
+        .unwrap()
+        .args
+        .push("--bare".into());
+    let error = bad.validate().unwrap_err().to_string();
+    assert!(error.contains("SCV pins Claude Code's credentials and routing itself"));
+    let mut preferred = Config::default();
+    preferred.agent.prefer.push("claude-ai".into());
+    assert!(preferred.validate().is_ok());
+}
+
+#[test]
 fn deepseek_harness_takes_a_model_and_effort_only_over_acp() {
     let with = |transport: AgentTransport, command: &str| {
         let mut config = Config::default();
@@ -879,7 +899,7 @@ args = [\"--always-approve\"]
     assert_eq!(config.agents.0["grok"].prompt_args, ["-p"]);
     assert_eq!(
         config.agents.0.keys().collect::<Vec<_>>(),
-        ["claude", "codex", "dsh", "grok", "pi", "scv"]
+        ["claude", "claude-ai", "codex", "dsh", "grok", "pi", "scv"]
     );
 
     merge(

@@ -71,6 +71,16 @@ const STILL_OPEN: &str =
     r#"{"verdict":"changes","summary":"Still racy.","prior":[{"id":"1.1","status":"open"}]}"#;
 const RESOLVED: &str = r#"{"verdict":"approve","summary":"Fixed.","evidence":["ran it 20x"],"prior":[{"id":"1.1","status":"resolved"}]}"#;
 
+#[test]
+fn default_review_order_keeps_claude_family_siblings_out() {
+    assert_eq!(default_order("claude"), ["codex", "grok", "claude"]);
+    assert_eq!(default_order("claude-ai"), ["codex", "grok", "claude-ai"]);
+    assert_eq!(
+        default_order("codex"),
+        ["claude-ai", "claude", "grok", "codex"]
+    );
+}
+
 /// One call an agent received.
 #[derive(Debug, Clone)]
 struct Call {

@@ -78,6 +78,9 @@ fn home_with_agents(
 ) -> (tempfile::TempDir, std::path::PathBuf) {
     let home = tempfile::tempdir().unwrap();
     let path = std::fs::canonicalize(home.path()).unwrap();
+    let key = path.join("agents/claude/.anthropic-api-key");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    write_private(&key, "sk-ant-api03-test-key");
     fake_agent(&path, "claude", claude);
     fake_agent(&path, "codex", codex);
     write_private(

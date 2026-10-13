@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     delegate::{
-        adapters::ConversationFiles,
+        adapters::{self, ConversationFiles},
         output::valid_session_id,
         records::{ProcessIdentity, write_private_json},
     },
@@ -138,22 +138,20 @@ impl Drop for PinGuard {
 /// Whether `value` has the shape of an SCV conversation handle
 /// (`<agent>-<number>`). CLI session IDs never do.
 pub(crate) fn is_handle(value: &str) -> bool {
-    value.len() <= MAX_HANDLE_BYTES
-        && value.split_once('-').is_some_and(|(agent, number)| {
-            !agent.is_empty()
-                && agent
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-                && !number.is_empty()
-                && number.chars().all(|c| c.is_ascii_digit())
-        })
+    handle_agent(value).is_some()
 }
 
 /// The agent whose conversation `handle` names, such as `codex` for
 /// `codex-2`, when it has the shape of a handle.
 pub(crate) fn handle_agent(handle: &str) -> Option<&str> {
-    let (agent, _) = handle.split_once('-')?;
-    is_handle(handle).then_some(agent)
+    if handle.len() > MAX_HANDLE_BYTES {
+        return None;
+    }
+    let (agent, number) = handle.rsplit_once('-')?;
+    (!number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && adapters::adapter(agent).is_some())
+    .then_some(agent)
 }
 
 impl ConversationStore {

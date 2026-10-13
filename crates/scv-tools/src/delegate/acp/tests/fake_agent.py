@@ -45,6 +45,7 @@ for line in sys.stdin:
         send({"id": rid, "result": result})
     elif method == "session/new":
         sessions += 1
+        json.dump(params, open(os.path.join(DIR, "session.json"), "w"))
         log("session/new cwd=" + params["cwd"])
         if MODE == "auth":
             send({"id": rid, "error": {"code": -32000, "message": "Authentication required"}})
@@ -116,6 +117,7 @@ for line in sys.stdin:
             send({"id": rid, "result": {"stopReason": "end_turn"}})
         elif text == "env":
             chunk(session, "CODEX_CONFIG=" + os.environ.get("CODEX_CONFIG", "unset"))
+            chunk(session, " ANTHROPIC_API_KEY=" + os.environ.get("ANTHROPIC_API_KEY", "unset"))
             send({"id": rid, "result": {"stopReason": "end_turn"}})
         else:
             chunk(session, "echo " + text)

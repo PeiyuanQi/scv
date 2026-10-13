@@ -608,6 +608,7 @@ fn the_registry_offers_scv_only_below_the_depth_limit() {
         output: crate::delegate::adapters::OutputFormat::Text,
         resume: crate::delegate::adapters::Resume::Unsupported,
         home: None,
+        auth: crate::AgentAuthPlan::None,
         transport: crate::delegate::adapters::Transport::ScvProtocol,
         acp: None,
         use_for: None,

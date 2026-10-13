@@ -36,9 +36,9 @@ pub(crate) fn offered_adapters(config: &Config) -> HashMap<String, scv_tools::Ag
             descriptor.map(|descriptor| descriptor.status),
             &adapter.home,
         ) {
-            (Some(scv_tools::adapters::Status::Stored(store)), Some(home)) => !matches!(
+            (Some(scv_tools::adapters::Status::Stored(store)), Some(home)) => matches!(
                 stores::stored_status(store, home),
-                Ok(stores::StoredStatus { ready: false, .. })
+                Ok(stores::StoredStatus { ready: true, .. })
             ),
             _ => true,
         }

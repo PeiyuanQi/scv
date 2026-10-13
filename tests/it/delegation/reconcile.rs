@@ -41,6 +41,9 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
     let home = tempfile::tempdir().unwrap();
     let home_path = std::fs::canonicalize(home.path()).unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let key = home_path.join("agents/claude/.anthropic-api-key");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    write_private(&key, "sk-ant-api03-test-key");
     // A fake agent that starts a detached descendant and keeps running.
     let agent = home_path.join("fake-claude");
     std::fs::write(&agent, "#!/bin/sh\nsetsid sleep 120 &\nexec sleep 120\n").unwrap();

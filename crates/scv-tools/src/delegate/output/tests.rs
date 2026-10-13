@@ -56,6 +56,20 @@ fn claude_signed_out_result_is_a_failure_with_its_message() {
 }
 
 #[test]
+fn claude_init_source_must_match_the_pinned_billing_identity() {
+    let mut stream = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeApiKey);
+    stream.push(
+        br#"{"type":"system","subtype":"init","apiKeySource":"none"}
+{"type":"result","is_error":false,"result":"done"}
+"#,
+    );
+    let result = stream.finish(OK, None);
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(result.error.unwrap().contains("credential source none"));
+}
+
+#[test]
 fn codex_jsonl_yields_the_last_agent_message_and_turn_usage() {
     let stdout = concat!(
         r#"{"type":"thread.started","thread_id":"t"}"#,

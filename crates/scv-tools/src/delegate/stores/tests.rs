@@ -488,3 +488,61 @@ fn a_broken_nested_scv_config_is_not_overwritten() {
     assert!(configure_scv_child(home.path(), &bad_url, "sk-key-0123456789").is_err());
     assert!(!path.exists());
 }
+
+#[test]
+fn claude_stores_fail_closed_for_api_and_subscription_identities() {
+    let home = tempfile::tempdir().unwrap();
+    let key = home.path().join(".anthropic-api-key");
+    assert!(
+        !claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+    std::fs::write(&key, "sk-ant-api03-test").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(
+        home.path().join(".claude/.credentials.json"),
+        r#"{"claudeAiOauth":{"refreshToken":"refresh","scopes":["user:inference"],"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    assert!(
+        !claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+    assert!(
+        claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .ready
+    );
+}
+
+#[test]
+fn claude_subscription_status_accepts_oauth_and_rejects_ambiguous_json() {
+    let home = tempfile::tempdir().unwrap();
+    let credentials = home.path().join(".claude/.credentials.json");
+    std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+    std::fs::write(
+        &credentials,
+        r#"{"claudeAiOauth":{"refreshToken":"refresh","scopes":["user:inference"],"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .lines[0],
+        "signed in (Claude subscription, max)"
+    );
+    std::fs::write(home.path().join(".claude.json"), "not json").unwrap();
+    assert!(
+        !claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .ready
+    );
+}

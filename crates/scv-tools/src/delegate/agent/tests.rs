@@ -397,7 +397,7 @@ fn the_schema_lists_only_offered_agents_and_the_options_some_of_them_take() {
     // its model family.
     let agent = properties["agent"]["description"].as_str().unwrap();
     for line in [
-        "\n- claude (Claude Code): Anthropic's coding agent;",
+        "\n- claude (Claude Code (API key)): Anthropic's coding agent;",
         "Takes model (Claude model alias or ID, such as sonnet or opus), effort, and session.",
         "\n- codex (Codex): OpenAI's coding agent;",
         "Takes model (OpenAI model ID from the Codex configuration; not a Claude alias), \
@@ -548,7 +548,7 @@ fn approval_summaries_name_the_agent() {
     );
     assert_eq!(
         tool.approval_summary(&json!({"prompt":"hi"})).unwrap(),
-        "agent claude: Launch claude with the prompt."
+        "agent claude (API key billing): Launch claude with the prompt."
     );
 }
 

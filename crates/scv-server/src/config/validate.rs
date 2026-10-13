@@ -303,6 +303,38 @@ impl Config {
             // DeepSeek Harness takes a model and effort only from its ACP
             // server, so only a transport that runs that server allows them.
             let descriptor = scv_tools::adapters::adapter(agent);
+            if descriptor
+                .is_some_and(|descriptor| descriptor.auth != scv_tools::adapters::AgentAuth::None)
+                && self.layout().agent_home(agent).to_str().is_none()
+            {
+                bail!("[agents.{agent}] Claude agent home must be valid UTF-8");
+            }
+            if descriptor
+                .is_some_and(|descriptor| descriptor.auth != scv_tools::adapters::AgentAuth::None)
+            {
+                for (field, values) in [
+                    ("args", &adapter.args),
+                    ("prompt_args", &adapter.prompt_args),
+                    ("model_args", &adapter.model_args),
+                    ("effort_args", &adapter.effort_args),
+                ] {
+                    for value in values {
+                        for flag in [
+                            "--settings",
+                            "--setting-sources",
+                            "--managed-settings",
+                            "--bare",
+                            "--hide-claude-auth",
+                        ] {
+                            if value == flag || value.starts_with(&format!("{flag}=")) {
+                                bail!(
+                                    "[agents.{agent}] {field} must not contain {flag}: SCV pins Claude Code's credentials and routing itself"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             let session_options = descriptor
                 .and_then(|descriptor| descriptor.acp)
                 .is_some_and(|launch| launch.session_options);

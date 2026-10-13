@@ -259,10 +259,17 @@ impl AgentTool {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let result = agent.backend.execute(arguments, context).await;
+        let family = crate::adapters::adapter(&agent.name).map(|descriptor| descriptor.family);
         let others: Vec<&str> = self
             .names()
             .into_iter()
             .filter(|name| *name != agent.name)
+            .filter(|name| {
+                family.is_none_or(|family| {
+                    crate::adapters::adapter(name)
+                        .is_none_or(|descriptor| descriptor.family != family)
+                })
+            })
             .collect();
         choice::settle(result, &others)
     }
@@ -497,8 +504,16 @@ impl Tool for AgentTool {
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
         let (agent, arguments) = self.route(arguments)?;
         Ok(format!(
-            "agent {}: {}",
+            "agent {}{}: {}",
             agent.name,
+            crate::adapters::adapter(&agent.name)
+                .and_then(|descriptor| match descriptor.auth {
+                    crate::adapters::AgentAuth::ClaudeApiKey => Some(" (API key billing)"),
+                    crate::adapters::AgentAuth::ClaudeSubscription =>
+                        Some(" (Claude subscription)"),
+                    crate::adapters::AgentAuth::None => None,
+                })
+                .unwrap_or_default(),
             agent.backend.approval_summary(&arguments)?
         ))
     }

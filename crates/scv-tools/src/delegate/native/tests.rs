@@ -1,6 +1,9 @@
 //! Unit tests for `src/delegate/native.rs`.
 
-use std::{os::unix::fs::symlink, time::Duration};
+use std::{
+    os::unix::fs::{PermissionsExt as _, symlink},
+    time::Duration,
+};
 
 use scv_core::Tool as _;
 use serde_json::json;
@@ -62,6 +65,7 @@ fn fake_agent_with_prompt_args(
             output: OutputFormat::Text,
             resume: Resume::Unsupported,
             home: None,
+            auth: crate::AgentAuthPlan::None,
             transport: Transport::Process,
             acp: None,
             use_for: None,
@@ -84,6 +88,37 @@ fn context(workspace: &Path) -> ToolContext {
         workspace.canonicalize().unwrap(),
         tokio_util::sync::CancellationToken::new(),
     )
+}
+
+#[tokio::test]
+async fn claude_native_launch_pins_settings_and_checks_the_api_key_file() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let key = home.path().join(".anthropic-api-key");
+    std::fs::write(&key, "sk-ant-api03-test").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut tool = fake_agent(
+        workspace.path(),
+        "claude",
+        "printf '%s\\n' \"$@\"\n",
+        &[],
+        Vec::new(),
+    );
+    tool.auth = crate::AgentAuthPlan::Claude {
+        mode: crate::adapters::AgentAuth::ClaudeApiKey,
+        settings: json!({"apiKeyHelper":"cat -- '/private/.anthropic-api-key'"}),
+        home: home.path().to_owned(),
+    };
+    let output = tool
+        .execute(json!({"prompt":"hello"}), context(workspace.path()))
+        .await
+        .unwrap();
+    assert!(output.content.contains("--settings"), "{}", output.content);
+    assert!(
+        output.content.contains("apiKeyHelper"),
+        "{}",
+        output.content
+    );
 }
 
 #[tokio::test]
@@ -167,6 +202,7 @@ async fn native_agent_maps_model_and_effort_to_adapter_flags() {
             output: OutputFormat::Text,
             resume: Resume::Unsupported,
             home: None,
+            auth: crate::AgentAuthPlan::None,
             transport: Transport::Process,
             acp: None,
             use_for: None,
@@ -530,6 +566,7 @@ fn conversing_agent(
             output: format,
             resume,
             home,
+            auth: crate::AgentAuthPlan::None,
             transport: Transport::Process,
             acp: None,
             use_for: None,

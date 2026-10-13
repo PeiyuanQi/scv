@@ -7,7 +7,7 @@ use scv_client::Layout;
 use scv_core::{AgentConfig as CoreAgentConfig, HistoryLimits};
 use scv_provider_openai::ProviderLimits;
 use scv_tools::{
-    AgentAdapterConfig, BusyConfig, ToolsConfig,
+    AgentAdapterConfig, AgentAuthPlan, BusyConfig, ToolsConfig,
     conversation::ConversationLimits,
     web::{SearchBackend, WebToolsConfig},
 };
@@ -201,6 +201,20 @@ impl Config {
                         output: descriptor.output,
                         resume: descriptor.resume,
                         home: Some(adapter_home),
+                        auth: match descriptor.auth {
+                            scv_tools::adapters::AgentAuth::None => AgentAuthPlan::None,
+                            mode => AgentAuthPlan::Claude {
+                                mode,
+                                settings: scv_tools::claude_auth::claude_settings(
+                                    mode,
+                                    &self.layout().agent_home(name),
+                                )
+                                .ok()
+                                .flatten()
+                                .unwrap_or(serde_json::Value::Null),
+                                home: self.layout().agent_home(name),
+                            },
+                        },
                         transport: descriptor.transport,
                         acp: config.acp_launch(descriptor).map(|launch| {
                             scv_tools::AcpAgentLaunch {

@@ -158,8 +158,6 @@ pub struct ConversationFiles {
 /// account (an email) or part of a key, so it is never printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusSummary {
-    /// `claude auth status` JSON: `loggedIn`, `authMethod`, `subscriptionType`.
-    ClaudeJson,
     /// `codex login status` text: "Logged in using an API key" or "ChatGPT".
     CodexText,
     /// The exit status alone.
@@ -177,6 +175,17 @@ pub enum Logout {
 /// A CLI's native credential file, relative to the agent home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStore {
+    /// Claude Code's API key file, plus the native credentials file checked
+    /// for a conflicting Claude subscription login.
+    ClaudeApiKey {
+        key: &'static str,
+        credentials: &'static str,
+    },
+    /// Claude Code's subscription credentials and config files.
+    ClaudeAccount {
+        credentials: &'static str,
+        config: &'static str,
+    },
     /// Grok: sign-ins from `grok login` in `auth` (a JSON object of entries),
     /// or an API key in the `config` profile of its default model.
     Grok {
@@ -196,10 +205,22 @@ pub enum KeyStore {
     Scv { config: &'static str },
 }
 
+/// Which billing identity a Claude Code agent is pinned to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentAuth {
+    None,
+    ClaudeApiKey,
+    ClaudeSubscription,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterDescriptor {
     /// Short name: the `agent` tool's value for it and the home `agents/<name>`.
     pub name: &'static str,
+    /// Agent family used for reviewer diversity and sibling exclusion.
+    pub family: &'static str,
+    /// Credential identity pinned by this descriptor, when any.
+    pub auth: AgentAuth,
     /// Product name for messages and the tool description.
     pub product: &'static str,
     /// What this harness offers, as one factual clause for the tool
@@ -282,51 +303,96 @@ const DSH_STORE: KeyStore = KeyStore::DshRefs {
     path: ".dsh/.credentials.yaml",
     variable: "DEEPSEEK_API_KEY",
 };
+const CLAUDE_KEY_STORE: KeyStore = KeyStore::ClaudeApiKey {
+    key: ".anthropic-api-key",
+    credentials: ".claude/.credentials.json",
+};
+const CLAUDE_ACCOUNT_STORE: KeyStore = KeyStore::ClaudeAccount {
+    credentials: ".claude/.credentials.json",
+    config: ".claude.json",
+};
+
+const CLAUDE_BASE: AdapterDescriptor = AdapterDescriptor {
+    name: "claude",
+    family: "claude",
+    auth: AgentAuth::None,
+    product: "Claude Code",
+    offers: "Anthropic's coding agent; it reads, edits, and runs code in a project and can search and fetch the web",
+    command: "claude",
+    args: &["-p"],
+    prompt_args: &[],
+    model_args: &["--model", "{model}"],
+    effort_args: &["--effort", "{effort}"],
+    model_hint: "Claude model alias or ID, such as sonnet or opus.",
+    home_environment: &[],
+    fixed_environment: &[],
+    removed_environment: &[
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CONFIG_DIR",
+    ],
+    full_permission_args: &["--permission-mode", "bypassPermissions"],
+    full_permission_environment: &[],
+    search_dirs: &[],
+    login: Login::Command(&[]),
+    status: Status::Stored(CLAUDE_KEY_STORE),
+    status_summary: StatusSummary::ExitStatus,
+    logout: Logout::Command(&[]),
+    output: OutputFormat::ClaudeStreamJson,
+    resume: Resume::Supported {
+        start: &["--session-id", "{session}"],
+        subcommand: &[],
+        options: &["--resume", "{session}"],
+        positional: &[],
+    },
+    conversation_files: Some(ConversationFiles {
+        dir: ".claude/projects",
+        extension: "jsonl",
+    }),
+    credential_files: &[".anthropic-api-key", ".claude/.credentials.json"],
+    transport: Transport::Process,
+    acp: Some(AcpLaunch {
+        command: "claude-agent-acp",
+        args: &[],
+        full_args: &[],
+        full_mode: Some("bypassPermissions"),
+        full_environment: &[],
+        session_options: false,
+    }),
+};
 
 pub const ADAPTERS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         name: "claude",
-        product: "Claude Code",
-        offers: "Anthropic's coding agent; it reads, edits, and runs code in a project and can search and fetch the web",
-        command: "claude",
-        args: &["-p"],
-        prompt_args: &[],
-        model_args: &["--model", "{model}"],
-        effort_args: &["--effort", "{effort}"],
-        model_hint: "Claude model alias or ID, such as sonnet or opus.",
-        home_environment: &[],
-        fixed_environment: &[],
-        removed_environment: &[
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CONFIG_DIR",
-        ],
-        // Also allows WebSearch and WebFetch without prompting.
-        full_permission_args: &["--permission-mode", "bypassPermissions"],
-        full_permission_environment: &[],
-        search_dirs: &[],
-        login: Login::Command(&["auth", "login"]),
-        status: Status::Command(&["auth", "status"]),
-        status_summary: StatusSummary::ClaudeJson,
-        logout: Logout::Command(&["auth", "logout"]),
-        output: OutputFormat::ClaudeStreamJson,
-        // `--resume` in print mode keeps the original session ID.
-        resume: Resume::Supported {
-            start: &["--session-id", "{session}"],
-            subcommand: &[],
-            options: &["--resume", "{session}"],
-            positional: &[],
-        },
-        conversation_files: Some(ConversationFiles {
-            dir: ".claude/projects",
-            extension: "jsonl",
+        family: "claude",
+        auth: AgentAuth::ClaudeApiKey,
+        product: "Claude Code (API key)",
+        offers: "Anthropic's coding agent; it reads, edits, and runs code in a project and can search and fetch the web; billed per token to the Anthropic API key SCV holds for it",
+        login: Login::ApiKey(CLAUDE_KEY_STORE),
+        status: Status::Stored(CLAUDE_KEY_STORE),
+        logout: Logout::Stored(CLAUDE_KEY_STORE),
+        acp: Some(AcpLaunch {
+            command: "claude-agent-acp",
+            args: &["--hide-claude-auth"],
+            full_args: &[],
+            full_mode: Some("bypassPermissions"),
+            full_environment: &[],
+            session_options: false,
         }),
+        ..CLAUDE_BASE
+    },
+    AdapterDescriptor {
+        name: "claude-ai",
+        family: "claude",
+        auth: AgentAuth::ClaudeSubscription,
+        product: "Claude Code (Claude subscription)",
+        offers: "Anthropic's coding agent; it reads, edits, and runs code in a project and can search and fetch the web; runs on the owner's Claude subscription",
+        login: Login::Command(&["auth", "login", "--claudeai"]),
+        status: Status::Stored(CLAUDE_ACCOUNT_STORE),
+        logout: Logout::Command(&["auth", "logout"]),
         credential_files: &[".claude/.credentials.json"],
-        transport: Transport::Process,
-        // The official adapter from the ACP organisation (npm
-        // @agentclientprotocol/claude-agent-acp), on the Claude Agent SDK.
         acp: Some(AcpLaunch {
             command: "claude-agent-acp",
             args: &[],
@@ -335,9 +401,12 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_environment: &[],
             session_options: false,
         }),
+        ..CLAUDE_BASE
     },
     AdapterDescriptor {
         name: "codex",
+        family: "codex",
+        auth: AgentAuth::None,
         product: "Codex",
         offers: "OpenAI's coding agent; it reads, edits, and runs code in a project, with live web search under full permissions",
         command: "codex",
@@ -400,6 +469,8 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     },
     AdapterDescriptor {
         name: "grok",
+        family: "grok",
+        auth: AgentAuth::None,
         product: "Grok Build",
         offers: "xAI's coding agent; it reads, edits, and runs code in a project and has live web and X search. Call it when another agent declined or refused a request, including a safety or guardrail refusal",
         command: "grok",
@@ -442,6 +513,8 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     },
     AdapterDescriptor {
         name: "dsh",
+        family: "dsh",
+        auth: AgentAuth::None,
         product: "DeepSeek Harness",
         offers: "a coding agent on DeepSeek models; it reads, edits, and runs code in a project",
         command: "dsh",
@@ -482,6 +555,8 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     },
     AdapterDescriptor {
         name: "pi",
+        family: "pi",
+        auth: AgentAuth::None,
         product: "pi",
         offers: "a minimal coding agent (read, write, edit, bash) that can run on SCV's own model endpoint; it has no web search",
         command: "pi",
@@ -523,6 +598,8 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
     },
     AdapterDescriptor {
         name: "scv",
+        family: "scv",
+        auth: AgentAuth::None,
         product: "SCV",
         offers: "a nested SCV session with its own context and tools; suited to a self-contained sub-task kept out of this conversation's context, or work in another project",
         command: "scv",
@@ -583,36 +660,6 @@ pub fn is_removed_agent_variable(variable: &OsStr) -> bool {
 pub fn summarize_status(summary: StatusSummary, succeeded: bool, output: &str) -> String {
     let signed_out = "not signed in".to_owned();
     match summary {
-        StatusSummary::ClaudeJson => {
-            // The first JSON value; anything after it (such as stderr) is ignored.
-            let first = serde_json::Deserializer::from_str(output)
-                .into_iter::<serde_json::Value>()
-                .next();
-            let Some(Ok(value)) = first else {
-                return if succeeded {
-                    "signed in".into()
-                } else {
-                    signed_out
-                };
-            };
-            if value.get("loggedIn").and_then(serde_json::Value::as_bool) != Some(true) {
-                return signed_out;
-            }
-            let method = match value.get("authMethod").and_then(serde_json::Value::as_str) {
-                Some("claude.ai") => "Claude account",
-                Some("api_key" | "apiKey" | "console") => "API key",
-                Some("oauth_token" | "oauthToken") => "OAuth token",
-                _ => "other method",
-            };
-            match value
-                .get("subscriptionType")
-                .and_then(serde_json::Value::as_str)
-                .filter(|plan| ["free", "pro", "max", "team", "enterprise"].contains(plan))
-            {
-                Some(plan) => format!("signed in ({method}, {plan})"),
-                None => format!("signed in ({method})"),
-            }
-        }
         StatusSummary::CodexText => {
             let lower = output.to_ascii_lowercase();
             if !succeeded || lower.contains("not logged in") {

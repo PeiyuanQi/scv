@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    AgentAuthPlan,
     args::bounded,
     delegate::{
         agent::AGENT_TOOL,
@@ -236,6 +237,21 @@ impl AcpAgentTool {
                 self.name, self.launch.command
             )
         })?;
+        if let AgentAuthPlan::Claude { mode, home, .. } = &self.auth {
+            let status =
+                crate::stores::claude_status(*mode, home).map_err(|error| format!("{error:#}"))?;
+            if !status.ready {
+                return Err(format!(
+                    "{} billing identity is unavailable: {}",
+                    match mode {
+                        crate::adapters::AgentAuth::ClaudeApiKey => "API key billing",
+                        crate::adapters::AgentAuth::ClaudeSubscription => "Claude subscription",
+                        crate::adapters::AgentAuth::None => "unknown billing",
+                    },
+                    status.lines.join("; ")
+                ));
+            }
+        }
         let owner_depth = self.owner_depth();
         let pending = self.delegation.as_ref().map(|delegation| {
             delegation.registry.begin_at(
@@ -247,6 +263,16 @@ impl AcpAgentTool {
             )
         });
         let mut environment = self.environment.clone();
+        if let AgentAuthPlan::Claude {
+            mode: crate::adapters::AgentAuth::ClaudeApiKey,
+            home,
+            ..
+        } = &self.auth
+        {
+            let key = std::fs::read_to_string(home.join(".anthropic-api-key"))
+                .map_err(|error| format!("read Claude API key: {error}"))?;
+            environment.push(("ANTHROPIC_API_KEY".into(), key.trim().into()));
+        }
         environment.extend(self.launch.environment.iter().cloned());
         match &pending {
             Some(pending) => environment.extend(pending.environment.iter().cloned()),
@@ -320,13 +346,14 @@ impl AcpAgentTool {
             );
             return Err((rpc, message));
         }
+        let mut session_params = json!({"cwd": cwd, "mcpServers": []});
+        if let AgentAuthPlan::Claude { settings, .. } = &self.auth {
+            session_params["_meta"] = json!({
+                "claudeCode": {"options": {"settings": settings}}
+            });
+        }
         let session = match rpc
-            .call(
-                "session/new",
-                json!({"cwd": cwd, "mcpServers": []}),
-                deadline,
-                cancellation,
-            )
+            .call("session/new", session_params, deadline, cancellation)
             .await
         {
             Ok(result) => result,
@@ -512,7 +539,38 @@ impl AcpAgentTool {
     pub(super) async fn call_error(&self, rpc: &Rpc, what: &str, error: CallError) -> String {
         match error {
             CallError::Io(error) => format!("{what}: {}", error.message),
-            CallError::Rpc(error) => format!("{what} failed: {}", describe_rpc_error(&error)),
+            CallError::Rpc(error) => {
+                if what == "session/new"
+                    && matches!(
+                        self.auth,
+                        AgentAuthPlan::Claude {
+                            mode: crate::adapters::AgentAuth::ClaudeApiKey,
+                            ..
+                        }
+                    )
+                    && error.pointer("/data/reason").and_then(Value::as_str)
+                        == Some("claude_subscription_not_supported")
+                {
+                    "claude is API-key only but its home holds a Claude subscription login; run scv agents logout claude, or use claude-ai".into()
+                } else if what == "session/new"
+                    && matches!(
+                        self.auth,
+                        AgentAuthPlan::Claude {
+                            mode: crate::adapters::AgentAuth::ClaudeApiKey,
+                            ..
+                        }
+                    )
+                    && error.get("data").is_none()
+                    && error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("Authentication required"))
+                {
+                    "claude has no usable API key; run scv agents login claude".into()
+                } else {
+                    format!("{what} failed: {}", describe_rpc_error(&error))
+                }
+            }
             CallError::Interrupted(Interrupt::TimedOut) => format!("{what}: timed out"),
             CallError::Interrupted(Interrupt::Cancelled) => format!("{what}: cancelled"),
             CallError::Interrupted(Interrupt::Lost(reason)) => {

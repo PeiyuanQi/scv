@@ -117,6 +117,9 @@ pub(crate) async fn agents(
             Ok(())
         }
         AgentsCommand::Status { agent } => {
+            for warning in user_config()?.claude_warnings() {
+                println!("Warning: {warning}");
+            }
             let selected: Vec<_> = match agent {
                 Some(name) => vec![agent_descriptor(&name)?],
                 None => adapters::ADAPTERS.iter().collect(),
@@ -370,7 +373,7 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     println!(
-        "{:<16} {:<7} {:<13} {:<10} {:>8} {:>5} {:>7} {:>5}  CWD",
+        "{:<16} {:<9} {:<13} {:<10} {:>8} {:>5} {:>7} {:>5}  CWD",
         "HANDLE", "AGENT", "CONVERSATION", "STATE", "PID", "PROCS", "AGE", "DEPTH"
     );
     for entry in entries {
@@ -382,7 +385,7 @@ fn print_delegations(entries: &[scv_protocol::DelegationInfo]) {
         };
         // Debug formatting escapes control characters in the untrusted path.
         println!(
-            "{:<16} {:<7} {:<13} {:<10} {:>8} {:>5} {:>7} {:>5}  {:?}",
+            "{:<16} {:<9} {:<13} {:<10} {:>8} {:>5} {:>7} {:>5}  {:?}",
             entry.handle,
             entry.agent,
             conversation,

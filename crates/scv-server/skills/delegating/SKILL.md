@@ -131,11 +131,12 @@ own Review and Landing lines, ahead of your summary.
   `before_review` lets it land each round's work before it is reviewed: use
   it only when the user asked to land first, such as for an urgent fix.
   Publishing still asks the user through its own approval.
-- **The reviewer.** Leave `review.agent` out: codex reviews claude's work,
-  and claude reviews codex's and everyone else's, then codex; grok steps in
-  when those are unavailable or one declines; a fresh conversation of the
-  builder's own agent is the last resort. Set `review.agent` only when the
-  user named one; it is then never swapped. `review.model` and
+- **The reviewer.** Leave `review.agent` out: Claude-family work is reviewed
+  by codex, then grok; codex work is reviewed by claude-ai, claude, then grok;
+  other work is reviewed by claude-ai, claude, codex, then grok. A fresh
+  conversation of the builder's own agent is the last resort, and a Claude
+  sibling is never used for Claude-family work. Set `review.agent` only when
+  the user named one; it is then never swapped. `review.model` and
   `review.effort` go only with it. Put what the reviewer should look at in
   particular in `review.focus`.
 - **The brief** is the usual self-contained brief with its "done when" and
@@ -203,6 +204,10 @@ cause.
 
   `model` and `effort` apply to every call to that agent that leaves them
   out, not only to the work its `use_for` names.
+
+  Claude Code has two names: claude is API-key billing and claude-ai is the
+  owner's Claude subscription. A Claude-family builder is reviewed by Codex
+  then Grok; its sibling is never used as the default reviewer.
 
   Add `[agent] prefer = [...]` too if they want the order changed. Edit the
   file only after the owner says yes. New sessions read it.
