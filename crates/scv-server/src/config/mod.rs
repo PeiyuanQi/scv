@@ -49,9 +49,17 @@ impl Instance {
 /// Warnings for Claude Code billing migrations and machine-wide policy.
 fn claude_warnings_for_layout(layout: &Layout) -> Vec<String> {
     let mut warnings = Vec::new();
-    let config_text = std::fs::read_to_string(layout.config()).unwrap_or_default();
-    let explicit_claude = config_text.contains("[agents.claude]");
-    let explicit_claude_ai = config_text.contains("[agents.claude-ai]");
+    let agents = std::fs::read_to_string(layout.config())
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|value| value.get("agents").cloned())
+        .and_then(|value| value.as_table().cloned());
+    let explicit_claude = agents
+        .as_ref()
+        .is_some_and(|agents| agents.contains_key("claude"));
+    let explicit_claude_ai = agents
+        .as_ref()
+        .is_some_and(|agents| agents.contains_key("claude-ai"));
     if explicit_claude
         && !explicit_claude_ai
         && scv_tools::stores::claude_status(

@@ -103,7 +103,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.14` and exact workspace dependency pins.
+`0.4.0` and exact workspace dependency pins.
 
 ## Finding your way
 

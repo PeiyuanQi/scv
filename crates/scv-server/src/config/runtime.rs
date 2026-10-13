@@ -203,17 +203,28 @@ impl Config {
                         home: Some(adapter_home),
                         auth: match descriptor.auth {
                             scv_tools::adapters::AgentAuth::None => AgentAuthPlan::None,
-                            mode => AgentAuthPlan::Claude {
-                                mode,
-                                settings: scv_tools::claude_auth::claude_settings(
+                            mode => {
+                                let settings = match scv_tools::claude_auth::claude_settings(
                                     mode,
                                     &self.layout().agent_home(name),
-                                )
-                                .ok()
-                                .flatten()
-                                .unwrap_or(serde_json::Value::Null),
-                                home: self.layout().agent_home(name),
-                            },
+                                ) {
+                                    Ok(Some(settings)) => settings,
+                                    Ok(None) => return None,
+                                    Err(error) => {
+                                        tracing::error!(
+                                            agent = %name,
+                                            %error,
+                                            "cannot build pinned Claude Code settings"
+                                        );
+                                        return None;
+                                    }
+                                };
+                                AgentAuthPlan::Claude {
+                                    mode,
+                                    settings,
+                                    home: self.layout().agent_home(name),
+                                }
+                            }
                         },
                         transport: descriptor.transport,
                         acp: config.acp_launch(descriptor).map(|launch| {

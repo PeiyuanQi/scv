@@ -3,7 +3,10 @@
 //! Structured formats are parsed line by line as the CLI writes them, keeping
 //! only the reply, usage, and error, so a long run's full event log never
 //! reaches the parent model. Unknown events and fields are ignored, and a
-//! stream with no parsable event falls back to its text.
+//! stream with no parsable event falls back to its text. Claude's first
+//! `system`/`init` event is also checked against the pinned billing identity:
+//! API-key runs require `apiKeySource = "apiKeyHelper"`, while subscription
+//! runs require `apiKeySource = "none"`.
 
 use scv_core::{ProgressSink, ToolFailure, ToolOutput};
 use scv_protocol::JobStatus;

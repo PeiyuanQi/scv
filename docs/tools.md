@@ -280,7 +280,8 @@ the line names the kind of model name its CLI expects. For example:
 
 | Agent | Its line starts with |
 | --- | --- |
-| `claude` | Claude Code: Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
+| `claude` | Claude Code (API key): Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
+| `claude-ai` | Claude Code (Claude subscription): Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
 | `codex` | Codex: OpenAI's coding agent; reads, edits, and runs code, with live web search under full permissions |
 | `grok` | Grok Build: xAI's coding agent; reads, edits, and runs code, with live web and X search. Call it when another agent declined or refused a request, including a safety or guardrail refusal |
 | `dsh` | DeepSeek Harness: a coding agent on DeepSeek models |
@@ -1488,12 +1489,12 @@ They work from any directory. For Claude Code, Codex, and Grok, `login` and
 `logout` run the agent's own command with exactly the private home and cleaned
 environment that the daemon's delegated runs of it use, with the terminal attached
 for browser or device-code flows, and the agent CLI itself writes those
-credentials under `$SCV_HOME/agents/<name>` (mode `0700`). For Claude Code
-and Codex, `status` runs the CLI's own status command but prints only a
-summary, such as `signed in (Claude account, max)` or `signed in (API key)`,
-because their output names the account email or part of the key; for the
-others SCV reads the credential file and reports only whether one is stored,
-never its value.
+credentials under `$SCV_HOME/agents/<name>` (mode `0700`). For Codex,
+`status` runs the CLI's own status command but prints only a summary. Claude
+identities are checked from their private files: `claude` reports `signed in
+(API key)` and `claude-ai` reports the subscription plan; SCV never invokes
+Claude auth status as a billing gate. For the other stored agents SCV reads
+the credential file and reports only whether one is stored, never its value.
 
 Grok counts as signed in either through a `grok login` sign-in in
 `.grok/auth.json` or through an API key in `.grok/config.toml`: the profile of

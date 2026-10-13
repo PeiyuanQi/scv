@@ -241,13 +241,14 @@ impl AcpAgentTool {
             let status =
                 crate::stores::claude_status(*mode, home).map_err(|error| format!("{error:#}"))?;
             if !status.ready {
+                let billing = match mode {
+                    crate::adapters::AgentAuth::ClaudeApiKey => "API key billing",
+                    crate::adapters::AgentAuth::ClaudeSubscription => "Claude subscription",
+                    crate::adapters::AgentAuth::None => "unknown billing",
+                };
                 return Err(format!(
-                    "{} billing identity is unavailable: {}",
-                    match mode {
-                        crate::adapters::AgentAuth::ClaudeApiKey => "API key billing",
-                        crate::adapters::AgentAuth::ClaudeSubscription => "Claude subscription",
-                        crate::adapters::AgentAuth::None => "unknown billing",
-                    },
+                    "{billing} identity for {} is unavailable: {}",
+                    self.name,
                     status.lines.join("; ")
                 ));
             }

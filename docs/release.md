@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.3.14`. All crates share that version, and
-dependencies between workspace packages use exact `=0.3.14` pins.
+The current workspace release is `0.4.0`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.0` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -52,12 +52,18 @@ and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
 
-## Upgrading to 0.3.14
+## Upgrading to 0.4.0
 
-`0.3.14` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
-so a planned restart from `0.3.13` checks the new release and can roll it back.
-It adds no configuration key, so going back to `0.3.13` needs no
-`config.toml` edit.
+`0.4.0` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.3.14` checks the new release and can roll it back.
+It adds two Claude billing identities. Going back to `0.3.14` requires removing
+any `[agents.claude-ai]` configuration and restoring the previous meaning of
+`claude`.
+
+- **Claude billing identities.** `claude` is pinned to an Anthropic API key and
+  `claude-ai` is pinned to the Claude Code subscription/OAuth identity. They
+  use separate private homes and never fall back to one another. See
+  [Claude Code credentials](security.md#pinned-claude-code-credentials).
 
 - **Reviewed jobs.** An `agent` call may set `review`: the job's agent builds,
   a fresh reviewer on another agent checks the work on a structured verdict,

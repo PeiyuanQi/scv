@@ -43,10 +43,7 @@ pub fn claude_settings(auth: AgentAuth, home: &Path) -> Result<Option<Value>> {
         }
         AgentAuth::ClaudeApiKey => {
             settings.insert("forceLoginMethod".into(), "console".into());
-            let path = home
-                .join(".anthropic-api-key")
-                .canonicalize()
-                .unwrap_or_else(|_| home.join(".anthropic-api-key"));
+            let path = home.join(".anthropic-api-key");
             let path = path
                 .to_str()
                 .ok_or_else(|| anyhow!("Claude agent home is not valid UTF-8"))?;
