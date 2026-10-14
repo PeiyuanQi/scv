@@ -561,41 +561,6 @@ fn claude_subscription_status_accepts_oauth_and_rejects_ambiguous_json() {
 
 #[test]
 fn a_large_claude_json_is_checked_for_a_console_key_without_failing_status() {
-    assert_eq!(
-        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":"sk-ant"}"#)).unwrap(),
-        ConsoleKey::Present
-    );
-    assert_eq!(
-        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":""}"#)).unwrap(),
-        ConsoleKey::Absent
-    );
-    assert_eq!(
-        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":"  "}"#)).unwrap(),
-        ConsoleKey::Absent
-    );
-    assert_eq!(
-        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":null}"#)).unwrap(),
-        ConsoleKey::Absent
-    );
-    assert_eq!(
-        scan_console_key(std::io::Cursor::new(
-            br#"{"nested":{"primaryApiKey":"sk-ant"}}"#,
-        ))
-        .unwrap(),
-        ConsoleKey::Absent
-    );
-    assert_eq!(
-        scan_console_key(std::io::Cursor::new(
-            br#"{"notes":"see \"primaryApiKey\": \"sk-ant\""}"#,
-        ))
-        .unwrap(),
-        ConsoleKey::Absent
-    );
-    assert_eq!(
-        scan_console_key(std::io::Cursor::new(br#"{"\u0070rimaryApiKey":"sk-ant"}"#,)).unwrap(),
-        ConsoleKey::Present
-    );
-
     let home = tempfile::tempdir().unwrap();
     let credentials = home.path().join(".claude/.credentials.json");
     std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
@@ -629,5 +594,22 @@ fn a_large_claude_json_is_checked_for_a_console_key_without_failing_status() {
             .iter()
             .any(|line| line.contains("Console API key")),
         "{blocked:?}"
+    );
+    std::fs::write(&config, r#"{"nested":{"primaryApiKey":"sk-ant"}}"#).unwrap();
+    assert!(
+        claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .ready
+    );
+    let huge = std::fs::File::create(&config).unwrap();
+    huge.set_len(MAX_CLAUDE_CONFIG_BYTES + 1).unwrap();
+    let too_large = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(!too_large.ready, "{too_large:?}");
+    assert!(
+        too_large
+            .lines
+            .iter()
+            .any(|line| line.contains("too large")),
+        "{too_large:?}"
     );
 }

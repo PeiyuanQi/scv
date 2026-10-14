@@ -336,10 +336,13 @@ selection is a configuration error, and both efforts follow the effort rules
 below. When a call fails in a way another agent
 could avoid (the executable is missing or exits, it is signed out, or its
 provider returned an HTTP 401, 403, 404, 429, or 5xx, a quota error, or an
-unknown model), the result gains a `fallback` field naming the other agents
-this session offers as values for `agent`, such as `"This agent could not
-run: it is missing, signed out, or its provider returned an error. Other
-agents are available: claude, codex. Call agent again with one of them."`.
+unknown model), the result gains a `fallback` field naming other agents this
+session offers, except any agent in the failed agent's family. A failed
+`claude` never suggests `claude-ai`, and the reverse, so one billing identity
+is not offered as a substitute for the other. The field looks like `"This
+agent could not run: it is missing, signed out, or its provider returned an
+error. Other agents are available: claude, codex. Call agent again with one
+of them."`.
 SCV's own error gets the same sentence when SCV
 found the agent unavailable: its executable missing or failing to start, or
 its live conversation's process gone. The decision reads only the result's
@@ -509,7 +512,7 @@ The default invocation contracts are:
 
 | Agent | Invocation |
 | --- | --- |
-| `claude` | `claude -p --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
+| `claude`, `claude-ai` | `claude -p --settings <json> [--permission-mode bypassPermissions] --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
 | `codex` | `codex exec --json -o <file> [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
 | `grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
 | `dsh` | `dsh --profile headless <prompt>` |
@@ -519,8 +522,9 @@ Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness run once
 per turn takes its model and effort from its profile, so it takes neither
 `model` nor `effort` then; over ACP (the default once `dsh` is installed) it
 takes both (see [Agent Client Protocol transport](#agent-client-protocol-transport)).
-`permissions = "full"` switches follow the fixed arguments, before the output
-format arguments.
+For both Claude agents, `--settings <json>` is always inserted after the fixed
+arguments. The JSON differs by billing identity and contains no secret.
+`permissions = "full"` switches follow it, before the output format arguments.
 
 Tool-enabled sessions that offer agents also list the built-in `delegating`
 skill, and the system prompt tells the model to read it before its first
@@ -1380,7 +1384,8 @@ permission requests and reports progress as it happens:
 
 | Agent | ACP server | Source |
 | --- | --- | --- |
-| `claude` | `claude-agent-acp` | npm `@agentclientprotocol/claude-agent-acp` (ACP organisation; Zed's `claude-code-acp` is deprecated in its favour) |
+| `claude` | `claude-agent-acp --hide-claude-auth` | npm `@agentclientprotocol/claude-agent-acp` (ACP organisation; Zed's `claude-code-acp` is deprecated in its favour) |
+| `claude-ai` | `claude-agent-acp` | the same server, without `--hide-claude-auth` |
 | `codex` | `codex-acp` | npm `@agentclientprotocol/codex-acp` (ACP organisation) |
 | `grok` | `grok agent stdio` | built in |
 | `dsh` | `dsh --profile acp` | built in (0.1.7-rc.1) |
@@ -1396,9 +1401,16 @@ run, so `auto` keeps it; custom `args` do not matter.
 
 ```text
 initialize {protocolVersion: 1, no fs or terminal capabilities}
-  → session/new {cwd, mcpServers: []} → [set mode for permissions = "full"]
+  → session/new {cwd, mcpServers: [], and for claude and claude-ai
+       _meta.claudeCode.options.settings: <pinned settings object>}
+  → [set mode for permissions = "full"]
   → [session/set_config_option for model/effort] → session/prompt per call
 ```
+
+For `claude`, SCV reads `.anthropic-api-key` at spawn and sets
+`ANTHROPIC_API_KEY` on the adapter process. `claude-ai` does not. Both agents
+send the same kind of pinned settings object on `session/new`. The object
+holds no secret.
 
 `initialize` records whether the server advertises
 `_meta.steering.supported`. Steering a running turn (see

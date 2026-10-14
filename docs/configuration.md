@@ -375,9 +375,10 @@ to `state/agent-options/claude-ai.json` when that file exists, rename the
 `[agents.claude]` table to `[agents.claude-ai]`, and point `[agent] prefer`
 at `claude-ai` when that is the agent that should run by default.
 
-`claude-ai` is blocked when `.claude.json` has a non-empty `primaryApiKey`.
-Claude Code owns that file and it can grow past the usual import bound. Status
-still checks the key, and the file's size alone does not fail status.
+`claude-ai` is blocked when `.claude.json` has a non-empty top-level
+`primaryApiKey`. Claude Code owns that file. Status parses at most 8 MiB of
+it. Within that bound it checks the key. A larger file blocks `claude-ai`
+instead of failing the status command.
 
 When `/etc/claude-code/managed-settings.json` exists, daemon start and
 `scv agents status` warn, and both agents still run:

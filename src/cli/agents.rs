@@ -146,7 +146,8 @@ pub(crate) async fn agents(
                             .output()
                         {
                             Ok(output) => {
-                                // Codex reports on stderr, Claude Code on stdout.
+                                // Codex reports its status on stderr. The
+                                // summary drops the account email.
                                 let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
                                 text.push('\n');
                                 text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -167,10 +168,14 @@ pub(crate) async fn agents(
                     Status::Stored(store) => {
                         let StoredStatus { ready, lines } =
                             setup::agent_stored_status(&config, name, store)?;
+                        // A blocked identity is not fixed by storing a new
+                        // login. Only a signed-out status gets that hint.
+                        let suggest_login =
+                            !ready && lines.iter().any(|line| line.starts_with("not signed in"));
                         for line in lines {
                             println!("  {line}");
                         }
-                        if !ready {
+                        if suggest_login {
                             println!("  Sign in for SCV with: scv agents login {name}");
                         }
                     }
