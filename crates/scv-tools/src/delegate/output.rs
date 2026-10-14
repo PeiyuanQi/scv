@@ -6,9 +6,11 @@
 //! stream with no parsable event falls back to its text. Claude's first
 //! `system`/`init` event is also checked against the pinned billing identity:
 //! API-key runs require `apiKeySource = "apiKeyHelper"`, while subscription
-//! runs require `apiKeySource = "none"`. A mismatch cancels [`AgentStream::halt_token`]
-//! so the supervisor stops the child, and the turn fails with that credential
-//! error instead of the model's reply.
+//! runs require `apiKeySource = "none"`. A mismatch, or a run that would
+//! otherwise complete with no init event, cancels [`AgentStream::halt_token`]
+//! when the child is still running. The turn fails with that credential error
+//! instead of the model's reply. A run that already failed, timed out, or was
+//! cancelled keeps that status.
 
 use scv_core::{ProgressSink, ToolFailure, ToolOutput};
 use scv_protocol::JobStatus;
@@ -102,9 +104,12 @@ pub(crate) struct AgentStream {
     /// The model stopped with a `refusal` stop reason.
     refused: bool,
     auth: AgentAuth,
-    /// Set when the pinned credential source does not match. Later events are
-    /// ignored, and [`Self::halt_token`] is cancelled so the child is stopped.
+    /// Set when the pinned credential source does not match, or never arrived
+    /// on a run that would otherwise complete. Later events are ignored, and
+    /// [`Self::halt_token`] is cancelled so the child is stopped.
     credential_rejected: bool,
+    /// A Claude init event reported the pinned credential source.
+    saw_pinned_source: bool,
     halt: CancellationToken,
     usage: Option<AgentUsage>,
     /// The CLI's own session ID, for continuing the conversation.
@@ -134,6 +139,7 @@ impl AgentStream {
             refused: false,
             auth: AgentAuth::None,
             credential_rejected: false,
+            saw_pinned_source: false,
             halt: CancellationToken::new(),
             usage: None,
             session: None,
@@ -245,7 +251,9 @@ impl AgentStream {
                             .get("apiKeySource")
                             .and_then(Value::as_str)
                             .unwrap_or("missing");
-                        if actual != expected {
+                        if actual == expected {
+                            self.saw_pinned_source = true;
+                        } else {
                             self.reject_credential(actual);
                         }
                     }
@@ -270,6 +278,11 @@ impl AgentStream {
                     self.refused |=
                         event.get("stop_reason").and_then(Value::as_str) == Some("refusal");
                     self.usage = usage(event.get("usage"), "input_tokens", "output_tokens");
+                    // A successful result with no init is the drift this
+                    // check exists to catch. Stop before any further work.
+                    if self.completed && self.requires_pinned_source() && !self.saw_pinned_source {
+                        self.reject_credential("missing");
+                    }
                 }
                 "assistant" => {
                     let text = text_parts(event.pointer("/message/content"));
@@ -334,8 +347,27 @@ impl AgentStream {
         }
     }
 
-    /// The pinned credential source did not match. Forget any model text and
-    /// ask the supervisor to stop the child.
+    fn requires_pinned_source(&self) -> bool {
+        matches!(
+            self.auth,
+            AgentAuth::ClaudeApiKey | AgentAuth::ClaudeSubscription
+        )
+    }
+
+    fn credential_error(auth: AgentAuth, actual: &str) -> String {
+        match auth {
+            AgentAuth::ClaudeApiKey => format!(
+                "claude reported credential source {actual}, not the Claude API key; the run was stopped"
+            ),
+            AgentAuth::ClaudeSubscription => format!(
+                "claude-ai reported credential source {actual}, not the Claude subscription; the run was stopped"
+            ),
+            AgentAuth::None => unreachable!(),
+        }
+    }
+
+    /// The pinned credential source did not match, or never arrived. Forget
+    /// any model text and ask the supervisor to stop the child.
     fn reject_credential(&mut self, actual: &str) {
         self.credential_rejected = true;
         self.failed = true;
@@ -344,15 +376,7 @@ impl AgentStream {
         self.reply = None;
         self.usage = None;
         self.session = None;
-        self.error = Some(match self.auth {
-            AgentAuth::ClaudeApiKey => format!(
-                "claude reported credential source {actual}, not the Claude API key; the run was stopped"
-            ),
-            AgentAuth::ClaudeSubscription => format!(
-                "claude-ai reported credential source {actual}, not the Claude subscription; the run was stopped"
-            ),
-            AgentAuth::None => unreachable!(),
-        });
+        self.error = Some(Self::credential_error(self.auth, actual));
         self.halt.cancel();
     }
 
@@ -377,12 +401,6 @@ impl AgentStream {
         }
         let text = String::from_utf8_lossy(&self.text).trim_end().to_owned();
         let structured = self.format != OutputFormat::Text && self.parsed_events > 0;
-        let mut reply = if structured {
-            self.reply.or(fallback_reply).or_else(|| self.error.clone())
-        } else {
-            fallback_reply.or_else(|| (!text.is_empty()).then(|| text.clone()))
-        }
-        .unwrap_or_default();
         let incomplete = structured && !self.completed;
         let status = match exit {
             RunExit::TimedOut => RunStatus::Timeout,
@@ -396,6 +414,26 @@ impl AgentStream {
                 }
             }
         };
+        if self.requires_pinned_source()
+            && !self.saw_pinned_source
+            && status == RunStatus::Completed
+        {
+            let error = Self::credential_error(self.auth, "missing");
+            return AgentResult {
+                status: RunStatus::Failed,
+                reply: error.clone(),
+                error: Some(error),
+                usage: None,
+                truncated: false,
+                session: None,
+            };
+        }
+        let mut reply = if structured {
+            self.reply.or(fallback_reply).or_else(|| self.error.clone())
+        } else {
+            fallback_reply.or_else(|| (!text.is_empty()).then(|| text.clone()))
+        }
+        .unwrap_or_default();
         // What went wrong, kept apart from the reply: the CLI's reported
         // error, or for a failed plain-text run its closing output, which
         // is the CLI's own error message rather than a model reply.

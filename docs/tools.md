@@ -1408,9 +1408,11 @@ initialize {protocolVersion: 1, no fs or terminal capabilities}
 ```
 
 For `claude`, SCV reads `.anthropic-api-key` at spawn and sets
-`ANTHROPIC_API_KEY` on the adapter process. `claude-ai` does not. Both agents
-send the same kind of pinned settings object on `session/new`. The object
-holds no secret.
+`ANTHROPIC_API_KEY` on the adapter process. The bundled Claude Code process
+inherits it in its initial environment, and the pinned settings then blank it
+inside Claude Code. Whether tools on that path see it empty is not verified.
+`claude-ai` does not receive the variable. Both agents send the same kind of
+pinned settings object on `session/new`. The object holds no secret.
 
 `initialize` records whether the server advertises
 `_meta.steering.supported`. Steering a running turn (see
@@ -1525,9 +1527,10 @@ from their private files: `claude` reports `signed in (API key)` and
 `claude-ai` reports the subscription plan. SCV never invokes Claude auth
 status as a billing gate. On the per-turn CLI, the first stream-json init
 event must report `apiKeySource` `apiKeyHelper` for `claude` and `none` for
-`claude-ai`. Any other source stops the child then. The turn fails, the error
-names the credential source that did not match, and the model's reply is not
-returned. For the other stored agents SCV reads the credential file and
+`claude-ai`. Any other source, or a run that would otherwise complete with no
+init event, stops the child or fails the turn. The error names the credential
+source that did not match, and the model's reply is not returned. A run that
+already failed, timed out, or was cancelled keeps that status. For the other stored agents SCV reads the credential file and
 reports only whether one is stored, never its value. Pins, the migration
 warning, and the machine-policy warning are in
 [Claude Code billing](configuration.md#claude-code-billing).

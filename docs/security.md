@@ -195,8 +195,9 @@ read from their private files. SCV never runs `claude auth status`.
 An agent reached over the Agent Client Protocol (`claude-agent-acp`,
 `codex-acp`, `grok agent stdio`, `dsh --profile acp`) is the same agent with
 the same private home and trust. ACP changes how SCV talks to it. For
-`claude` it also places the API key in the adapter process environment, as
-[Pinned Claude Code credentials](#pinned-claude-code-credentials) describes.
+`claude` it also places the API key in the adapter process environment. The
+bundled Claude Code process inherits that variable until the pin blanks it,
+as [Pinned Claude Code credentials](#pinned-claude-code-credentials) describes.
 SCV declares no client file-system or terminal capabilities and refuses
 every `fs/*`, `terminal/*`, or other agent-to-client request, so the agent
 cannot use SCV to read, write, or run anything. The agent's own
@@ -226,13 +227,18 @@ On the per-turn CLI the key stays in the file. Claude Code reads
 `apiKeyHelper`. SCV does not put that key in the CLI process environment.
 The first stream-json init event must report `apiKeySource` `apiKeyHelper`
 for `claude` and `none` for `claude-ai`. Any other source stops that child
-immediately. The turn fails with an error that names the credential source,
-and the model's reply is discarded.
+immediately. If that init event never arrives, a run that would otherwise
+complete fails the same way. The error names the credential source, and the
+model's reply is discarded. A run that already failed, timed out, or was
+cancelled keeps that status.
 
 Over ACP, `claude` is started with `--hide-claude-auth`. At spawn SCV reads
-the same key file and sets `ANTHROPIC_API_KEY` on the adapter process only.
-That value is not logged. `claude-ai` does not receive the flag or the
-variable. `session/new` for both agents sends the pinned settings object in
+the same key file and sets `ANTHROPIC_API_KEY` on the adapter process. The
+adapter's bundled Claude Code process inherits that variable in its initial
+environment, and the pinned settings then blank it inside Claude Code.
+Whether tools on the ACP path see it empty is not verified; on the per-turn
+CLI they do. The value is not logged. `claude-ai` does not receive the flag
+or the variable. `session/new` for both agents sends the pinned settings object in
 `_meta.claudeCode.options.settings`. The subscription variant leaves OAuth
 credentials owned by Claude Code.
 
