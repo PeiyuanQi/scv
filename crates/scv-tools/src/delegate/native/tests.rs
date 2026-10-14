@@ -91,6 +91,63 @@ fn context(workspace: &Path) -> ToolContext {
 }
 
 #[tokio::test]
+async fn a_mismatched_claude_credential_source_stops_the_child() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let key = home.path().join(".anthropic-api-key");
+    std::fs::write(&key, "sk-ant-api03-test").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let marker = workspace.path().join("billed");
+    let mut tool = fake_agent(
+        workspace.path(),
+        "claude",
+        r#"/usr/bin/printf '%s\n' '{"type":"system","subtype":"init","apiKeySource":"none","session_id":"sess"}'
+sleep 15
+touch "$SCV_MARKER"
+/usr/bin/printf '%s\n' '{"type":"result","is_error":false,"result":"should-not-appear"}'
+"#,
+        &[],
+        vec![("SCV_MARKER".into(), marker.as_os_str().to_owned())],
+    );
+    tool.output = OutputFormat::ClaudeStreamJson;
+    tool.timeouts = Timeouts {
+        default: Duration::from_secs(30),
+        max: Duration::from_secs(30),
+    };
+    tool.auth = crate::AgentAuthPlan::Claude {
+        mode: crate::adapters::AgentAuth::ClaudeApiKey,
+        settings: json!({"apiKeyHelper":"cat -- '/private/.anthropic-api-key'"}),
+        home: home.path().to_owned(),
+    };
+    let started = std::time::Instant::now();
+    let output = tool
+        .execute(json!({"prompt":"hello"}), context(workspace.path()))
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "child kept running for {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !marker.exists(),
+        "child kept running after the credential mismatch"
+    );
+    let value: Value = serde_json::from_str(&output.content).unwrap();
+    assert_eq!(value["status"], "failed", "{}", output.content);
+    assert_eq!(
+        value["error"],
+        "claude reported credential source none, not the Claude API key; the run was stopped"
+    );
+    assert!(
+        !output.content.contains("should-not-appear"),
+        "{}",
+        output.content
+    );
+    assert!(output.failure.is_some());
+}
+
+#[tokio::test]
 async fn claude_native_launch_pins_settings_and_checks_the_api_key_file() {
     let workspace = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

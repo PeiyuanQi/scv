@@ -6,12 +6,15 @@
 //! stream with no parsable event falls back to its text. Claude's first
 //! `system`/`init` event is also checked against the pinned billing identity:
 //! API-key runs require `apiKeySource = "apiKeyHelper"`, while subscription
-//! runs require `apiKeySource = "none"`.
+//! runs require `apiKeySource = "none"`. A mismatch cancels [`AgentStream::halt_token`]
+//! so the supervisor stops the child, and the turn fails with that credential
+//! error instead of the model's reply.
 
 use scv_core::{ProgressSink, ToolFailure, ToolOutput};
 use scv_protocol::JobStatus;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     delegate::{
@@ -99,6 +102,10 @@ pub(crate) struct AgentStream {
     /// The model stopped with a `refusal` stop reason.
     refused: bool,
     auth: AgentAuth,
+    /// Set when the pinned credential source does not match. Later events are
+    /// ignored, and [`Self::halt_token`] is cancelled so the child is stopped.
+    credential_rejected: bool,
+    halt: CancellationToken,
     usage: Option<AgentUsage>,
     /// The CLI's own session ID, for continuing the conversation.
     session: Option<String>,
@@ -126,6 +133,8 @@ impl AgentStream {
             completed: false,
             refused: false,
             auth: AgentAuth::None,
+            credential_rejected: false,
+            halt: CancellationToken::new(),
             usage: None,
             session: None,
             progress: ProgressSink::default(),
@@ -142,6 +151,13 @@ impl AgentStream {
     pub(crate) fn with_auth(mut self, auth: AgentAuth) -> Self {
         self.auth = auth;
         self
+    }
+
+    /// Cancelled when this stream sees a Claude credential source other than
+    /// the one its billing identity is pinned to. The process supervisor
+    /// watches it and stops the child.
+    pub(crate) fn halt_token(&self) -> CancellationToken {
+        self.halt.clone()
     }
 
     pub(crate) fn push(&mut self, bytes: &[u8]) {
@@ -194,6 +210,9 @@ impl AgentStream {
     }
 
     fn event(&mut self, event: &Value) {
+        if self.credential_rejected {
+            return;
+        }
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
         if self.progress.is_enabled() {
             for line in progress_lines(self.format, kind, event) {
@@ -227,16 +246,7 @@ impl AgentStream {
                             .and_then(Value::as_str)
                             .unwrap_or("missing");
                         if actual != expected {
-                            self.failed = true;
-                            self.error = Some(match self.auth {
-                                AgentAuth::ClaudeApiKey => format!(
-                                    "claude reported credential source {actual}, not the Claude API key; the run was stopped"
-                                ),
-                                AgentAuth::ClaudeSubscription => format!(
-                                    "claude-ai reported credential source {actual}, not the Claude subscription; the run was stopped"
-                                ),
-                                AgentAuth::None => unreachable!(),
-                            });
+                            self.reject_credential(actual);
                         }
                     }
                 }
@@ -324,11 +334,46 @@ impl AgentStream {
         }
     }
 
+    /// The pinned credential source did not match. Forget any model text and
+    /// ask the supervisor to stop the child.
+    fn reject_credential(&mut self, actual: &str) {
+        self.credential_rejected = true;
+        self.failed = true;
+        self.completed = false;
+        self.refused = false;
+        self.reply = None;
+        self.usage = None;
+        self.session = None;
+        self.error = Some(match self.auth {
+            AgentAuth::ClaudeApiKey => format!(
+                "claude reported credential source {actual}, not the Claude API key; the run was stopped"
+            ),
+            AgentAuth::ClaudeSubscription => format!(
+                "claude-ai reported credential source {actual}, not the Claude subscription; the run was stopped"
+            ),
+            AgentAuth::None => unreachable!(),
+        });
+        self.halt.cancel();
+    }
+
     /// Settle the run. `fallback_reply` is a final message the CLI wrote
     /// elsewhere (Codex `-o`), used when the stream carried none.
     pub(crate) fn finish(mut self, exit: RunExit, fallback_reply: Option<String>) -> AgentResult {
         if !self.line.is_empty() || self.line_overflowed {
             self.end_line();
+        }
+        if self.credential_rejected {
+            let error = self.error.clone().unwrap_or_else(|| {
+                "credential source did not match; the run was stopped".to_owned()
+            });
+            return AgentResult {
+                status: RunStatus::Failed,
+                reply: error.clone(),
+                error: Some(error),
+                usage: None,
+                truncated: false,
+                session: None,
+            };
         }
         let text = String::from_utf8_lossy(&self.text).trim_end().to_owned();
         let structured = self.format != OutputFormat::Text && self.parsed_events > 0;

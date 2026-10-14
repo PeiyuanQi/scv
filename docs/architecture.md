@@ -487,7 +487,11 @@ the backend validates, summarizes, or runs it, except on a continued ACP or
 nested-SCV conversation, whose session keeps its own. `delegate/choice.rs`
 writes each agent's line in the argument's description (product, what it
 offers, what it takes, the user's `use_for`, defaults, and `hard_task_effort`)
-and names the other offered agents on availability failures. A
+and names the other offered agents on availability failures. Claude Code is
+two descriptors in one family: `claude` for API-key billing and `claude-ai`
+for the Claude subscription. Their homes, settings tables, conversation
+handles, and credential checks stay separate, and the adapter layer passes the
+same pinned settings to the native CLI and to ACP. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a
@@ -753,9 +757,3 @@ source code from them.
 User configuration supports named provider profiles with per-profile endpoints,
 credentials, and headers; project configuration cannot redirect that trust
 boundary.
-
-Claude Code is represented by two adapter descriptors in one family:
-claude for API-key billing and claude-ai for Claude subscription billing.
-Their homes, settings tables, conversation handles, and credential checks stay
-separate. The adapter layer owns the pinned settings passed to both the native
-CLI and ACP transports.

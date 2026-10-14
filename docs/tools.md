@@ -238,7 +238,10 @@ starts, so an agent installed later appears in new sessions. An agent whose
 sign-in SCV checks by reading a local file (Grok, DeepSeek Harness, pi, and
 the nested SCV; see [Signing in](#signing-in-delegated-agents)) is also left
 out while that check says it is signed out. Claude identities are checked from
-their private files; SCV never runs Claude auth status as a billing gate.
+their private files and left out while that check says they are signed out,
+blocked, or ambiguous. SCV never runs Claude auth status as a billing gate.
+Every launch pins the billing identity and the Anthropic route; see
+[Pinned Claude Code credentials](security.md#pinned-claude-code-credentials).
 A session that offers no agent has no `agent` tool.
 
 Behind the tool, each agent runs on one of three backends: its CLI once per
@@ -887,13 +890,14 @@ builder conversation; reviewer turns take none. The start result adds
 
 | Builder | Reviewer, the first available of |
 | --- | --- |
-| `claude` | `codex`, `grok`, a fresh `claude` conversation |
-| `codex` | `claude`, `grok`, a fresh `codex` conversation |
-| any other (`grok`, `dsh`, `pi`, `scv`) | `claude`, `codex`, `grok`, a fresh conversation of the builder's agent (for `grok`, the last two are the same) |
+| `claude` or `claude-ai` | `codex`, `grok`, then a fresh conversation of that same builder |
+| `codex` | `claude-ai`, `claude`, `grok`, then a fresh `codex` conversation |
+| any other (`grok`, `dsh`, `pi`, `scv`) | `claude-ai`, `claude`, `codex`, `grok`, then a fresh conversation of the builder when that name is not already listed (`grok` already is) |
 
-Agents the session does not offer are dropped before approval. A fresh
-conversation of the builder's own agent shares the builder agent's private
-home and memory, so SCV labels it `same agent as builder`. SCV moves to the
+A Claude sibling is never in that order. Agents the session does not offer
+are dropped before approval. A fresh conversation of the builder's own agent
+shares the builder agent's private home and memory, so SCV labels it
+`same agent as builder`. SCV moves to the
 next agent, in the same round, only when the attempt is classed unavailable,
 exactly as an ordinary call's `fallback` is decided (see
 [Choosing an agent](#choosing-an-agent)): from its status and structured
@@ -1470,31 +1474,51 @@ user's personal login, so token refreshes by one never invalidate the other.
 Sign the agents in once on the SCV host:
 
 ```sh
-scv agents login claude                 # claude auth login
-scv agents login codex                  # codex login
-scv agents login codex -- --device-auth # extra arguments after --
-scv agents import codex                 # or copy your own Codex setup
-scv agents login grok -- --device-auth  # grok login, device code for SSH hosts
-scv agents import grok                  # or copy your own Grok config and model profiles
-scv agents login dsh                    # prompts for a DeepSeek API key
-scv agents login pi                     # opens pi: run /login, then /quit
-scv agents login pi --openai-compatible # or point pi at any OpenAI-compatible endpoint
+scv agents login claude                  # hidden prompt; stores the API key
+scv agents login claude-ai               # claude auth login --claudeai
+scv agents login codex                   # codex login
+scv agents login codex -- --device-auth  # extra arguments after --
+scv agents import codex                  # or copy your own Codex setup
+scv agents login grok -- --device-auth   # grok login, device code for SSH hosts
+scv agents import grok                   # or copy your own Grok config and model profiles
+scv agents login dsh                     # prompts for a DeepSeek API key
+scv agents login pi                      # opens pi: run /login, then /quit
+scv agents login pi --openai-compatible  # or point pi at any OpenAI-compatible endpoint
 scv agents import pi --from-scv-provider # or reuse SCV's own provider
-scv agents status                       # every agent's sign-in state
-scv agents check                        # does each one work as SCV runs it?
-scv agents logout claude
+scv agents status                        # every agent's sign-in state
+scv agents check                         # does each one work as SCV runs it?
+scv agents logout claude                 # removes only the API key file
+scv agents logout claude-ai              # claude auth logout
 ```
 
-They work from any directory. For Claude Code, Codex, and Grok, `login` and
-`logout` run the agent's own command with exactly the private home and cleaned
-environment that the daemon's delegated runs of it use, with the terminal attached
-for browser or device-code flows, and the agent CLI itself writes those
-credentials under `$SCV_HOME/agents/<name>` (mode `0700`). For Codex,
-`status` runs the CLI's own status command but prints only a summary. Claude
-identities are checked from their private files: `claude` reports `signed in
-(API key)` and `claude-ai` reports the subscription plan; SCV never invokes
-Claude auth status as a billing gate. For the other stored agents SCV reads
-the credential file and reports only whether one is stored, never its value.
+They work from any directory. `scv agents login claude` reads an Anthropic API
+key without echo, or from stdin when stdin is not a terminal, and writes
+`agents/claude/.anthropic-api-key` with mode 0600. `scv agents logout claude`
+removes that file and nothing else. A Claude subscription login in that home
+is not cleared by that logout; it blocks `claude` until the home is moved to
+`agents/claude-ai` or signed out with `claude auth logout` there.
+`scv agents login claude-ai` runs `claude auth login --claudeai`, and
+`scv agents logout claude-ai` runs `claude auth logout`. Claude Code owns
+those subscription files. An ACP `session/new` that refuses a subscription
+login in the `claude` home says to move that login to `agents/claude-ai` or
+to run `claude auth logout` in the claude home.
+
+For Codex and Grok, `login` and `logout` run the agent's own command with
+exactly the private home and cleaned environment that the daemon's delegated
+runs of it use, with the terminal attached for browser or device-code flows,
+and the agent CLI itself writes those credentials under
+`$SCV_HOME/agents/<name>` (mode `0700`). For Codex, `status` runs the CLI's
+own status command but prints only a summary. Claude identities are checked
+from their private files: `claude` reports `signed in (API key)` and
+`claude-ai` reports the subscription plan. SCV never invokes Claude auth
+status as a billing gate. On the per-turn CLI, the first stream-json init
+event must report `apiKeySource` `apiKeyHelper` for `claude` and `none` for
+`claude-ai`. Any other source stops the child then. The turn fails, the error
+names the credential source that did not match, and the model's reply is not
+returned. For the other stored agents SCV reads the credential file and
+reports only whether one is stored, never its value. Pins, the migration
+warning, and the machine-policy warning are in
+[Claude Code billing](configuration.md#claude-code-billing).
 
 Grok counts as signed in either through a `grok login` sign-in in
 `.grok/auth.json` or through an API key in `.grok/config.toml`: the profile of
@@ -1726,15 +1750,3 @@ Tool-enabled sessions also map workspace project skills (`.agents/skills` and
 project with the `agent` tool and `cwd`; see
 [Project skills](configuration.md#project-skills). Skill
 metadata and content remain untrusted instructions.
-
-Claude Code has two explicit billing identities. claude is API-key billing
-using SCV's private .anthropic-api-key file; claude-ai is the owner's Claude
-subscription and keeps its OAuth files under its separate private home.
-SCV pins credentials and the Anthropic route on every CLI and ACP launch.
-Project Claude settings cannot replace those pins, and ambiguous or conflicting
-credential files remove the agent from the offered set.
-
-When review is requested, Claude-family work is reviewed by codex and then
-grok; codex work is reviewed by claude-ai, claude, then grok; other work is
-reviewed by claude-ai, claude, codex, then grok. Claude siblings are never
-used to review one another.

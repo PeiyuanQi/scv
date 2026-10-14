@@ -499,6 +499,9 @@ async fn execute_agent_process(
     // tagged, so a later sweep can find what it leaves behind.
     let guard: Option<DelegationGuard> =
         registration.and_then(|(registry, pending)| registry.register(pending, pid as u32).ok());
+    // Cancelled from the stdout parser when Claude's init event names a
+    // credential source other than the pinned one.
+    let halt = stream.halt_token();
     let stdout = Arc::new(Mutex::new(stream));
     let stderr = Arc::new(Mutex::new(TailBuffer::new(STDERR_TAIL_BYTES)));
     let stdout_task = child
@@ -516,6 +519,7 @@ async fn execute_agent_process(
         cancellation,
         stdout_task,
         stderr_task,
+        Some(&halt),
     )
     .await;
     records::untrack_spawned(pid as u32);

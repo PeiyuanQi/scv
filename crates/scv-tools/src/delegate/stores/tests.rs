@@ -511,10 +511,22 @@ fn claude_stores_fail_closed_for_api_and_subscription_identities() {
         r#"{"claudeAiOauth":{"refreshToken":"refresh","scopes":["user:inference"],"subscriptionType":"max"}}"#,
     )
     .unwrap();
+    let blocked = claude_status(AgentAuth::ClaudeApiKey, home.path()).unwrap();
+    assert!(!blocked.ready);
     assert!(
-        !claude_status(AgentAuth::ClaudeApiKey, home.path())
-            .unwrap()
-            .ready
+        blocked.lines.iter().any(|line| {
+            line.contains("agents/claude-ai") && line.contains("claude auth logout")
+        }),
+        "{:?}",
+        blocked.lines
+    );
+    assert!(
+        blocked
+            .lines
+            .iter()
+            .all(|line| !line.contains("scv agents logout claude")),
+        "{:?}",
+        blocked.lines
     );
     assert!(
         claude_status(AgentAuth::ClaudeSubscription, home.path())
@@ -544,5 +556,78 @@ fn claude_subscription_status_accepts_oauth_and_rejects_ambiguous_json() {
         !claude_status(AgentAuth::ClaudeSubscription, home.path())
             .unwrap()
             .ready
+    );
+}
+
+#[test]
+fn a_large_claude_json_is_checked_for_a_console_key_without_failing_status() {
+    assert_eq!(
+        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":"sk-ant"}"#)).unwrap(),
+        ConsoleKey::Present
+    );
+    assert_eq!(
+        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":""}"#)).unwrap(),
+        ConsoleKey::Absent
+    );
+    assert_eq!(
+        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":"  "}"#)).unwrap(),
+        ConsoleKey::Absent
+    );
+    assert_eq!(
+        scan_console_key(std::io::Cursor::new(br#"{"primaryApiKey":null}"#)).unwrap(),
+        ConsoleKey::Absent
+    );
+    assert_eq!(
+        scan_console_key(std::io::Cursor::new(
+            br#"{"nested":{"primaryApiKey":"sk-ant"}}"#,
+        ))
+        .unwrap(),
+        ConsoleKey::Absent
+    );
+    assert_eq!(
+        scan_console_key(std::io::Cursor::new(
+            br#"{"notes":"see \"primaryApiKey\": \"sk-ant\""}"#,
+        ))
+        .unwrap(),
+        ConsoleKey::Absent
+    );
+    assert_eq!(
+        scan_console_key(std::io::Cursor::new(br#"{"\u0070rimaryApiKey":"sk-ant"}"#,)).unwrap(),
+        ConsoleKey::Present
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let credentials = home.path().join(".claude/.credentials.json");
+    std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+    std::fs::write(
+        &credentials,
+        r#"{"claudeAiOauth":{"refreshToken":"refresh","scopes":["user:inference"],"subscriptionType":"pro"}}"#,
+    )
+    .unwrap();
+    let config = home.path().join(".claude.json");
+    let padding = "a".repeat(MAX_IMPORT_BYTES as usize);
+    std::fs::write(&config, format!("{{\"padding\":\"{padding}\"}}")).unwrap();
+    let open = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(open.ready, "{open:?}");
+    std::fs::write(
+        &config,
+        format!("{{\"primaryApiKey\":\"\",\"padding\":\"{padding}\"}}"),
+    )
+    .unwrap();
+    let empty = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(empty.ready, "{empty:?}");
+    std::fs::write(
+        &config,
+        format!("{{\"padding\":\"{padding}\",\"primaryApiKey\":\"sk-ant-api03-console\"}}"),
+    )
+    .unwrap();
+    let blocked = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(!blocked.ready, "{blocked:?}");
+    assert!(
+        blocked
+            .lines
+            .iter()
+            .any(|line| line.contains("Console API key")),
+        "{blocked:?}"
     );
 }

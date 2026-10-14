@@ -479,11 +479,369 @@ fn claude_api_status(key: &Path, credentials: &Path, home: &Path) -> Result<Stor
             .is_some_and(|oauth| !oauth.is_null())
         {
             return Ok(StoredStatus::missing(vec![
-                "blocked: a Claude subscription login is in this home (run scv agents logout claude, or move it to claude-ai)".into(),
+                "blocked: a Claude subscription login is in this home (move it to agents/claude-ai, or run claude auth logout in this home)".into(),
             ]));
         }
     }
     Ok(StoredStatus::ready("signed in (API key)".into()))
+}
+
+/// Whether `.claude.json` holds a non-empty top-level `primaryApiKey`.
+/// Claude Code owns that file and it grows with project history. A file
+/// within the import bound is parsed; a larger one is scanned in a fixed
+/// window, so its size is not a status error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleKey {
+    Absent,
+    Present,
+    Unparseable,
+}
+
+fn console_key(path: &Path) -> Result<ConsoleKey> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ConsoleKey::Absent);
+        }
+        Err(error) => return Err(anyhow!(error).context(format!("open {}", path.display()))),
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    if metadata.len() <= MAX_IMPORT_BYTES {
+        let mut text = String::new();
+        file.take(MAX_IMPORT_BYTES + 1)
+            .read_to_string(&mut text)
+            .with_context(|| format!("read {}", path.display()))?;
+        if text.len() as u64 > MAX_IMPORT_BYTES {
+            let file =
+                std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+            return scan_console_key(file);
+        }
+        return Ok(console_key_in_text(&text));
+    }
+    scan_console_key(file)
+}
+
+fn console_key_in_text(text: &str) -> ConsoleKey {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => {
+            if value
+                .get("primaryApiKey")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|key| !key.trim().is_empty())
+            {
+                ConsoleKey::Present
+            } else {
+                ConsoleKey::Absent
+            }
+        }
+        Err(_) => ConsoleKey::Unparseable,
+    }
+}
+
+fn scan_console_key(file: impl std::io::Read) -> Result<ConsoleKey> {
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = [0u8; 8192];
+    let mut scanner = ConsoleScanner::new();
+    loop {
+        let read = reader.read(&mut buf).context("read Claude config")?;
+        if read == 0 {
+            break;
+        }
+        for &byte in &buf[..read] {
+            match scanner.push(byte) {
+                Scan::Continue => {}
+                Scan::Present => return Ok(ConsoleKey::Present),
+                Scan::Unparseable => return Ok(ConsoleKey::Unparseable),
+            }
+        }
+    }
+    Ok(ConsoleKey::Absent)
+}
+
+const MAX_JSON_DEPTH: usize = 128;
+const MAX_KEY_BYTES: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Container {
+    Object,
+    Array,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Value,
+    Key,
+    Colon,
+    After,
+    Literal,
+    String(Role),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Key,
+    Target,
+    Skip,
+}
+
+enum Feed {
+    Done(Scan),
+    Again,
+}
+
+enum Scan {
+    Continue,
+    Present,
+    Unparseable,
+}
+
+struct ConsoleScanner {
+    stack: Vec<Container>,
+    mode: Mode,
+    escape: bool,
+    hex_left: u8,
+    hex_value: u32,
+    key: Vec<u8>,
+    key_overflow: bool,
+    target_next: bool,
+}
+
+impl ConsoleScanner {
+    fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            mode: Mode::Value,
+            escape: false,
+            hex_left: 0,
+            hex_value: 0,
+            key: Vec::new(),
+            key_overflow: false,
+            target_next: false,
+        }
+    }
+
+    fn push(&mut self, byte: u8) -> Scan {
+        loop {
+            match self.feed(byte) {
+                Feed::Done(scan) => return scan,
+                Feed::Again => {}
+            }
+        }
+    }
+
+    fn feed(&mut self, byte: u8) -> Feed {
+        if let Mode::String(role) = self.mode {
+            return self.string_byte(role, byte);
+        }
+        if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
+            return Feed::Done(Scan::Continue);
+        }
+        match self.mode {
+            Mode::Value | Mode::Key => self.start_value(byte),
+            Mode::Colon => {
+                if byte == b':' {
+                    self.mode = Mode::Value;
+                    Feed::Done(Scan::Continue)
+                } else {
+                    Feed::Done(Scan::Unparseable)
+                }
+            }
+            Mode::After => self.after(byte),
+            Mode::Literal => {
+                if matches!(byte, b',' | b'}' | b']') {
+                    self.mode = Mode::After;
+                    Feed::Again
+                } else {
+                    Feed::Done(Scan::Continue)
+                }
+            }
+            Mode::String(_) => unreachable!(),
+        }
+    }
+
+    fn start_value(&mut self, byte: u8) -> Feed {
+        match byte {
+            b'{' => self.begin(Container::Object),
+            b'[' => self.begin(Container::Array),
+            b'"' => {
+                let role = if self.mode == Mode::Key {
+                    self.key.clear();
+                    self.key_overflow = false;
+                    Role::Key
+                } else if self.target_next {
+                    self.target_next = false;
+                    Role::Target
+                } else {
+                    Role::Skip
+                };
+                self.mode = Mode::String(role);
+                Feed::Done(Scan::Continue)
+            }
+            b'}' if self.mode == Mode::Key => self.end(byte),
+            b']' if self.mode == Mode::Value && self.stack.last() == Some(&Container::Array) => {
+                self.end(byte)
+            }
+            b't' | b'f' | b'n' | b'-' | b'0'..=b'9' if self.mode == Mode::Value => {
+                self.target_next = false;
+                self.mode = Mode::Literal;
+                Feed::Done(Scan::Continue)
+            }
+            _ => Feed::Done(Scan::Unparseable),
+        }
+    }
+
+    fn begin(&mut self, container: Container) -> Feed {
+        if self.stack.len() >= MAX_JSON_DEPTH {
+            return Feed::Done(Scan::Unparseable);
+        }
+        self.target_next = false;
+        self.stack.push(container);
+        self.mode = match container {
+            Container::Object => Mode::Key,
+            Container::Array => Mode::Value,
+        };
+        Feed::Done(Scan::Continue)
+    }
+
+    fn end(&mut self, byte: u8) -> Feed {
+        let Some(container) = self.stack.pop() else {
+            return Feed::Done(Scan::Unparseable);
+        };
+        let matches_container = matches!(
+            (container, byte),
+            (Container::Object, b'}') | (Container::Array, b']')
+        );
+        if !matches_container {
+            return Feed::Done(Scan::Unparseable);
+        }
+        self.target_next = false;
+        self.mode = Mode::After;
+        Feed::Done(Scan::Continue)
+    }
+
+    fn after(&mut self, byte: u8) -> Feed {
+        match byte {
+            b',' => {
+                self.mode = match self.stack.last() {
+                    Some(Container::Object) => Mode::Key,
+                    Some(Container::Array) => Mode::Value,
+                    None => return Feed::Done(Scan::Unparseable),
+                };
+                Feed::Done(Scan::Continue)
+            }
+            b'}' | b']' => self.end(byte),
+            _ => Feed::Done(Scan::Unparseable),
+        }
+    }
+
+    fn string_byte(&mut self, role: Role, byte: u8) -> Feed {
+        if self.hex_left > 0 {
+            let Some(digit) = hex_digit(byte) else {
+                return Feed::Done(Scan::Unparseable);
+            };
+            self.hex_value = (self.hex_value << 4) | u32::from(digit);
+            self.hex_left -= 1;
+            if self.hex_left == 0 {
+                let ch = char::from_u32(self.hex_value).unwrap_or('\u{FFFD}');
+                return self.note_char(role, ch);
+            }
+            return Feed::Done(Scan::Continue);
+        }
+        if self.escape {
+            self.escape = false;
+            return match byte {
+                b'u' => {
+                    self.hex_left = 4;
+                    self.hex_value = 0;
+                    Feed::Done(Scan::Continue)
+                }
+                b'n' => self.note_char(role, '\n'),
+                b't' => self.note_char(role, '\t'),
+                b'r' => self.note_char(role, '\r'),
+                b'b' => self.note_char(role, '\u{0008}'),
+                b'f' => self.note_char(role, '\u{000c}'),
+                b'"' => self.note_char(role, '"'),
+                b'\\' => self.note_char(role, '\\'),
+                b'/' => self.note_char(role, '/'),
+                _ => Feed::Done(Scan::Unparseable),
+            };
+        }
+        match byte {
+            b'\\' => {
+                self.escape = true;
+                Feed::Done(Scan::Continue)
+            }
+            b'"' => self.finish_string(role),
+            _ => self.note_byte(role, byte),
+        }
+    }
+
+    fn note_char(&mut self, role: Role, ch: char) -> Feed {
+        match role {
+            Role::Key => {
+                let mut buf = [0u8; 4];
+                let encoded = ch.encode_utf8(&mut buf);
+                self.note_key(encoded.as_bytes())
+            }
+            Role::Target if !ch.is_whitespace() => Feed::Done(Scan::Present),
+            Role::Target | Role::Skip => Feed::Done(Scan::Continue),
+        }
+    }
+
+    fn note_byte(&mut self, role: Role, byte: u8) -> Feed {
+        match role {
+            Role::Key => self.note_key(&[byte]),
+            Role::Target if !matches!(byte, b' ' | b'\t' | b'\n' | b'\r') => {
+                Feed::Done(Scan::Present)
+            }
+            Role::Target | Role::Skip => Feed::Done(Scan::Continue),
+        }
+    }
+
+    fn note_key(&mut self, bytes: &[u8]) -> Feed {
+        if !self.key_overflow {
+            if self.key.len() + bytes.len() > MAX_KEY_BYTES {
+                self.key_overflow = true;
+                self.key.clear();
+            } else {
+                self.key.extend_from_slice(bytes);
+            }
+        }
+        Feed::Done(Scan::Continue)
+    }
+
+    fn finish_string(&mut self, role: Role) -> Feed {
+        self.escape = false;
+        self.hex_left = 0;
+        match role {
+            Role::Key => {
+                // Only the root object's primaryApiKey counts. Nested copies,
+                // including ones inside strings, must not block the account.
+                self.target_next =
+                    self.stack.len() == 1 && !self.key_overflow && self.key == b"primaryApiKey";
+                self.mode = Mode::Colon;
+                Feed::Done(Scan::Continue)
+            }
+            Role::Target | Role::Skip => {
+                self.mode = Mode::After;
+                Feed::Done(Scan::Continue)
+            }
+        }
+    }
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn claude_account_status(credentials: &Path, config: &Path, _home: &Path) -> Result<StoredStatus> {
@@ -500,29 +858,18 @@ fn claude_account_status(credentials: &Path, config: &Path, _home: &Path) -> Res
             ]));
         }
     };
-    let config_value = match read_bounded(config)? {
-        Some(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(value) => Some(value),
-            Err(_) => {
-                return Ok(StoredStatus::missing(vec![
-                    "blocked: Claude config file is not valid JSON".into(),
-                ]));
-            }
-        },
-        None => None,
-    };
-    if config_value
-        .as_ref()
-        .and_then(|value| {
-            value
-                .get("primaryApiKey")
-                .and_then(serde_json::Value::as_str)
-        })
-        .is_some_and(|key| !key.trim().is_empty())
-    {
-        return Ok(StoredStatus::missing(vec![
-            "blocked: a Console API key is in this home".into(),
-        ]));
+    match console_key(config)? {
+        ConsoleKey::Present => {
+            return Ok(StoredStatus::missing(vec![
+                "blocked: a Console API key is in this home".into(),
+            ]));
+        }
+        ConsoleKey::Unparseable => {
+            return Ok(StoredStatus::missing(vec![
+                "blocked: Claude config file is not valid JSON".into(),
+            ]));
+        }
+        ConsoleKey::Absent => {}
     }
     let Some(oauth) = value
         .get("claudeAiOauth")

@@ -677,4 +677,12 @@ variables, and selects the intended billing identity. The API-key variant reads
 only its mode-0600 key file through Claude Code's helper. The subscription
 variant leaves OAuth credentials owned by Claude Code. SCV never uses Claude's
 auth-status command as a billing gate, and fails closed when either identity is
-missing, malformed, conflicting, or ambiguous.
+missing, malformed, conflicting, or ambiguous. On the per-turn CLI, the first
+stream-json init event must report `apiKeySource` `apiKeyHelper` for `claude`
+and `none` for `claude-ai`. Any other source stops that child immediately. The
+turn fails with an error that names the credential source, and the model's
+reply is discarded. `scv agents logout claude` removes only the API key file;
+it does not delete a subscription login Claude Code owns. A machine policy
+file `/etc/claude-code/managed-settings.json`, when present, outranks these
+pins. SCV warns at daemon start and in `scv agents status`, and does not block
+on it. See [Claude Code billing](configuration.md#claude-code-billing).

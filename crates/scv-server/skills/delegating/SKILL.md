@@ -117,7 +117,7 @@ own Review and Landing lines, ahead of your summary.
   request still starts one.
 - **Ask first when the task lands, publishes, or deploys**, because the
   review has to come first: "This lands on main. I suggest an independent
-  review first: a fresh claude checks codex's work, up to 3 rounds, and codex
+  review first: a fresh claude-ai checks codex's work, up to 3 rounds, and codex
   lands only after approval. Run it with review?" A yes sets `"land":
   "after_approval"`; "land now and review after" sets `"land":
   "before_review"`; a no starts an ordinary job.
