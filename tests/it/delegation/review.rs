@@ -58,13 +58,17 @@ fn codex_signed_out() -> String {
     .collect()
 }
 
-/// Claude Code's `stream-json` result for a reply.
+/// Claude Code's `stream-json` events for an API-key reply. The init event
+/// is the pinned credential source; without it a completed run fails closed.
 fn claude_says(reply: &str) -> String {
-    format!(
-        "{}\n",
+    [
+        json!({"type":"system","subtype":"init","apiKeySource":"apiKeyHelper"}),
         json!({"type":"result","subtype":"success","is_error":false,"result":reply,
-               "usage":{"input_tokens":1,"output_tokens":1}})
-    )
+               "usage":{"input_tokens":1,"output_tokens":1}}),
+    ]
+    .iter()
+    .map(|event| format!("{event}\n"))
+    .collect()
 }
 
 fn verdict(body: &Value) -> String {

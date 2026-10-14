@@ -515,7 +515,8 @@ fn claude_stores_fail_closed_for_api_and_subscription_identities() {
     assert!(!blocked.ready);
     assert!(
         blocked.lines.iter().any(|line| {
-            line.contains("agents/claude-ai") && line.contains("claude auth logout")
+            line.contains("agents/claude-ai")
+                && line.contains("HOME=$SCV_HOME/agents/claude claude auth logout")
         }),
         "{:?}",
         blocked.lines

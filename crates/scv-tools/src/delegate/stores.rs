@@ -479,7 +479,7 @@ fn claude_api_status(key: &Path, credentials: &Path, home: &Path) -> Result<Stor
             .is_some_and(|oauth| !oauth.is_null())
         {
             return Ok(StoredStatus::missing(vec![
-                "blocked: a Claude subscription login is in this home (move it to agents/claude-ai, or run claude auth logout in this home)".into(),
+                "blocked: a Claude subscription login is in this home (move it to agents/claude-ai, or run HOME=$SCV_HOME/agents/claude claude auth logout)".into(),
             ]));
         }
     }

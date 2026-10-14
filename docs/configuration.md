@@ -367,8 +367,10 @@ has an `[agents.claude]` table and no `[agents.claude-ai]` table, and
 claude now bills an API key and claude-ai uses the Claude subscription. agents/claude holds a Claude subscription login, so claude will not run. To keep using the subscription, move agents/claude to agents/claude-ai and [agents.claude] to [agents.claude-ai] (see docs/configuration.md).
 ```
 
-`claude` stays blocked until that login is moved or signed out with
-`claude auth logout` in that home. `scv agents logout claude` removes only
+`claude` stays blocked until that login is moved to `agents/claude-ai` or
+signed out with `HOME=$SCV_HOME/agents/claude claude auth logout`. A plain
+`claude auth logout` would sign out the owner's personal `~/.claude` login.
+`scv agents logout claude` removes only
 `.anthropic-api-key`. To keep the subscription, with the daemon idle: move
 `agents/claude` to `agents/claude-ai`, move `state/agent-options/claude.json`
 to `state/agent-options/claude-ai.json` when that file exists, rename the

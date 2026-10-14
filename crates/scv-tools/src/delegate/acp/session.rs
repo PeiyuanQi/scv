@@ -552,7 +552,7 @@ impl AcpAgentTool {
                     && error.pointer("/data/reason").and_then(Value::as_str)
                         == Some("claude_subscription_not_supported")
                 {
-                    "claude is API-key only but its home holds a Claude subscription login; move that login to agents/claude-ai, or run claude auth logout in the claude home".into()
+                    "claude is API-key only but its home holds a Claude subscription login; move that login to agents/claude-ai, or run HOME=$SCV_HOME/agents/claude claude auth logout".into()
                 } else if what == "session/new"
                     && matches!(
                         self.auth,

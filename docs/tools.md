@@ -668,7 +668,7 @@ a conversation needs no `agent`:
 
 | Agent | Starts with | Continues with |
 | --- | --- | --- |
-| `claude` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
+| `claude`, `claude-ai` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
 | `codex` | nothing; the thread ID comes from `thread.started` | `codex exec resume … <thread-id> <prompt>` |
 | `pi` | `--session-id <uuid>` (chosen by SCV) | `--session-id <uuid>` |
 
@@ -1510,12 +1510,15 @@ key without echo, or from stdin when stdin is not a terminal, and writes
 `agents/claude/.anthropic-api-key` with mode 0600. `scv agents logout claude`
 removes that file and nothing else. A Claude subscription login in that home
 is not cleared by that logout; it blocks `claude` until the home is moved to
-`agents/claude-ai` or signed out with `claude auth logout` there.
+`agents/claude-ai`, or signed out with
+`HOME=$SCV_HOME/agents/claude claude auth logout`. A plain `claude auth logout`
+would sign out the owner's personal `~/.claude` login instead.
 `scv agents login claude-ai` runs `claude auth login --claudeai`, and
-`scv agents logout claude-ai` runs `claude auth logout`. Claude Code owns
-those subscription files. An ACP `session/new` that refuses a subscription
-login in the `claude` home says to move that login to `agents/claude-ai` or
-to run `claude auth logout` in the claude home.
+`scv agents logout claude-ai` runs `claude auth logout`, both inside
+`agents/claude-ai`. Claude Code owns those subscription files. An ACP
+`session/new` that refuses a subscription login in the `claude` home says to
+move that login to `agents/claude-ai` or to run
+`HOME=$SCV_HOME/agents/claude claude auth logout`.
 
 For Codex and Grok, `login` and `logout` run the agent's own command with
 exactly the private home and cleaned environment that the daemon's delegated
@@ -1671,7 +1674,7 @@ closes, then kills what is left.
 For example:
 
 ```text
-claude (Claude Code)
+claude (Claude Code (API key))
   reached   over ACP: /home/me/.local/bin/claude-agent-acp
   version   2.1.283 (Claude Code)
   models    opus[1m], claude-fable-5-1[1m], sonnet, haiku

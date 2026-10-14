@@ -157,10 +157,13 @@ async fn claude_native_launch_pins_settings_and_checks_the_api_key_file() {
     let mut tool = fake_agent(
         workspace.path(),
         "claude",
-        "printf '%s\\n' \"$@\"\n",
+        r#"/usr/bin/printf '%s\n' '{"type":"system","subtype":"init","apiKeySource":"apiKeyHelper"}'
+python3 -c 'import json,sys; print(json.dumps({"type":"result","is_error":False,"result":"\n".join(sys.argv[1:])}))' "$@"
+"#,
         &[],
         Vec::new(),
     );
+    tool.output = OutputFormat::ClaudeStreamJson;
     tool.auth = crate::AgentAuthPlan::Claude {
         mode: crate::adapters::AgentAuth::ClaudeApiKey,
         settings: json!({"apiKeyHelper":"cat -- '/private/.anthropic-api-key'"}),

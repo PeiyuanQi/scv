@@ -212,42 +212,6 @@ agent's reject option, and a relay without a gate rejects. `permissions =
 or flag, so nothing is relayed then. Progress lines carry tool titles, never
 tool output or the agent's thoughts, and are redacted.
 
-### Pinned Claude Code credentials
-
-SCV keeps `claude` and `claude-ai` in separate private homes and separate
-configuration tables. Every launch, on both the per-turn CLI and ACP, passes
-the same programmatic settings object. It pins the Anthropic API route,
-clears alternate credential and cloud-provider variables, and selects the
-intended billing identity. SCV never uses Claude's auth-status command as a
-billing gate, and fails closed when either identity is missing, malformed,
-conflicting, or ambiguous.
-
-On the per-turn CLI the key stays in the file. Claude Code reads
-`agents/claude/.anthropic-api-key` (mode 0600) through the pinned
-`apiKeyHelper`. SCV does not put that key in the CLI process environment.
-The first stream-json init event must report `apiKeySource` `apiKeyHelper`
-for `claude` and `none` for `claude-ai`. Any other source stops that child
-immediately. If that init event never arrives, a run that would otherwise
-complete fails the same way. The error names the credential source, and the
-model's reply is discarded. A run that already failed, timed out, or was
-cancelled keeps that status.
-
-Over ACP, `claude` is started with `--hide-claude-auth`. At spawn SCV reads
-the same key file and sets `ANTHROPIC_API_KEY` on the adapter process. The
-adapter's bundled Claude Code process inherits that variable in its initial
-environment, and the pinned settings then blank it inside Claude Code.
-Whether tools on the ACP path see it empty is not verified; on the per-turn
-CLI they do. The value is not logged. `claude-ai` does not receive the flag
-or the variable. `session/new` for both agents sends the pinned settings object in
-`_meta.claudeCode.options.settings`. The subscription variant leaves OAuth
-credentials owned by Claude Code.
-
-`scv agents logout claude` removes only the API key file. It does not delete
-a subscription login Claude Code owns. A machine policy file
-`/etc/claude-code/managed-settings.json`, when present, outranks these pins.
-SCV warns at daemon start and in `scv agents status`, and does not block on
-it. See [Claude Code billing](configuration.md#claude-code-billing).
-
 A nested SCV (the `scv` agent) is a delegated agent like the others and adds no
 new trust: it runs as the user, unsandboxed, in its private home, one
 delegation level deeper. Its tools are still gated by approval, and each of
@@ -296,6 +260,45 @@ to report the refusal to the user instead of retrying elsewhere; the user may
 still name another agent, whose own policies then apply. Fallback suggestions
 for real availability failures are decided from the result's status and
 structured `error` only, so text in an agent's reply cannot trigger one.
+
+### Pinned Claude Code credentials
+
+SCV keeps `claude` and `claude-ai` in separate private homes and separate
+configuration tables. Every launch, on both the per-turn CLI and ACP, passes
+the same programmatic settings object. It pins the Anthropic API route,
+clears alternate credential and cloud-provider variables, and selects the
+intended billing identity. SCV never uses Claude's auth-status command as a
+billing gate, and fails closed when either identity is missing, malformed,
+conflicting, or ambiguous.
+
+On the per-turn CLI the key stays in the file. Claude Code reads
+`agents/claude/.anthropic-api-key` (mode 0600) through the pinned
+`apiKeyHelper`. SCV does not put that key in the CLI process environment.
+The first stream-json init event must report `apiKeySource` `apiKeyHelper`
+for `claude` and `none` for `claude-ai`. Any other source stops that child
+immediately. If that init event never arrives, a run that would otherwise
+complete fails the same way. The error names the credential source, and the
+model's reply is discarded. A run that already failed, timed out, or was
+cancelled keeps that status.
+
+Over ACP, `claude` is started with `--hide-claude-auth`. At spawn SCV reads
+the same key file and sets `ANTHROPIC_API_KEY` on the adapter process. The
+adapter's bundled Claude Code process inherits that variable in its initial
+environment, and the pinned settings then blank it inside Claude Code.
+Whether tools on the ACP path see it empty is not verified; on the per-turn
+CLI they do. The value is not logged. `claude-ai` does not receive the flag
+or the variable. `session/new` for both agents sends the pinned settings object in
+`_meta.claudeCode.options.settings`. The subscription variant leaves OAuth
+credentials owned by Claude Code.
+
+`scv agents logout claude` removes only the API key file. It does not delete
+a subscription login Claude Code owns. Move that home to `agents/claude-ai`,
+or sign it out with `HOME=$SCV_HOME/agents/claude claude auth logout`. A plain
+`claude auth logout` would sign out the owner's personal `~/.claude` login.
+A machine policy file
+`/etc/claude-code/managed-settings.json`, when present, outranks these pins.
+SCV warns at daemon start and in `scv agents status`, and does not block on
+it. See [Claude Code billing](configuration.md#claude-code-billing).
 
 ## Web access
 
