@@ -67,7 +67,16 @@ fn descriptors_are_unique_and_self_consistent() {
         .into_iter()
         .flatten()
         {
+            let claude_private_home = matches!(
+                store,
+                KeyStore::ClaudeApiKey { .. } | KeyStore::ClaudeAccount { .. }
+            );
             let paths = match store {
+                KeyStore::ClaudeApiKey { key, credentials } => vec![key, credentials],
+                KeyStore::ClaudeAccount {
+                    credentials,
+                    config,
+                } => vec![credentials, config],
                 KeyStore::Grok { auth, config } => vec![auth, config],
                 KeyStore::DshRefs { path, .. } => vec![path],
                 KeyStore::Pi { dir } => vec![dir],
@@ -76,10 +85,11 @@ fn descriptors_are_unique_and_self_consistent() {
             };
             for path in paths {
                 assert!(
-                    adapter
-                        .home_environment
-                        .iter()
-                        .any(|(_, home)| !home.is_empty() && path.starts_with(home)),
+                    claude_private_home
+                        || adapter
+                            .home_environment
+                            .iter()
+                            .any(|(_, home)| !home.is_empty() && path.starts_with(home)),
                     "{}: {path}",
                     adapter.name
                 );
@@ -90,31 +100,6 @@ fn descriptors_are_unique_and_self_consistent() {
 
 #[test]
 fn status_summaries_never_echo_accounts_or_keys() {
-    let claude = r#"{"loggedIn":true,"authMethod":"claude.ai","email":"me@example.com","orgName":"me@example.com's Organization","subscriptionType":"max"}"#;
-    assert_eq!(
-        summarize_status(StatusSummary::ClaudeJson, true, claude),
-        "signed in (Claude account, max)"
-    );
-    assert_eq!(
-        summarize_status(
-            StatusSummary::ClaudeJson,
-            true,
-            r#"{"loggedIn":true,"authMethod":"api_key","subscriptionType":"me@example.com"}"#
-        ),
-        "signed in (API key)"
-    );
-    assert_eq!(
-        summarize_status(StatusSummary::ClaudeJson, false, r#"{"loggedIn":false}"#),
-        "not signed in"
-    );
-    assert_eq!(
-        summarize_status(
-            StatusSummary::ClaudeJson,
-            true,
-            "{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}\n\nsome stderr"
-        ),
-        "signed in (Claude account)"
-    );
     assert_eq!(
         summarize_status(
             StatusSummary::CodexText,

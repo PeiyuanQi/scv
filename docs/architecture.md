@@ -103,7 +103,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.3.14` and exact workspace dependency pins.
+`0.4.0` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -487,7 +487,11 @@ the backend validates, summarizes, or runs it, except on a continued ACP or
 nested-SCV conversation, whose session keeps its own. `delegate/choice.rs`
 writes each agent's line in the argument's description (product, what it
 offers, what it takes, the user's `use_for`, defaults, and `hard_task_effort`)
-and names the other offered agents on availability failures. A
+and names the other offered agents on availability failures. Claude Code is
+two descriptors in one family: `claude` for API-key billing and `claude-ai`
+for the Claude subscription. Their homes, settings tables, conversation
+handles, and credential checks stay separate, and the adapter layer passes the
+same pinned settings to the native CLI and to ACP. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a

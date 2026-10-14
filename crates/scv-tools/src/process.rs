@@ -1,6 +1,6 @@
 //! Running a child process for a tool: spawn it in its own process group,
 //! drain its output while it runs, and always finish the whole group when
-//! it exits, times out, or is cancelled.
+//! it exits, times out, is cancelled, or its output asks for a halt.
 
 use std::{
     ffi::OsString, os::unix::process::CommandExt as _, path::PathBuf, sync::Arc, time::Duration,
@@ -83,6 +83,7 @@ pub(crate) async fn execute_process(
         cancellation,
         stdout_task,
         stderr_task,
+        None,
     )
     .await;
     records::untrack_spawned(pid as u32);
@@ -147,8 +148,10 @@ pub(crate) struct Finished {
     pub(crate) timed_out: bool,
 }
 
-/// Wait for a spawned process group until it exits, times out, or is
-/// cancelled, always finishing the whole group and draining its output.
+/// Wait for a spawned process group until it exits, times out, is
+/// cancelled, or `halt` is cancelled. Always finishes the whole group and
+/// drains its output. A cancelled `halt` stops the group at once and returns
+/// its exit status; it is not user cancellation.
 pub(crate) async fn supervise(
     child: &mut tokio::process::Child,
     pid: i32,
@@ -156,14 +159,22 @@ pub(crate) async fn supervise(
     cancellation: tokio_util::sync::CancellationToken,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
+    halt: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<Finished, ToolError> {
     enum Completion {
         Exited(std::process::ExitStatus),
         TimedOut,
         Cancelled,
+        Halted,
     }
     let completion = tokio::select! {
         status = child.wait() => Completion::Exited(status.map_err(|error| ToolError::failed(format!("wait for child: {error}")))?),
+        () = async {
+            match halt {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        } => Completion::Halted,
         () = cancellation.cancelled() => {
             Completion::Cancelled
         },
@@ -183,6 +194,11 @@ pub(crate) async fn supervise(
         Completion::TimedOut => {
             let status = terminate_group(pid, child, None, Instant::now(), false).await?;
             (status, true, Instant::now() + Duration::from_millis(250))
+        }
+        Completion::Halted => {
+            // Stop before the child can keep billing the wrong identity.
+            let status = terminate_group(pid, child, None, Instant::now(), false).await?;
+            (status, false, Instant::now() + Duration::from_millis(250))
         }
         Completion::Cancelled => {
             let cleanup_deadline = Instant::now() + Duration::from_secs(2);

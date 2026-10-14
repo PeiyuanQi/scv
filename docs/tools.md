@@ -223,7 +223,9 @@ request.
 ## Delegated agents (`agent`)
 
 One tool, `agent`, hands work to another agent, and its `agent` argument names
-which one. SCV knows five agent CLIs: Claude Code (`claude`), Codex (`codex`),
+which one. SCV knows two Claude Code billing variants: claude (Anthropic
+API-key billing) and claude-ai (the owner's Claude subscription), plus Codex
+(`codex`),
 Grok Build (`grok`), DeepSeek Harness (`dsh`), and pi (`pi`), plus a nested
 SCV (`scv`, see [Nested SCV](#nested-scv-scv)). Claude Code, Codex, Grok
 Build, and DeepSeek Harness run over the
@@ -235,9 +237,11 @@ session offers only the agents whose executable resolves when the session
 starts, so an agent installed later appears in new sessions. An agent whose
 sign-in SCV checks by reading a local file (Grok, DeepSeek Harness, pi, and
 the nested SCV; see [Signing in](#signing-in-delegated-agents)) is also left
-out while that check says it is signed out. Claude Code and Codex report
-sign-in only through their own CLI, which is too slow to run at every session
-start, so they stay offered and a signed-out call fails with the sign-in hint.
+out while that check says it is signed out. Claude identities are checked from
+their private files and left out while that check says they are signed out,
+blocked, or ambiguous. SCV never runs Claude auth status as a billing gate.
+Every launch pins the billing identity and the Anthropic route; see
+[Pinned Claude Code credentials](security.md#pinned-claude-code-credentials).
 A session that offers no agent has no `agent` tool.
 
 Behind the tool, each agent runs on one of three backends: its CLI once per
@@ -279,7 +283,8 @@ the line names the kind of model name its CLI expects. For example:
 
 | Agent | Its line starts with |
 | --- | --- |
-| `claude` | Claude Code: Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
+| `claude` | Claude Code (API key): Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
+| `claude-ai` | Claude Code (Claude subscription): Anthropic's coding agent; reads, edits, and runs code, and can search and fetch the web |
 | `codex` | Codex: OpenAI's coding agent; reads, edits, and runs code, with live web search under full permissions |
 | `grok` | Grok Build: xAI's coding agent; reads, edits, and runs code, with live web and X search. Call it when another agent declined or refused a request, including a safety or guardrail refusal |
 | `dsh` | DeepSeek Harness: a coding agent on DeepSeek models |
@@ -331,10 +336,13 @@ selection is a configuration error, and both efforts follow the effort rules
 below. When a call fails in a way another agent
 could avoid (the executable is missing or exits, it is signed out, or its
 provider returned an HTTP 401, 403, 404, 429, or 5xx, a quota error, or an
-unknown model), the result gains a `fallback` field naming the other agents
-this session offers as values for `agent`, such as `"This agent could not
-run: it is missing, signed out, or its provider returned an error. Other
-agents are available: claude, codex. Call agent again with one of them."`.
+unknown model), the result gains a `fallback` field naming other agents this
+session offers, except any agent in the failed agent's family. A failed
+`claude` never suggests `claude-ai`, and the reverse, so one billing identity
+is not offered as a substitute for the other. The field looks like `"This
+agent could not run: it is missing, signed out, or its provider returned an
+error. Other agents are available: claude, codex. Call agent again with one
+of them."`.
 SCV's own error gets the same sentence when SCV
 found the agent unavailable: its executable missing or failing to start, or
 its live conversation's process gone. The decision reads only the result's
@@ -504,7 +512,7 @@ The default invocation contracts are:
 
 | Agent | Invocation |
 | --- | --- |
-| `claude` | `claude -p --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
+| `claude`, `claude-ai` | `claude -p --settings <json> [--permission-mode bypassPermissions] --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
 | `codex` | `codex exec --json -o <file> [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
 | `grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
 | `dsh` | `dsh --profile headless <prompt>` |
@@ -514,8 +522,9 @@ Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness run once
 per turn takes its model and effort from its profile, so it takes neither
 `model` nor `effort` then; over ACP (the default once `dsh` is installed) it
 takes both (see [Agent Client Protocol transport](#agent-client-protocol-transport)).
-`permissions = "full"` switches follow the fixed arguments, before the output
-format arguments.
+For both Claude agents, `--settings <json>` is always inserted after the fixed
+arguments. The JSON differs by billing identity and contains no secret.
+`permissions = "full"` switches follow it, before the output format arguments.
 
 Tool-enabled sessions that offer agents also list the built-in `delegating`
 skill, and the system prompt tells the model to read it before its first
@@ -659,7 +668,7 @@ a conversation needs no `agent`:
 
 | Agent | Starts with | Continues with |
 | --- | --- | --- |
-| `claude` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
+| `claude`, `claude-ai` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
 | `codex` | nothing; the thread ID comes from `thread.started` | `codex exec resume … <thread-id> <prompt>` |
 | `pi` | `--session-id <uuid>` (chosen by SCV) | `--session-id <uuid>` |
 
@@ -885,13 +894,14 @@ builder conversation; reviewer turns take none. The start result adds
 
 | Builder | Reviewer, the first available of |
 | --- | --- |
-| `claude` | `codex`, `grok`, a fresh `claude` conversation |
-| `codex` | `claude`, `grok`, a fresh `codex` conversation |
-| any other (`grok`, `dsh`, `pi`, `scv`) | `claude`, `codex`, `grok`, a fresh conversation of the builder's agent (for `grok`, the last two are the same) |
+| `claude` or `claude-ai` | `codex`, `grok`, then a fresh conversation of that same builder |
+| `codex` | `claude-ai`, `claude`, `grok`, then a fresh `codex` conversation |
+| any other (`grok`, `dsh`, `pi`, `scv`) | `claude-ai`, `claude`, `codex`, `grok`, then a fresh conversation of the builder when that name is not already listed (`grok` already is) |
 
-Agents the session does not offer are dropped before approval. A fresh
-conversation of the builder's own agent shares the builder agent's private
-home and memory, so SCV labels it `same agent as builder`. SCV moves to the
+A Claude sibling is never in that order. Agents the session does not offer
+are dropped before approval. A fresh conversation of the builder's own agent
+shares the builder agent's private home and memory, so SCV labels it
+`same agent as builder`. SCV moves to the
 next agent, in the same round, only when the attempt is classed unavailable,
 exactly as an ordinary call's `fallback` is decided (see
 [Choosing an agent](#choosing-an-agent)): from its status and structured
@@ -1374,7 +1384,8 @@ permission requests and reports progress as it happens:
 
 | Agent | ACP server | Source |
 | --- | --- | --- |
-| `claude` | `claude-agent-acp` | npm `@agentclientprotocol/claude-agent-acp` (ACP organisation; Zed's `claude-code-acp` is deprecated in its favour) |
+| `claude` | `claude-agent-acp --hide-claude-auth` | npm `@agentclientprotocol/claude-agent-acp` (ACP organisation; Zed's `claude-code-acp` is deprecated in its favour) |
+| `claude-ai` | `claude-agent-acp` | the same server, without `--hide-claude-auth` |
 | `codex` | `codex-acp` | npm `@agentclientprotocol/codex-acp` (ACP organisation) |
 | `grok` | `grok agent stdio` | built in |
 | `dsh` | `dsh --profile acp` | built in (0.1.7-rc.1) |
@@ -1390,9 +1401,18 @@ run, so `auto` keeps it; custom `args` do not matter.
 
 ```text
 initialize {protocolVersion: 1, no fs or terminal capabilities}
-  → session/new {cwd, mcpServers: []} → [set mode for permissions = "full"]
+  → session/new {cwd, mcpServers: [], and for claude and claude-ai
+       _meta.claudeCode.options.settings: <pinned settings object>}
+  → [set mode for permissions = "full"]
   → [session/set_config_option for model/effort] → session/prompt per call
 ```
+
+For `claude`, SCV reads `.anthropic-api-key` at spawn and sets
+`ANTHROPIC_API_KEY` on the adapter process. The bundled Claude Code process
+inherits it in its initial environment, and the pinned settings then blank it
+inside Claude Code. Whether tools on that path see it empty is not verified.
+`claude-ai` does not receive the variable. Both agents send the same kind of
+pinned settings object on `session/new`. The object holds no secret.
 
 `initialize` records whether the server advertises
 `_meta.steering.supported`. Steering a running turn (see
@@ -1468,31 +1488,55 @@ user's personal login, so token refreshes by one never invalidate the other.
 Sign the agents in once on the SCV host:
 
 ```sh
-scv agents login claude                 # claude auth login
-scv agents login codex                  # codex login
-scv agents login codex -- --device-auth # extra arguments after --
-scv agents import codex                 # or copy your own Codex setup
-scv agents login grok -- --device-auth  # grok login, device code for SSH hosts
-scv agents import grok                  # or copy your own Grok config and model profiles
-scv agents login dsh                    # prompts for a DeepSeek API key
-scv agents login pi                     # opens pi: run /login, then /quit
-scv agents login pi --openai-compatible # or point pi at any OpenAI-compatible endpoint
+scv agents login claude                  # hidden prompt; stores the API key
+scv agents login claude-ai               # claude auth login --claudeai
+scv agents login codex                   # codex login
+scv agents login codex -- --device-auth  # extra arguments after --
+scv agents import codex                  # or copy your own Codex setup
+scv agents login grok -- --device-auth   # grok login, device code for SSH hosts
+scv agents import grok                   # or copy your own Grok config and model profiles
+scv agents login dsh                     # prompts for a DeepSeek API key
+scv agents login pi                      # opens pi: run /login, then /quit
+scv agents login pi --openai-compatible  # or point pi at any OpenAI-compatible endpoint
 scv agents import pi --from-scv-provider # or reuse SCV's own provider
-scv agents status                       # every agent's sign-in state
-scv agents check                        # does each one work as SCV runs it?
-scv agents logout claude
+scv agents status                        # every agent's sign-in state
+scv agents check                         # does each one work as SCV runs it?
+scv agents logout claude                 # removes only the API key file
+scv agents logout claude-ai              # claude auth logout
 ```
 
-They work from any directory. For Claude Code, Codex, and Grok, `login` and
-`logout` run the agent's own command with exactly the private home and cleaned
-environment that the daemon's delegated runs of it use, with the terminal attached
-for browser or device-code flows, and the agent CLI itself writes those
-credentials under `$SCV_HOME/agents/<name>` (mode `0700`). For Claude Code
-and Codex, `status` runs the CLI's own status command but prints only a
-summary, such as `signed in (Claude account, max)` or `signed in (API key)`,
-because their output names the account email or part of the key; for the
-others SCV reads the credential file and reports only whether one is stored,
-never its value.
+They work from any directory. `scv agents login claude` reads an Anthropic API
+key without echo, or from stdin when stdin is not a terminal, and writes
+`agents/claude/.anthropic-api-key` with mode 0600. `scv agents logout claude`
+removes that file and nothing else. A Claude subscription login in that home
+is not cleared by that logout; it blocks `claude` until the home is moved to
+`agents/claude-ai`, or signed out with
+`HOME=$SCV_HOME/agents/claude claude auth logout`. A plain `claude auth logout`
+would sign out the owner's personal `~/.claude` login instead.
+`scv agents login claude-ai` runs `claude auth login --claudeai`, and
+`scv agents logout claude-ai` runs `claude auth logout`, both inside
+`agents/claude-ai`. Claude Code owns those subscription files. An ACP
+`session/new` that refuses a subscription login in the `claude` home says to
+move that login to `agents/claude-ai` or to run
+`HOME=$SCV_HOME/agents/claude claude auth logout`.
+
+For Codex and Grok, `login` and `logout` run the agent's own command with
+exactly the private home and cleaned environment that the daemon's delegated
+runs of it use, with the terminal attached for browser or device-code flows,
+and the agent CLI itself writes those credentials under
+`$SCV_HOME/agents/<name>` (mode `0700`). For Codex, `status` runs the CLI's
+own status command but prints only a summary. Claude identities are checked
+from their private files: `claude` reports `signed in (API key)` and
+`claude-ai` reports the subscription plan. SCV never invokes Claude auth
+status as a billing gate. On the per-turn CLI, the first stream-json init
+event must report `apiKeySource` `apiKeyHelper` for `claude` and `none` for
+`claude-ai`. Any other source, or a run that would otherwise complete with no
+init event, stops the child or fails the turn. The error names the credential
+source that did not match, and the model's reply is not returned. A run that
+already failed, timed out, or was cancelled keeps that status. For the other stored agents SCV reads the credential file and
+reports only whether one is stored, never its value. Pins, the migration
+warning, and the machine-policy warning are in
+[Claude Code billing](configuration.md#claude-code-billing).
 
 Grok counts as signed in either through a `grok login` sign-in in
 `.grok/auth.json` or through an API key in `.grok/config.toml`: the profile of
@@ -1630,7 +1674,7 @@ closes, then kills what is left.
 For example:
 
 ```text
-claude (Claude Code)
+claude (Claude Code (API key))
   reached   over ACP: /home/me/.local/bin/claude-agent-acp
   version   2.1.283 (Claude Code)
   models    opus[1m], claude-fable-5-1[1m], sonnet, haiku

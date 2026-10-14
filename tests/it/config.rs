@@ -83,23 +83,10 @@ fn scv_home_inside_the_workspace_is_not_a_project_layer() {
 fn agent_sign_in_ignores_project_configuration() {
     let workspace = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    // A fake `claude` whose status names the account, as the real one does.
-    let fake = home.path().join("fake-claude");
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\n[ \"$*\" = \"auth status\" ] || exit 2\n\
-         echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"owner@example.com\",\"subscriptionType\":\"max\",\"orgName\":\"owner@example.com Org\"}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    write_private(
-        &home.path().join("config.toml"),
-        &format!(
-            "{}[agents.claude]\ncommand = {:?}\n",
-            provider("model"),
-            fake.display().to_string()
-        ),
-    );
+    let key = home.path().join("agents/claude/.anthropic-api-key");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    write_private(&key, "sk-ant-api03-test-key");
+    write_private(&home.path().join("config.toml"), &provider("model"));
     // A project layer that would be rejected must not block agent sign-in.
     std::fs::create_dir(workspace.path().join(".scv")).unwrap();
     std::fs::write(
@@ -124,7 +111,7 @@ fn agent_sign_in_ignores_project_configuration() {
     // Signed-in state and method only: never the account email.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "claude:\n  signed in (Claude account, max)\n"
+        "claude:\n  not installed (\"claude\" is not on PATH or in ~/.local/bin)\n  signed in (API key)\n"
     );
     assert!(home.path().join("agents/claude").is_dir());
 }

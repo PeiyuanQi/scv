@@ -140,7 +140,7 @@ impl Backend for Conversing {
     ) -> Result<ToolOutput, ToolError> {
         let args: AgentArgs = parse_args(&arguments)?;
         let turn = self.conversations.begin(
-            "fake",
+            "codex",
             args.session.as_deref(),
             std::path::Path::new("/w"),
             false,
@@ -151,7 +151,7 @@ impl Backend for Conversing {
                 permit.unwrap().forget();
                 let session = turn.finish(Some("thread".into()), true);
                 Ok(ToolOutput::success(
-                    json!({"agent":"fake","status":"completed","reply":args.prompt,"session":session})
+                    json!({"agent":"codex","status":"completed","reply":args.prompt,"session":session})
                         .to_string(),
                 ))
             }
@@ -160,8 +160,8 @@ impl Backend for Conversing {
     }
 }
 
-/// A session offering [`Conversing`] as `fake`, whose conversations
-/// `fake-1` and `fake-2` have each had a turn.
+/// A session offering [`Conversing`] as `codex`, whose conversations
+/// `codex-1` and `codex-2` have each had a turn.
 struct Session {
     tool: Arc<BackgroundCapable>,
     jobs: Arc<BackgroundJobs>,
@@ -179,14 +179,14 @@ fn session(limit: usize, busy: BusyConfig) -> Session {
     ));
     for _ in 0..2 {
         let turn = conversations
-            .begin("fake", None, std::path::Path::new("/w"), false)
+            .begin("codex", None, std::path::Path::new("/w"), false)
             .unwrap();
         turn.finish(Some("thread".into()), true).unwrap();
     }
     let release = Arc::new(Semaphore::new(0));
     let prompts = Arc::default();
     let offered = Offered {
-        name: "fake".into(),
+        name: "codex".into(),
         backend: Arc::new(Conversing {
             conversations,
             release: Arc::clone(&release),
@@ -210,7 +210,7 @@ fn session(limit: usize, busy: BusyConfig) -> Session {
     let jobs = Arc::new(BackgroundJobs::new(limit, None));
     Session {
         tool: Arc::new(BackgroundCapable::plain(
-            Arc::new(AgentTool::new(vec![offered], &["fake".into()], timeouts)),
+            Arc::new(AgentTool::new(vec![offered], &["codex".into()], timeouts)),
             Arc::clone(&jobs),
         )),
         jobs,
@@ -254,13 +254,13 @@ impl Session {
 async fn a_busy_conversation_queues_prompts_in_the_order_they_arrive() {
     let session = session(2, BusyConfig::default());
     let first = session
-        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .call(json!({"prompt":"a","session":"codex-1","background":true}))
         .await
         .unwrap();
     assert_eq!(first.get("queued"), None);
     // The first job has not begun its turn yet, and still these wait for it.
     let second = session
-        .call(json!({"prompt":"b","session":"fake-1"}))
+        .call(json!({"prompt":"b","session":"codex-1"}))
         .await
         .unwrap();
     assert_eq!(
@@ -268,7 +268,7 @@ async fn a_busy_conversation_queues_prompts_in_the_order_they_arrive() {
         (&json!("job-2"), &json!(true))
     );
     let third = session
-        .call(json!({"prompt":"c","session":"fake-1","background":true}))
+        .call(json!({"prompt":"c","session":"codex-1","background":true}))
         .await
         .unwrap();
     assert_eq!(third["queued"], true);
@@ -299,22 +299,22 @@ async fn queued_prompts_are_bounded_per_conversation_not_by_max_background() {
         },
     );
     session
-        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .call(json!({"prompt":"a","session":"codex-1","background":true}))
         .await
         .unwrap();
     let queued = session
-        .call(json!({"prompt":"b","session":"fake-1","background":true}))
+        .call(json!({"prompt":"b","session":"codex-1","background":true}))
         .await
         .unwrap();
     assert_eq!(queued["queued"], true);
     let full = session
-        .call(json!({"prompt":"c","session":"fake-1"}))
+        .call(json!({"prompt":"c","session":"codex-1"}))
         .await
         .unwrap_err();
     assert!(full.message.contains("agent.max_queued_turns"), "{full}");
     // The one background job allowed runs already.
     let other = session
-        .call(json!({"prompt":"d","session":"fake-2","background":true}))
+        .call(json!({"prompt":"d","session":"codex-2","background":true}))
         .await
         .unwrap_err();
     assert!(other.message.contains("agent.max_background"), "{other}");
@@ -322,13 +322,13 @@ async fn queued_prompts_are_bounded_per_conversation_not_by_max_background() {
     let running = tokio::spawn({
         let tool = Arc::clone(&session.tool);
         async move {
-            tool.execute(json!({"prompt":"e","session":"fake-2"}), context())
+            tool.execute(json!({"prompt":"e","session":"codex-2"}), context())
                 .await
         }
     });
     session.ran(&["a", "e"]).await;
     let queued = session
-        .call(json!({"prompt":"f","session":"fake-2"}))
+        .call(json!({"prompt":"f","session":"codex-2"}))
         .await
         .unwrap();
     assert_eq!(queued["queued"], true);
@@ -343,20 +343,20 @@ async fn queued_prompts_are_bounded_per_conversation_not_by_max_background() {
 async fn a_call_never_overtakes_prompts_already_waiting() {
     let session = session(2, BusyConfig::default());
     session
-        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .call(json!({"prompt":"a","session":"codex-1","background":true}))
         .await
         .unwrap();
     session
-        .call(json!({"prompt":"b","session":"fake-1"}))
+        .call(json!({"prompt":"b","session":"codex-1"}))
         .await
         .unwrap();
     let refused = session
-        .call(json!({"prompt":"x","session":"fake-1","on_busy":"fail"}))
+        .call(json!({"prompt":"x","session":"codex-1","on_busy":"fail"}))
         .await
         .unwrap_err();
     assert_eq!(
         refused.message,
-        "session busy: conversation fake-1 is still running a turn, and 1 more prompts wait \
+        "session busy: conversation codex-1 is still running a turn, and 1 more prompts wait \
          for it"
     );
     // Waiting holds the call until the prompts ahead of it have run.
@@ -364,7 +364,7 @@ async fn a_call_never_overtakes_prompts_already_waiting() {
         let tool = Arc::clone(&session.tool);
         async move {
             tool.execute(
-                json!({"prompt":"c","session":"fake-1","on_busy":"wait"}),
+                json!({"prompt":"c","session":"codex-1","on_busy":"wait"}),
                 context(),
             )
             .await
@@ -388,7 +388,7 @@ async fn cancelling_a_queued_prompt_frees_its_place_without_running_it() {
     let session = session(2, BusyConfig::default());
     for prompt in ["a", "b", "c"] {
         session
-            .call(json!({"prompt":prompt,"session":"fake-1","background":true}))
+            .call(json!({"prompt":prompt,"session":"codex-1","background":true}))
             .await
             .unwrap();
     }
@@ -412,14 +412,14 @@ async fn background_calls_and_steering_fall_back_to_the_busy_policy() {
         },
     );
     session
-        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .call(json!({"prompt":"a","session":"codex-1","background":true}))
         .await
         .unwrap();
     // This agent cannot steer, so its fallback refuses the call.
     for arguments in [
-        json!({"prompt":"b","session":"fake-1"}),
-        json!({"prompt":"b","session":"fake-1","background":true}),
-        json!({"prompt":"b","session":"fake-1","on_busy":"fail","background":true}),
+        json!({"prompt":"b","session":"codex-1"}),
+        json!({"prompt":"b","session":"codex-1","background":true}),
+        json!({"prompt":"b","session":"codex-1","on_busy":"fail","background":true}),
     ] {
         let error = session.call(arguments).await.unwrap_err();
         assert!(error.message.starts_with("session busy"), "{error}");
@@ -427,12 +427,12 @@ async fn background_calls_and_steering_fall_back_to_the_busy_policy() {
     // A background call that would wait queues instead; a blank policy is
     // the agent's own.
     let queued = session
-        .call(json!({"prompt":"b","session":"fake-1","on_busy":"wait","background":true}))
+        .call(json!({"prompt":"b","session":"codex-1","on_busy":"wait","background":true}))
         .await
         .unwrap();
     assert_eq!(queued["queued"], true);
     let error = session
-        .call(json!({"prompt":"c","session":"fake-1","on_busy":""}))
+        .call(json!({"prompt":"c","session":"codex-1","on_busy":""}))
         .await
         .unwrap_err();
     assert!(error.message.starts_with("session busy"), "{error}");
@@ -446,11 +446,11 @@ async fn background_calls_and_steering_fall_back_to_the_busy_policy() {
         },
     );
     session
-        .call(json!({"prompt":"a","session":"fake-1","background":true}))
+        .call(json!({"prompt":"a","session":"codex-1","background":true}))
         .await
         .unwrap();
     let queued = session
-        .call(json!({"prompt":"b","session":"fake-1"}))
+        .call(json!({"prompt":"b","session":"codex-1"}))
         .await
         .unwrap();
     assert_eq!(queued["queued"], true);

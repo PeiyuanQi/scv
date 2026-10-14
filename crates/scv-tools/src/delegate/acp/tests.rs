@@ -71,6 +71,7 @@ fn adapter(full: bool) -> AgentAdapterConfig {
         output: OutputFormat::Text,
         resume: Resume::Unsupported,
         home: None,
+        auth: crate::AgentAuthPlan::None,
         transport: Transport::Process,
         acp: None,
         use_for: None,
@@ -697,6 +698,38 @@ async fn the_launch_environment_reaches_the_acp_server() {
 }
 
 #[tokio::test]
+async fn claude_acp_launch_pins_settings_and_api_key_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "normal");
+    let home = tempfile::tempdir().unwrap();
+    let key = home.path().join(".anthropic-api-key");
+    std::fs::write(&key, "sk-ant-api03-test").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut tool = acp_tool(&script, store(Duration::from_secs(60)), None, None);
+    tool.auth = crate::AgentAuthPlan::Claude {
+        mode: crate::adapters::AgentAuth::ClaudeApiKey,
+        settings: json!({"apiKeyHelper":"cat -- '/private/.anthropic-api-key'"}),
+        home: home.path().to_owned(),
+    };
+    let output = tool
+        .execute(json!({"prompt":"env"}), context(dir.path(), None))
+        .await
+        .unwrap();
+    assert!(
+        output
+            .content
+            .contains("ANTHROPIC_API_KEY=sk-ant-api03-test")
+    );
+    let session: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("session.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        session["_meta"]["claudeCode"]["options"]["settings"]["apiKeyHelper"],
+        "cat -- '/private/.anthropic-api-key'"
+    );
+}
+
+#[tokio::test]
 async fn idle_conversations_shut_their_agent_down() {
     let dir = tempfile::tempdir().unwrap();
     let script = fake_agent(dir.path(), "normal");
@@ -778,13 +811,15 @@ fn the_registry_prefers_an_installed_acp_server() {
     };
     let installed = summary(with_acp(&script.display().to_string(), false)).unwrap();
     assert!(
-        installed.starts_with("agent claude: Send prompt \"hi\" to a new ACP session of"),
+        installed.starts_with(
+            "agent claude (API key billing): Send prompt \"hi\" to a new ACP session of",
+        ),
         "{installed}"
     );
     let missing = dir.path().join("no-such-acp-server").display().to_string();
     let fallback = summary(with_acp(&missing, false)).unwrap();
     assert!(
-        fallback.starts_with("agent claude: Launch /bin/echo with args"),
+        fallback.starts_with("agent claude (API key billing): Launch /bin/echo with args"),
         "{fallback}"
     );
     assert!(summary(with_acp(&missing, true)).is_none());

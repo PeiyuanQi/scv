@@ -55,8 +55,9 @@ six places:
 │   │                          code (and SMTP server); for Gmail or Outlook the
 │   │                          address and OAuth client
 │   └── email/<account>.grants an OAuth mailbox's refresh tokens (0600)
-├── agents/<name>/     private homes of the delegated agents (claude, codex,
-│                      grok, dsh, pi, scv), with their own sign-ins
+├── agents/<name>/     private homes of the delegated agents (claude,
+│                      claude-ai, codex, grok, dsh, pi, scv), with their own
+│                      sign-ins
 ├── skills/            your SCV skills
 ├── history/           the chat log of each account owner's direct chat, and of
 │                      each Feishu or Slack thread in it (0700)
@@ -268,6 +269,14 @@ effort_args = ["--effort", "{effort}"]
 # steer_fallback = "queue"
 # max_queued_turns = 4
 
+[agents.claude-ai]
+command = "claude"
+args = ["-p"]
+permissions = "default"
+model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
+# Subscription credentials remain owned by Claude Code.
+
 [agents.codex]
 command = "codex"
 args = ["exec"]
@@ -328,6 +337,57 @@ arguments between the fixed arguments and the prompt, followed by
 the adapter offers no such selection; a non-empty one must contain its
 placeholder. Overriding only `command` or `args` keeps the built-in templates. The built-in adapters are enabled when their executable is
 available; attempting to call a missing adapter returns a clear tool error.
+
+### Claude Code billing
+
+`claude` bills an Anthropic API key that `scv agents login claude` stores at
+`agents/claude/.anthropic-api-key`. `claude-ai` uses the owner's Claude
+subscription, which Claude Code owns under `agents/claude-ai`. The two homes
+and the `[agents.claude]` and `[agents.claude-ai]` tables stay separate, and
+neither agent falls back to the other's credentials. Both launches pin
+credentials and the Anthropic route. For either agent, `args`, `prompt_args`,
+`model_args`, and `effort_args` must not contain `--settings`,
+`--setting-sources`, `--managed-settings`, `--bare`, or `--hide-claude-auth`,
+including the `--flag=value` form. Startup fails with:
+
+```text
+[agents.<name>] <field> must not contain <flag>: SCV pins Claude Code's credentials and routing itself
+```
+
+A custom `command` is still allowed and still gets the pins. `"full"`
+permissions apply to both Claude agents the same way; see
+[Agent permissions](#agent-permissions).
+
+SCV does not move homes or rewrite config on upgrade. When the user config
+has an `[agents.claude]` table and no `[agents.claude-ai]` table, and
+`agents/claude` holds a usable Claude subscription login, daemon start and
+`scv agents status` warn:
+
+```text
+claude now bills an API key and claude-ai uses the Claude subscription. agents/claude holds a Claude subscription login, so claude will not run. To keep using the subscription, move agents/claude to agents/claude-ai and [agents.claude] to [agents.claude-ai] (see docs/configuration.md).
+```
+
+`claude` stays blocked until that login is moved to `agents/claude-ai` or
+signed out with `HOME=$SCV_HOME/agents/claude claude auth logout`. A plain
+`claude auth logout` would sign out the owner's personal `~/.claude` login.
+`scv agents logout claude` removes only
+`.anthropic-api-key`. To keep the subscription, with the daemon idle: move
+`agents/claude` to `agents/claude-ai`, move `state/agent-options/claude.json`
+to `state/agent-options/claude-ai.json` when that file exists, rename the
+`[agents.claude]` table to `[agents.claude-ai]`, and point `[agent] prefer`
+at `claude-ai` when that is the agent that should run by default.
+
+`claude-ai` is blocked when `.claude.json` has a non-empty top-level
+`primaryApiKey`. Claude Code owns that file. Status parses at most 8 MiB of
+it. Within that bound it checks the key. A larger file blocks `claude-ai`
+instead of failing the status command.
+
+When `/etc/claude-code/managed-settings.json` exists, daemon start and
+`scv agents status` warn, and both agents still run:
+
+```text
+machine policy /etc/claude-code/managed-settings.json outranks SCV's pinned Claude Code credentials for claude and claude-ai
+```
 
 `provider`, `agents.*`, `skills.user_dir`, and `[history]` are accepted only
 from built-in, user, explicit `SCV_CONFIG`, environment, and CLI layers. `[channels]` is
@@ -496,7 +556,7 @@ own prompts:
 
 | Agent | `"full"` adds | Web search |
 | --- | --- | --- |
-| `claude` | `--permission-mode bypassPermissions` | WebSearch and WebFetch, unprompted |
+| `claude`, `claude-ai` | `--permission-mode bypassPermissions` | WebSearch and WebFetch, unprompted |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox -c web_search="live"` | native `web_search` tool (if the provider supports it) |
 | `grok` | `--always-approve` | on by default |
 | `dsh` | `DSH_PERMISSION_MODE=danger-full-access` (sandbox off, approvals `never`) | its own web tool |
@@ -519,7 +579,7 @@ instead:
 
 | Agent | `"full"` over ACP | Web search |
 | --- | --- | --- |
-| `claude` | `bypassPermissions` session mode | WebSearch and WebFetch, unprompted |
+| `claude`, `claude-ai` | `bypassPermissions` session mode | WebSearch and WebFetch, unprompted |
 | `codex` | `agent-full-access` session mode and `CODEX_CONFIG={"web_search":"live"}` | native `web_search` tool (if the provider supports it) |
 | `grok` | `grok agent --always-approve stdio` | on by default |
 | `dsh` | the same `DSH_PERMISSION_MODE` variable | its own web tool |

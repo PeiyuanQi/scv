@@ -488,3 +488,129 @@ fn a_broken_nested_scv_config_is_not_overwritten() {
     assert!(configure_scv_child(home.path(), &bad_url, "sk-key-0123456789").is_err());
     assert!(!path.exists());
 }
+
+#[test]
+fn claude_stores_fail_closed_for_api_and_subscription_identities() {
+    let home = tempfile::tempdir().unwrap();
+    let key = home.path().join(".anthropic-api-key");
+    assert!(
+        !claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+    std::fs::write(&key, "sk-ant-api03-test").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(
+        home.path().join(".claude/.credentials.json"),
+        r#"{"claudeAiOauth":{"refreshToken":"refresh","scopes":["user:inference"],"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    let blocked = claude_status(AgentAuth::ClaudeApiKey, home.path()).unwrap();
+    assert!(!blocked.ready);
+    assert!(
+        blocked.lines.iter().any(|line| {
+            line.contains("agents/claude-ai")
+                && line.contains("HOME=$SCV_HOME/agents/claude claude auth logout")
+        }),
+        "{:?}",
+        blocked.lines
+    );
+    assert!(
+        blocked
+            .lines
+            .iter()
+            .all(|line| !line.contains("scv agents logout claude")),
+        "{:?}",
+        blocked.lines
+    );
+    assert!(
+        claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .ready
+    );
+}
+
+#[test]
+fn claude_subscription_status_accepts_oauth_and_rejects_ambiguous_json() {
+    let home = tempfile::tempdir().unwrap();
+    let credentials = home.path().join(".claude/.credentials.json");
+    std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+    std::fs::write(
+        &credentials,
+        r#"{"claudeAiOauth":{"refreshToken":"refresh","scopes":["user:inference"],"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .lines[0],
+        "signed in (Claude subscription, max)"
+    );
+    std::fs::write(home.path().join(".claude.json"), "not json").unwrap();
+    assert!(
+        !claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .ready
+    );
+}
+
+#[test]
+fn a_large_claude_json_is_checked_for_a_console_key_without_failing_status() {
+    let home = tempfile::tempdir().unwrap();
+    let credentials = home.path().join(".claude/.credentials.json");
+    std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+    std::fs::write(
+        &credentials,
+        r#"{"claudeAiOauth":{"refreshToken":"refresh","scopes":["user:inference"],"subscriptionType":"pro"}}"#,
+    )
+    .unwrap();
+    let config = home.path().join(".claude.json");
+    let padding = "a".repeat(MAX_IMPORT_BYTES as usize);
+    std::fs::write(&config, format!("{{\"padding\":\"{padding}\"}}")).unwrap();
+    let open = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(open.ready, "{open:?}");
+    std::fs::write(
+        &config,
+        format!("{{\"primaryApiKey\":\"\",\"padding\":\"{padding}\"}}"),
+    )
+    .unwrap();
+    let empty = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(empty.ready, "{empty:?}");
+    std::fs::write(
+        &config,
+        format!("{{\"padding\":\"{padding}\",\"primaryApiKey\":\"sk-ant-api03-console\"}}"),
+    )
+    .unwrap();
+    let blocked = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(!blocked.ready, "{blocked:?}");
+    assert!(
+        blocked
+            .lines
+            .iter()
+            .any(|line| line.contains("Console API key")),
+        "{blocked:?}"
+    );
+    std::fs::write(&config, r#"{"nested":{"primaryApiKey":"sk-ant"}}"#).unwrap();
+    assert!(
+        claude_status(AgentAuth::ClaudeSubscription, home.path())
+            .unwrap()
+            .ready
+    );
+    let huge = std::fs::File::create(&config).unwrap();
+    huge.set_len(MAX_CLAUDE_CONFIG_BYTES + 1).unwrap();
+    let too_large = claude_status(AgentAuth::ClaudeSubscription, home.path()).unwrap();
+    assert!(!too_large.ready, "{too_large:?}");
+    assert!(
+        too_large
+            .lines
+            .iter()
+            .any(|line| line.contains("too large")),
+        "{too_large:?}"
+    );
+}

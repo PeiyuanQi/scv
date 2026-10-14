@@ -15,6 +15,8 @@ const DAY: Duration = Duration::from_secs(86400);
 fn handles_are_issued_per_agent_and_vendor_ids_are_not_handles() {
     assert!(is_handle("codex-2"));
     assert!(is_handle("pi-10"));
+    assert!(is_handle("claude-ai-3"));
+    assert_eq!(handle_agent("claude-ai-3"), Some("claude-ai"));
     for not_handle in [
         "01a0cd5a-7195-7b31-a503-e235d5da7b45",
         "b514bbf5-a5b7-4bbe-83f9-5824ab41c35c",
@@ -24,6 +26,7 @@ fn handles_are_issued_per_agent_and_vendor_ids_are_not_handles() {
         "Codex-1",
         "codex-1a",
         "../codex-1",
+        "foo-1",
     ] {
         assert!(!is_handle(not_handle), "{not_handle}");
         assert_eq!(handle_agent(not_handle), None, "{not_handle}");

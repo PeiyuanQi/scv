@@ -6,7 +6,7 @@ use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc, time::D
 use crate::{
     builtin::{chat_attach, chat_history},
     delegate::{
-        adapters::{OutputFormat, Resume, Transport},
+        adapters::{AgentAuth, OutputFormat, Resume, Transport},
         background,
         conversation::ConversationLimits,
         records::DelegationRegistry,
@@ -205,6 +205,8 @@ pub struct AgentAdapterConfig {
     pub resume: Resume,
     /// SCV's private home for this agent, for files SCV hands the CLI.
     pub home: Option<PathBuf>,
+    /// Credential identity and pinned settings for Claude Code launches.
+    pub auth: AgentAuthPlan,
     /// How SCV talks to the agent.
     pub transport: Transport,
     /// The agent's ACP server, when `[agents.<name>] transport` allows it and
@@ -221,6 +223,16 @@ pub struct AgentAdapterConfig {
     /// How a call to one of this agent's busy conversations is handled:
     /// `[agents.<name>]` over `[agent]`.
     pub busy: BusyConfig,
+}
+
+#[derive(Debug, Clone)]
+pub enum AgentAuthPlan {
+    None,
+    Claude {
+        mode: AgentAuth,
+        settings: serde_json::Value,
+        home: PathBuf,
+    },
 }
 
 /// The user's model and effort for one agent: `[agents.<name>] model`,

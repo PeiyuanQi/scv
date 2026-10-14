@@ -46,5 +46,51 @@ impl Instance {
     }
 }
 
+/// Warnings for Claude Code billing migrations and machine-wide policy.
+fn claude_warnings_for_layout(layout: &Layout) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let agents = std::fs::read_to_string(layout.config())
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|value| value.get("agents").cloned())
+        .and_then(|value| value.as_table().cloned());
+    let explicit_claude = agents
+        .as_ref()
+        .is_some_and(|agents| agents.contains_key("claude"));
+    let explicit_claude_ai = agents
+        .as_ref()
+        .is_some_and(|agents| agents.contains_key("claude-ai"));
+    if explicit_claude
+        && !explicit_claude_ai
+        && scv_tools::stores::claude_status(
+            scv_tools::adapters::AgentAuth::ClaudeSubscription,
+            &layout.agent_home("claude"),
+        )
+        .is_ok_and(|status| status.ready)
+    {
+        warnings.push(
+            "claude now bills an API key and claude-ai uses the Claude subscription. agents/claude holds a Claude subscription login, so claude will not run. To keep using the subscription, move agents/claude to agents/claude-ai and [agents.claude] to [agents.claude-ai] (see docs/configuration.md).".into(),
+        );
+    }
+    if std::path::Path::new("/etc/claude-code/managed-settings.json").is_file() {
+        warnings.push(
+            "machine policy /etc/claude-code/managed-settings.json outranks SCV's pinned Claude Code credentials for claude and claude-ai".into(),
+        );
+    }
+    warnings
+}
+
+impl Config {
+    pub fn claude_warnings(&self) -> Vec<String> {
+        claude_warnings_for_layout(&Layout::new(&self.instance_home))
+    }
+}
+
+impl Instance {
+    pub(crate) fn claude_warnings(&self) -> Vec<String> {
+        claude_warnings_for_layout(&self.layout)
+    }
+}
+
 #[cfg(test)]
 mod tests;

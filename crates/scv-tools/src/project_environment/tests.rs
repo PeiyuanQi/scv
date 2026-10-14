@@ -388,7 +388,7 @@ async fn native_launch_receives_project_tools_and_keeps_private_home() {
         prompt_args: Vec::new(), full_permission_args: None, model_args: Vec::new(),
         effort_args: Vec::new(), model_hint: String::new(), environment: fixture.launch_environment(),
         search_dirs: Vec::new(), output: OutputFormat::Text, resume: Resume::Unsupported,
-        home: None, transport: Transport::Process, acp: None, use_for: None,
+        home: None, auth: crate::AgentAuthPlan::None, transport: Transport::Process, acp: None, use_for: None,
         defaults: crate::AgentDefaults::default(), options_file: None,
         busy: crate::BusyConfig::default(),
     };

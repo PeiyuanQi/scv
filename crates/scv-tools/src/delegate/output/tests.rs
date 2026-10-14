@@ -56,6 +56,94 @@ fn claude_signed_out_result_is_a_failure_with_its_message() {
 }
 
 #[test]
+fn claude_init_source_must_match_the_pinned_billing_identity() {
+    let mut stream = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeApiKey);
+    stream.push(
+        br#"{"type":"system","subtype":"init","apiKeySource":"none"}
+{"type":"result","is_error":false,"result":"done"}
+"#,
+    );
+    let result = stream.finish(OK, None);
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("claude reported credential source none, not the Claude API key; the run was stopped")
+    );
+    assert_eq!(result.reply, result.error.clone().unwrap());
+
+    let mut stream = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeSubscription);
+    stream.push(
+        br#"{"type":"system","subtype":"init","apiKeySource":"apiKeyHelper"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"billed"}]}}
+{"type":"result","is_error":false,"result":"billed"}
+"#,
+    );
+    let result = stream.finish(OK, None);
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(
+        result.error.as_deref(),
+        Some(
+            "claude-ai reported credential source apiKeyHelper, not the Claude subscription; the run was stopped"
+        )
+    );
+    assert_eq!(result.reply, result.error.clone().unwrap());
+}
+
+#[test]
+fn a_claude_run_that_completes_without_an_init_event_fails() {
+    let mut stream = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeApiKey);
+    stream.push(br#"{"type":"result","is_error":false,"result":"done"}"#);
+    let result = stream.finish(OK, None);
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(
+        result.error.as_deref(),
+        Some(
+            "claude reported credential source missing, not the Claude API key; the run was stopped"
+        )
+    );
+    assert_eq!(result.reply, result.error.clone().unwrap());
+
+    let mut stream = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeApiKey);
+    stream
+        .push(br#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#);
+    let result = stream.finish(OK, None);
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(!result.reply.contains("partial"));
+
+    let mut signed_out = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeApiKey);
+    signed_out.push(br#"{"type":"result","is_error":true,"result":"Not logged in"}"#);
+    let result = signed_out.finish(RunExit::Exited { success: false }, None);
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(result.reply.contains("Not logged in"));
+    assert!(!result.error.unwrap().contains("credential source"));
+
+    let mut timed_out = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeSubscription);
+    timed_out
+        .push(br#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#);
+    assert_eq!(
+        timed_out.finish(RunExit::TimedOut, None).status,
+        RunStatus::Timeout
+    );
+
+    let mut matched = AgentStream::new(OutputFormat::ClaudeStreamJson, 1024)
+        .with_auth(crate::adapters::AgentAuth::ClaudeApiKey);
+    matched.push(
+        br#"{"type":"system","subtype":"init","apiKeySource":"apiKeyHelper"}
+{"type":"result","is_error":false,"result":"ok"}
+"#,
+    );
+    let result = matched.finish(OK, None);
+    assert_eq!(result.status, RunStatus::Completed);
+    assert_eq!(result.reply, "ok");
+}
+
+#[test]
 fn codex_jsonl_yields_the_last_agent_message_and_turn_usage() {
     let stdout = concat!(
         r#"{"type":"thread.started","thread_id":"t"}"#,

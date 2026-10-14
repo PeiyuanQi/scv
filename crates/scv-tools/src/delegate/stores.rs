@@ -3,11 +3,13 @@
 //! API-key and endpoint stores SCV writes in an agent CLI's native format.
 
 use std::io::Read as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::adapters::KeyStore;
+use super::adapters::{AgentAuth, KeyStore};
 
 const MAX_IMPORT_BYTES: u64 = 1024 * 1024;
 
@@ -358,6 +360,23 @@ pub struct StoredStatus {
     pub lines: Vec<String>,
 }
 
+/// Check one Claude billing identity without invoking Claude Code.
+pub fn claude_status(auth: AgentAuth, home: &Path) -> Result<StoredStatus> {
+    match auth {
+        AgentAuth::ClaudeApiKey => claude_api_status(
+            &home.join(".anthropic-api-key"),
+            &home.join(".claude/.credentials.json"),
+            home,
+        ),
+        AgentAuth::ClaudeSubscription => claude_account_status(
+            &home.join(".claude/.credentials.json"),
+            &home.join(".claude.json"),
+            home,
+        ),
+        AgentAuth::None => Ok(StoredStatus::ready("not applicable".into())),
+    }
+}
+
 impl StoredStatus {
     fn ready(line: String) -> Self {
         Self {
@@ -409,6 +428,186 @@ fn grok_status(auth: &Path, config: &Path, home: &Path) -> Result<StoredStatus> 
         ]),
         GrokKey::NoDefault => StoredStatus::missing(vec!["not signed in".into()]),
     })
+}
+
+fn claude_api_status(key: &Path, credentials: &Path, home: &Path) -> Result<StoredStatus> {
+    let metadata = match std::fs::symlink_metadata(key) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoredStatus::missing(vec![
+                "not signed in (no API key; run scv agents login claude)".into(),
+            ]));
+        }
+        Err(error) => return Err(anyhow!(error).context(format!("inspect {}", display(key, home)))),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(StoredStatus::missing(vec![
+            "not signed in (API key file is not a regular file)".into(),
+        ]));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Ok(StoredStatus::missing(vec![format!(
+            "key file is readable by group or others; run chmod 600 {}",
+            display(key, home)
+        )]));
+    }
+    let text =
+        std::fs::read_to_string(key).with_context(|| format!("read {}", display(key, home)))?;
+    let key_value = text.trim();
+    if !(1..=512).contains(&key_value.len())
+        || !key_value.starts_with("sk-ant-")
+        || key_value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Ok(StoredStatus::missing(vec![
+            "not signed in (API key file has an invalid shape; run scv agents login claude)".into(),
+        ]));
+    }
+    if let Some(text) = read_bounded(credentials)? {
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(StoredStatus::missing(vec![
+                    "blocked: Claude credentials file is not valid JSON".into(),
+                ]));
+            }
+        };
+        if value
+            .get("claudeAiOauth")
+            .is_some_and(|oauth| !oauth.is_null())
+        {
+            return Ok(StoredStatus::missing(vec![
+                "blocked: a Claude subscription login is in this home (move it to agents/claude-ai, or run HOME=$SCV_HOME/agents/claude claude auth logout)".into(),
+            ]));
+        }
+    }
+    Ok(StoredStatus::ready("signed in (API key)".into()))
+}
+
+/// Largest `.claude.json` that status will parse. Claude Code owns the file
+/// and it grows with project history. Only a non-empty top-level
+/// `primaryApiKey` matters. A file past this cap blocks the subscription
+/// identity instead of failing status or being read without a bound.
+const MAX_CLAUDE_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Whether `.claude.json` holds a non-empty top-level `primaryApiKey`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleKey {
+    Absent,
+    Present,
+    Unparseable,
+    /// Larger than [`MAX_CLAUDE_CONFIG_BYTES`]. Not read.
+    TooLarge,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeConfigFile {
+    #[serde(default, rename = "primaryApiKey")]
+    primary_api_key: Option<String>,
+}
+
+fn console_key(path: &Path) -> Result<ConsoleKey> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ConsoleKey::Absent);
+        }
+        Err(error) => return Err(anyhow!(error).context(format!("open {}", path.display()))),
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    if metadata.len() > MAX_CLAUDE_CONFIG_BYTES {
+        return Ok(ConsoleKey::TooLarge);
+    }
+    let reader = std::io::BufReader::new(file.take(MAX_CLAUDE_CONFIG_BYTES));
+    match serde_json::from_reader::<_, ClaudeConfigFile>(reader) {
+        Ok(config) => Ok(
+            if config
+                .primary_api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+            {
+                ConsoleKey::Present
+            } else {
+                ConsoleKey::Absent
+            },
+        ),
+        Err(_) => Ok(ConsoleKey::Unparseable),
+    }
+}
+
+fn claude_account_status(credentials: &Path, config: &Path, _home: &Path) -> Result<StoredStatus> {
+    let Some(text) = read_bounded(credentials)? else {
+        return Ok(StoredStatus::missing(vec![
+            "not signed in (run scv agents login claude-ai)".into(),
+        ]));
+    };
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(StoredStatus::missing(vec![
+                "blocked: Claude credentials file is not valid JSON".into(),
+            ]));
+        }
+    };
+    match console_key(config)? {
+        ConsoleKey::Present => {
+            return Ok(StoredStatus::missing(vec![
+                "blocked: a Console API key is in this home".into(),
+            ]));
+        }
+        ConsoleKey::Unparseable => {
+            return Ok(StoredStatus::missing(vec![
+                "blocked: Claude config file is not valid JSON".into(),
+            ]));
+        }
+        ConsoleKey::TooLarge => {
+            return Ok(StoredStatus::missing(vec![
+                "blocked: Claude config file is too large to confirm it has no Console API key"
+                    .into(),
+            ]));
+        }
+        ConsoleKey::Absent => {}
+    }
+    let Some(oauth) = value
+        .get("claudeAiOauth")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(StoredStatus::missing(vec![
+            "not signed in (run scv agents login claude-ai)".into(),
+        ]));
+    };
+    let usable = oauth
+        .get("refreshToken")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|token| !token.trim().is_empty())
+        && oauth
+            .get("scopes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|scopes| {
+                scopes
+                    .iter()
+                    .any(|scope| scope.as_str() == Some("user:inference"))
+            });
+    if !usable {
+        return Ok(StoredStatus::missing(vec![
+            "not signed in (run scv agents login claude-ai)".into(),
+        ]));
+    }
+    let plan = oauth
+        .get("subscriptionType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|plan| ["free", "pro", "max", "team", "enterprise"].contains(plan))
+        .unwrap_or("unknown");
+    Ok(StoredStatus::ready(format!(
+        "signed in (Claude subscription, {plan})"
+    )))
 }
 
 fn write_private(path: &Path, contents: &str) -> Result<()> {
@@ -466,6 +665,20 @@ pub fn validate_secret(secret: &str) -> Result<()> {
 pub fn store_key(store: KeyStore, home: &Path, key: &str) -> Result<Vec<String>> {
     validate_secret(key)?;
     match store {
+        KeyStore::ClaudeApiKey { key: relative, .. } => {
+            let path = home.join(relative);
+            create_private_dirs(home, &path)?;
+            write_private(&path, key)?;
+            Ok(vec![format!(
+                "Stored the Claude API key in {}",
+                display(&path, home)
+            )])
+        }
+        KeyStore::ClaudeAccount { .. } => {
+            bail!(
+                "Claude subscription credentials are owned by Claude Code; run `claude auth login --claudeai`"
+            )
+        }
         KeyStore::DshRefs { path, variable } => {
             let path = home.join(path);
             create_private_dirs(home, &path)?;
@@ -492,6 +705,13 @@ pub fn store_key(store: KeyStore, home: &Path, key: &str) -> Result<Vec<String>>
 /// Describe what `store` holds, never printing a secret.
 pub fn stored_status(store: KeyStore, home: &Path) -> Result<StoredStatus> {
     match store {
+        KeyStore::ClaudeApiKey { key, credentials } => {
+            claude_api_status(&home.join(key), &home.join(credentials), home)
+        }
+        KeyStore::ClaudeAccount {
+            credentials,
+            config,
+        } => claude_account_status(&home.join(credentials), &home.join(config), home),
         KeyStore::Grok { auth, config } => grok_status(&home.join(auth), &home.join(config), home),
         KeyStore::DshRefs { path, variable } => {
             let path = home.join(path);
@@ -517,6 +737,19 @@ pub fn stored_status(store: KeyStore, home: &Path) -> Result<StoredStatus> {
 /// Remove the credentials SCV can see in `store`.
 pub fn remove_stored(store: KeyStore, home: &Path) -> Result<Vec<String>> {
     match store {
+        KeyStore::ClaudeApiKey { key, .. } => {
+            let path = home.join(key);
+            Ok(vec![if remove_if_present(&path)? {
+                format!("Removed {}", display(&path, home))
+            } else {
+                "Nothing stored".into()
+            }])
+        }
+        KeyStore::ClaudeAccount { .. } => {
+            bail!(
+                "Claude subscription credentials are owned by Claude Code; run `claude auth logout`"
+            )
+        }
         KeyStore::Grok { auth: path, .. }
         | KeyStore::DshRefs { path, .. }
         | KeyStore::Scv { config: path } => {

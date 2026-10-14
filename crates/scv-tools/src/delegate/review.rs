@@ -13,10 +13,10 @@
 //! is not a round. The job records every step in its journal and ends with
 //! the builder's last result plus SCV's own `review` and `landing` fields.
 //!
-//! The reviewer is routed: Claude's work goes to Codex, Codex's to Claude,
-//! any other agent's to Claude, then Codex; Grok steps in only when those
-//! are unavailable, and a fresh conversation of the builder's own agent is
-//! the last resort. Only the availability classification of the result moves
+//! The reviewer is routed by family: Claude-family work goes to Codex then
+//! Grok, Codex work goes to claude-ai then claude then Grok, and other work
+//! goes to claude-ai, claude, Codex, then Grok; a fresh conversation of the
+//! builder's own agent is the last resort. Only the availability classification of the result moves
 //! to the next agent. A refusal hands the review to Grok for the rest of the
 //! job, never to the builder's own agent. A named reviewer is never swapped.
 
@@ -170,9 +170,9 @@ impl Plan {
 /// The default reviewer order for work by `builder`.
 fn default_order(builder: &str) -> Vec<&str> {
     let mut order = match builder {
-        "claude" => vec!["codex", "grok"],
-        "codex" => vec!["claude", "grok"],
-        _ => vec!["claude", "codex", "grok"],
+        "claude" | "claude-ai" => vec!["codex", "grok"],
+        "codex" => vec!["claude-ai", "claude", "grok"],
+        _ => vec!["claude-ai", "claude", "codex", "grok"],
     };
     // A fresh conversation of the builder's own agent is the last resort.
     if !order.contains(&builder) {
@@ -359,8 +359,9 @@ pub(crate) fn schema(agents: &AgentTool) -> Value {
                 "type":"string",
                 "enum":agents.names(),
                 "description":"The reviewer, when the user named one; it is then never swapped. \
-                    Omit it to let SCV choose: codex reviews claude's work, claude reviews \
-                    everyone else's."
+                    Omit it to let SCV choose: a Claude-family builder is reviewed by codex \
+                    then grok; codex is reviewed by claude-ai, claude, then grok; other \
+                    builders are reviewed by claude-ai, claude, codex, then grok."
             },
             "rounds":{
                 "type":"integer","minimum":1,"maximum":MAX_ROUNDS,

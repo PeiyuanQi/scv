@@ -34,13 +34,13 @@ mod sync;
 
 pub use builtin::{chat_attach, chat_history, web};
 pub use config::{
-    AcpAgentLaunch, AgentAdapterConfig, AgentDefaults, BusyBehavior, BusyConfig, DelegationContext,
-    Skill, SkillMap, ToolsConfig,
+    AcpAgentLaunch, AgentAdapterConfig, AgentAuthPlan, AgentDefaults, BusyBehavior, BusyConfig,
+    DelegationContext, Skill, SkillMap, ToolsConfig,
 };
 pub use delegate::{
     adapters,
     agent::offered_agents,
-    background, choice as agent_choice, conversation, options as agent_options,
+    background, choice as agent_choice, claude_auth, conversation, options as agent_options,
     records as delegation,
     request::{AGENT_EFFORTS, valid_effort, valid_model_name},
     stores,

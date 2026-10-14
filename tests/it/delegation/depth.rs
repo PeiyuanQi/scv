@@ -64,6 +64,7 @@ async fn inherited_depth_gates_agents_and_extends_the_parent_chain() {
         output: OutputFormat::Text,
         resume: Resume::Unsupported,
         home: None,
+        auth: scv_tools::AgentAuthPlan::None,
         transport: Transport::Process,
         acp: None,
         use_for: None,

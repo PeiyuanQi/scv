@@ -27,6 +27,7 @@ pub mod adapters;
 pub(crate) mod agent;
 pub mod background;
 pub mod choice;
+pub mod claude_auth;
 pub mod conversation;
 pub(crate) mod live;
 pub(crate) mod native;

@@ -60,7 +60,10 @@ agent working.
 
 Each agent signs in once with `scv agents login` and runs in its own home under
 `~/.scv/agents/<name>`. It never reads your personal `~/.claude` or
-`~/.codex`, and never inherits your `*_API_KEY` variables.
+`~/.codex`, and never inherits your `*_API_KEY` variables. Claude Code is two
+of those agents: `claude` bills an Anthropic API key SCV stores in its home,
+and `claude-ai` uses the owner's Claude subscription login, which Claude Code
+owns in a separate home. SCV pins the selected billing identity on every launch.
 
 ### Updates without dropping work
 
