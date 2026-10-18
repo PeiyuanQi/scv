@@ -29,6 +29,7 @@ impl Config {
 
     pub(crate) fn tools(&self) -> ToolsConfig {
         ToolsConfig {
+            allow_no_timeout: self.tools.allow_no_timeout,
             command_timeout: Duration::from_secs(self.tools.command_timeout_seconds),
             agent_timeout: Duration::from_secs(self.tools.agent_timeout_seconds),
             max_timeout: Duration::from_secs(self.tools.max_timeout_seconds),

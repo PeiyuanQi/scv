@@ -2,6 +2,7 @@
 //! timeouts, and bounded text for approval summaries.
 
 use std::time::Duration;
+use tokio::time::Instant;
 
 use scv_core::ToolError;
 use serde::Deserialize;
@@ -50,6 +51,31 @@ impl Timeouts {
             Some(seconds) => Ok(Duration::from_secs(seconds)),
         }
     }
+
+    /// When a turn starting now must end: once its timeout passes, or never
+    /// for `no_timeout`, which only a background job may set, and never
+    /// together with `timeout_seconds`.
+    pub(crate) fn deadline(
+        self,
+        requested: Option<u64>,
+        no_timeout: bool,
+        background_job: bool,
+    ) -> Result<Option<Instant>, ToolError> {
+        if !no_timeout {
+            return Ok(Some(Instant::now() + self.resolve(requested)?));
+        }
+        if requested.is_some() {
+            return Err(ToolError::invalid_arguments(
+                "no_timeout cannot be combined with timeout_seconds",
+            ));
+        }
+        if !background_job {
+            return Err(ToolError::invalid_arguments(
+                "no_timeout is only allowed for background agent jobs; set background: true",
+            ));
+        }
+        Ok(None)
+    }
 }
 
 pub(crate) fn timeout_schema(timeouts: Timeouts) -> Value {
@@ -74,3 +100,6 @@ pub(crate) fn bounded(value: &str, max_chars: usize) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod tests;

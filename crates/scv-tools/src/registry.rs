@@ -96,7 +96,10 @@ pub fn builtin_registry(
         default: config.agent_timeout,
         max: config.max_timeout,
     };
-    let agent = Arc::new(AgentTool::new(offered, &config.prefer, timeouts));
+    let agent = Arc::new(
+        AgentTool::new(offered, &config.prefer, timeouts)
+            .with_no_timeout(config.allow_no_timeout && config.max_background > 0),
+    );
     if config.max_background == 0 {
         registry.register(agent)?;
         return Ok(registry);

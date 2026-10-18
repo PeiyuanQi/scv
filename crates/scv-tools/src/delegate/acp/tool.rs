@@ -26,6 +26,7 @@ use crate::{
             AgentArgs, resolve_agent_cwd, valid_effort, valid_model_name, validate_agent_cwd,
         },
     },
+    process::{APPROVAL_TIMEOUT, startup_deadline},
 };
 
 use super::{AcpChild, Steered, TurnEnd};
@@ -260,10 +261,14 @@ impl Backend for AcpAgentTool {
             " Its own permission requests come back here for approval."
         };
         Ok(format!(
-            "Send prompt {:?} to {conversation} in {directory} for up to {} seconds. The \
-             nested agent has your user permissions.{permissions}",
+            "Send prompt {:?} to {conversation} in {directory} {}. The nested agent has your \
+             user permissions.{permissions}",
             bounded(&args.prompt, 2000),
-            timeout.as_secs()
+            if args.no_timeout {
+                "with no time limit".to_owned()
+            } else {
+                format!("for up to {} seconds", timeout.as_secs())
+            }
         ))
     }
 
@@ -315,7 +320,13 @@ impl Backend for AcpAgentTool {
         });
         child
             .rpc
-            .send_request(request, "_session/steering", params)
+            .send_request(
+                request,
+                "_session/steering",
+                params,
+                Some(Instant::now() + STEER_ANSWER_WAIT),
+                &context.cancellation,
+            )
             .await?;
         match expected
             .answer(STEER_ANSWER_WAIT, &context.cancellation)
@@ -353,7 +364,13 @@ impl Backend for AcpAgentTool {
         self.validate(&args)?;
         let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
         let limit = self.timeouts.resolve(args.timeout_seconds)?;
-        let deadline = Instant::now() + limit;
+        let deadline = self.timeouts.deadline(
+            args.timeout_seconds,
+            args.no_timeout,
+            context.background_job,
+        )?;
+        // Without a main deadline, starting the agent still has one.
+        let startup = startup_deadline(deadline);
         let mut turn =
             self.conversations
                 .begin(&self.name, args.session.as_deref(), &cwd, false)?;
@@ -374,7 +391,7 @@ impl Backend for AcpAgentTool {
                 child
             }
             None => match self
-                .start(&turn, &cwd, deadline, &context.cancellation)
+                .start(&turn, &cwd, startup, &context.cancellation)
                 .await
             {
                 Ok(child) => {
@@ -405,7 +422,7 @@ impl Backend for AcpAgentTool {
         // Recorded at work until this call returns, however it ends.
         let _serving = child.rpc.live.begin_turn(turn.turn);
         if let Err(error) = self
-            .configure(&child, &args, deadline, &context.cancellation)
+            .configure(&child, &args, startup, &context.cancellation)
             .await
         {
             let handle = turn.handle.clone();
@@ -448,7 +465,19 @@ impl Backend for AcpAgentTool {
                 ),
             },
             TurnEnd::Failed { reply, error } => (RunStatus::Failed, reply, None, Some(error)),
-            TurnEnd::TimedOut { reply, settled } => {
+            TurnEnd::TimedOut {
+                reply,
+                settled,
+                approval,
+            } => {
+                let detail = if approval {
+                    format!(
+                        "its approval request went unanswered for {} seconds",
+                        APPROVAL_TIMEOUT.as_secs()
+                    )
+                } else {
+                    format!("timed out after {} seconds", limit.as_secs())
+                };
                 if !settled {
                     child.rpc.live.close().await;
                     turn.forget();
@@ -457,19 +486,12 @@ impl Backend for AcpAgentTool {
                         reply,
                         None,
                         Some(format!(
-                            "timed out after {} seconds; the agent did not stop in time and \
-                             was shut down",
-                            limit.as_secs()
+                            "{detail}; the agent did not stop in time and was shut down"
                         )),
                         None,
                     ));
                 }
-                (
-                    RunStatus::Timeout,
-                    reply,
-                    None,
-                    Some(format!("timed out after {} seconds", limit.as_secs())),
-                )
+                (RunStatus::Timeout, reply, None, Some(detail))
             }
             TurnEnd::Cancelled { settled } => {
                 if settled {

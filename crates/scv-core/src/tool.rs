@@ -1,11 +1,12 @@
 //! The [`Tool`] trait, its inputs and outputs, and the [`ToolRegistry`].
 
-use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use crate::{AgentError, ApprovalGate, ApprovalRequest, ProgressSink};
@@ -66,6 +67,9 @@ pub struct ToolContext {
     pub call_id: String,
     pub workspace: PathBuf,
     pub cancellation: CancellationToken,
+    /// Whether this call runs as a detached background job, the only kind
+    /// of `agent` call that may run without a main deadline (`no_timeout`).
+    pub background_job: bool,
     /// Where the tool may report short status lines while it runs.
     pub progress: ProgressSink,
     /// The session's approval gate, for a tool relaying a nested agent's own
@@ -81,6 +85,7 @@ impl ToolContext {
             call_id: String::new(),
             workspace,
             cancellation,
+            background_job: false,
             progress: ProgressSink::default(),
             approvals: ToolApprovals::default(),
         }
@@ -147,7 +152,43 @@ impl ToolApprovals {
         )
         .await
     }
+
+    /// [`request`](Self::request), giving up at `deadline` when there is
+    /// one. Then `cancellation` is cancelled, the gate gets up to a second
+    /// to withdraw the request it is showing, and the result is
+    /// [`AgentError::ToolLimit`]. Cancellation itself is the gate's to
+    /// observe, so it always cleans up after itself.
+    pub async fn request_until(
+        &self,
+        name: impl Into<String>,
+        risk: ToolRisk,
+        cwd: PathBuf,
+        summary: impl Into<String>,
+        cancellation: CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<bool, AgentError> {
+        let request = self.request(name, risk, cwd, summary, cancellation.clone());
+        let Some(deadline) = deadline else {
+            return request.await;
+        };
+        tokio::pin!(request);
+        tokio::select! {
+            biased;
+            result = &mut request => result,
+            () = sleep_until(deadline) => {
+                // Dropping the request would skip the gate's own cleanup,
+                // such as forgetting the approval it sent a client.
+                cancellation.cancel();
+                let _ = tokio::time::timeout(WITHDRAW_GRACE, &mut request).await;
+                Err(AgentError::ToolLimit("the approval wait timed out".into()))
+            }
+        }
+    }
 }
+
+/// How long [`ToolApprovals::request_until`] waits for a gate to withdraw a
+/// request whose deadline passed.
+const WITHDRAW_GRACE: Duration = Duration::from_secs(1);
 
 /// Why a tool call failed. The model reads the call's output either way;
 /// this tells the session's clients what happened without reading the text.

@@ -34,7 +34,9 @@ use tokio::{
     io::{AsyncWriteExt as _, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{Mutex, mpsc, watch},
+    time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     delegate::{
@@ -43,7 +45,7 @@ use crate::{
             self, DelegationGuard, DelegationRegistry, PendingDelegation, STOP_GRACE, group_exists,
         },
     },
-    process::{ProcessGroup, apply_agent_environment, drain_output},
+    process::{ProcessGroup, apply_agent_environment, drain_output, until},
     sync::lock,
 };
 
@@ -52,6 +54,9 @@ const STDERR_TAIL_BYTES: usize = 4096;
 /// Lines read ahead of the protocol client, a burst of events within one
 /// turn. A child that speaks between turns needs a client reading then.
 const LINE_QUEUE: usize = 256;
+/// How long a message the protocol owes the child may take to write before
+/// the child counts as not reading its input.
+pub(crate) const SEND_GRACE: Duration = Duration::from_secs(2);
 
 /// How to start a live child.
 pub(crate) struct LiveSpec {
@@ -174,23 +179,67 @@ impl LiveChild {
         }))
     }
 
-    /// Write `message` as one JSON line.
+    /// Write `message` as one JSON line that the protocol owes the child,
+    /// such as an answer to its request or a cancellation: within
+    /// [`SEND_GRACE`] of now, whatever the turn's deadline, and never given
+    /// up for the turn's cancellation, which is often what made it due.
     pub(crate) async fn send(&self, message: &impl Serialize) -> Result<(), ToolError> {
+        self.send_until(
+            message,
+            Some(Instant::now() + SEND_GRACE),
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Write `message` as one JSON line, giving up at `deadline` or on
+    /// `cancellation`, for a request that starts work. The write is tried
+    /// before either is checked, so one the child can take at once is not
+    /// lost to a deadline or token that is also due. A write given up
+    /// part-way would leave the child half a line, so its input is closed
+    /// instead: the child is lost rather than sent a garbled message.
+    pub(crate) async fn send_until(
+        &self,
+        message: &impl Serialize,
+        deadline: Option<Instant>,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ToolError> {
         let mut bytes = serde_json::to_vec(message)
             .map_err(|error| ToolError::failed(format!("encode message: {error}")))?;
         bytes.push(b'\n');
-        let mut stdin = self.stdin.lock().await;
+        let mut stdin = tokio::select! {
+            biased;
+            stdin = self.stdin.lock() => stdin,
+            () = until(deadline) => return Err(ToolError::limit("write to child timed out")),
+            () = cancellation.cancelled() => return Err(ToolError::cancelled("write to child cancelled")),
+        };
         let writer = stdin
             .as_mut()
             .ok_or_else(|| ToolError::failed("the child's input is closed"))?;
-        writer
-            .write_all(&bytes)
-            .await
-            .map_err(|error| ToolError::failed(format!("write to child: {error}")))?;
-        writer
-            .flush()
-            .await
-            .map_err(|error| ToolError::failed(format!("write to child: {error}")))
+        let mut written = 0;
+        let write = async {
+            while written < bytes.len() {
+                match writer.write(&bytes[written..]).await {
+                    Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                    Ok(count) => written += count,
+                    Err(error) => return Err(error),
+                }
+            }
+            writer.flush().await
+        };
+        let interrupted = tokio::select! {
+            biased;
+            result = write => {
+                return result.map_err(|error| ToolError::failed(format!("write to child: {error}")));
+            }
+            () = until(deadline) => ToolError::limit("write to child timed out"),
+            () = cancellation.cancelled() => ToolError::cancelled("write to child cancelled"),
+        };
+        if written > 0 {
+            // Anything sent after half a line would be misread.
+            *stdin = None;
+        }
+        Err(interrupted)
     }
 
     /// The next stdout line, or `None` once the child closed its output.

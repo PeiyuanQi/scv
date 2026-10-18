@@ -1,6 +1,13 @@
 //! Unit tests for `src/delegate/acp/mod.rs`.
 
-use std::{os::unix::fs::PermissionsExt as _, sync::Mutex as StdMutex, time::Duration};
+use std::{
+    os::unix::fs::PermissionsExt as _,
+    sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use scv_core::{AgentError, ApprovalGate, ApprovalRequest, ToolApprovals};
@@ -323,6 +330,159 @@ async fn file_system_and_terminal_requests_are_refused() {
             .contains("refused:-32601,-32601"),
         "{value}"
     );
+}
+
+/// Keeps each relayed request waiting for a person who never answers, until
+/// the request is cancelled, as the session's own gate does.
+#[derive(Default)]
+struct Unanswered {
+    asked: AtomicUsize,
+}
+
+#[async_trait]
+impl ApprovalGate for Unanswered {
+    async fn approve(
+        &self,
+        _request: ApprovalRequest,
+        cancellation: CancellationToken,
+    ) -> Result<bool, AgentError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        cancellation.cancelled().await;
+        Err(AgentError::Cancelled)
+    }
+}
+
+fn unanswered(workspace: &Path) -> (Arc<Unanswered>, ToolContext) {
+    let gate = Arc::new(Unanswered::default());
+    let mut context = context(workspace, None);
+    context.approvals = ToolApprovals::new(Arc::clone(&gate) as Arc<dyn ApprovalGate>, "call-1");
+    (gate, context)
+}
+
+/// How many times the agent was told its permission request was cancelled.
+fn cancelled_permissions(dir: &Path) -> usize {
+    calls(dir)
+        .lines()
+        .filter(|line| *line == "permission=cancelled")
+        .count()
+}
+
+#[tokio::test]
+async fn a_cancelled_approval_wait_still_answers_the_agents_permission_request() {
+    // This agent ends a cancelled turn only once its permission request is
+    // answered, so a lost answer would leave session/cancel unsettled and
+    // shut it down. Repeated, since a lost answer was a race.
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "strict");
+    let tool = acp_tool(&script, store(Duration::from_secs(60)), None, None);
+    let session = open_conversation(&tool, dir.path()).await;
+    for round in 1..=5 {
+        let (gate, context) = unanswered(dir.path());
+        let cancel = context.cancellation.clone();
+        tokio::spawn(async move {
+            until(|| gate.asked.load(Ordering::SeqCst) > 0).await;
+            cancel.cancel();
+        });
+        let error = tool
+            .execute(json!({"prompt":"permission","session":session}), context)
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "claude turn cancelled", "round {round}");
+        assert_eq!(cancelled_permissions(dir.path()), round);
+    }
+    let resumed = tool
+        .execute(
+            json!({"prompt":"hello","session":session}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&resumed)["status"], "completed");
+}
+
+#[tokio::test]
+async fn an_approval_wait_past_the_turns_timeout_still_answers_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "strict");
+    let tool = acp_tool(&script, store(Duration::from_secs(60)), None, None);
+    let session = open_conversation(&tool, dir.path()).await;
+    for round in 1..=3 {
+        let (gate, context) = unanswered(dir.path());
+        let output = tool
+            .execute(
+                json!({"prompt":"permission","session":session,"timeout_seconds":1}),
+                context,
+            )
+            .await
+            .unwrap();
+        let value = json(&output);
+        assert_eq!(value["status"], "timeout", "{value}");
+        assert_eq!(value["error"], "timed out after 1 seconds", "{value}");
+        // It settled, so the conversation is kept.
+        assert_eq!(value["session"], session, "{value}");
+        assert_eq!(gate.asked.load(Ordering::SeqCst), 1);
+        assert_eq!(cancelled_permissions(dir.path()), round);
+    }
+}
+
+#[tokio::test]
+async fn a_background_turn_without_a_deadline_runs_relays_and_stays_cancellable() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "normal");
+    let tool = acp_tool(&script, store(Duration::from_secs(60)), None, None);
+    let summary = tool
+        .approval_summary(&json!({"prompt":"work","no_timeout":true}))
+        .unwrap();
+    assert!(summary.contains("with no time limit"), "{summary}");
+    let refused = tool
+        .execute(
+            json!({"prompt":"hello","no_timeout":true}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.message.contains("only allowed for background"),
+        "{}",
+        refused.message
+    );
+    let gate = Arc::new(Gate {
+        answer: true,
+        requests: StdMutex::new(Vec::new()),
+    });
+    let mut background = context(dir.path(), Some(Arc::clone(&gate)));
+    background.background_job = true;
+    let output = tool
+        .execute(json!({"prompt":"permission","no_timeout":true}), background)
+        .await
+        .unwrap();
+    let value = json(&output);
+    assert_eq!(value["status"], "completed", "{value}");
+    assert!(
+        value["reply"]
+            .as_str()
+            .unwrap()
+            .contains("chose allow-once"),
+        "{value}"
+    );
+    assert_eq!(gate.requests.lock().unwrap().len(), 1);
+    let mut background = context(dir.path(), None);
+    background.background_job = true;
+    let cancel = background.cancellation.clone();
+    let log = dir.path().to_owned();
+    tokio::spawn(async move {
+        until(|| calls(&log).contains("hang")).await;
+        cancel.cancel();
+    });
+    let error = tool
+        .execute(
+            json!({"prompt":"hang","session":value["session"],"no_timeout":true}),
+            background,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.message, "claude turn cancelled");
+    assert!(calls(dir.path()).lines().any(|line| line == "cancel"));
 }
 
 /// Start the agent with one untimed turn, and return the conversation's handle.

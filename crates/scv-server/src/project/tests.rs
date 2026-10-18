@@ -2,6 +2,7 @@ use super::*;
 use scv_protocol::{
     DaemonCommand, ProjectResponse, ProjectRunStatus, ProjectStatus, ProjectTaskStatus,
 };
+use serde_json::Value;
 use tempfile::TempDir;
 
 fn ledger() -> (TempDir, TempDir, ProjectLedger) {
@@ -180,6 +181,61 @@ fn failed_run_retries_until_the_budget_is_exhausted() {
         panic!("expected status")
     };
     assert_eq!(summary.status, ProjectStatus::Failed);
+}
+
+#[test]
+fn stale_project_runs_are_reconciled_independently_of_tool_timeouts() {
+    let (_home, workspace, mut ledger) = ledger();
+    let project = project_id(
+        ledger
+            .execute(DaemonCommand::ProjectCreate {
+                name: "heartbeat".into(),
+                workspace: workspace.path().display().to_string(),
+            })
+            .unwrap(),
+    );
+    let task = task_id(
+        ledger
+            .execute(DaemonCommand::ProjectTaskAdd {
+                project: project.clone(),
+                title: "long job".into(),
+                depends_on: vec![],
+                max_retries: 0,
+            })
+            .unwrap(),
+    );
+    let run = run_id(
+        ledger
+            .execute(DaemonCommand::ProjectRunStart {
+                project: project.clone(),
+                task,
+                agent: "background".into(),
+            })
+            .unwrap(),
+    );
+    ledger
+        .reconcile_stale(now() + HEARTBEAT_TIMEOUT_SECONDS + 1)
+        .unwrap();
+    let ProjectResponse::Status { project: summary } = ledger
+        .execute(DaemonCommand::ProjectStatus { project })
+        .unwrap()
+    else {
+        panic!("expected status")
+    };
+    assert_eq!(summary.status, ProjectStatus::Failed);
+    let ProjectResponse::Events { events, .. } = ledger
+        .execute(DaemonCommand::ProjectEvents {
+            project: summary.id,
+            after: None,
+        })
+        .unwrap()
+    else {
+        panic!("expected events")
+    };
+    assert!(events.iter().any(|event| {
+        event.kind == "run.stale"
+            && event.data.get("run").and_then(Value::as_str) == Some(run.as_str())
+    }));
 }
 
 #[test]

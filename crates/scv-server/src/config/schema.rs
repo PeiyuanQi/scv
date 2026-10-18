@@ -234,6 +234,9 @@ pub enum ApprovalPolicy {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ToolConfig {
     pub(crate) approval_policy: ApprovalPolicy,
+    /// Let background `agent` calls set `no_timeout` and run with no main
+    /// deadline. Off unless the owner turns it on.
+    pub(crate) allow_no_timeout: bool,
     /// `bash` timeout when a call does not choose one.
     pub(crate) command_timeout_seconds: u64,
     /// Native-agent timeout when a call does not choose one.
@@ -249,6 +252,7 @@ impl Default for ToolConfig {
     fn default() -> Self {
         Self {
             approval_policy: ApprovalPolicy::OnRisk,
+            allow_no_timeout: false,
             command_timeout_seconds: 600,
             agent_timeout_seconds: 3600,
             max_timeout_seconds: 14400,

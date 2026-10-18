@@ -16,6 +16,9 @@ use crate::{
 /// Limits and shared state for one session's tools.
 #[derive(Debug, Clone)]
 pub struct ToolsConfig {
+    /// Let background `agent` calls set `no_timeout` to run with no main
+    /// deadline. Off by default.
+    pub allow_no_timeout: bool,
     /// Default `bash` timeout when a call does not choose one.
     pub command_timeout: Duration,
     /// Default native-agent timeout when a call does not choose one.
@@ -57,6 +60,7 @@ pub struct ToolsConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
+            allow_no_timeout: false,
             command_timeout: Duration::from_secs(600),
             agent_timeout: Duration::from_secs(3600),
             max_timeout: Duration::from_secs(14400),

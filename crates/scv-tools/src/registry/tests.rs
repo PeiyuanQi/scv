@@ -239,6 +239,32 @@ fn one_agent_tool_offers_every_installed_agent_with_the_preferred_one_as_default
 }
 
 #[test]
+fn no_timeout_is_offered_only_with_the_owners_consent_and_background_jobs() {
+    let home = tempfile::tempdir().unwrap();
+    let offers = |allow_no_timeout, max_background| {
+        let registry = builtin_registry(
+            ToolsConfig {
+                allow_no_timeout,
+                max_background,
+                delegation: Some(delegation_context(home.path())),
+                ..ToolsConfig::default()
+            },
+            SkillMap::new(),
+            Vec::new(),
+            1024,
+            HashMap::from([("claude".to_owned(), installed(true))]),
+        )
+        .unwrap();
+        let spec = registry.get("agent").unwrap().spec();
+        spec.parameters["properties"].get("no_timeout").is_some()
+    };
+    assert!(!ToolsConfig::default().allow_no_timeout);
+    assert!(!offers(false, 2));
+    assert!(!offers(true, 0));
+    assert!(offers(true, 2));
+}
+
+#[test]
 fn an_acp_agent_lists_the_values_its_server_offered_and_says_so_when_unknown() {
     use crate::delegate::options::{self, AgentOptions, Choice};
 

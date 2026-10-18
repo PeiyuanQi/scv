@@ -164,9 +164,10 @@ fn timeouts_default_below_a_ceiling_that_projects_may_only_lower() {
         (
             user.tools.command_timeout_seconds,
             user.tools.agent_timeout_seconds,
-            user.tools.max_timeout_seconds
+            user.tools.max_timeout_seconds,
+            user.tools.allow_no_timeout,
         ),
-        (600, 3600, 14400)
+        (600, 3600, 14400, false)
     );
     assert_eq!(user.agent.max_steps, 128);
     assert_eq!(user.provider.timeout_seconds, 600);
@@ -215,6 +216,11 @@ fn timeouts_default_below_a_ceiling_that_projects_may_only_lower() {
         raise(&mut higher);
         assert!(validate_project_not_weaker(&user, &higher).is_err());
     }
+    // Only the owner can allow no_timeout; a project may turn it off.
+    let mut owner_on = user.clone();
+    owner_on.tools.allow_no_timeout = true;
+    assert!(validate_project_not_weaker(&owner_on, &user).is_ok());
+    assert!(validate_project_not_weaker(&user, &owner_on).is_err());
 }
 
 #[test]

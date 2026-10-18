@@ -21,13 +21,27 @@ if MODE == "grouped":
                    {"group": "xubao", "options": [{"value": "[\"xubao\",\"glm-5.3\"]"}]}]},
                {"id": "reasoning_effort", "currentValue": "high", "options": [{"value": "off"}, {"value": "low"}, {"value": "high"}, {"value": "max"}]}]
 memory, pending, refusals, sessions = "", None, [], 0
+# In "strict" mode a cancelled turn ends only once its permission request
+# is answered, as an agent may insist; a lost answer leaves it hanging.
+asking, cancel_seen = False, False
+def end_cancelled():
+    global pending
+    send({"id": pending[0], "result": {"stopReason": "cancelled"}})
+    pending = None
 for line in sys.stdin:
     message = json.loads(line)
     method, params, rid = message.get("method"), message.get("params") or {}, message.get("id")
     if method is None:
         if rid == 900 and pending:
             outcome = message["result"]["outcome"]
-            chunk(pending[1], "chose " + outcome.get("optionId", outcome["outcome"]))
+            answer = outcome.get("optionId", outcome["outcome"])
+            log("permission=" + answer)
+            asking = False
+            if MODE == "strict" and answer == "cancelled":
+                if cancel_seen:
+                    end_cancelled()
+                continue
+            chunk(pending[1], "chose " + answer)
             send({"id": pending[0], "result": {"stopReason": "end_turn"}})
             pending = None
         elif rid in (901, 902) and pending:
@@ -61,9 +75,9 @@ for line in sys.stdin:
         send({"id": rid, "result": {"configOptions": OPTIONS}})
     elif method == "session/cancel":
         log("cancel")
-        if pending and MODE != "stubborn":
-            send({"id": pending[0], "result": {"stopReason": "cancelled"}})
-            pending = None
+        cancel_seen = True
+        if pending and MODE != "stubborn" and not (MODE == "strict" and asking):
+            end_cancelled()
     elif method == "_session/steering":
         text = params["prompt"][0]["text"]
         log("steering:" + text)
@@ -88,7 +102,7 @@ for line in sys.stdin:
             chunk(session, "the word is " + memory + " in " + session)
             send({"id": rid, "result": {"stopReason": "end_turn"}})
         elif text == "permission":
-            pending = (rid, session)
+            pending, asking, cancel_seen = (rid, session), True, False
             send({"id": 900, "method": "session/request_permission", "params": {"sessionId": session,
                   "toolCall": {"toolCallId": "t3", "title": "Write /tmp/scv-acp.txt", "kind": "edit", "locations": [{"path": "/tmp/scv-acp.txt"}]},
                   "options": [{"optionId": "allow-once", "name": "Allow", "kind": "allow_once"},

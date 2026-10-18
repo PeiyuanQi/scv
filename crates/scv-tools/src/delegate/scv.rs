@@ -24,7 +24,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
+use scv_core::{AgentError, ToolContext, ToolError, ToolFailure, ToolOutput, ToolRisk};
 use scv_protocol::{ClientMessage, PROTOCOL_VERSION, ServerEvent};
 use serde_json::Value;
 use tokio::{
@@ -45,6 +45,7 @@ use crate::{
         records,
         request::{AgentArgs, resolve_agent_cwd, valid_model_name, validate_agent_cwd},
     },
+    process::{APPROVAL_TIMEOUT, approval_deadline, startup_deadline},
     sync::lock,
 };
 
@@ -193,7 +194,7 @@ impl Nested {
     async fn next_event(
         &self,
         current: Option<&str>,
-        deadline: Instant,
+        deadline: Option<Instant>,
         cancellation: &CancellationToken,
     ) -> Result<ServerEvent, Interrupt> {
         loop {
@@ -216,6 +217,9 @@ impl Nested {
         }
     }
 
+    /// Answer the nested SCV's approval request. The answer is owed however
+    /// the turn is going, so it is sent within its own grace
+    /// ([`LiveChild::send`]).
     async fn resolve(&self, approval_id: String, approved: bool) -> Result<(), ToolError> {
         self.live
             .send(&ClientMessage::ApprovalResolve {
@@ -233,7 +237,7 @@ impl Nested {
     async fn watch(self: Arc<Self>, stop: CancellationToken) {
         loop {
             match self
-                .next_event(None, Instant::now() + WATCH_WAIT, &stop)
+                .next_event(None, Some(Instant::now() + WATCH_WAIT), &stop)
                 .await
             {
                 Ok(_) | Err(Interrupt::TimedOut) => {}
@@ -423,10 +427,14 @@ impl ScvAgentTool {
         )
         .await?;
         let handshake = async {
-            live.send(&ClientMessage::initialize("scv-agent-init", "scv-agent"))
-                .await?;
+            live.send_until(
+                &ClientMessage::initialize("scv-agent-init", "scv-agent"),
+                Some(deadline),
+                cancellation,
+            )
+            .await?;
             loop {
-                match next_event(&live, deadline, cancellation).await {
+                match next_event(&live, Some(deadline), cancellation).await {
                     Ok(ServerEvent::Initialized {
                         protocol_version, ..
                     }) if protocol_version == PROTOCOL_VERSION => break,
@@ -447,22 +455,26 @@ impl ScvAgentTool {
                     Err(interrupt) => return Err(interrupt_error(&live, interrupt).await),
                 }
             }
-            live.send(&ClientMessage::SessionStart {
-                request_id: "scv-agent-session".into(),
-                cwd: cwd.display().to_string(),
-                provider: None,
-                model: model.map(str::to_owned),
-                base_url: None,
-                no_tools: None,
-                delegation_depth: Some(depth),
-                channel: None,
-                auto_approve: None,
-                chat: None,
-                system_prompt: None,
-            })
+            live.send_until(
+                &ClientMessage::SessionStart {
+                    request_id: "scv-agent-session".into(),
+                    cwd: cwd.display().to_string(),
+                    provider: None,
+                    model: model.map(str::to_owned),
+                    base_url: None,
+                    no_tools: None,
+                    delegation_depth: Some(depth),
+                    channel: None,
+                    auto_approve: None,
+                    chat: None,
+                    system_prompt: None,
+                },
+                Some(deadline),
+                cancellation,
+            )
             .await?;
             loop {
-                match next_event(&live, deadline, cancellation).await {
+                match next_event(&live, Some(deadline), cancellation).await {
                     Ok(ServerEvent::SessionStarted { session_id, .. }) => return Ok(session_id),
                     Ok(ServerEvent::Error { message, .. }) => {
                         return Err(reported_error(format!(
@@ -498,20 +510,31 @@ impl ScvAgentTool {
         handle: &str,
         prompt: String,
         context: &ToolContext,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> TurnEnd {
         let nested = &child.nested;
         let request_id = uuid::Uuid::new_v4().to_string();
+        // Handing over the prompt is part of starting the turn, which stays
+        // bounded without a main deadline.
         if let Err(error) = nested
             .live
-            .send(&ClientMessage::TurnStart {
-                request_id: request_id.clone(),
-                session_id: nested.session_id.clone(),
-                prompt,
-                attachments: Vec::new(),
-            })
+            .send_until(
+                &ClientMessage::TurnStart {
+                    request_id: request_id.clone(),
+                    session_id: nested.session_id.clone(),
+                    prompt,
+                    attachments: Vec::new(),
+                },
+                Some(startup_deadline(deadline)),
+                &context.cancellation,
+            )
             .await
         {
+            // Not taken, or taken in part with the child's input then
+            // closed: either way there is no turn to settle.
+            if error.kind == ToolFailure::Cancelled {
+                return TurnEnd::Cancelled { settled: false };
+            }
             return TurnEnd::Lost(error.message);
         }
         let label = format!("[{handle} depth {}]", child.depth);
@@ -531,6 +554,7 @@ impl ScvAgentTool {
                         Interrupt::TimedOut => TurnEnd::TimedOut {
                             reply: reply.finish(),
                             settled,
+                            approval: false,
                         },
                         _ => TurnEnd::Cancelled { settled },
                     };
@@ -573,27 +597,32 @@ impl ScvAgentTool {
                     summary,
                     ..
                 } => {
-                    let request = context.approvals.request(
+                    let request = context.approvals.request_until(
                         name,
                         ToolRisk::parse(&risk).unwrap_or(ToolRisk::Delegate),
                         PathBuf::from(cwd),
                         format!("{label} {summary}"),
                         context.cancellation.child_token(),
+                        Some(approval_deadline(deadline)),
                     );
-                    let approved = tokio::select! {
-                        result = request => result,
-                        () = tokio::time::sleep_until(deadline) => {
-                            let settled = cancel_turn(nested, turn_id.as_deref(), &request_id).await;
-                            return TurnEnd::TimedOut { reply: reply.finish(), settled };
+                    let approved = match request.await {
+                        Ok(approved) => approved,
+                        Err(error) => {
+                            let timed_out = matches!(error, AgentError::ToolLimit(_))
+                                && !context.cancellation.is_cancelled();
+                            // Cancelling the turn withdraws its approval request.
+                            let settled =
+                                cancel_turn(nested, turn_id.as_deref(), &request_id).await;
+                            return if timed_out {
+                                TurnEnd::TimedOut {
+                                    reply: reply.finish(),
+                                    settled,
+                                    approval: deadline.is_none(),
+                                }
+                            } else {
+                                TurnEnd::Cancelled { settled }
+                            };
                         }
-                        () = context.cancellation.cancelled() => {
-                            let settled = cancel_turn(nested, turn_id.as_deref(), &request_id).await;
-                            return TurnEnd::Cancelled { settled };
-                        }
-                    };
-                    let Ok(approved) = approved else {
-                        let settled = cancel_turn(nested, turn_id.as_deref(), &request_id).await;
-                        return TurnEnd::Cancelled { settled };
                     };
                     if let Err(error) = nested.resolve(approval_id, approved).await {
                         return TurnEnd::Lost(error.message);
@@ -647,6 +676,9 @@ enum TurnEnd {
         reply: (String, bool),
         /// Whether the nested SCV acknowledged the cancellation in time.
         settled: bool,
+        /// A turn without a main deadline waited too long on one of its
+        /// approval requests ([`APPROVAL_TIMEOUT`]).
+        approval: bool,
     },
     Cancelled {
         settled: bool,
@@ -685,7 +717,10 @@ async fn cancel_turn(nested: &Nested, turn_id: Option<&str>, request_id: &str) -
     let deadline = Instant::now() + SETTLE_GRACE;
     let never = CancellationToken::new();
     loop {
-        match nested.next_event(Some(request_id), deadline, &never).await {
+        match nested
+            .next_event(Some(request_id), Some(deadline), &never)
+            .await
+        {
             Ok(event) if belongs_to(&event, request_id) => match event {
                 ServerEvent::TurnCancelled { .. }
                 | ServerEvent::TurnFailed { .. }
@@ -705,14 +740,19 @@ async fn cancel_turn(nested: &Nested, turn_id: Option<&str>, request_id: &str) -
 /// The next protocol event from the nested SCV.
 async fn next_event(
     live: &LiveChild,
-    deadline: Instant,
+    deadline: Option<Instant>,
     cancellation: &CancellationToken,
 ) -> Result<ServerEvent, Interrupt> {
+    let received = async {
+        match deadline {
+            Some(deadline) => timeout_at(deadline, live.recv())
+                .await
+                .map_err(|_| Interrupt::TimedOut),
+            None => Ok(live.recv().await),
+        }
+    };
     let line = tokio::select! {
-        line = timeout_at(deadline, live.recv()) => match line {
-            Ok(line) => line,
-            Err(_) => return Err(Interrupt::TimedOut),
-        },
+        line = received => line?,
         () = cancellation.cancelled() => return Err(Interrupt::Cancelled),
     };
     match line {
@@ -840,11 +880,15 @@ impl Backend for ScvAgentTool {
             |session| format!("nested SCV conversation {session}"),
         );
         let timeout = self.timeouts.resolve(args.timeout_seconds)?;
+        let duration = if args.no_timeout {
+            "with no time limit".to_owned()
+        } else {
+            format!("for up to {} seconds", timeout.as_secs())
+        };
         Ok(format!(
-            "Send prompt {:?} to {session} in {directory} for up to {} seconds. It runs as your \
-             user in SCV's private home; its own tool calls come back here for approval.",
+            "Send prompt {:?} to {session} in {directory} {duration}. It runs as your user in \
+             SCV's private home; its own tool calls come back here for approval.",
             bounded(&args.prompt, 2000),
-            timeout.as_secs()
         ))
     }
 
@@ -877,7 +921,13 @@ impl Backend for ScvAgentTool {
         self.validate(&args)?;
         let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
         let limit = self.timeouts.resolve(args.timeout_seconds)?;
-        let deadline = Instant::now() + limit;
+        let deadline = self.timeouts.deadline(
+            args.timeout_seconds,
+            args.no_timeout,
+            context.background_job,
+        )?;
+        // Without a main deadline, starting the nested SCV still has one.
+        let startup = startup_deadline(deadline);
         let mut turn = self
             .conversations
             .begin(AGENT, args.session.as_deref(), &cwd, false)?;
@@ -901,7 +951,7 @@ impl Backend for ScvAgentTool {
                     &turn,
                     &cwd,
                     args.model.as_deref(),
-                    deadline,
+                    startup,
                     &context.cancellation,
                 )
                 .await?;
@@ -924,7 +974,19 @@ impl Backend for ScvAgentTool {
         let (status, (reply, cut), usage, error) = match end {
             TurnEnd::Completed { reply, usage } => (RunStatus::Completed, reply, Some(usage), None),
             TurnEnd::Failed { reply, error } => (RunStatus::Failed, reply, None, Some(error)),
-            TurnEnd::TimedOut { reply, settled } => {
+            TurnEnd::TimedOut {
+                reply,
+                settled,
+                approval,
+            } => {
+                let detail = if approval {
+                    format!(
+                        "its approval request went unanswered for {} seconds",
+                        APPROVAL_TIMEOUT.as_secs()
+                    )
+                } else {
+                    format!("timed out after {} seconds", limit.as_secs())
+                };
                 if !settled {
                     live.close().await;
                     turn.forget();
@@ -933,20 +995,13 @@ impl Backend for ScvAgentTool {
                         reply,
                         None,
                         Some(format!(
-                            "timed out after {} seconds; the nested SCV did not stop in time and \
-                             was shut down",
-                            limit.as_secs()
+                            "{detail}; the nested SCV did not stop in time and was shut down"
                         )),
                         None,
                         self.output_limit,
                     ));
                 }
-                (
-                    RunStatus::Timeout,
-                    reply,
-                    None,
-                    Some(format!("timed out after {} seconds", limit.as_secs())),
-                )
+                (RunStatus::Timeout, reply, None, Some(detail))
             }
             TurnEnd::Cancelled { settled } => {
                 if settled {

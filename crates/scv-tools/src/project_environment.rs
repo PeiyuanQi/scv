@@ -312,7 +312,7 @@ impl Probe<'_> {
                 environment: self.environment.clone(),
                 clear_environment: true,
                 sanitize_scv_environment: true,
-                timeout: remaining.min(Duration::from_secs(5)),
+                deadline: Some(Instant::now() + remaining.min(Duration::from_secs(5))),
                 output_limit: 16 * 1024,
             },
             self.cancellation.clone(),

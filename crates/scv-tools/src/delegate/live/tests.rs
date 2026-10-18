@@ -116,3 +116,50 @@ async fn a_child_is_recorded_idle_between_turns_and_at_work_during_one() {
     drop(turn);
     assert_eq!(registry.list(true), []);
 }
+
+#[tokio::test]
+async fn a_write_the_child_can_take_beats_a_passed_deadline_or_a_fired_token() {
+    let home = tempfile::tempdir().unwrap();
+    let input = home.path().join("input");
+    let (_registry, child) = spawn(home.path(), &format!("exec cat > '{}'", input.display())).await;
+    child.send(&serde_json::json!({"n": 1})).await.unwrap();
+    // A turn whose deadline has just passed and whose token has fired still
+    // gets out a request the child can take now, such as its prompt.
+    // Repeated, since an unordered race would let some through anyway.
+    let fired = CancellationToken::new();
+    fired.cancel();
+    for n in 2..=20 {
+        child
+            .send_until(&serde_json::json!({"n": n}), Some(Instant::now()), &fired)
+            .await
+            .unwrap();
+    }
+    child.close().await;
+    let expected: String = (1..=20).map(|n| format!("{{\"n\":{n}}}\n")).collect();
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), expected);
+}
+
+#[tokio::test]
+async fn an_owed_message_a_child_never_reads_is_bounded_and_ends_its_input() {
+    let home = tempfile::tempdir().unwrap();
+    // Never reads its input, so a message larger than the pipe stalls.
+    let (_registry, child) = spawn(home.path(), "exec sleep 30").await;
+    let large = serde_json::json!({"text": "x".repeat(1 << 20)});
+    let started = Instant::now();
+    let error = child.send(&large).await.unwrap_err();
+    assert_eq!(
+        error.kind,
+        scv_core::ToolFailure::Limit,
+        "{}",
+        error.message
+    );
+    assert!(started.elapsed() < SEND_GRACE + Duration::from_secs(3));
+    // Part of that line reached the child, so nothing may follow it.
+    let error = child.send(&serde_json::json!({"n": 1})).await.unwrap_err();
+    assert!(
+        error.message.contains("input is closed"),
+        "{}",
+        error.message
+    );
+    child.close().await;
+}

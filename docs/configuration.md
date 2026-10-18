@@ -207,6 +207,7 @@ approval_policy = "on-risk"
 command_timeout_seconds = 600
 agent_timeout_seconds = 3600
 max_timeout_seconds = 14400
+allow_no_timeout = false
 output_limit_bytes = 65536
 max_read_bytes = 262144
 max_write_bytes = 1048576
@@ -400,9 +401,9 @@ the bounded prompt argument before launch.
 
 Project configuration may lower context, size, output, and timeout limits; make
 approval policy stricter; set `skills.project_dir` within the workspace; turn
-`skills.scan_projects`, `web.enabled`, or `web.search` off; and append project
-instructions. Attempts to weaken a limit or set a user-only key
-are startup errors rather than ignored fields.
+`skills.scan_projects`, `tools.allow_no_timeout`, `web.enabled`, or
+`web.search` off; and append project instructions. Attempts to weaken a limit
+or set a user-only key are startup errors rather than ignored fields.
 
 ### Tool timeouts
 
@@ -418,6 +419,13 @@ to land a change. Three keys bound this:
 - `max_timeout_seconds` (default 14400, four hours) is the ceiling any single call may
   request, and is advertised in each tool's schema. A request above it is
   refused with an error naming the ceiling rather than silently shortened.
+
+`allow_no_timeout` (default `false`) lets a background `agent` call set
+`no_timeout: true` and run with no main deadline, for a job that must run
+until it is done. Only the user file can turn it on; project configuration may
+turn it off. Foreground calls and calls that also set `timeout_seconds` are
+refused either way, and starting the agent and its approval requests keep
+their own limits ([`docs/tools.md`](tools.md), "Choosing an agent").
 
 Both defaults must not exceed the ceiling, and the ceiling is at most 86400
 (one day). To allow longer delegated jobs, raise the ceiling in the user file:

@@ -378,7 +378,9 @@ budget; `project_run_start`, `project_run_progress`, `project_run_finish`, and
 `project_tasks`, `project_events`, and `project_report` read the reducer without
 contacting a model. Project responses are returned in the additive `project`
 field of `daemon.status`. The daemon's `project:orchestrator` component marks
-running work stale after five minutes without a heartbeat. It does not infer
+running work stale after five minutes without a heartbeat, however long the
+agent doing it may run (an `agent` call's `no_timeout` does not change
+this). It does not infer
 completion from prose and does not replace the existing one-off delegation
 flow. `project_events` returns the retained event tail; after a private
 snapshot compacts older events, `compacted_before` names the highest omitted

@@ -86,7 +86,7 @@ impl Tool for BashTool {
                 environment: Vec::new(),
                 sanitize_scv_environment: false,
                 clear_environment: false,
-                timeout: requested,
+                deadline: Some(tokio::time::Instant::now() + requested),
                 output_limit: self.output_limit,
             },
             context.cancellation,
