@@ -245,7 +245,7 @@ async fn connected_client_reconnects_after_daemon_restart_without_replaying_work
     std::fs::remove_file(&path.0).unwrap();
     app.handle_server_result(client.read_event().await).unwrap();
     assert_disconnected(&app);
-    assert!(app.input.is_empty());
+    assert_eq!(app.input, "");
     assert_eq!(app.prompt_history.front().unwrap(), "interrupted prompt");
     handle_key(
         &mut client,
@@ -342,7 +342,7 @@ async fn stalled_socket_write_times_out_without_replaying_a_partial_prompt() {
     .unwrap()
     .unwrap();
     assert_disconnected(&app);
-    assert!(app.input.is_empty());
+    assert_eq!(app.input, "");
     client.shutdown().await;
     drop(peer);
     let options = LaunchOptions::default();

@@ -136,7 +136,7 @@ X-Bad Name: skipped\r\nnot a field\r\nPrecedence:  bulk \r\n\r\nBody: not a head
             ("precedence".to_owned(), b"bulk".to_vec()),
         ]
     );
-    assert!(header_fields(b"").is_empty());
+    assert_eq!(header_fields(b""), []);
 }
 
 #[test]

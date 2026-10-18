@@ -715,7 +715,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"all done"
     assert!(chain.contains("/session-1/claude-"), "{chain}");
     assert_eq!(lines[7], "1");
     // The run's record is gone once it ends.
-    assert!(context_home.registry.list(true).is_empty());
+    assert_eq!(context_home.registry.list(true), []);
 }
 
 /// A fake Codex that records each call's arguments, reports thread
@@ -1133,5 +1133,5 @@ async fn a_timed_out_run_and_its_detached_descendants_are_stopped() {
         remaining = tagged();
     }
     assert_eq!(remaining, 0, "tagged processes of {handle} survived");
-    assert!(delegation.registry.list(true).is_empty());
+    assert_eq!(delegation.registry.list(true), []);
 }

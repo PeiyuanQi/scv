@@ -64,7 +64,7 @@ fn accounts_read_and_write_each_channel_under_the_layout() {
     let feishu_accounts = ChannelKind::Feishu.accounts(&layout);
     assert_eq!(wechat_accounts.kind(), ChannelKind::Wechat);
     assert_eq!(wechat_accounts.names().unwrap(), ["default"]);
-    assert!(feishu_accounts.names().unwrap().is_empty());
+    assert_eq!(feishu_accounts.names().unwrap(), [] as [String; 0]);
     assert!(wechat_accounts.signed_in("default").unwrap());
     assert!(!feishu_accounts.signed_in("default").unwrap());
     assert_eq!(
@@ -86,8 +86,8 @@ fn accounts_read_and_write_each_channel_under_the_layout() {
     assert!(credentials.unwrap().is_some());
 
     wechat_accounts.remove("default").unwrap();
-    assert!(wechat_accounts.names().unwrap().is_empty());
-    assert!(wechat_accounts.configured().unwrap().is_empty());
+    assert_eq!(wechat_accounts.names().unwrap(), [] as [String; 0]);
+    assert_eq!(wechat_accounts.configured().unwrap(), [] as [String; 0]);
 }
 
 #[test]

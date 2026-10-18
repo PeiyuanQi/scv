@@ -136,7 +136,7 @@ async fn claims_move_the_cursor_in_the_same_write_and_decisions_release_them() {
         .await
         .unwrap();
     let state = saved(directory.path());
-    assert!(state.claims.is_empty());
+    assert_eq!(state.claims, []);
     assert_eq!(state.queue.len(), 1);
     assert_eq!(state.queue[0].key, "report:imap:7:5");
     assert_eq!(state.counts.skipped, 1);
@@ -213,7 +213,7 @@ async fn a_report_that_cannot_fit_the_state_file_is_counted_instead() {
         .await
         .unwrap();
     let state = saved(directory.path());
-    assert!(state.queue.is_empty());
+    assert_eq!(state.queue, []);
     assert!(state.claims.is_empty(), "the claim is still released");
     // Trimming drops the report into a count rather than refusing it.
     assert_eq!(state.counts.skipped + state.counts.unlisted, 1);
@@ -310,7 +310,7 @@ async fn a_batch_is_stored_once_and_its_counts_leave_the_next_digest() {
         .await
         .unwrap();
     let state = saved(directory.path());
-    assert!(state.watched.is_empty());
+    assert_eq!(state.watched, []);
     assert_eq!(state.counts.undelivered, 1);
 }
 
@@ -431,7 +431,7 @@ async fn a_slow_disk_holds_up_no_reader_and_no_shutdown() {
     // The write is stalled on a blocking thread: the async thread runs on,
     // and a reader sees the state as last saved without waiting.
     tokio::time::sleep(Duration::from_millis(1)).await;
-    assert!(ledger.snapshot().queue.is_empty());
+    assert_eq!(ledger.snapshot().queue, []);
 
     // Shutdown drops the change at once. The write still lands whole, and
     // until it has, no run can take the account over.
@@ -484,7 +484,7 @@ async fn a_cancelled_write_keeps_its_writer_lock_and_publishes_before_the_next_c
         ledger.writer.try_lock().is_err(),
         "the blocking write still owns serialization"
     );
-    assert!(ledger.snapshot().queue.is_empty());
+    assert_eq!(ledger.snapshot().queue, []);
     release.send(()).unwrap();
     tokio::time::timeout(
         Duration::from_secs(10),

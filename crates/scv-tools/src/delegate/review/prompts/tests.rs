@@ -184,7 +184,7 @@ fn every_open_finding_reaches_the_next_reviewer_and_the_builder() {
         listed(&prompt, &open)
     );
     let fix = fix_prompt(3, 5, LandMode::NoLanding, &open, None);
-    assert!(listed(&fix, &open).is_empty());
+    assert_eq!(listed(&fix, &open), [] as [String; 0]);
     // Far more than fits: details shortened, every line kept.
     let open: Vec<Finding> = (1..=6)
         .flat_map(|round| many(round, 20, "Defect", 2000))
@@ -192,7 +192,7 @@ fn every_open_finding_reaches_the_next_reviewer_and_the_builder() {
     let list = finding_list(&open, FINDINGS_BYTES);
     assert!(list.len() <= FINDINGS_BYTES, "{}", list.len());
     assert!(list.starts_with("(Details are shortened to fit"));
-    assert!(listed(&list, &open).is_empty());
+    assert_eq!(listed(&list, &open), [] as [String; 0]);
     assert!(list.contains("(src/lib.rs:20)"));
     // So many that only shortened lines fit.
     let title = "é".repeat(200);
@@ -202,6 +202,6 @@ fn every_open_finding_reaches_the_next_reviewer_and_the_builder() {
     let list = finding_list(&open, FINDINGS_BYTES);
     assert!(list.len() <= FINDINGS_BYTES, "{}", list.len());
     assert!(list.starts_with("(Too many findings to quote in full"));
-    assert!(listed(&list, &open).is_empty());
+    assert_eq!(listed(&list, &open), [] as [String; 0]);
     assert!(!list.contains("dddd"));
 }

@@ -253,7 +253,7 @@ async fn a_searched_answer_streams_with_its_cited_sources() {
     let expected = "Tokio is at 1.53.1.\n\nSources:\n- [tokio - Docs.rs](https://docs.rs/tokio)\n- [crates.io](https://crates.io/crates/tokio)";
     assert_eq!(response.content, expected);
     assert_eq!(*deltas.0.lock().unwrap(), expected);
-    assert!(response.tool_calls.is_empty());
+    assert_eq!(response.tool_calls, []);
     let body = server.join().unwrap();
     assert_eq!(body["tools"], json!([{"type":"web_search"}]));
 }

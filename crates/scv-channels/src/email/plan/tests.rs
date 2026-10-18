@@ -313,14 +313,14 @@ fn over_random_arrivals_the_limits_hold_and_every_item_goes_out_in_order() {
             assert_eq!(decided, plan(now, &queue, &log, &limits));
             match decided {
                 Plan::Send { seqs, class } => {
-                    assert!(!seqs.is_empty());
+                    assert_ne!(seqs, [] as [u64; 0]);
                     assert!(seqs.len() <= limits.max_items);
                     queue.retain(|item| !seqs.contains(&item.seq));
                     delivered.extend(seqs);
                     log.push(Logged { at: now, class });
                 }
                 Plan::Wait { until, .. } => assert!(until > now, "a wait must end later"),
-                Plan::Idle => assert!(queue.is_empty()),
+                Plan::Idle => assert_eq!(queue, []),
             }
             let window = |span: u64, classes: &[SendClass]| {
                 log.iter()

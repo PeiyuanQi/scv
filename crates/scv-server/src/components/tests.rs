@@ -161,7 +161,7 @@ async fn bounded_stop_aborts_uncooperative_component_and_cancels_backoff() {
     tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
         .await
         .unwrap();
-    assert!(supervisor.health().is_empty());
+    assert_eq!(supervisor.health(), []);
     let fake = Arc::new(Fake {
         starts: Arc::new(AtomicUsize::new(0)),
         stops: Arc::new(AtomicUsize::new(0)),
@@ -334,7 +334,7 @@ async fn status_shows_an_email_accounts_counts_and_nothing_else() {
     assert_eq!(hub.mail_counts("email:default").unwrap().queued, 3);
     drop(registration);
     assert_eq!(hub.mail_counts("email:default"), None);
-    assert!(components.status().components.is_empty());
+    assert_eq!(components.status().components, []);
 }
 
 #[tokio::test]

@@ -682,7 +682,7 @@ async fn a_kind_turned_off_after_approval_fails_without_an_effect() {
         failed.outcome.as_ref().map(|outcome| outcome.code),
         Some(OutcomeCode::Policy)
     );
-    assert!(bench.effects.calls().is_empty());
+    assert_eq!(bench.effects.calls(), [] as [&str; 0]);
     let told = bench.outcomes();
     assert!(
         told.iter()
@@ -887,7 +887,7 @@ async fn an_already_stopped_executor_does_not_start_approved_work() {
         .run(std::future::ready(()))
         .await
         .unwrap();
-    assert!(bench.effects.calls().is_empty());
+    assert_eq!(bench.effects.calls(), [] as [&str; 0]);
     assert_eq!(bench.entry(&content.id).state, ActionState::Approved);
 }
 
@@ -1056,7 +1056,7 @@ async fn a_stop_during_the_sent_copy_leaves_it_pending_and_recovery_tells_the_ow
                 .and_then(|outcome| outcome.sent_copy),
             Some(SentCopyState::Pending)
         );
-        assert!(bench.outcomes().is_empty());
+        assert_eq!(bench.outcomes(), [] as [String; 0]);
     }
 
     bench.ledger.recover(bench.now()).await.unwrap();

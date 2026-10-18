@@ -421,7 +421,7 @@ fn search_results_parse_for_each_backend() {
                 snippet: "Tokio runtime".into()
             }
         );
-    assert!(parse_results(&brave, &json!({})).unwrap().is_empty());
+    assert_eq!(parse_results(&brave, &json!({})).unwrap(), []);
     assert!(!format!("{brave:?}").contains("brave-secret"));
 }
 

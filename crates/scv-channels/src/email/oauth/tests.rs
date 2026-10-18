@@ -311,7 +311,7 @@ fn read_tokens_keeps_the_error_code_splits_scopes_and_never_the_secret() {
     assert_eq!(tokens.refresh_token.unwrap().expose(), "rt-SECRET");
 
     let assumed = read_tokens(&json!({"access_token": "at"})).unwrap();
-    assert!(assumed.scopes.is_empty());
+    assert_eq!(assumed.scopes, [] as [String; 0]);
     assert!(assumed.refresh_token.is_none());
     assert_eq!(assumed.expires_in, Duration::from_secs(3600));
 }

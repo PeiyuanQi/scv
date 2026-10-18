@@ -624,7 +624,7 @@ async fn results_name_the_other_agents_as_values_for_agent() {
 #[test]
 fn the_offered_agents_are_read_from_the_registry() {
     let mut registry = ToolRegistry::default();
-    assert!(offered_agents(&registry).is_empty());
+    assert_eq!(offered_agents(&registry), [] as [String; 0]);
     let (pi, codex) = (Recorder::new("pi"), Recorder::new("codex"));
     registry
         .register(Arc::new(dispatcher(&[&pi, &codex], &[])))

@@ -49,7 +49,7 @@ fn interrupted_recovery_is_durable_and_preserves_retry_identity() {
     recover_interrupted(&store, "default", &mut recovered).unwrap();
     let mut restarted = store.load_state("default").unwrap();
     assert!(restarted.in_flight.is_empty());
-    assert!(restarted.seen.is_empty());
+    assert_eq!(restarted.seen, [] as [String; 0]);
     let pending = restarted.pending[0].clone();
     assert_eq!(pending.message_id, "incoming");
     assert_eq!(pending.to_user_id, "sender");
@@ -182,7 +182,7 @@ fn only_held_replies_that_fit_ride_along_and_refusal_restores_them() {
     let own = "y".repeat(MAX_REPLY_BYTES - LATEST_HEADER.len());
     let pending = compose_pending(&mut state, &claim, &own, now + 1);
     assert_eq!(pending.reply, own);
-    assert!(pending.carried.is_empty());
+    assert_eq!(pending.carried, []);
     assert_eq!(state.held.len(), 4);
 }
 
@@ -272,7 +272,7 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
         ]
     );
     // Notices answer no message: no reply handle, the chat's own key.
-    assert!(restarted.pending[1].context_token.is_empty());
+    assert_eq!(restarted.pending[1].context_token, "");
     assert_eq!(restarted.pending[2].key, "bob");
 }
 

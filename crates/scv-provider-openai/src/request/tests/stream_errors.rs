@@ -244,7 +244,7 @@ async fn a_rejected_reasoning_effort_is_reported_without_a_retry() {
         "{}",
         error.message
     );
-    assert!(text.is_empty());
+    assert_eq!(text, "");
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -342,7 +342,7 @@ async fn a_stream_that_ends_early_is_retried_and_then_reported() {
         result.unwrap_err().message,
         "provider stream ended before the response completed (gave up after 3 attempts)"
     );
-    assert!(streamed.is_empty());
+    assert_eq!(streamed, "");
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 

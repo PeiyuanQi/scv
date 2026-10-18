@@ -56,7 +56,7 @@ fn only_a_successful_chat_attach_reports_an_attachment() {
     let attached = reply_attachment(CHAT_ATTACH_TOOL, true, output).unwrap();
     assert_eq!(attached.name, "report.pdf");
     assert_eq!(attached.size, 10);
-    assert!(attached.caption.is_empty());
+    assert_eq!(attached.caption, "");
     assert_eq!(reply_attachment(CHAT_ATTACH_TOOL, false, output), None);
     assert_eq!(reply_attachment("bash", true, output), None);
     assert_eq!(reply_attachment(CHAT_ATTACH_TOOL, true, "not json"), None);
@@ -360,7 +360,7 @@ fn remote_tools_fields_are_additive() {
     .unwrap();
     assert_eq!(health.remote_tools, RemoteTools::None);
     // Daemons before channels reported no channel.
-    assert!(health.channel.is_empty());
+    assert_eq!(health.channel, "");
 }
 
 #[test]
@@ -669,7 +669,7 @@ fn tool_calls_report_the_jobs_they_start_and_settle() {
         serde_json::from_str(r#"{"job":"job-1","tool":"agent","agent":"codex","status":"paused"}"#)
             .unwrap();
     assert_eq!(settled.status, JobStatus::Unknown);
-    assert!(settled.task.is_empty());
+    assert_eq!(settled.task, "");
     assert!(!settled.started());
     let event = ServerEvent::ToolCompleted {
         request_id: "r".into(),
@@ -690,7 +690,7 @@ fn tool_calls_report_the_jobs_they_start_and_settle() {
     // A newer server's origin kind parses too.
     let origin: TurnOrigin = serde_json::from_str(r#"{"kind":"schedule"}"#).unwrap();
     assert_eq!(origin.kind, OriginKind::Unknown);
-    assert!(origin.jobs.is_empty());
+    assert_eq!(origin.jobs, [] as [String; 0]);
 }
 
 #[test]

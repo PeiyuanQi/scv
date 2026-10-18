@@ -67,8 +67,11 @@ fn the_open_episode_comes_back_in_order_with_roles() {
         "[SCV sent the user this message itself]\nSCV restarted into 0.3.2."
     );
     // After the gap nothing comes back.
-    assert!(reload(home.path(), GAP, (AT as u64 + 7200) * 1000, true).is_empty());
-    assert!(reload(&home.path().join("missing"), GAP, 0, true).is_empty());
+    assert_eq!(
+        reload(home.path(), GAP, (AT as u64 + 7200) * 1000, true),
+        []
+    );
+    assert_eq!(reload(&home.path().join("missing"), GAP, 0, true), []);
 }
 
 #[test]

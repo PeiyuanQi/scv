@@ -384,7 +384,7 @@ async fn a_timed_out_turn_is_cancelled_and_a_stubborn_agent_is_shut_down() {
     assert_eq!(value["status"], "timeout");
     assert!(value.get("session").is_none(), "{value}");
     wait_gone(pid(dir.path())).await;
-    assert!(conversations.handles().is_empty());
+    assert_eq!(conversations.handles(), [] as [String; 0]);
 }
 
 #[tokio::test]
@@ -505,7 +505,7 @@ async fn an_agent_dying_mid_turn_fails_with_its_stderr() {
             .contains("boom: out of memory"),
         "{value}"
     );
-    assert!(conversations.handles().is_empty());
+    assert_eq!(conversations.handles(), [] as [String; 0]);
 }
 
 #[tokio::test]

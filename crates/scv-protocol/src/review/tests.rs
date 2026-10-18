@@ -408,7 +408,7 @@ fn reports_changes_and_origins_carry_outcomes_and_older_frames_parse() {
     assert_eq!(serde_json::from_str::<TurnOrigin>(&wire).unwrap(), origin);
     let older: TurnOrigin =
         serde_json::from_str(r#"{"kind":"background","jobs":["job-1"]}"#).unwrap();
-    assert!(older.outcomes.is_empty());
+    assert_eq!(older.outcomes, []);
 }
 
 #[test]

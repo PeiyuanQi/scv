@@ -24,11 +24,11 @@ async fn the_greeting_may_carry_capabilities_or_preauthenticate() {
     assert_eq!(client.capabilities(), ["IMAP4REV1", "AUTH=PLAIN"]);
     assert!(client.has("auth=plain"));
     assert!(!client.preauthenticated());
-    assert!(finish(client, fake).await.is_empty());
+    assert_eq!(finish(client, fake).await, [] as [String; 0]);
 
     let (client, fake) = connect("* PREAUTH signed in already\r\n", vec![]).await;
     assert!(client.preauthenticated());
-    assert!(client.capabilities().is_empty());
+    assert_eq!(client.capabilities(), [] as [String; 0]);
     finish(client, fake).await;
 }
 
@@ -163,7 +163,7 @@ async fn login_disabled_without_plain_sends_nothing() {
     let (mut client, fake) = connect(greeting, vec![]).await;
     assert!(client.login("me", "secret").await.is_err());
     assert!(client.login("me", "sec\0ret").await.is_err());
-    assert!(finish(client, fake).await.is_empty());
+    assert_eq!(finish(client, fake).await, [] as [String; 0]);
 }
 
 /// Every way an error may be shown or logged.
@@ -320,7 +320,7 @@ async fn a_refused_command_writes_nothing_and_ends_the_connection() {
     assert!(append.is_err());
     let expunge = client.run("UID EXPUNGE 1:*", Vec::new()).await;
     assert!(expunge.is_err());
-    assert!(finish(client, fake).await.is_empty());
+    assert_eq!(finish(client, fake).await, [] as [String; 0]);
 }
 
 #[tokio::test]
@@ -401,23 +401,20 @@ async fn uid_search_drops_what_the_star_quirk_matches() {
         ],
     )
     .await;
-    assert!(
-        client
-            .uid_search(Search::UidFrom(10))
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        client.uid_search(Search::UidFrom(10)).await.unwrap(),
+        [] as [u32; 0]
     );
     assert_eq!(
         client.uid_search(Search::UidFrom(10)).await.unwrap(),
         [10, 11, 12]
     );
-    assert!(
+    assert_eq!(
         client
             .uid_search(Search::Since(1790596800 - 3 * 86_400))
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [u32; 0]
     );
     finish(client, fake).await;
 }
@@ -437,13 +434,7 @@ async fn uid_fetch_merges_split_responses_and_drops_others() {
         )],
     )
     .await;
-    assert!(
-        client
-            .uid_fetch(&[], &[Item::Uid])
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(client.uid_fetch(&[], &[Item::Uid]).await.unwrap(), []);
     let fetched = client
         .uid_fetch(
             &[5, 6],

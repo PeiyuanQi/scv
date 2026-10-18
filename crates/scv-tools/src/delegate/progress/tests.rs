@@ -16,7 +16,10 @@ fn codex_reports_commands_files_and_searches() {
         ["exit 1: false"]
     );
     let succeeded = json!({"type":"item.completed","item":{"type":"command_execution","command":"ls","exit_code":0}});
-    assert!(progress_lines(OutputFormat::CodexJsonl, "item.completed", &succeeded).is_empty());
+    assert_eq!(
+        progress_lines(OutputFormat::CodexJsonl, "item.completed", &succeeded),
+        [] as [String; 0]
+    );
     let files = json!({"type":"item.completed","item":{"type":"file_change","changes":[{"path":"/home/u/projects/scv/src/main.rs","kind":"update"},{"path":"note.txt","kind":"add"}]}});
     assert_eq!(
         progress_lines(OutputFormat::CodexJsonl, "item.completed", &files),
@@ -29,7 +32,10 @@ fn codex_reports_commands_files_and_searches() {
     );
     let message =
         json!({"type":"item.completed","item":{"type":"agent_message","text":"final answer"}});
-    assert!(progress_lines(OutputFormat::CodexJsonl, "item.completed", &message).is_empty());
+    assert_eq!(
+        progress_lines(OutputFormat::CodexJsonl, "item.completed", &message),
+        [] as [String; 0]
+    );
 }
 
 #[test]
@@ -53,7 +59,10 @@ fn claude_reports_tool_use_and_brief_text_but_not_results() {
         ]
     );
     let result = json!({"type":"user","message":{"content":[{"type":"tool_result","content":"private output"}]}});
-    assert!(progress_lines(OutputFormat::ClaudeStreamJson, "user", &result).is_empty());
+    assert_eq!(
+        progress_lines(OutputFormat::ClaudeStreamJson, "user", &result),
+        [] as [String; 0]
+    );
 }
 
 #[test]
@@ -74,7 +83,10 @@ fn pi_reports_tool_starts_and_failures() {
         ["bash failed"]
     );
     let update = json!({"type":"tool_execution_update","toolName":"bash","partialResult":{"content":[{"type":"text","text":"out"}]}});
-    assert!(progress_lines(OutputFormat::PiJson, "tool_execution_update", &update).is_empty());
+    assert_eq!(
+        progress_lines(OutputFormat::PiJson, "tool_execution_update", &update),
+        [] as [String; 0]
+    );
 }
 
 #[test]

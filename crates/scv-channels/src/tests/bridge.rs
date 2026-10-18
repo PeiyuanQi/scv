@@ -1444,7 +1444,7 @@ async fn a_refused_mail_notice_is_recorded_and_never_held_for_later() {
             eventually(|| hub.keyed_outcome("fake:mail", "k1") == Some(hub::KeyedOutcome::Refused))
                 .await;
             eventually(|| bench.state().pending.is_empty()).await;
-            assert!(bench.state().held.is_empty());
+            assert_eq!(bench.state().held, []);
         })
         .await;
 }

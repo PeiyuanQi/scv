@@ -247,7 +247,7 @@ async fn a_change_held_up_by_backpressure_is_followed_by_the_update_not_preceded
     // may overtake it.
     fixture.jobs.stop_for_tests(&last);
     let jobs = Arc::clone(&fixture.jobs);
-    assert!(jobs.take_updates().is_empty());
+    assert_eq!(jobs.take_updates(), []);
     drop(held);
     sending.await.unwrap().unwrap();
     fixture.connection.on_background().await.unwrap();
@@ -289,7 +289,7 @@ async fn a_send_dropped_mid_flight_leaves_its_outcome_to_one_update_when_the_tur
         result = complete_cancel(&fixture.sink) => panic!("unexpected send: {result:?}"),
         () = tokio::task::yield_now() => {}
     }
-    assert!(fixture.jobs.take_updates().is_empty());
+    assert_eq!(fixture.jobs.take_updates(), []);
     drop(held);
     fixture.jobs.turn_ended();
     fixture.connection.on_background().await.unwrap();

@@ -34,7 +34,7 @@ async fn the_first_run_without_uidnext_starts_after_the_highest_uid() {
     let Changes::New { refs, next } = source.changes(None, 50, 86_400).await.unwrap() else {
         panic!("not new");
     };
-    assert!(refs.is_empty());
+    assert_eq!(refs, []);
     assert_eq!(next, cursor("INBOX", 7, 9));
     let Changes::New { next, .. } = source.changes(None, 50, 86_400).await.unwrap() else {
         panic!("not new");

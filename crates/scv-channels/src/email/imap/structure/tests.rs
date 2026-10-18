@@ -62,7 +62,7 @@ fn alternative_prefers_plain_over_html() {
             120
         ))
     );
-    assert!(layout.attachments.is_empty());
+    assert_eq!(layout.attachments, []);
     // Order does not matter: plain wins wherever it is.
     let layout = layout_of(&format!("({HTML}{PLAIN} \"ALTERNATIVE\")"));
     assert_eq!(layout.text.unwrap().id, "2");
@@ -272,7 +272,7 @@ fn other_text_types_are_neither_text_nor_attachments() {
         "((\"TEXT\" \"CALENDAR\" NIL NIL NIL \"7BIT\" 10 1){HTML} \"MIXED\")"
     ));
     assert_eq!(layout.text.unwrap().id, "2");
-    assert!(layout.attachments.is_empty());
+    assert_eq!(layout.attachments, []);
 }
 
 #[test]

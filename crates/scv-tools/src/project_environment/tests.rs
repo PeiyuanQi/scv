@@ -291,7 +291,7 @@ async fn system_tools_from_different_directories_keep_their_path_precedence() {
 async fn non_rust_project_does_not_probe_or_change_environment() {
     let fixture = Fixture::new();
     std::fs::remove_file(fixture.project.join("Cargo.toml")).unwrap();
-    assert!(
+    assert_eq!(
         resolve_from(
             &fixture.project,
             &[],
@@ -300,8 +300,8 @@ async fn non_rust_project_does_not_probe_or_change_environment() {
         )
         .await
         .unwrap()
-        .environment
-        .is_empty()
+        .environment,
+        []
     );
 }
 

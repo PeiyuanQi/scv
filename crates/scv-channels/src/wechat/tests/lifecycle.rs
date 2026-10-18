@@ -307,7 +307,7 @@ async fn cancellation_drops_long_poll_and_pending_send() {
         assert!(store.lock("default").is_ok());
         if sending {
             let saved = store.load_state("default").unwrap();
-            assert!(saved.seen.is_empty());
+            assert_eq!(saved.seen, [] as [String; 0]);
             let restored = &saved.pending[0];
             assert_eq!(restored.client_ids, pending.client_ids);
             assert_eq!(restored.next_chunk, 0);
@@ -346,7 +346,7 @@ async fn cancellation_drops_handshake_and_active_turn_with_durable_marker() {
             );
             assert_eq!(saved.in_flight[0].key, "sender");
             assert!(saved.pending.is_empty());
-            assert!(saved.seen.is_empty());
+            assert_eq!(saved.seen, [] as [String; 0]);
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
@@ -448,7 +448,7 @@ async fn failed_send_retries_same_client_id_and_only_poll_restores_health() {
             assert!(route.ends_with("sendmessage"));
             assert_eq!(body["msg"]["client_id"], pending.client_ids[0]);
             let saved = store.load_state("default").unwrap();
-            assert!(saved.seen.is_empty());
+            assert_eq!(saved.seen, [] as [String; 0]);
             assert_eq!(saved.pending[0].client_ids, pending.client_ids);
             respond(&mut stream, status, r#"{"ret":0}"#, "").await;
         }

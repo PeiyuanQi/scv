@@ -2205,7 +2205,7 @@ async fn a_job_still_stopping_after_the_cancel_wait_keeps_its_journal_and_report
             scv_protocol::outcome_notice(&outcome)
         );
         assert_eq!(event_names(&session), ["review.started", "builder.started"]);
-        assert!(session.jobs.take_updates().is_empty());
+        assert_eq!(session.jobs.take_updates(), []);
         // The job stops later and journals what it did; the session then
         // gets its final outcome, once.
         release.notify_one();
@@ -2248,9 +2248,9 @@ async fn a_job_still_stopping_after_the_cancel_wait_keeps_its_journal_and_report
         review.as_object_mut().unwrap().remove("findings");
         review.as_object_mut().unwrap().remove("builder_session");
         assert_eq!(serde_json::to_value(&update.review).unwrap(), review);
-        assert!(session.jobs.take_changes("status").is_empty());
-        assert!(session.jobs.take_unreported().is_empty());
-        assert!(session.jobs.take_updates().is_empty());
+        assert_eq!(session.jobs.take_changes("status"), []);
+        assert_eq!(session.jobs.take_unreported(), []);
+        assert_eq!(session.jobs.take_updates(), []);
     }
 }
 
@@ -2393,7 +2393,7 @@ async fn a_final_outcome_whose_change_could_not_be_sent_goes_out_as_an_update() 
     session.jobs.updated(&["job-1".to_owned()], false);
     assert_eq!(session.jobs.take_updates().len(), 1);
     session.jobs.updated(&["job-1".to_owned()], true);
-    assert!(session.jobs.take_updates().is_empty());
+    assert_eq!(session.jobs.take_updates(), []);
 }
 
 #[tokio::test]

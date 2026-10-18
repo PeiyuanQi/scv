@@ -452,7 +452,7 @@ async fn the_first_check_stores_the_profile_history_id_and_lists_nothing() {
         let Changes::New { refs, next } = changes else {
             panic!("the first check is not a resync");
         };
-        assert!(refs.is_empty());
+        assert_eq!(refs, []);
         assert_eq!(next.provider, ProviderKind::Gmail);
         assert_eq!(next.value, "900");
     }

@@ -76,7 +76,7 @@ async fn close_stops_a_running_child_and_its_record() {
     let (registry, child) = spawn(home.path(), "trap '' TERM; sleep 30").await;
     child.close().await;
     assert!(!child.is_running());
-    assert!(registry.list(true).is_empty());
+    assert_eq!(registry.list(true), []);
     assert!(!zombie(child.pid));
 }
 
@@ -114,5 +114,5 @@ async fn a_child_is_recorded_idle_between_turns_and_at_work_during_one() {
     // A turn that outlives its child leaves no record behind.
     child.close().await;
     drop(turn);
-    assert!(registry.list(true).is_empty());
+    assert_eq!(registry.list(true), []);
 }

@@ -343,7 +343,7 @@ fn claude_variants_accept_defaults_and_reject_unpinned_flags() {
     let config: Config =
         toml::from_str("[agents.claude-ai]\ncommand = \"claude\"\nargs = [\"-p\"]\n").unwrap();
     assert!(config.validate().is_ok());
-    assert!(config.agent.prefer.is_empty());
+    assert_eq!(config.agent.prefer, [] as [String; 0]);
     let mut bad = Config::default();
     bad.agents
         .0
@@ -853,7 +853,7 @@ fn full_permissions_are_opt_in_per_agent_and_combine_with_args() {
     );
     assert_eq!(adapters["codex"].args, ["exec", "--skip-git-repo-check"]);
     assert_eq!(full("grok"), ["--always-approve"]);
-    assert!(full("dsh").is_empty());
+    assert_eq!(full("dsh"), [] as [String; 0]);
     assert!(adapters["dsh"].environment.contains(&(
         OsString::from("DSH_PERMISSION_MODE"),
         OsString::from("danger-full-access")
@@ -865,7 +865,7 @@ fn full_permissions_are_opt_in_per_agent_and_combine_with_args() {
             .any(|(variable, _)| variable == "DSH_PERMISSION_MODE")
     );
     // pi has no permission system: `full` is accepted and adds nothing.
-    assert!(full("pi").is_empty());
+    assert_eq!(full("pi"), [] as [String; 0]);
 
     let mut invalid: toml::Value =
         toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
@@ -893,7 +893,7 @@ args = [\"--always-approve\"]
         .unwrap(),
     );
     let config: Config = value.clone().try_into().unwrap();
-    assert!(config.agents.0["pi"].model_args.is_empty());
+    assert_eq!(config.agents.0["pi"].model_args, [] as [String; 0]);
     assert_eq!(config.agents.0["pi"].args, ["-p"]);
     assert_eq!(config.agents.0["grok"].args, ["--always-approve"]);
     assert_eq!(config.agents.0["grok"].prompt_args, ["-p"]);

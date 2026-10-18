@@ -216,7 +216,7 @@ struct JobChange030 {
 #[test]
 fn a_0_3_0_job_change_reads_its_agent_from_the_tool_and_encodes_unchanged() {
     let change: JobChange = serde_json::from_str(JOB_CHANGE_0_3_0).unwrap();
-    assert!(change.agent.is_empty());
+    assert_eq!(change.agent, "");
     assert_eq!(change.agent_name(), "codex");
     assert!(change.started());
     // Nothing is added to a 0.3.0 frame, such as one a nested SCV sends.

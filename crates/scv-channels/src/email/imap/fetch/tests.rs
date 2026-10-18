@@ -142,7 +142,7 @@ fn a_missing_or_short_envelope_is_empty() {
     );
     let short = Envelope::read(&value("(\"d\" \"s\" (\"not an address\"))"));
     assert_eq!(short.subject, "s");
-    assert!(short.from.is_empty());
+    assert_eq!(short.from, []);
 }
 
 #[test]

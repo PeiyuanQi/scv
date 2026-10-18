@@ -99,7 +99,7 @@ async fn reports_wait_for_the_settle_window_then_go_to_the_mail_chat_once() {
     assert_eq!(state.log.len(), 1);
     // Its delivery is then known, and nothing more is sent.
     assert_eq!(bench.notifier().step().await.unwrap(), TICK);
-    assert!(bench.ledger.snapshot().watched.is_empty());
+    assert_eq!(bench.ledger.snapshot().watched, []);
     assert_eq!(texts.lock().unwrap().len(), 1);
 }
 
@@ -171,7 +171,7 @@ async fn a_refused_digest_is_counted_in_the_next_one() {
     registration.record_keyed(&key, KeyedOutcome::Refused);
     bench.notifier().step().await.unwrap();
     let state = bench.ledger.snapshot();
-    assert!(state.watched.is_empty());
+    assert_eq!(state.watched, []);
     assert_eq!(state.counts.undelivered, 1);
 }
 
