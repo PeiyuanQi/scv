@@ -57,7 +57,7 @@ async fn daemon_control_lists_and_stops_delegations() {
     };
     assert_eq!(status.delegations.active, 1);
     assert_eq!(status.delegations.idle, Some(0));
-    assert!(status.delegations.entries.is_empty());
+    assert_eq!(status.delegations.entries, []);
     // Between turns it still counts as live, and as idle.
     save(&delegations::DelegationRecord {
         idle_since_unix: Some(2),
@@ -150,7 +150,7 @@ async fn daemon_control_lists_and_stops_delegations() {
     else {
         panic!("orphan sweep failed");
     };
-    assert!(registry.list(true).is_empty());
+    assert_eq!(registry.list(true), []);
 }
 
 /// A mail action's ID: `a` and 32 hex digits.

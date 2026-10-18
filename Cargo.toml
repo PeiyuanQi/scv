@@ -27,9 +27,6 @@ unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-# This lint was added after the minimum supported Rust toolchain; existing
-# tests intentionally use the direct predicate for these assertions.
-assert_is_empty = "allow"
 # Pedantic lints that do not pay for themselves here.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"

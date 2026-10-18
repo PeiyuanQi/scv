@@ -201,7 +201,7 @@ async fn records_are_private_and_removed_when_the_run_finishes() {
     child.wait().unwrap();
     guard.finish().await;
     assert!(!path.exists());
-    assert!(registry.list(true).is_empty());
+    assert_eq!(registry.list(true), []);
 }
 
 #[tokio::test]
@@ -271,7 +271,7 @@ async fn reconcile_reaps_an_orphan_and_its_detached_descendants() {
 
     // Another SCV process of the same instance reconciles.
     let daemon = registry(home.path());
-    assert!(daemon.list(false).is_empty());
+    assert_eq!(daemon.list(false), []);
     let orphans = daemon.list(true);
     assert_eq!(orphans.len(), 1);
     assert!(orphans[0].orphaned);
@@ -334,7 +334,7 @@ fn records_for_another_instance_or_under_the_wrong_name_are_ignored() {
         dir.join("codex-renamed.json"),
     )
     .unwrap();
-    assert!(registry.list(true).is_empty());
+    assert_eq!(registry.list(true), []);
 }
 
 /// Records are read across SCV processes of different releases: the daemon,

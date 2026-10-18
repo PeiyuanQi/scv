@@ -236,9 +236,12 @@ async fn mail_text_reaches_the_mail_chat_and_nothing_else() {
 
     // Once delivered, nothing at rest holds it, and no log line or status
     // count ever did.
-    assert!(files_holding(home.path(), CANARY).is_empty());
+    assert_eq!(
+        files_holding(home.path(), CANARY),
+        [] as [std::path::PathBuf; 0]
+    );
     let logs = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
-    assert!(!logs.is_empty());
+    assert_ne!(logs, "");
     assert!(!logs.contains(CANARY), "{logs}");
     assert!(!logs.contains("alice@example.com"), "{logs}");
     let status = serde_json::to_string(&counts(

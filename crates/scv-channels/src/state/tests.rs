@@ -89,7 +89,7 @@ fn pending_state_reads_legacy_shape() {
     let [pending] = state.pending.as_slice() else {
         panic!("one legacy pending reply")
     };
-    assert!(pending.client_ids.is_empty());
+    assert_eq!(pending.client_ids, [] as [String; 0]);
     assert_eq!(pending.next_chunk, 0);
     assert!(pending.key.is_empty() && pending.carried.is_empty() && !pending.transient);
     let claim: BridgeState = serde_json::from_str(
@@ -148,7 +148,7 @@ fn a_running_job_names_its_agent_and_0_3_0_state_still_reads() {
     let [old] = state.jobs.as_slice() else {
         panic!("one saved job")
     };
-    assert!(old.agent.is_empty());
+    assert_eq!(old.agent, "");
     assert_eq!(old.agent_name(), "codex");
     // Written back unchanged.
     assert_eq!(serde_json::to_string(old).unwrap(), saved);
@@ -425,7 +425,7 @@ fn files_follow_the_instance_layout_privately() {
 fn discovery_is_bounded_and_ignores_bad_credentials() {
     let directory = tempfile::tempdir().unwrap();
     let store = store(directory.path());
-    assert!(store.account_names().unwrap().is_empty());
+    assert_eq!(store.account_names().unwrap(), [] as [String; 0]);
     private_directory(directory.path(), &store.credentials).unwrap();
     atomic_write(&store.credentials_path("broken").unwrap(), "not JSON").unwrap();
     atomic_write(&store.credentials.join("invalid.name.json"), "{}").unwrap();

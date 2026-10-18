@@ -528,7 +528,7 @@ async fn a_read_only_account_never_gets_a_handle_or_stores_an_action() {
     let snapshot = ledger.snapshot();
     assert!(snapshot.handles.is_empty(), "{:?}", snapshot.handles);
     assert!(snapshot.actions.is_empty(), "{:?}", snapshot.actions);
-    assert!(snapshot.requests.is_empty());
+    assert_eq!(snapshot.requests, []);
     let told = notices(&texts);
     assert!(told.contains(SUBJECT), "{told}");
     assert!(

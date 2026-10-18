@@ -485,7 +485,7 @@ async fn an_unknown_handle_and_a_code_that_is_not_a_draft_are_refused() {
         not_draft,
         "TRASH2 is not a reply, forward, or new mail waiting for your answer."
     );
-    assert!(bench.ledger.snapshot().requests.is_empty());
+    assert_eq!(bench.ledger.snapshot().requests, []);
 }
 
 #[tokio::test]
@@ -545,7 +545,7 @@ async fn bad_recipients_are_refused_without_echoing_the_addresses() {
     for address in ["a@example.com", "b@example.com", "c@example.com"] {
         assert!(!too_many.contains(address), "{address} in {too_many}");
     }
-    assert!(bench.ledger.snapshot().requests.is_empty());
+    assert_eq!(bench.ledger.snapshot().requests, []);
 }
 
 #[tokio::test]
@@ -891,7 +891,7 @@ async fn only_the_owner_of_a_chat_the_account_reports_to_can_ask_for_an_action()
             );
         }
     }
-    assert!(bench.ledger.snapshot().requests.is_empty());
+    assert_eq!(bench.ledger.snapshot().requests, []);
     assert_eq!(bench.ledger.snapshot().actions, before);
 
     // The chat's own owner still can.
@@ -931,7 +931,7 @@ async fn a_draft_is_revised_only_from_the_chat_it_was_sent_to() {
         text,
         "DRAFT2 was sent to another chat; revise it there. Nothing was done."
     );
-    assert!(bench.ledger.snapshot().requests.is_empty());
+    assert_eq!(bench.ledger.snapshot().requests, []);
     assert_eq!(bench.entry_state(&draft.id), ActionState::Open);
 
     let revised = bench

@@ -94,7 +94,7 @@ fn reply_recipients_come_from_the_headers_never_from_a_model() {
     let Recipients { to, notes, .. } =
         reply_recipients(&redirected, "me@example.com", &ignore).unwrap();
     assert_eq!(to, ["alice@example.com"]);
-    assert!(notes.is_empty());
+    assert_eq!(notes, [] as [String; 0]);
 
     let all = ActionSettings {
         reply_all: true,

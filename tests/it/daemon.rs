@@ -261,7 +261,7 @@ async fn daemon_restores_enabled_accounts_and_connected_clients_get_fresh_sessio
     )
     .await
     .unwrap();
-    assert!(removed.components.is_empty());
+    assert_eq!(removed.components, []);
     assert!(!account.exists());
     terminate(&mut child).await;
 }

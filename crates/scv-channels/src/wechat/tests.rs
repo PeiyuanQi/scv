@@ -98,7 +98,7 @@ fn voice_transcripts_quotes_and_files_come_through() {
         "ref_msg":{"message_item":{"type":1,"text_item":{"text":"ready?"}}}}]))
     .unwrap();
     assert_eq!(quoted_text.text, "[Quoting: ready?]\nyes");
-    assert!(quoted_text.media.is_empty());
+    assert_eq!(quoted_text.media, []);
 
     // Items without text or a file leave nothing to answer.
     assert!(parsed(serde_json::json!([{"type":11,"tool_call_start_item":{}}])).is_none());

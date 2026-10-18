@@ -176,11 +176,11 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
     // A tool-free session (a chat stranger's, or mail triage) cannot read
     // skills, so it learns of none, not even the user's own.
     let tool_free = discover_skills(&workspace, &config, false).unwrap();
-    assert!(tool_free.project_listing.is_empty());
-    assert!(tool_free.listing.is_empty());
-    assert!(tool_free.builtin_listing.is_empty());
+    assert_eq!(tool_free.project_listing, "");
+    assert_eq!(tool_free.listing, "");
+    assert_eq!(tool_free.builtin_listing, "");
     assert!(tool_free.map.is_empty());
-    assert!(tool_free.roots.is_empty());
+    assert_eq!(tool_free.roots, [] as [PathBuf; 0]);
     let prompt = build_system_prompt(
         &workspace,
         &config,
@@ -202,7 +202,7 @@ async fn workspace_projects_list_their_agent_skills_for_delegation() {
     assert!(!prompt.contains("read_skill"), "{prompt}");
     config.skills.scan_projects = false;
     let disabled = discover_skills(&workspace, &config, true).unwrap();
-    assert!(disabled.project_listing.is_empty());
+    assert_eq!(disabled.project_listing, "");
     config.skills.scan_projects = true;
     config.skills.max_skills = 3;
     let capped = discover_skills(&workspace, &config, true).unwrap();
@@ -231,7 +231,7 @@ fn a_user_skill_replaces_a_built_in_one_of_the_same_name() {
         Skill::File(user.join("delegating/SKILL.md"))
     );
     assert_eq!(skills.listing, "- delegating: My own delegation rules\n");
-    assert!(skills.builtin_listing.is_empty());
+    assert_eq!(skills.builtin_listing, "");
 
     // A repository's skill for its own agents does not replace it.
     std::fs::remove_dir_all(user.join("delegating")).unwrap();

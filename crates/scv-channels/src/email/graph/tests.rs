@@ -454,9 +454,9 @@ async fn the_first_check_takes_the_newest_received_time_and_lists_nothing() {
     let Changes::New { refs, next } = changes else {
         panic!("the first check lists nothing");
     };
-    assert!(refs.is_empty());
+    assert_eq!(refs, []);
     let (received, ids) = position(&next);
-    assert!(ids.is_empty());
+    assert_eq!(ids, [] as [String; 0]);
     let unix = unix_of(&received);
     assert!(
         (before..=after).contains(&unix),
@@ -475,7 +475,7 @@ async fn the_first_check_takes_the_newest_received_time_and_lists_nothing() {
         let Changes::New { refs, .. } = changes else {
             panic!("a cursor that is not a Graph time is a first check");
         };
-        assert!(refs.is_empty());
+        assert_eq!(refs, []);
     }
 
     let newest = GraphBox::open(|request| {
@@ -492,7 +492,7 @@ async fn the_first_check_takes_the_newest_received_time_and_lists_nothing() {
     let Changes::New { refs, next } = changes else {
         panic!("the first check lists nothing");
     };
-    assert!(refs.is_empty());
+    assert_eq!(refs, []);
     assert_eq!(
         position(&next),
         (T0.to_owned(), vec!["newest-1".to_owned()])
@@ -649,7 +649,7 @@ async fn metadata_lists_attachments_and_text_stops_on_a_character_boundary() {
             .map(|address| address.name.as_str()),
         Some("Someone Else")
     );
-    assert!(found[1].attachments.is_empty());
+    assert_eq!(found[1].attachments, []);
     assert_eq!(found[1].category, None);
     assert!(
         !mailbox

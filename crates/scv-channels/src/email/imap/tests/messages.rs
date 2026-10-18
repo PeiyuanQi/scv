@@ -280,8 +280,8 @@ async fn metadata_for_another_selection_sends_nothing() {
         uidvalidity: 1,
         uid: 3,
     };
-    assert!(source.metadata(&[stale]).await.unwrap().is_empty());
-    assert!(source.metadata(&[]).await.unwrap().is_empty());
+    assert_eq!(source.metadata(&[stale]).await.unwrap(), []);
+    assert_eq!(source.metadata(&[]).await.unwrap(), []);
     assert_eq!(finish(source, fake).await.len(), 3);
 }
 

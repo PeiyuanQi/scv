@@ -119,10 +119,8 @@ fn strays_name_old_layout_paths_and_unknown_files() {
             ("server.sock".to_owned(), true),
         ]
     );
-    assert!(
-        Layout::new(home.path().join("missing"))
-            .strays()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        Layout::new(home.path().join("missing")).strays().unwrap(),
+        []
     );
 }

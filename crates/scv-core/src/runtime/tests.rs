@@ -371,7 +371,7 @@ async fn active_turn_over_history_limit_rolls_back() {
         )
         .await;
     assert!(matches!(result, Err(AgentError::HistoryLimit(_))));
-    assert!(history.is_empty());
+    assert_eq!(history, []);
 }
 
 #[tokio::test]

@@ -92,7 +92,7 @@ async fn new_mail_is_triaged_in_a_fresh_tool_free_turn_and_reported() {
         "Please pay 100 by Friday.",
     );
     let state = bench.check().await;
-    assert!(state.claims.is_empty());
+    assert_eq!(state.claims, []);
     assert_eq!(state.queue.len(), 1);
     let item = &state.queue[0];
     assert!(item.urgent, "the model's urgent counts by default");
@@ -124,7 +124,7 @@ async fn mail_the_model_passes_over_is_counted_not_reported() {
         .mailbox
         .add(meta(1, "alice@example.com", "fyi"), "fyi");
     let state = bench.check().await;
-    assert!(state.queue.is_empty());
+    assert_eq!(state.queue, []);
     assert_eq!(state.counts.skipped, 1);
     assert_eq!(state.day.triaged, 1);
 }
@@ -381,7 +381,7 @@ async fn a_message_that_keeps_failing_is_read_by_headers_then_given_up() {
     }
     let state = bench.check().await;
     assert_eq!(state.counts.unreadable, 1);
-    assert!(state.claims.is_empty());
+    assert_eq!(state.claims, []);
 }
 
 #[tokio::test]
@@ -430,6 +430,6 @@ async fn low_disk_space_counts_mail_instead_of_writing_reports() {
         .mailbox
         .add(meta(1, "noreply@example.com", "one"), "x");
     let state = bench.check().await;
-    assert!(state.queue.is_empty());
+    assert_eq!(state.queue, []);
     assert_eq!(state.counts.skipped, 1);
 }

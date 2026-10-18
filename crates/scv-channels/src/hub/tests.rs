@@ -960,5 +960,5 @@ fn mail_authorities_lists_only_accounts_that_take_actions() {
     drop(alpha);
     assert_eq!(hub.mail_authorities(), vec!["email:alpha".to_owned()]);
     drop(zeta);
-    assert!(hub.mail_authorities().is_empty());
+    assert_eq!(hub.mail_authorities(), [] as [String; 0]);
 }

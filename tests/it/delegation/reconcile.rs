@@ -175,7 +175,7 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
         "tagged processes survived"
     );
     assert!(!record.process.is_alive());
-    assert!(registry.list(true).is_empty());
+    assert_eq!(registry.list(true), []);
     assert!(
         std::fs::read_dir(registry.record_dir())
             .unwrap()

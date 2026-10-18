@@ -294,7 +294,7 @@ fn search_finds_every_word_newest_first() {
     assert_eq!(hits[0].role, Role::Scv);
     assert_eq!(hits[1].excerpt, "Please publish the Crates release");
     assert_eq!(search(&dir, "receipt", 10, u64::MAX).unwrap().0[0].index, 2);
-    assert!(search(&dir, "   ", 10, u64::MAX).unwrap().0.is_empty());
+    assert_eq!(search(&dir, "   ", 10, u64::MAX).unwrap().0, []);
     let (hits, stopped) = search(&dir, "crates", 1, u64::MAX).unwrap();
     assert_eq!(hits.len(), 1);
     assert!(stopped);

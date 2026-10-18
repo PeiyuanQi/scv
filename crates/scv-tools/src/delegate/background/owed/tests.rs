@@ -35,9 +35,9 @@ fn a_change_sent_after_the_job_stopped_says_the_final_outcome_and_ends_the_debt(
     let mut sent = change();
     owed.take("cancel", &mut sent);
     assert_eq!(sent.outcome, Some(outcome(false, true)));
-    assert!(owed.take_updates().is_empty());
+    assert_eq!(owed.take_updates(), []);
     assert!(!owed.sent("cancel", true));
-    assert!(owed.take_updates().is_empty());
+    assert_eq!(owed.take_updates(), []);
     assert!(owed.owed.is_empty());
 }
 
@@ -51,11 +51,11 @@ fn a_pending_change_is_followed_by_one_update_once_the_job_stops() {
     assert_eq!(sent.outcome, Some(outcome(true, false)));
     // Stopping while the change is being sent queues nothing yet.
     assert!(!owed.stopped("job-1", &outcome(false, false)));
-    assert!(owed.take_updates().is_empty());
+    assert_eq!(owed.take_updates(), []);
     assert!(owed.sent("cancel", true), "now due");
     assert_eq!(owed.take_updates(), [outcome(false, false)]);
     // Taken once: being sent, not taken again.
-    assert!(owed.take_updates().is_empty());
+    assert_eq!(owed.take_updates(), []);
     owed.updated(&["job-1".to_owned()], true);
     assert!(owed.owed.is_empty());
 }
@@ -78,7 +78,7 @@ fn whatever_did_not_reach_the_client_is_owed_by_an_update() {
     let mut owed = Owed::default();
     owed.cancelling("job-1", "cancel");
     assert!(!owed.abandoned("job-1", "cancel"));
-    assert!(owed.take_updates().is_empty());
+    assert_eq!(owed.take_updates(), []);
     assert!(owed.stopped("job-1", &outcome(false, false)));
     assert_eq!(owed.take_updates(), [outcome(false, false)]);
     // A change pushed out unsent, or left by a turn that ended.

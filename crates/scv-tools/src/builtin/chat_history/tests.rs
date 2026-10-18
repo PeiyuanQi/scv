@@ -194,5 +194,8 @@ fn large_results_are_cut_to_the_output_limit() {
     assert!(output.content.len() <= 2000);
     let parsed: Value = serde_json::from_str(&output.content).unwrap();
     assert_eq!(parsed["more"], true);
-    assert!(!parsed["hits"].as_array().unwrap().is_empty());
+    assert_ne!(
+        parsed["hits"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
 }

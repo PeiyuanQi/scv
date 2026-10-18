@@ -64,7 +64,7 @@ fn tool_free_sessions_see_no_paths_and_voice_transcripts_are_quoted() {
         "[The user attached:]\n- voice or audio (audio/silk, 900 bytes); it says: \"see you at five\""
     );
     assert!(!input.text.contains(&dir.path().display().to_string()));
-    assert!(input.images.is_empty());
+    assert_eq!(input.images, []);
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn unsupported_or_oversized_images_are_listed_but_not_shown() {
         ),
     ];
     let input = turn_input("", &files, true);
-    assert!(input.images.is_empty());
+    assert_eq!(input.images, []);
     assert!(input.text.contains("a.heic"));
     assert!(input.text.contains("b.png"));
 }

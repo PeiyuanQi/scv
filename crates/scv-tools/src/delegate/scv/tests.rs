@@ -531,7 +531,7 @@ async fn a_child_dying_mid_turn_fails_the_call_and_ends_the_conversation() {
         value["stderr_tail"].as_str().unwrap().contains("boom"),
         "{value}"
     );
-    assert!(conversations.handles().is_empty());
+    assert_eq!(conversations.handles(), [] as [String; 0]);
     let error = tool
         .execute(
             json!({"prompt":"again","session":"scv-1"}),

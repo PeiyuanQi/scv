@@ -375,7 +375,7 @@ async fn an_approved_draft_runs_once_and_its_sibling_is_superseded() {
     // Once over, both are tombstoned and their codes still answer.
     let swept = bench.ledger.sweep_actions(14 * DAY, T0 + 24).await.unwrap();
     assert_eq!(swept.tombstoned.len(), 2);
-    assert!(bench.ledger.snapshot().actions.is_empty());
+    assert_eq!(bench.ledger.snapshot().actions, []);
     assert_eq!(
         bench
             .approve(
@@ -454,8 +454,8 @@ async fn every_approval_check_answers_exactly_and_changes_nothing() {
         ["Not approved: this message was sent before D2D2D2 reached you."]
     );
     assert_eq!(bench.entry(&draft).state, ActionState::Open);
-    assert!(bench.ledger.snapshot().reservations.is_empty());
-    assert!(bench.ledger.snapshot().approvals.is_empty());
+    assert_eq!(bench.ledger.snapshot().reservations, []);
+    assert_eq!(bench.ledger.snapshot().approvals, []);
     // Past its window it expires.
     assert_eq!(
         bench
@@ -595,7 +595,7 @@ async fn deny_and_cancel_exclude_execution_in_either_order() {
         bench.deny_codes(Some(&["D2D2D2"]), T0 + 2).await,
         ["Denied D2D2D2 (saving the reply to #4K7P in Drafts)."]
     );
-    assert!(bench.ledger.snapshot().reservations.is_empty());
+    assert_eq!(bench.ledger.snapshot().reservations, []);
     let content = bench.policy().content.read(&draft).unwrap();
     assert_eq!(
         bench
@@ -686,7 +686,7 @@ async fn execution_rechecks_content_credentials_deadline_and_settings() {
             .err(),
         Some(NotStarted::Ended(ActionState::Invalid))
     );
-    assert!(bench.ledger.snapshot().reservations.is_empty());
+    assert_eq!(bench.ledger.snapshot().reservations, []);
 
     // A missing content file.
     let bench = Bench::new();
@@ -827,7 +827,7 @@ async fn retries_are_bounded_and_backed_off() {
     }
     let failed = bench.entry(&id);
     assert_eq!(failed.state, ActionState::Failed);
-    assert!(bench.ledger.snapshot().reservations.is_empty());
+    assert_eq!(bench.ledger.snapshot().reservations, []);
     assert!(
         bench
             .ledger
@@ -861,7 +861,7 @@ async fn an_unclear_send_is_checked_and_never_sent_again() {
         .probed(&id, Probe::Unreachable, T0 + 4)
         .await
         .unwrap();
-    assert!(bench.ledger.due_probes(T0 + 5).is_empty());
+    assert_eq!(bench.ledger.due_probes(T0 + 5), [] as [String; 0]);
     assert_eq!(bench.ledger.due_probes(T0 + 40), std::slice::from_ref(&id));
     // Not found is not proof it was not sent: unknown, never retried.
     bench
@@ -1256,7 +1256,7 @@ async fn a_refused_preview_is_offered_again_with_new_codes_at_most_twice() {
         })
         .await
         .unwrap();
-    assert!(again.is_empty());
+    assert_eq!(again, [] as [String; 0]);
     assert_eq!(bench.entry(&content.id).state, ActionState::Expired);
 }
 
@@ -1344,7 +1344,7 @@ async fn recovery_applies_the_settings_the_account_starts_with() {
     let mut codes = recovered.codes.clone();
     codes.sort();
     assert_eq!(codes, ["D2D2D2", "S3S3S3", "TRASH2"]);
-    assert!(recovered.unpreviewed.is_empty());
+    assert_eq!(recovered.unpreviewed, [] as [String; 0]);
 }
 
 #[tokio::test]

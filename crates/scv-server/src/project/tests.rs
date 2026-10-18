@@ -217,7 +217,7 @@ fn compaction_keeps_state_and_reports_the_omitted_event_boundary() {
     else {
         panic!("expected events")
     };
-    assert!(events.is_empty());
+    assert_eq!(events, []);
     assert_eq!(compacted_before, Some(512));
 
     let mut reopened = ProjectLedger::open(&Layout::new(home.path())).unwrap();

@@ -194,7 +194,7 @@ async fn a_reply_rereads_the_message_drafts_once_and_offers_both_alternatives() 
             )
             .await,
     );
-    assert!(revised.is_empty());
+    assert_eq!(revised, [] as [String; 0]);
     assert_eq!(contents.len(), 2, "a reply offers a draft and a send");
     assert_eq!(codes.len(), 2);
     assert_ne!(codes[0], codes[1], "the alternatives have distinct codes");
@@ -386,7 +386,7 @@ async fn new_mail_uses_the_models_subject_and_body() {
             )
             .await,
     );
-    assert!(revised.is_empty());
+    assert_eq!(revised, [] as [String; 0]);
     assert!(contents.iter().all(|content| content.source.is_none()));
     let message = contents[0].message.as_ref().unwrap();
     assert_eq!(message.subject, "Lunch Friday");
@@ -616,7 +616,7 @@ async fn a_refused_record_removes_the_content_it_wrote() {
             .is_none(),
         "the content file survived a refused record"
     );
-    assert!(bench.ledger.snapshot().actions.is_empty());
+    assert_eq!(bench.ledger.snapshot().actions, []);
 }
 
 #[test]

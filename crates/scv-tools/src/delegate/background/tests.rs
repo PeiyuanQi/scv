@@ -509,7 +509,7 @@ async fn background_calls_return_a_job_that_wait_and_status_observe() {
         fixture.jobs.take_changes("call-1"),
         [job_1(JobStatus::Running)]
     );
-    assert!(fixture.jobs.take_changes("call-1").is_empty());
+    assert_eq!(fixture.jobs.take_changes("call-1"), []);
     // Running, with the job's latest progress.
     let status = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -537,8 +537,8 @@ async fn background_calls_return_a_job_that_wait_and_status_observe() {
         .unwrap();
     assert_eq!(waited["status"], "running");
     // Seeing it run changes nothing for the clients.
-    assert!(fixture.jobs.take_changes("call-2").is_empty());
-    assert!(fixture.jobs.take_changes("call-3").is_empty());
+    assert_eq!(fixture.jobs.take_changes("call-2"), []);
+    assert_eq!(fixture.jobs.take_changes("call-3"), []);
 
     fixture.release.notify_one();
     let waited = fixture
@@ -561,11 +561,11 @@ async fn background_calls_return_a_job_that_wait_and_status_observe() {
     );
     // The session was woken, but the model already saw the result.
     fixture.finished.recv().await.unwrap();
-    assert!(fixture.jobs.take_unreported().is_empty());
+    assert_eq!(fixture.jobs.take_unreported(), []);
     let all = fixture.jobs.describe(None, "call-5").unwrap();
     assert_eq!(all["jobs"][0]["job"], "job-1");
     // A result seen before is not settled again.
-    assert!(fixture.jobs.take_changes("call-5").is_empty());
+    assert_eq!(fixture.jobs.take_changes("call-5"), []);
 }
 
 #[tokio::test]
@@ -583,7 +583,7 @@ async fn listing_jobs_settles_only_the_finished_ones_the_model_had_not_seen() {
         [job_1(JobStatus::Completed)]
     );
     // The listing replaced the report turn.
-    assert!(fixture.jobs.take_unreported().is_empty());
+    assert_eq!(fixture.jobs.take_unreported(), []);
     // Changes stay with the call that made them.
     assert_eq!(fixture.jobs.take_changes("call-2").len(), 1);
     assert_eq!(fixture.jobs.take_changes("call-1").len(), 1);
@@ -650,7 +650,7 @@ async fn a_failed_report_is_due_again_after_a_delay_then_reported_directly() {
     );
     // Still unreported, and so still holding a planned restart, but not due.
     assert_eq!(jobs.pending(), 1);
-    assert!(jobs.take_unreported().is_empty());
+    assert_eq!(jobs.take_unreported(), []);
     let due = jobs.next_retry().unwrap();
     assert_eq!(due - tokio::time::Instant::now(), Duration::from_secs(30));
 
@@ -663,7 +663,7 @@ async fn a_failed_report_is_due_again_after_a_delay_then_reported_directly() {
         ReportFailure::Retry(Duration::from_secs(120))
     );
     tokio::time::advance(Duration::from_secs(119)).await;
-    assert!(jobs.take_unreported().is_empty());
+    assert_eq!(jobs.take_unreported(), []);
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(jobs.take_unreported().len(), 1);
 
@@ -687,11 +687,11 @@ async fn a_failed_report_is_due_again_after_a_delay_then_reported_directly() {
     );
     assert_eq!(jobs.pending(), 0);
     assert_eq!(jobs.next_retry(), None);
-    assert!(jobs.take_unreported().is_empty());
+    assert_eq!(jobs.take_unreported(), []);
     // It is still there to look up, and looking settles nothing new.
     let status = jobs.describe(Some("job-1"), "call-1").unwrap();
     assert_eq!(status["result"]["reply"], "all done");
-    assert!(jobs.take_changes("call-1").is_empty());
+    assert_eq!(jobs.take_changes("call-1"), []);
 }
 
 #[tokio::test(start_paused = true)]
@@ -706,7 +706,7 @@ async fn a_failure_that_must_not_be_retried_is_reported_directly_at_once() {
     assert_eq!((attempts, reports.len()), (1, 1));
     assert_eq!(fixture.jobs.pending(), 0);
     tokio::time::advance(Duration::from_secs(3600)).await;
-    assert!(fixture.jobs.take_unreported().is_empty());
+    assert_eq!(fixture.jobs.take_unreported(), []);
 }
 
 #[tokio::test(start_paused = true)]
@@ -720,7 +720,7 @@ async fn a_cancelled_report_turn_settles_its_jobs() {
         fixture.jobs.report_failed(&job_1_only(), true),
         ReportFailure::Settled
     );
-    assert!(fixture.jobs.take_unreported().is_empty());
+    assert_eq!(fixture.jobs.take_unreported(), []);
 }
 
 #[tokio::test(start_paused = true)]
@@ -731,7 +731,7 @@ async fn a_turn_that_succeeds_makes_a_waiting_report_due_at_once() {
     assert!(!jobs.retry_now());
     jobs.take_unreported();
     jobs.report_failed(&job_1_only(), true);
-    assert!(jobs.take_unreported().is_empty());
+    assert_eq!(jobs.take_unreported(), []);
     assert!(jobs.retry_now());
     assert!(!jobs.retry_now());
     assert_eq!(jobs.next_retry(), None);
@@ -757,7 +757,7 @@ async fn a_job_the_model_looks_up_needs_no_report_however_its_turn_ends() {
     assert_eq!(fixture.jobs.pending(), 0);
     assert_eq!(fixture.jobs.next_retry(), None);
     tokio::time::advance(Duration::from_secs(3600)).await;
-    assert!(fixture.jobs.take_unreported().is_empty());
+    assert_eq!(fixture.jobs.take_unreported(), []);
 
     // Looked up during its own report turn, which then fails.
     let fixture = finished_job().await;
@@ -876,7 +876,7 @@ async fn agent_cancel_stops_a_running_job_without_a_report() {
     );
     // The session is woken, but the model asked for the stop.
     fixture.finished.recv().await.unwrap();
-    assert!(fixture.jobs.take_unreported().is_empty());
+    assert_eq!(fixture.jobs.take_unreported(), []);
     assert_eq!(fixture.jobs.running(), 0);
     let again = cancel
         .execute(json!({"job":"job-1"}), call("call-10"))
@@ -887,7 +887,7 @@ async fn agent_cancel_stops_a_running_job_without_a_report() {
         "{}",
         again.content
     );
-    assert!(fixture.jobs.take_changes("call-10").is_empty());
+    assert_eq!(fixture.jobs.take_changes("call-10"), []);
     let unknown = cancel
         .execute(json!({"job":"job-9"}), context())
         .await
@@ -1052,7 +1052,7 @@ async fn a_background_call_runs_the_agent_it_names_and_a_refused_one_starts_no_j
         );
     }
     assert_eq!(fixture.jobs.running(), 0);
-    assert!(fixture.jobs.take_changes("call-0").is_empty());
+    assert_eq!(fixture.jobs.take_changes("call-0"), []);
     // The job belongs to the agent the call named, however it is named.
     let started = fixture
         .tool
@@ -1111,7 +1111,7 @@ fn a_cancels_change_pushed_out_unsent_leaves_its_outcome_to_an_update() {
         jobs.state()
             .record(&format!("later-{n}"), job_1(JobStatus::Running));
     }
-    assert!(jobs.take_changes("cancel").is_empty());
+    assert_eq!(jobs.take_changes("cancel"), []);
     jobs.stop_for_tests(&reviewed_outcome(false));
     assert_eq!(jobs.take_updates(), [reviewed_outcome(false)]);
 }

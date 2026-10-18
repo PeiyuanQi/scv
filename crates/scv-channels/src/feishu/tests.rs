@@ -680,7 +680,7 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
             .await;
         let content: Value = serde_json::from_str(reply.body["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["text"], crate::FAILURE_REPLY);
-        assert!(!reply.body["uuid"].as_str().unwrap().is_empty());
+        assert_ne!(reply.body["uuid"].as_str().unwrap(), "");
         // The reply is delivered and remembered; the checkpoint moved.
         tokio::time::timeout(WAIT, async {
             loop {
@@ -1168,7 +1168,7 @@ async fn quoted_and_forwarded_messages_are_resolved_into_context_and_files() {
         .await
         .unwrap();
     assert_eq!(quoted.context, "[Quoting: ship it?]");
-    assert!(quoted.media.is_empty());
+    assert_eq!(quoted.media, []);
 
     fake.script(
         "/open-apis/im/v1/messages/om_bundle",
