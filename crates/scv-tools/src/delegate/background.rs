@@ -389,6 +389,7 @@ impl BackgroundJobs {
         tokio::spawn(async move {
             let started = Instant::now();
             let mut context = ToolContext::new(workspace, cancellation);
+            context.background_job = true;
             // No turn is left to ask a person, so nested approval requests
             // get the session's unattended answer, or are denied.
             if let Some(gate) = &approvals {
@@ -1152,12 +1153,18 @@ impl Tool for BackgroundCapable {
         if let Some(review) = &split.review {
             self.plan(&split, review)?;
         }
-        self.inner.risk(&split.arguments)
+        self.inner.risk_for(
+            &split.arguments,
+            split.background() || split.review.is_some(),
+        )
     }
 
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
         let split = Split::new(arguments);
-        let mut summary = self.inner.approval_summary(&split.arguments)?;
+        let background = split.background() || split.review.is_some();
+        let mut summary = self
+            .inner
+            .approval_summary_for(&split.arguments, background)?;
         if let Some(review) = &split.review {
             let plan = self.plan(&split, review)?;
             summary.push_str(
@@ -1186,10 +1193,10 @@ impl Tool for BackgroundCapable {
         let background = split.background();
         let arguments = split.arguments;
         let (agent, routed) = self.inner.route(&arguments)?;
-        // Validate before returning a job handle, so a bad call fails now.
-        if background {
-            agent.backend.risk(&routed)?;
-        }
+        // Validate before returning a job handle, so a bad call fails now,
+        // and as the call was made: a foreground call queued behind a busy
+        // conversation runs as a job but may not set `no_timeout`.
+        self.inner.risk_for(&arguments, background)?;
         let Some(handle) = parse_args::<AgentArgs>(&routed)?
             .session
             .filter(|session| conversation::is_handle(session))
@@ -1329,6 +1336,7 @@ impl BackgroundCapable {
     ) -> Result<ToolOutput, ToolError> {
         let plan = self.plan(split, review)?;
         let arguments = split.arguments.clone();
+        self.inner.risk_for(&arguments, true)?;
         let (agent, routed) = self.inner.route(&arguments)?;
         let turn = match parse_args::<AgentArgs>(&routed)?
             .session

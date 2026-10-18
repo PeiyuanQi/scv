@@ -16,6 +16,8 @@ pub(crate) struct AgentArgs {
     pub(crate) agent: Option<String>,
     pub(crate) prompt: String,
     pub(crate) timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub(crate) no_timeout: bool,
     #[serde(default, deserialize_with = "blank_as_none")]
     pub(crate) session: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]

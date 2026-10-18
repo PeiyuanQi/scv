@@ -77,8 +77,9 @@ chat, asking you before it publishes.
 
 The server, not the client, enforces approvals: by default reads run, while
 writes, shell commands, and agents ask first. File tools stay in the workspace,
-every command has a timeout and an output cap, and chat stays tool-free until
-you grant tools to your own account.
+commands and agents have timeouts (a background agent job may run without one
+only if you allow it) and output caps, and chat stays tool-free until you grant
+tools to your own account.
 
 ### Native, small, extensible
 

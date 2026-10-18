@@ -394,6 +394,21 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 (default 3600) and may be raised up to `tools.max_timeout_seconds` (default
 14400) for long work such as builds, releases, or landing a change.
 
+`no_timeout: true` runs a background call with no main deadline, for work that
+must run until it is done however long that takes. It is offered only when the
+owner allows it with `tools.allow_no_timeout` (off by default) and the session
+runs background jobs (`agent.max_background` above 0), and needs
+`background: true` (a reviewed call is a background job already). A call that also sets
+`timeout_seconds`, or that runs in the foreground, is refused before approval,
+including one that would only queue behind a busy conversation. Only the main
+deadline goes: starting the agent (launch, handshake, session setup, and
+handing it the prompt) must still finish within 60 seconds, a permission
+request it relays stops waiting after 300 seconds, and cancellation and
+`agent_cancel` stop it with the usual bounded cleanup. The job holds its
+`agent.max_background` slot until it ends, and a project run it reports to
+still goes stale after five minutes without a heartbeat (see the project
+ledger under [`daemon.status`](protocol.md#daemonstatus)).
+
 Each agent's line lists the values its ACP server offers, or names the model
 family its CLI takes (Claude aliases such as `sonnet` for `claude`, OpenAI
 model IDs for `codex`, Grok model IDs for `grok`, pi model patterns or
@@ -874,7 +889,7 @@ conversation, and the session keeps journals (an SCV session always does).
 | `land` | No landing | `after_approval` or `before_review` (see *Landing*). |
 | `focus` | None | Extra instructions for every reviewer: at most 2 KiB of text, where line breaks and tabs are allowed and other control characters are not. |
 | `model`, `effort` | The reviewer's defaults | Only together with `agent`. |
-| `timeout_seconds` | `tools.agent_timeout_seconds` | Each reviewer turn, at most `tools.max_timeout_seconds`. |
+| `timeout_seconds` | `tools.agent_timeout_seconds` | Each reviewer turn, at most `tools.max_timeout_seconds`. Not with `no_timeout`. |
 
 The call is checked before approval, and nothing launches when it fails: an
 explicit `background: false`, a builder that cannot continue a conversation
@@ -955,6 +970,10 @@ ends. The builder's handle comes back in the result (`session` and
 `review.builder_session`). Each turn has its own timeout: builder and
 landing turns the call's `timeout_seconds`, reviewer and confirmation turns
 `review.timeout_seconds`, repair turns the lower of 300 seconds and that.
+A `no_timeout` call's builder, landing, reviewer, and confirmation turns
+have no deadline, and `review.timeout_seconds` cannot be set with it; a
+repair turn still has the lower of 300 seconds and the default
+`tools.agent_timeout_seconds`.
 
 #### The verdict
 
@@ -1471,7 +1490,12 @@ nowhere. Between turns SCV sends no steering request.
   required"), the `scv agents login <name>` hint.
 - A cancelled or timed-out call sends `session/cancel`; an agent that answers
   within 2 seconds keeps the conversation (a timed-out turn is resumable),
-  otherwise it is shut down and the conversation forgotten. An agent that
+  otherwise it is shut down and the conversation forgotten. A permission
+  request still waiting for approval is answered `cancelled` first, as ACP
+  requires. Answers, refusals, and `session/cancel` are owed to the agent
+  whatever ended the turn, so each gets 2 seconds of its own to be written;
+  an agent that does not read them in that time counts as stuck. A message
+  given up part-way closes the agent's input rather than leave it half a line. An agent that
   exits mid-turn fails the call with its stderr tail. The server is recorded
   like any delegation for `scv agents ps`, `kill`, and orphan reaping, and it
   ends like the nested SCV: stdin closed, 2 seconds' grace, then a group kill.

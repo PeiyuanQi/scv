@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use scv_core::{ToolContext, ToolOutput};
+use scv_core::{AgentError, ToolContext, ToolFailure, ToolOutput};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -28,6 +28,7 @@ use crate::{
         request::AgentArgs,
         scv::Reply,
     },
+    process,
 };
 
 use super::{
@@ -214,6 +215,9 @@ pub(super) enum TurnEnd {
         reply: (String, bool),
         /// Whether the agent answered `session/cancel` in time.
         settled: bool,
+        /// A turn without a main deadline waited too long on one of its
+        /// permission requests ([`process::APPROVAL_TIMEOUT`]).
+        approval: bool,
     },
     Cancelled {
         settled: bool,
@@ -594,8 +598,10 @@ impl AcpAgentTool {
         cwd: &Path,
         prompt: String,
         context: &ToolContext,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> TurnEnd {
+        // Handing over the prompt is part of starting the turn, which stays
+        // bounded without a main deadline.
         let prompt_id = match child
             .rpc
             .request(
@@ -604,10 +610,17 @@ impl AcpAgentTool {
                     "sessionId": child.session_id,
                     "prompt": [{"type": "text", "text": prompt}]
                 }),
+                Some(process::startup_deadline(deadline)),
+                &context.cancellation,
             )
             .await
         {
             Ok(id) => json!(id),
+            // Not taken, or taken in part with the agent's input then
+            // closed: either way there is no turn to settle.
+            Err(error) if error.kind == ToolFailure::Cancelled => {
+                return TurnEnd::Cancelled { settled: false };
+            }
             Err(error) => return TurnEnd::Lost(error.message),
         };
         // Only now, so the agent never gets a steer before its prompt.
@@ -625,6 +638,7 @@ impl AcpAgentTool {
                         Interrupt::TimedOut => TurnEnd::TimedOut {
                             reply: reply.finish(),
                             settled,
+                            approval: false,
                         },
                         _ => TurnEnd::Cancelled { settled },
                     };
@@ -668,29 +682,39 @@ impl AcpAgentTool {
                     }
                     progress.lines.flush(&context.progress);
                     let (risk, summary) = describe_permission(&params, &label);
-                    let request = context.approvals.request(
+                    let request = context.approvals.request_until(
                         AGENT_TOOL,
                         risk,
                         cwd.to_owned(),
                         summary,
                         context.cancellation.child_token(),
+                        Some(process::approval_deadline(deadline)),
                     );
-                    let approved = tokio::select! {
-                        result = request => result.ok(),
-                        () = tokio::time::sleep_until(deadline) => {
-                            let _ = child.rpc.respond(id, json!({"outcome":{"outcome":"cancelled"}})).await;
+                    let approved = match request.await {
+                        Ok(approved) => approved,
+                        Err(error) => {
+                            let timed_out = matches!(error, AgentError::ToolLimit(_))
+                                && !context.cancellation.is_cancelled();
+                            // The request is owed an answer even now. `respond`
+                            // sends it within its own grace, not racing it
+                            // against the passed deadline or fired token that
+                            // ended the wait, so the agent is never left
+                            // waiting on it while `session/cancel` settles.
+                            let _ = child
+                                .rpc
+                                .respond(id, json!({"outcome":{"outcome":"cancelled"}}))
+                                .await;
                             let settled = cancel_prompt(child, &prompt_id).await;
-                            return TurnEnd::TimedOut { reply: reply.finish(), settled };
+                            return if timed_out {
+                                TurnEnd::TimedOut {
+                                    reply: reply.finish(),
+                                    settled,
+                                    approval: deadline.is_none(),
+                                }
+                            } else {
+                                TurnEnd::Cancelled { settled }
+                            };
                         }
-                        () = context.cancellation.cancelled() => None,
-                    };
-                    let Some(approved) = approved else {
-                        let _ = child
-                            .rpc
-                            .respond(id, json!({"outcome":{"outcome":"cancelled"}}))
-                            .await;
-                        let settled = cancel_prompt(child, &prompt_id).await;
-                        return TurnEnd::Cancelled { settled };
                     };
                     let outcome = choose_option(params.get("options"), approved);
                     if let Err(error) = child.rpc.respond(id, json!({"outcome": outcome})).await {
@@ -749,7 +773,7 @@ pub(super) async fn cancel_prompt(child: &AcpChild, prompt_id: &Value) -> bool {
     let deadline = Instant::now() + SETTLE_GRACE;
     let never = CancellationToken::new();
     loop {
-        match child.rpc.next(deadline, &never).await {
+        match child.rpc.next(Some(deadline), &never).await {
             Ok(Incoming::Response { id, .. }) if &id == prompt_id => return true,
             Ok(Incoming::Request { id, method, .. }) => {
                 // Refuse anything the cancelled turn still asks for.

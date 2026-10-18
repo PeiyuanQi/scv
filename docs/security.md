@@ -64,8 +64,10 @@ names, and only one the session offers; it checks the call's options against
 what that agent takes before anything launches. Each adapter uses an executable
 and argument vector without shell interpolation, appends the model-provided
 prompt as one argument, uses the workspace or a directory inside it as current
-directory, applies the same timeout/output bounds, kills the process group on
-cancellation, and requires approval. A per-call `cwd` is resolved with symlinks
+directory, applies the same output bounds and the call's timeout (which only a
+background call may drop, with `no_timeout`, and only when the owner sets
+`tools.allow_no_timeout`), kills the process group on cancellation, and
+requires approval. A per-call `cwd` is resolved with symlinks
 followed at launch and must remain an existing directory under the canonical
 workspace; `..`, absolute paths elsewhere, and links pointing outside are
 refused. The nested agent loads that directory's own instructions (such as

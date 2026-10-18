@@ -68,30 +68,48 @@ impl Rpc {
         id: u64,
         method: &str,
         params: Value,
+        deadline: Option<Instant>,
+        cancellation: &CancellationToken,
     ) -> Result<(), ToolError> {
         self.live
-            .send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .send_until(
+                &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+                deadline,
+                cancellation,
+            )
             .await
     }
 
-    pub(super) async fn request(&self, method: &str, params: Value) -> Result<u64, ToolError> {
+    pub(super) async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Option<Instant>,
+        cancellation: &CancellationToken,
+    ) -> Result<u64, ToolError> {
         let id = self.reserve_request();
-        self.send_request(id, method, params).await?;
+        self.send_request(id, method, params, deadline, cancellation)
+            .await?;
         Ok(id)
     }
 
+    /// Send the agent a notification, such as the `session/cancel` a
+    /// cancelled turn owes it, within its own grace ([`LiveChild::send`]).
     pub(super) async fn notify(&self, method: &str, params: Value) -> Result<(), ToolError> {
         self.live
             .send(&json!({"jsonrpc":"2.0","method":method,"params":params}))
             .await
     }
 
+    /// Answer the agent's request `id`. The answer is owed however the turn
+    /// is going, so it is sent within its own grace ([`LiveChild::send`]).
     pub(super) async fn respond(&self, id: Value, result: Value) -> Result<(), ToolError> {
         self.live
             .send(&json!({"jsonrpc":"2.0","id":id,"result":result}))
             .await
     }
 
+    /// Refuse the agent's request `id` for `method`, like [`respond`](Self::respond).
     pub(super) async fn refuse(&self, id: Value, method: &str) -> Result<(), ToolError> {
         self.live
             .send(&json!({
@@ -102,17 +120,22 @@ impl Rpc {
             .await
     }
 
-    /// The next message, waiting until `deadline` or cancellation.
+    /// The next message, waiting until `deadline`, if any, or cancellation.
     pub(super) async fn next(
         &self,
-        deadline: Instant,
+        deadline: Option<Instant>,
         cancellation: &CancellationToken,
     ) -> Result<Incoming, Interrupt> {
+        let received = async {
+            match deadline {
+                Some(deadline) => timeout_at(deadline, self.live.recv())
+                    .await
+                    .map_err(|_| Interrupt::TimedOut),
+                None => Ok(self.live.recv().await),
+            }
+        };
         let line = tokio::select! {
-            line = timeout_at(deadline, self.live.recv()) => match line {
-                Ok(line) => line,
-                Err(_) => return Err(Interrupt::TimedOut),
-            },
+            line = received => line?,
             () = cancellation.cancelled() => return Err(Interrupt::Cancelled),
         };
         let bytes = match line {
@@ -152,9 +175,10 @@ impl Rpc {
         })
     }
 
-    /// Call `method` outside a prompt turn and wait for its result. The agent
-    /// may not ask for anything meanwhile: permission requests are cancelled
-    /// and other requests refused.
+    /// Call `method` outside a prompt turn, such as while starting the
+    /// session, which always has a deadline, and wait for its result. The
+    /// agent may not ask for anything meanwhile: permission requests are
+    /// cancelled and other requests refused.
     pub(super) async fn call(
         &self,
         method: &str,
@@ -162,9 +186,12 @@ impl Rpc {
         deadline: Instant,
         cancellation: &CancellationToken,
     ) -> Result<Value, CallError> {
-        let id = self.request(method, params).await.map_err(CallError::Io)?;
+        let id = self
+            .request(method, params, Some(deadline), cancellation)
+            .await
+            .map_err(CallError::Io)?;
         loop {
-            match self.next(deadline, cancellation).await {
+            match self.next(Some(deadline), cancellation).await {
                 Ok(Incoming::Response { id: reply, outcome }) if reply == json!(id) => {
                     return outcome.map_err(CallError::Rpc);
                 }

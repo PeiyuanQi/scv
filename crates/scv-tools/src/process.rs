@@ -18,6 +18,33 @@ use tokio::{
 
 use crate::delegate::{adapters, records};
 
+/// How long starting a delegated agent may take (launch, handshake, session
+/// setup, and handing it the prompt) when its turn has no main deadline.
+pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one nested approval request may wait for an answer when its
+/// turn has no main deadline.
+pub(crate) const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// When starting an agent whose turn ends at `main` must be done by: `main`,
+/// or [`STARTUP_TIMEOUT`] from now for a turn without a deadline.
+pub(crate) fn startup_deadline(main: Option<Instant>) -> Instant {
+    main.unwrap_or_else(|| Instant::now() + STARTUP_TIMEOUT)
+}
+
+/// When a nested approval request asked now stops waiting: `main`, or
+/// [`APPROVAL_TIMEOUT`] from now for a turn without a deadline.
+pub(crate) fn approval_deadline(main: Option<Instant>) -> Instant {
+    main.unwrap_or_else(|| Instant::now() + APPROVAL_TIMEOUT)
+}
+
+/// Sleep until `deadline`, or forever without one.
+pub(crate) async fn until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Give a native agent command its adapter environment: remove every
 /// inherited credential, endpoint, and state-location variable any adapter
 /// declares, then set `environment` (such as the relocated config home).
@@ -56,7 +83,7 @@ pub(crate) struct ProcessSpec {
     /// Strip inherited agent credentials and state locations first
     /// ([`apply_agent_environment`]), as for a delegated agent CLI.
     pub(crate) sanitize_scv_environment: bool,
-    pub(crate) timeout: Duration,
+    pub(crate) deadline: Option<Instant>,
     pub(crate) output_limit: usize,
 }
 
@@ -64,7 +91,6 @@ pub(crate) async fn execute_process(
     spec: ProcessSpec,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<ToolOutput, ToolError> {
-    let deadline = Instant::now() + spec.timeout;
     let mut child = spawn_process(&spec)?;
     let pid = child_pid(&child)?;
     let output = Arc::new(Mutex::new(BoundedOutput::new(spec.output_limit)));
@@ -79,7 +105,7 @@ pub(crate) async fn execute_process(
     let finished = supervise(
         &mut child,
         pid,
-        deadline,
+        spec.deadline,
         cancellation,
         stdout_task,
         stderr_task,
@@ -155,7 +181,7 @@ pub(crate) struct Finished {
 pub(crate) async fn supervise(
     child: &mut tokio::process::Child,
     pid: i32,
-    deadline: Instant,
+    deadline: Option<Instant>,
     cancellation: tokio_util::sync::CancellationToken,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
@@ -178,18 +204,19 @@ pub(crate) async fn supervise(
         () = cancellation.cancelled() => {
             Completion::Cancelled
         },
-        () = sleep_until(deadline) => Completion::TimedOut,
+        () = until(deadline) => Completion::TimedOut,
+    };
+    // A grace from now, cut short by the deadline when there is one.
+    let within = |grace: Duration| {
+        let soon = Instant::now() + grace;
+        deadline.map_or(soon, |deadline| deadline.min(soon))
     };
 
     let (status, timed_out, drain_deadline) = match completion {
         Completion::Exited(status) => {
-            let cleanup_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+            let cleanup_deadline = within(Duration::from_secs(2));
             let status = terminate_group(pid, child, Some(status), cleanup_deadline, true).await?;
-            (
-                status,
-                false,
-                deadline.min(Instant::now() + Duration::from_millis(250)),
-            )
+            (status, false, within(Duration::from_millis(250)))
         }
         Completion::TimedOut => {
             let status = terminate_group(pid, child, None, Instant::now(), false).await?;

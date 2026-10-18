@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.0`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.0` pins.
+The current workspace release is `0.4.1`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.1` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,30 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.1
+
+`0.4.1` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.4.0` checks the new release and can roll it back.
+An instance that does not set `tools.allow_no_timeout` behaves as in `0.4.0`.
+
+- **Background agent jobs without a time limit.** With
+  `tools.allow_no_timeout = true` in the user file (off by default), a
+  background `agent` call may set `no_timeout: true` and run until it is done.
+  Starting the agent, its approval requests, and cleanup keep their own
+  limits, and a project run still goes stale without heartbeats. See
+  [Choosing an agent](tools.md#choosing-an-agent).
+- **Bounded writes to delegated agents.** A message SCV owes an ACP server or
+  nested SCV, such as an answer or a cancellation, now gets two seconds to be
+  written, so an agent that stops reading its input no longer holds a turn.
+- `0.4.0` rejects `tools.allow_no_timeout`, so with it in `config.toml` it
+  cannot start, and an automatic rollback would fail too. Remove it before
+  going back to `0.4.0`.
+
+What changes for code that embeds SCV's crates: `scv-core`'s `ToolContext`
+gains `background_job` (`ToolContext::new` sets it to `false`), so a struct
+literal needs the new field, and `ToolApprovals` adds `request_until`.
+`scv-tools`'s `ToolsConfig` gains `allow_no_timeout`.
 
 ## Upgrading to 0.4.0
 

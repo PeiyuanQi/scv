@@ -701,6 +701,9 @@ pub(super) fn validate_project_not_weaker(user: &Config, project: &Config) -> Re
     if project.tools.approval_policy.strictness() < user.tools.approval_policy.strictness() {
         bail!("project configuration cannot weaken tools.approval_policy");
     }
+    if project.tools.allow_no_timeout && !user.tools.allow_no_timeout {
+        bail!("project configuration cannot enable tools.allow_no_timeout");
+    }
     if project.skills.scan_projects && !user.skills.scan_projects {
         bail!("project configuration cannot enable skills.scan_projects");
     }

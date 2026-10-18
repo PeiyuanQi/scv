@@ -170,6 +170,12 @@ struct Session {
 }
 
 fn session(limit: usize, busy: BusyConfig) -> Session {
+    session_with(limit, busy, false)
+}
+
+/// [`session`], where background calls may set `no_timeout` when
+/// `no_timeout`.
+fn session_with(limit: usize, busy: BusyConfig, no_timeout: bool) -> Session {
     let conversations = Arc::new(ConversationStore::new(
         ConversationLimits {
             max: 8,
@@ -210,7 +216,10 @@ fn session(limit: usize, busy: BusyConfig) -> Session {
     let jobs = Arc::new(BackgroundJobs::new(limit, None));
     Session {
         tool: Arc::new(BackgroundCapable::plain(
-            Arc::new(AgentTool::new(vec![offered], &["codex".into()], timeouts)),
+            Arc::new(
+                AgentTool::new(vec![offered], &["codex".into()], timeouts)
+                    .with_no_timeout(no_timeout),
+            ),
             Arc::clone(&jobs),
         )),
         jobs,
@@ -287,6 +296,71 @@ async fn a_busy_conversation_queues_prompts_in_the_order_they_arrive() {
         assert_eq!(result["status"], "completed", "{result}");
         assert_eq!(result["result"]["reply"], reply);
     }
+}
+
+#[tokio::test]
+async fn no_timeout_is_only_for_background_jobs_the_owner_allows() {
+    // Without the owner's setting the schema leaves it out and calls fail.
+    let session = session(2, BusyConfig::default());
+    assert!(
+        session.tool.spec().parameters["properties"]
+            .get("no_timeout")
+            .is_none()
+    );
+    let refused = session
+        .tool
+        .risk(&json!({"prompt":"a","background":true,"no_timeout":true}))
+        .unwrap_err();
+    assert!(
+        refused.message.contains("tools.allow_no_timeout"),
+        "{refused}"
+    );
+
+    let session = session_with(2, BusyConfig::default(), true);
+    assert_eq!(
+        session.tool.spec().parameters["properties"]["no_timeout"]["type"],
+        "boolean"
+    );
+    for (call, reason) in [
+        (
+            json!({"prompt":"a","no_timeout":true}),
+            "only allowed for background",
+        ),
+        (
+            json!({"prompt":"a","background":false,"no_timeout":true}),
+            "only allowed for background",
+        ),
+        (
+            json!({"prompt":"a","background":true,"no_timeout":true,"timeout_seconds":5}),
+            "cannot be combined with timeout_seconds",
+        ),
+    ] {
+        let refused = session.tool.risk(&call).unwrap_err();
+        assert!(refused.message.contains(reason), "{call}: {refused}");
+        // Running it checks again, as for a call that was never approved.
+        let refused = session.call(call.clone()).await.unwrap_err();
+        assert!(refused.message.contains(reason), "{call}: {refused}");
+    }
+    let started = session
+        .call(json!({"prompt":"a","session":"codex-1","background":true,"no_timeout":true}))
+        .await
+        .unwrap();
+    assert_eq!(started["status"], "running", "{started}");
+    session.ran(&["a"]).await;
+    // A foreground call that would queue behind the busy conversation runs
+    // as a job too, but was made in the foreground, so it may not set it.
+    let queued = session
+        .call(json!({"prompt":"b","session":"codex-1","no_timeout":true}))
+        .await
+        .unwrap_err();
+    assert!(
+        queued.message.contains("only allowed for background"),
+        "{queued}"
+    );
+    session.release.add_permits(1);
+    let finished = session.result("job-1").await;
+    assert_eq!(finished["status"], "completed", "{finished}");
+    assert_eq!(session.jobs.running(), 0);
 }
 
 #[tokio::test]

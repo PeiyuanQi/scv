@@ -118,6 +118,9 @@ pub(crate) struct Plan {
     pub(crate) focus: Option<String>,
     /// Each reviewer turn's timeout.
     pub(crate) timeout: Duration,
+    /// The builder's call set `no_timeout`, so its reviewer and confirmation
+    /// turns run without a deadline too; a repair turn still has one.
+    pub(crate) no_timeout: bool,
     /// The builder's `cwd`, where every reviewer runs.
     pub(crate) cwd: Option<String>,
 }
@@ -130,14 +133,19 @@ pub(crate) struct Reviewer {
 }
 
 impl Plan {
+    /// A reviewer or confirmation turn's timeout: `None` without one.
+    fn turn_timeout(&self) -> Option<Duration> {
+        (!self.no_timeout).then_some(self.timeout)
+    }
+
     /// The arguments of a reviewer turn: a new conversation with `prompt`,
-    /// or the next turn of `session`.
+    /// or the next turn of `session`, within `timeout` or without a deadline.
     fn reviewer_call(
         &self,
         reviewer: &Reviewer,
         prompt: &str,
         session: Option<&str>,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Value {
         let mut call = Map::new();
         match session {
@@ -145,7 +153,10 @@ impl Plan {
             None => call.insert("agent".into(), reviewer.agent.clone().into()),
         };
         call.insert("prompt".into(), prompt.into());
-        call.insert("timeout_seconds".into(), timeout.as_secs().max(1).into());
+        match timeout {
+            Some(timeout) => call.insert("timeout_seconds".into(), timeout.as_secs().max(1).into()),
+            None => call.insert("no_timeout".into(), true.into()),
+        };
         if let Some(cwd) = &self.cwd {
             call.insert("cwd".into(), cwd.clone().into());
         }
@@ -257,6 +268,11 @@ pub(crate) fn plan(
              (agent.max_conversations is below 2)",
         ));
     }
+    if call_args.no_timeout && args.timeout_seconds.is_some() {
+        return Err(ToolError::invalid_arguments(
+            "review.timeout_seconds cannot be combined with no_timeout",
+        ));
+    }
     let timeout = agents.timeouts().resolve(args.timeout_seconds)?;
     let named = args.agent.is_some();
     let order: Vec<Reviewer> = match &args.agent {
@@ -283,10 +299,11 @@ pub(crate) fn plan(
         land,
         focus: args.focus,
         timeout,
+        no_timeout: call_args.no_timeout,
         cwd: call_args.cwd,
     };
     for reviewer in &plan.reviewers {
-        let routed = plan.reviewer_call(reviewer, PLACEHOLDER_PROMPT, None, timeout);
+        let routed = plan.reviewer_call(reviewer, PLACEHOLDER_PROMPT, None, plan.turn_timeout());
         let (agent, routed) = agents
             .route(&routed)
             .map_err(|error| ToolError::invalid_arguments(format!("review: {}", error.message)))?;
@@ -326,7 +343,7 @@ pub(crate) fn approval_summary(plan: &Plan, agents: &AgentTool) -> Result<String
         "\nReviewer each round, the first available of:"
     });
     for reviewer in &plan.reviewers {
-        let call = plan.reviewer_call(reviewer, PLACEHOLDER_PROMPT, None, plan.timeout);
+        let call = plan.reviewer_call(reviewer, PLACEHOLDER_PROMPT, None, plan.turn_timeout());
         let (agent, routed) = agents.route(&call)?;
         let same = if reviewer.agent == plan.builder {
             " (same agent as builder)"
@@ -1187,9 +1204,9 @@ impl<'a> Run<'a> {
                 "reviewer.started",
                 json!({"round": round, "agent": agent, "kind": "review"}),
             )?;
-            let call = self
-                .plan()
-                .reviewer_call(reviewer, &prompt, None, self.plan().timeout);
+            let call =
+                self.plan()
+                    .reviewer_call(reviewer, &prompt, None, self.plan().turn_timeout());
             let result = self
                 .tool
                 .agents
@@ -1331,7 +1348,7 @@ impl<'a> Run<'a> {
             reviewer,
             &prompts::repair_prompt(error),
             Some(handle),
-            timeout,
+            Some(timeout),
         );
         let turn = self.continue_reviewer(agent, handle, call).await?;
         self.record_reviewer(round, agent, "repair", &turn)?;
@@ -1485,9 +1502,12 @@ impl<'a> Run<'a> {
                 model: None,
                 effort: None,
             });
-        let call =
-            self.plan()
-                .reviewer_call(&reviewer, &prompt, Some(&handle), self.plan().timeout);
+        let call = self.plan().reviewer_call(
+            &reviewer,
+            &prompt,
+            Some(&handle),
+            self.plan().turn_timeout(),
+        );
         let turn = self.continue_reviewer(agent, &handle, call).await?;
         let parsed = blocks::parse_check(&turn.reply, turn.truncated);
         // Only a run that completed checks anything: one that did not leaves

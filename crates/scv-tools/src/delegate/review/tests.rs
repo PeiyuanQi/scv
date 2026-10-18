@@ -88,6 +88,7 @@ struct Call {
     session: Option<String>,
     prompt: String,
     timeout: Option<u64>,
+    no_timeout: bool,
 }
 
 /// The scripted agents of one session.
@@ -149,6 +150,7 @@ impl Backend for Scripted {
             session: args.session.clone(),
             prompt: args.prompt.clone(),
             timeout: args.timeout_seconds,
+            no_timeout: args.no_timeout,
         });
         let turn = self.conversations.begin(
             &self.name,
@@ -262,7 +264,9 @@ fn fixture_with(agents: &[&str], once: &[&str], limits: ConversationLimits) -> F
     let jobs = Arc::new(BackgroundJobs::new(4, Some(finished_tx)));
     let home = tempfile::tempdir().unwrap();
     let tool = BackgroundCapable {
-        inner: Arc::new(AgentTool::new(offered, &[agents[0].to_owned()], timeouts)),
+        inner: Arc::new(
+            AgentTool::new(offered, &[agents[0].to_owned()], timeouts).with_no_timeout(true),
+        ),
         jobs: Arc::clone(&jobs),
         conversations: Arc::clone(&conversations),
         reviews: Some(home.path().join("reviews")),
@@ -819,6 +823,45 @@ async fn a_malformed_verdict_gets_one_repair_turn_in_the_same_conversation() {
         Some("malformed_verdict")
     );
     assert_eq!(session.order(), ["claude", "codex", "codex"]);
+}
+
+#[tokio::test]
+async fn a_no_timeout_job_reviews_without_a_deadline_but_bounds_its_repair_turn() {
+    let mut session = fixture(&["claude", "codex"]);
+    let refused = session
+        .start(json!({"prompt":"Fix it.","no_timeout":true,"review":{"timeout_seconds":60}}))
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .message
+            .contains("review.timeout_seconds cannot be combined with no_timeout"),
+        "{refused}"
+    );
+    assert!(session.calls().is_empty());
+    session.script("claude", [says("Done.")]);
+    session.script("codex", [says("LGTM!"), verdict(APPROVE)]);
+    // A reviewed call is a background job, so it may set no_timeout.
+    session
+        .start(json!({"prompt":"Fix it.","no_timeout":true,"review":{}}))
+        .await
+        .unwrap();
+    let (report, _) = session.finished().await;
+    assert_eq!(outcome(&report).review.outcome, ReviewOutcome::Approved);
+    let limits: Vec<_> = session
+        .calls()
+        .iter()
+        .map(|call| (call.agent.clone(), call.no_timeout, call.timeout))
+        .collect();
+    assert_eq!(
+        limits,
+        [
+            ("claude".to_owned(), true, None),
+            ("codex".to_owned(), true, None),
+            // The repair of a malformed verdict keeps its own limit.
+            ("codex".to_owned(), false, Some(60)),
+        ]
+    );
 }
 
 #[tokio::test]

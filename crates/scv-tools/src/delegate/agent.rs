@@ -173,6 +173,9 @@ pub(crate) struct AgentTool {
     /// The first offered agent in `[agent] prefer`.
     default: Option<usize>,
     timeouts: Timeouts,
+    /// Whether calls may set `no_timeout`: the owner allows it
+    /// (`tools.allow_no_timeout`) and the session runs background jobs.
+    no_timeout: bool,
 }
 
 impl AgentTool {
@@ -187,7 +190,65 @@ impl AgentTool {
             agents,
             default,
             timeouts,
+            no_timeout: false,
         }
+    }
+
+    /// Let background jobs' calls set `no_timeout` when `offered`.
+    pub(crate) fn with_no_timeout(mut self, offered: bool) -> Self {
+        self.no_timeout = offered;
+        self
+    }
+
+    /// Refuse a call's `no_timeout` unless this session offers it, the call
+    /// runs as a background job, and it sets no `timeout_seconds`.
+    fn check_no_timeout(&self, arguments: &Value, background_job: bool) -> Result<(), ToolError> {
+        let args = parse_args::<AgentArgs>(arguments)?;
+        if args.no_timeout && !self.no_timeout {
+            return Err(ToolError::invalid_arguments(
+                "no_timeout is not available in this session: it needs the owner's \
+                 tools.allow_no_timeout and background jobs (agent.max_background above 0)",
+            ));
+        }
+        self.timeouts
+            .deadline(args.timeout_seconds, args.no_timeout, background_job)
+            .map(drop)
+    }
+
+    /// [`Tool::risk`] for a call that runs as a background job when
+    /// `background_job`, which alone may set `no_timeout`.
+    pub(crate) fn risk_for(
+        &self,
+        arguments: &Value,
+        background_job: bool,
+    ) -> Result<ToolRisk, ToolError> {
+        self.check_no_timeout(arguments, background_job)?;
+        let (agent, arguments) = self.route(arguments)?;
+        agent.backend.risk(&arguments)
+    }
+
+    /// [`Tool::approval_summary`] for a call that runs as a background job
+    /// when `background_job`.
+    pub(crate) fn approval_summary_for(
+        &self,
+        arguments: &Value,
+        background_job: bool,
+    ) -> Result<String, ToolError> {
+        self.check_no_timeout(arguments, background_job)?;
+        let (agent, arguments) = self.route(arguments)?;
+        Ok(format!(
+            "agent {}{}: {}",
+            agent.name,
+            crate::adapters::adapter(&agent.name)
+                .and_then(|descriptor| match descriptor.auth {
+                    crate::adapters::AgentAuth::ClaudeApiKey => Some(" (API key billing)"),
+                    crate::adapters::AgentAuth::ClaudeSubscription =>
+                        Some(" (Claude subscription)"),
+                    crate::adapters::AgentAuth::None => None,
+                })
+                .unwrap_or_default(),
+            agent.backend.approval_summary(&arguments)?
+        ))
     }
 
     /// The offered agent `name`.
@@ -244,6 +305,7 @@ impl AgentTool {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let (agent, arguments) = self.route(&arguments)?;
+        self.check_no_timeout(&arguments, context.background_job)?;
         agent
             .backend
             .wait_idle(&arguments, &context.cancellation)
@@ -464,6 +526,18 @@ impl Tool for AgentTool {
             );
         }
         properties.insert("timeout_seconds".into(), timeout_schema(self.timeouts));
+        if self.no_timeout {
+            properties.insert(
+                "no_timeout".into(),
+                json!({
+                    "type":"boolean",
+                    "description":"Run with no time limit, for a background call (background: true) \
+                        that must run until it finishes however long it takes. Not together with \
+                        timeout_seconds. Starting the agent and each approval it asks for stay \
+                        time-limited."
+                }),
+            );
+        }
         let required = if self.default.is_some() {
             json!(["prompt"])
         } else {
@@ -497,25 +571,11 @@ impl Tool for AgentTool {
     }
 
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError> {
-        let (agent, arguments) = self.route(arguments)?;
-        agent.backend.risk(&arguments)
+        self.risk_for(arguments, false)
     }
 
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError> {
-        let (agent, arguments) = self.route(arguments)?;
-        Ok(format!(
-            "agent {}{}: {}",
-            agent.name,
-            crate::adapters::adapter(&agent.name)
-                .and_then(|descriptor| match descriptor.auth {
-                    crate::adapters::AgentAuth::ClaudeApiKey => Some(" (API key billing)"),
-                    crate::adapters::AgentAuth::ClaudeSubscription =>
-                        Some(" (Claude subscription)"),
-                    crate::adapters::AgentAuth::None => None,
-                })
-                .unwrap_or_default(),
-            agent.backend.approval_summary(&arguments)?
-        ))
+        self.approval_summary_for(arguments, false)
     }
 
     async fn execute(
@@ -524,6 +584,7 @@ impl Tool for AgentTool {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let (agent, arguments) = self.route(&arguments)?;
+        self.check_no_timeout(&arguments, context.background_job)?;
         // Without background jobs (agent.max_background = 0) nothing can
         // queue, so a busy conversation's call steers, waits, or fails.
         // With them, the background wrapper decides before this runs.

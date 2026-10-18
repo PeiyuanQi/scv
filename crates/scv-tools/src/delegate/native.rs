@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
 use serde_json::Value;
-use tokio::{sync::Mutex, time::Instant};
+use tokio::sync::Mutex;
 
 use crate::{
     AgentAdapterConfig, AgentAuthPlan, DelegationContext,
@@ -235,6 +235,11 @@ impl Backend for NativeAgentTool {
             |session| format!(", continuing conversation {session},"),
         );
         let timeout = self.timeouts.resolve(args.timeout_seconds)?;
+        let duration = if args.no_timeout {
+            "with no time limit".to_owned()
+        } else {
+            format!("for up to {} seconds", timeout.as_secs())
+        };
         let permissions = if self.full_permission_args.is_some() {
             " FULL PERMISSIONS (permissions = \"full\"): the agent's own approval prompts \
              and sandbox are off, so it edits files, runs commands, and uses the network \
@@ -243,9 +248,8 @@ impl Backend for NativeAgentTool {
             ""
         };
         Ok(format!(
-            "Launch {executable} with args {command_args:?} and prompt {:?}{conversation} in {directory} for up to {} seconds. The nested agent has your user permissions.{permissions}",
+            "Launch {executable} with args {command_args:?} and prompt {:?}{conversation} in {directory} {duration}. The nested agent has your user permissions.{permissions}",
             bounded(&args.prompt, 2000),
-            timeout.as_secs()
         ))
     }
 
@@ -276,6 +280,11 @@ impl Backend for NativeAgentTool {
     ) -> Result<ToolOutput, ToolError> {
         let args: AgentArgs = parse_args(&arguments)?;
         let command_args = self.command_args(&args)?;
+        let deadline = self.timeouts.deadline(
+            args.timeout_seconds,
+            args.no_timeout,
+            context.background_job,
+        )?;
         let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
         let executable = self.resolved.as_ref().ok_or_else(|| {
             ToolError::unavailable(format!(
@@ -383,7 +392,6 @@ impl Backend for NativeAgentTool {
                 (records::current_depth() + 1).to_string().into(),
             )),
         }
-        let requested = self.timeouts.resolve(args.timeout_seconds)?;
         let registration = self
             .delegation
             .as_ref()
@@ -397,7 +405,7 @@ impl Backend for NativeAgentTool {
                 environment,
                 clear_environment: false,
                 sanitize_scv_environment: true,
-                timeout: requested,
+                deadline,
                 output_limit: self.output_limit,
             },
             AgentStream::new(self.output, self.output_limit)
@@ -475,7 +483,6 @@ async fn execute_agent_process(
     registration: Option<(Arc<DelegationRegistry>, records::PendingDelegation)>,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentRun, ToolError> {
-    let deadline = Instant::now() + spec.timeout;
     let project = crate::project_environment::resolve(
         &spec.cwd,
         &spec.environment,
@@ -515,7 +522,7 @@ async fn execute_agent_process(
     let finished = supervise(
         &mut child,
         pid,
-        deadline,
+        spec.deadline,
         cancellation,
         stdout_task,
         stderr_task,
