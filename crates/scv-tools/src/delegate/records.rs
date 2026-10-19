@@ -40,6 +40,10 @@ const MAX_RECORD_BYTES: u64 = 64 * 1024;
 const ZOMBIE_MIN_AGE: Duration = Duration::from_secs(10);
 
 /// Delegation depth of the current process: 0 unless an SCV started it.
+///
+/// Always 0 in this crate's unit tests: callers without a delegation context
+/// fall back to it, and the test runner may itself be a delegated agent. The
+/// black-box tests cover the inherited read.
 pub fn current_depth() -> u32 {
     #[cfg(test)]
     {
@@ -203,24 +207,15 @@ impl DelegationRegistry {
             instance,
             owner: ProcessIdentity::current(),
             depth: current_depth(),
-            chain: {
-                #[cfg(test)]
-                {
-                    None
-                }
-                #[cfg(not(test))]
-                {
-                    std::env::var(PARENT_VARIABLE)
-                        .ok()
-                        .filter(|value| !value.trim().is_empty())
-                }
-            },
+            chain: std::env::var(PARENT_VARIABLE)
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             inner: Mutex::new(Inner::default()),
         }
     }
 
     /// A unit-test fixture whose caller is independent of the test runner.
-    /// Production construction always reads the inherited depth and chain.
+    /// [`Self::new`] reads the inherited chain in every build.
     #[cfg(test)]
     pub(crate) fn for_test(layout: &Layout) -> Self {
         Self {

@@ -98,9 +98,57 @@ async fn inherited_depth_gates_agents_and_extends_the_parent_chain() {
             .unwrap();
             assert_eq!(tools.get("agent").is_some(), owner < limit);
             assert!(tools.get("bash").is_some());
-            // Existing nested-SCV integration coverage exercises emitted
-            // environment propagation; this test focuses on the production
-            // depth gate under inherited and client-declared selectors.
         }
     }
+    // A real call: the agent inherits this process's chain extended by its
+    // own run, one level deeper.
+    let workspace = tempfile::tempdir().unwrap();
+    let recorded = workspace.path().join("environment.txt");
+    let recorder = AgentAdapterConfig {
+        command: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                r#"printf '%s\n' "$SCV_PARENT" "$SCV_DELEGATION_DEPTH" > '{}'"#,
+                recorded.display()
+            ),
+        ],
+        ..adapter
+    };
+    let called = scv_tools::call_agent(
+        "probe",
+        recorder,
+        workspace.path(),
+        serde_json::json!({"agent": "probe", "prompt": "record"}),
+        Duration::from_secs(30),
+        DelegationContext {
+            registry: Arc::clone(&records),
+            session: "depth-test".into(),
+            depth: 0,
+        },
+        std::future::pending(),
+    )
+    .await;
+    if expected >= ToolsConfig::default().max_delegation_depth {
+        let error = called.unwrap_err();
+        assert!(error.contains("not offered"), "{error}");
+        return;
+    }
+    let result = called.unwrap();
+    assert_eq!(result["status"], "completed", "{result}");
+    let recorded = std::fs::read_to_string(recorded).unwrap();
+    let (chain, depth) = recorded.trim_end().split_once('\n').unwrap();
+    let inherited = if expected > 0 {
+        format!("{PARENT};")
+    } else {
+        String::new()
+    };
+    let own = format!("{inherited}{}/depth-test/probe-", records.instance());
+    assert!(
+        chain
+            .strip_prefix(&own)
+            .is_some_and(|suffix| suffix.len() == 6),
+        "{chain}"
+    );
+    assert_eq!(depth, (expected + 1).to_string());
 }
