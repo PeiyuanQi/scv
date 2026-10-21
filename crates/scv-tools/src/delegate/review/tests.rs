@@ -2319,6 +2319,7 @@ fn start_with_failing_journal(
             &context(),
             turn,
             Some(&reviewed),
+            crate::delegate::background::JobMeta::default(),
         )
         .unwrap();
     reviewed

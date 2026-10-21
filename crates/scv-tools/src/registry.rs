@@ -98,7 +98,8 @@ pub fn builtin_registry(
     };
     let agent = Arc::new(
         AgentTool::new(offered, &config.prefer, timeouts)
-            .with_no_timeout(config.allow_no_timeout && config.max_background > 0),
+            .with_no_timeout(config.allow_no_timeout && config.max_background > 0)
+            .with_worktrees(config.worktrees.clone()),
     );
     if config.max_background == 0 {
         registry.register(agent)?;
@@ -106,20 +107,31 @@ pub fn builtin_registry(
     }
     // One job store per session, dropped with it, which cancels the jobs
     // still running.
-    let jobs = config
-        .background
-        .clone()
-        .unwrap_or_else(|| Arc::new(background::BackgroundJobs::new(config.max_background, None)));
-    registry.register(Arc::new(background::BackgroundCapable {
+    let session = config
+        .delegation
+        .as_ref()
+        .map(|context| context.session.clone());
+    let jobs = config.background.clone().unwrap_or_else(|| {
+        let mut jobs = background::BackgroundJobs::new(config.max_background, None);
+        if let (Some(root), Some(session)) = (&config.jobs, &session)
+            && let Some(ledger) =
+                background::ledger::JobLedger::new(root, session, &config.label, &config.workspace)
+        {
+            jobs = jobs.with_ledger(ledger);
+        }
+        Arc::new(jobs)
+    });
+    let capable = Arc::new(background::BackgroundCapable {
         inner: agent,
         jobs: Arc::clone(&jobs),
         conversations,
         reviews: config.reviews.clone(),
-        session: config
-            .delegation
-            .as_ref()
-            .map(|context| context.session.clone()),
-    }))?;
+        session: session.clone(),
+    });
+    if let (Some(workbench), Some(session)) = (&config.workbench, &session) {
+        workbench.attach(session, Arc::downgrade(&capable), Arc::downgrade(&jobs));
+    }
+    registry.register(capable)?;
     registry.register(Arc::new(background::WaitTool {
         jobs: Arc::clone(&jobs),
         timeouts,
@@ -311,6 +323,7 @@ fn offer(
                 output_limit: config.output_limit_bytes,
                 delegation: config.delegation.clone(),
                 conversations: Arc::clone(conversations),
+                worktrees: config.worktrees.clone(),
             }),
             ScvAgentTool::ACCEPTS,
         ),
@@ -326,7 +339,8 @@ fn offer(
                 config.delegation.clone(),
                 Arc::clone(conversations),
             )
-            .with_precheck(config.precheck_agent_models);
+            .with_precheck(config.precheck_agent_models)
+            .with_worktrees(config.worktrees.clone());
             let accepts = tool.accepts();
             offered = tool.offered();
             // Its CLI's own model names may not be what the server accepts.
@@ -346,7 +360,8 @@ fn offer(
                 config.output_limit_bytes,
                 config.delegation.clone(),
                 Arc::clone(conversations),
-            );
+            )
+            .with_worktrees(config.worktrees.clone());
             tool.resolved.as_ref()?;
             let accepts = tool.accepts();
             (Arc::new(tool), accepts)

@@ -172,6 +172,8 @@ struct Inner {
 pub struct DelegationRegistry {
     record_dir: PathBuf,
     conversation_dir: PathBuf,
+    /// Where each run's activity log and state go.
+    runs_dir: PathBuf,
     instance: String,
     owner: Option<ProcessIdentity>,
     depth: u32,
@@ -204,6 +206,7 @@ impl DelegationRegistry {
         Self {
             record_dir: layout.delegations(),
             conversation_dir: layout.conversations(),
+            runs_dir: layout.runs(),
             instance,
             owner: ProcessIdentity::current(),
             depth: current_depth(),
@@ -247,6 +250,21 @@ impl DelegationRegistry {
     /// Where live conversations leave markers for `scv agents gc`.
     pub fn conversation_dir(&self) -> &Path {
         &self.conversation_dir
+    }
+
+    /// Where each run's activity log and state go.
+    pub fn runs_dir(&self) -> &Path {
+        &self.runs_dir
+    }
+
+    /// Start the activity log of the run `header` describes, owned by this
+    /// process; `None` when it cannot be written.
+    pub(crate) fn open_activity(
+        &self,
+        header: crate::delegate::activity::RunHeader,
+    ) -> Option<crate::delegate::activity::RunActivity> {
+        let owner = self.owner?;
+        crate::delegate::activity::RunActivity::open(&self.runs_dir, owner, header)
     }
 
     #[cfg(test)]

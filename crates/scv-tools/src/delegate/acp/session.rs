@@ -18,6 +18,7 @@ use crate::{
     AgentAuthPlan,
     args::bounded,
     delegate::{
+        activity::{RunActivity, RunHeader, RunTransport},
         agent::AGENT_TOOL,
         conversation::TurnGuard,
         live::{LiveChild, LiveSpec},
@@ -227,11 +228,13 @@ pub(super) enum TurnEnd {
 }
 
 impl AcpAgentTool {
-    /// Start the ACP server for a new conversation and open its session.
+    /// Start the ACP server for a new conversation and open its session, or
+    /// load the saved session `load` for a conversation resumed from it.
     pub(super) async fn start(
         &self,
         turn: &TurnGuard,
         cwd: &Path,
+        load: Option<&str>,
         deadline: Instant,
         cancellation: &CancellationToken,
     ) -> Result<AcpChild, String> {
@@ -286,6 +289,21 @@ impl AcpAgentTool {
                 owner_depth.saturating_add(1).to_string().into(),
             )),
         }
+        let activity =
+            self.delegation
+                .as_ref()
+                .zip(pending.as_ref())
+                .and_then(|(delegation, pending)| {
+                    delegation.registry.open_activity(RunHeader {
+                        handle: pending.handle.clone(),
+                        agent: self.name.clone(),
+                        session: delegation.session.clone(),
+                        transport: RunTransport::Acp,
+                        cwd: cwd.to_owned(),
+                        conversation: Some((turn.handle.clone(), turn.turn)),
+                        streams: true,
+                    })
+                });
         let registration = self
             .delegation
             .as_ref()
@@ -298,6 +316,7 @@ impl AcpAgentTool {
                 cwd: cwd.to_owned(),
                 environment,
                 max_line_bytes: MAX_LINE_BYTES,
+                activity,
             },
             registration,
             cancellation.clone(),
@@ -308,7 +327,7 @@ impl AcpAgentTool {
             live,
             next_id: AtomicU64::new(1),
         };
-        match self.handshake(rpc, cwd, deadline, cancellation).await {
+        match self.handshake(rpc, cwd, load, deadline, cancellation).await {
             Ok(child) => Ok(child),
             Err((rpc, error)) => {
                 rpc.live.close().await;
@@ -321,6 +340,7 @@ impl AcpAgentTool {
         &self,
         rpc: Rpc,
         cwd: &Path,
+        load: Option<&str>,
         deadline: Instant,
         cancellation: &CancellationToken,
     ) -> Result<AcpChild, (Rpc, String)> {
@@ -357,24 +377,53 @@ impl AcpAgentTool {
                 "claudeCode": {"options": {"settings": settings}}
             });
         }
+        let method = if let Some(saved) = load {
+            let loads = initialized
+                .pointer("/agentCapabilities/loadSession")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !loads {
+                return Err((
+                    rpc,
+                    format!(
+                        "the {} ACP server cannot load a saved session (it does not offer \
+                         loadSession), so this conversation cannot be resumed; start a new one",
+                        self.name
+                    ),
+                ));
+            }
+            session_params["sessionId"] = saved.into();
+            "session/load"
+        } else {
+            "session/new"
+        };
         let session = match rpc
-            .call("session/new", session_params, deadline, cancellation)
+            .call(method, session_params, deadline, cancellation)
             .await
         {
             Ok(result) => result,
             Err(error) => {
-                let message = self.call_error(&rpc, "session/new", error).await;
+                let message = self.call_error(&rpc, method, error).await;
                 return Err((rpc, message));
             }
         };
-        let Some(session_id) = session
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            return Err((rpc, "the agent's session/new returned no sessionId".into()));
+        // `session/load` answers with the session's options, not its ID.
+        let session_id = if let Some(saved) = load {
+            saved.to_owned()
+        } else {
+            let Some(session_id) = session
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            else {
+                return Err((rpc, "the agent's session/new returned no sessionId".into()));
+            };
+            session_id
         };
         self.remember_offered(&session);
+        if let Some(activity) = rpc.live.activity() {
+            activity.set_vendor(&session_id);
+        }
         let child = AcpChild {
             rpc,
             session_id,
@@ -391,6 +440,9 @@ impl AcpAgentTool {
                 .await
         {
             return Err((child.rpc, error));
+        }
+        if let Some(activity) = child.rpc.live.activity() {
+            activity.set_steerable(child.steerable);
         }
         Ok(child)
     }
@@ -628,6 +680,7 @@ impl AcpAgentTool {
         let label = format!("[{handle} acp]");
         let mut reply = Reply::new(self.output_limit);
         let mut progress = Progress::default();
+        let activity: Option<&RunActivity> = child.rpc.live.activity();
         loop {
             let message = match child.rpc.next(deadline, &context.cancellation).await {
                 Ok(message) => message,
@@ -670,7 +723,7 @@ impl AcpAgentTool {
                 }
                 Incoming::Notification { method, params } => {
                     if method == "session/update" {
-                        progress.update(&params, &mut reply, &context.progress);
+                        progress.update(&params, &mut reply, &context.progress, activity);
                     }
                 }
                 Incoming::Request { id, method, params } => {
@@ -682,6 +735,9 @@ impl AcpAgentTool {
                     }
                     progress.lines.flush(&context.progress);
                     let (risk, summary) = describe_permission(&params, &label);
+                    if let Some(activity) = activity {
+                        activity.approval_requested(risk.as_str(), &summary);
+                    }
                     let request = context.approvals.request_until(
                         AGENT_TOOL,
                         risk,
@@ -690,7 +746,11 @@ impl AcpAgentTool {
                         context.cancellation.child_token(),
                         Some(process::approval_deadline(deadline)),
                     );
-                    let approved = match request.await {
+                    let answer = request.await;
+                    if let Some(activity) = activity {
+                        activity.approval_resolved(matches!(answer, Ok(true)));
+                    }
+                    let approved = match answer {
                         Ok(approved) => approved,
                         Err(error) => {
                             let timed_out = matches!(error, AgentError::ToolLimit(_))

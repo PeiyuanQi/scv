@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     delegate::{
+        activity::RunActivity,
         adapters::{AgentAuth, OutputFormat},
-        progress::progress_lines,
+        progress::{progress_lines, tool_lines},
     },
     process::OutputSink,
 };
@@ -75,7 +76,7 @@ impl RunStatus {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -116,6 +117,10 @@ pub(crate) struct AgentStream {
     session: Option<String>,
     /// Where status lines from structured events go while the run lasts.
     progress: ProgressSink,
+    /// The run's activity log: its message text and tool lines as they come.
+    activity: Option<RunActivity>,
+    /// The end of plain text that stopped inside a UTF-8 character.
+    utf8_tail: Vec<u8>,
 }
 
 impl AgentStream {
@@ -144,7 +149,16 @@ impl AgentStream {
             usage: None,
             session: None,
             progress: ProgressSink::default(),
+            activity: None,
+            utf8_tail: Vec::new(),
         }
+    }
+
+    /// Log the agent's message text and tool calls to `activity` as they
+    /// arrive.
+    pub(crate) fn with_activity(mut self, activity: Option<RunActivity>) -> Self {
+        self.activity = activity;
+        self
     }
 
     /// Report what the agent does (commands, files, searches, tool calls)
@@ -168,6 +182,7 @@ impl AgentStream {
 
     pub(crate) fn push(&mut self, bytes: &[u8]) {
         if self.format == OutputFormat::Text {
+            self.log_text(bytes);
             self.push_text(bytes);
             return;
         }
@@ -208,6 +223,23 @@ impl AgentStream {
         }
     }
 
+    /// Plain output as it prints, whole characters only, for the activity
+    /// log.
+    fn log_text(&mut self, bytes: &[u8]) {
+        let Some(activity) = &self.activity else {
+            return;
+        };
+        self.utf8_tail.extend_from_slice(bytes);
+        let valid = match std::str::from_utf8(&self.utf8_tail) {
+            Ok(_) => self.utf8_tail.len(),
+            // Wait for the rest of a character cut at the end.
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => self.utf8_tail.len(),
+        };
+        let complete: Vec<u8> = self.utf8_tail.drain(..valid).collect();
+        activity.text(&String::from_utf8_lossy(&complete));
+    }
+
     fn push_text(&mut self, bytes: &[u8]) {
         let remaining = self.text_limit.saturating_sub(self.text.len());
         self.text
@@ -225,21 +257,36 @@ impl AgentStream {
                 self.progress.report(&line);
             }
         }
+        if let Some(activity) = &self.activity {
+            for line in tool_lines(self.format, kind, event) {
+                activity.tool(&line);
+            }
+        }
         let session = match (self.format, kind) {
-            (OutputFormat::ClaudeStreamJson, "system" | "result") => event.get("session_id"),
+            (format, "system" | "result") if format.claude_like() => event.get("session_id"),
             (OutputFormat::CodexJsonl, "thread.started") => event.get("thread_id"),
             (OutputFormat::PiJson, "session") => event.get("id"),
+            (OutputFormat::GeminiStreamJson, "init") => event.get("session_id"),
             _ => None,
         };
         if let Some(session) = session
             .and_then(Value::as_str)
             .filter(|id| valid_session_id(id))
         {
+            // Saved at once, so a run cut off by a crash can be resumed.
+            if self.session.as_deref() != Some(session)
+                && let Some(activity) = &self.activity
+            {
+                activity.set_vendor(session);
+            }
             self.session = Some(session.to_owned());
         }
         match self.format {
             OutputFormat::Text => {}
-            OutputFormat::ClaudeStreamJson => match kind {
+            OutputFormat::GeminiStreamJson => self.gemini_event(kind, event),
+            OutputFormat::ClaudeStreamJson
+            | OutputFormat::CursorStreamJson
+            | OutputFormat::AmpStreamJson => match kind {
                 "system" if event.get("subtype").and_then(Value::as_str) == Some("init") => {
                     let expected = match self.auth {
                         AgentAuth::ClaudeApiKey => Some("apiKeyHelper"),
@@ -286,6 +333,9 @@ impl AgentStream {
                 }
                 "assistant" => {
                     let text = text_parts(event.pointer("/message/content"));
+                    if let Some(activity) = self.activity.as_ref().filter(|_| !text.is_empty()) {
+                        activity.message(&text);
+                    }
                     if !text.is_empty() && !self.completed {
                         self.reply = Some(text);
                     }
@@ -302,6 +352,9 @@ impl AgentStream {
                     if event.pointer("/item/type").and_then(Value::as_str) == Some("agent_message")
                         && let Some(text) = event.pointer("/item/text").and_then(Value::as_str)
                     {
+                        if let Some(activity) = &self.activity {
+                            activity.message(text);
+                        }
                         self.reply = Some(text.to_owned());
                     }
                 }
@@ -332,6 +385,9 @@ impl AgentStream {
                     let message = &event["message"];
                     let text = text_parts(message.get("content"));
                     if !text.is_empty() {
+                        if let Some(activity) = &self.activity {
+                            activity.message(&text);
+                        }
                         self.reply = Some(text);
                         self.completed = true;
                     }
@@ -344,6 +400,61 @@ impl AgentStream {
                     }
                 }
             }
+        }
+    }
+
+    /// One Gemini CLI `stream-json` event, or its whole `json` output.
+    fn gemini_event(&mut self, kind: &str, event: &Value) {
+        let text = |key: &str| event.get(key).and_then(Value::as_str);
+        match kind {
+            "message" if text("role") == Some("assistant") => {
+                let Some(content) = text("content") else {
+                    return;
+                };
+                let delta = event.get("delta").and_then(Value::as_bool) == Some(true);
+                if let Some(activity) = &self.activity {
+                    if delta {
+                        activity.text(content);
+                    } else {
+                        activity.message(content);
+                    }
+                }
+                match (&mut self.reply, delta) {
+                    (Some(reply), true) => reply.push_str(content),
+                    (reply, _) => *reply = Some(content.to_owned()),
+                }
+            }
+            "error" if text("severity") != Some("warning") => {
+                if let Some(message) = text("message") {
+                    self.error = Some(message.to_owned());
+                }
+            }
+            "result" => {
+                if text("status") == Some("error") {
+                    self.failed = true;
+                    if let Some(message) = event.pointer("/error/message").and_then(Value::as_str) {
+                        self.error = Some(message.to_owned());
+                    }
+                } else {
+                    self.completed = true;
+                }
+                self.usage = usage(event.get("stats"), "input_tokens", "output_tokens");
+            }
+            // `--output-format json`: one object with the whole response.
+            "" if event.get("response").is_some() => {
+                if let Some(message) = event.pointer("/error/message").and_then(Value::as_str) {
+                    self.failed = true;
+                    self.error = Some(message.to_owned());
+                }
+                if let Some(response) = text("response") {
+                    if let Some(activity) = &self.activity {
+                        activity.message(response);
+                    }
+                    self.reply = Some(response.to_owned());
+                    self.completed |= !self.failed;
+                }
+            }
+            _ => {}
         }
     }
 

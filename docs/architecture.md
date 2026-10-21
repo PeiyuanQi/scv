@@ -49,14 +49,21 @@ SCV provides:
   `web_search` tools, plus the provider's hosted web search when configured,
   and in chat sessions `chat_attach`, `chat_history`, and `chat_keep`;
 - delegation through one `agent` tool, whose `agent` argument names another
-  agent CLI (`claude`, `codex`, `grok`, `dsh`, `pi`) or a nested SCV (`scv`),
+  agent CLI (`claude`, `codex`, `grok`, `dsh`, `pi`, `gemini`, `qwen`,
+  `opencode`, `copilot`, `cursor`, `amp`, `kimi`) or a nested SCV (`scv`),
   in the foreground or as background jobs (`agent_wait`, `agent_status`,
-  `agent_cancel`);
+  `agent_cancel`), optionally each in its own git worktree;
+- a workbench of every delegated run and background job of the instance:
+  durable activity logs and a job ledger, agent states with their reasons,
+  the owner's own jobs, sending prompts into a delegated conversation,
+  approvals answered while the owner watches, and resuming jobs a restart or
+  crash interrupted, through the TUI dashboard and `scv jobs`;
 - a versioned newline-delimited JSON protocol;
 - one Unix-socket daemon that owns agent state and per-connection sessions;
-- a TUI and chat channel bridges (WeChat, Feishu/Lark, Slack) that attach to the
-  daemon through the same protocol, including media in both directions
-  (`chat_attach`);
+- a TUI dashboard (chat tabs per workspace, agent views, panes, a sidebar,
+  notifications, configurable keys) and chat channel bridges (WeChat,
+  Feishu/Lark, Slack) that attach to the daemon through the same protocol,
+  including media in both directions (`chat_attach`);
 - mail triage and approval-gated actions: an email account watches a
   mailbox over IMAP, the Gmail API, or Microsoft Graph, decides each new
   message with deterministic rules and, within a token budget, one tool-free
@@ -77,7 +84,9 @@ SCV provides:
 - Linux and macOS source builds and release archives.
 
 The current release does not include dynamic library loading, OS-level
-sandboxing, session resume (beyond a chat's open episode), provider login, syntax-highlighted diffs, or
+sandboxing, session resume (beyond a chat's open episode and a TUI's kept
+queue), terminal mirroring of delegated agents (they run headless; the
+workbench shows their structured activity), provider login, syntax-highlighted diffs, or
 feature parity with mature coding agents. Those features may be added without
 moving policy or model-provider code into the TUI.
 
@@ -91,9 +100,9 @@ The repository is one Cargo workspace with these packages:
 | `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket and project ledger among them, and the instance's service unit name), the chat log (`history`: its episode files, writer, and readers), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`, whose temporary files are named for their target), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
-| `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation, and the credential files each delegated agent CLI reads (`stores`). |
-| `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, event serialization, and the optional durable project ledger/orchestrator. |
-| `scv-tui` | Terminal state, rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
+| `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation with its activity logs, job ledger, and worktrees, the workbench that reads and acts on them, and the credential files each delegated agent CLI reads (`stores`). |
+| `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, event serialization, kept session queues, the workbench's daemon side (its own sessions for the owner's jobs and its control actions), and the optional durable project ledger/orchestrator. |
+| `scv-tui` | Terminal state, the dashboard (tabs, panes, sidebar, agent views, notifications, key bindings), rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), `slack` (tokens entered by hand, Socket Mode events with catch-up from conversation history, sending, files both ways, and its credentials), and `email` (mail triage and approval-gated actions: IMAP, the Gmail API, Microsoft Graph, and SMTP). |
 | root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), `scv mail` (`mail.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
 
@@ -103,7 +112,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.4.2` and exact workspace dependency pins.
+`0.4.3` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -143,11 +152,12 @@ What lives where in the largest crates:
 | Crate | Module | Contents |
 | --- | --- | --- |
 | `scv-server` | `lib.rs` | Module list and the public API (`run_socket`, `run_stdio`, `config`, build info, the restart watchdog) |
-| | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs |
+| | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs and workbench records |
+| | `workbench.rs` | The workbench's daemon side: one session per workspace for the owner's jobs (`Hosts`), the workbench `daemon.control` actions, and maintenance |
 | | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
 | | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, questions to the owner, and mail action status and withdrawal |
 | | `outbound.rs` | The byte- and frame-bounded outbound queue and event encoding |
-| | `session/` | A session (`mod.rs`), building one (`build.rs`), starting a chat session with its log's open episode (`reload.rs`), its turn queue (`queue.rs`), and running a turn (`turn.rs`) |
+| | `session/` | A session (`mod.rs`), building one (`build.rs`), starting a chat session with its log's open episode (`reload.rs`), its turn queue (`queue.rs`), a TUI session's kept queue (`persist.rs`), and running a turn (`turn.rs`) |
 | | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`), with the built-in skills from `skills/<name>/SKILL.md` |
 | | `approval.rs`, `events.rs` | Approval gates, and `CoreEvent` to `ServerEvent` |
 | | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
@@ -164,7 +174,9 @@ What lives where in the largest crates:
 | | `delegate/native.rs` | The per-turn CLI backend |
 | | `delegate/acp/`, `delegate/scv.rs`, `delegate/live.rs` | Long-running delegations over ACP (`rpc`, `session`, `permission`, `progress`, `tool`) and the SCV protocol, on one live-child runtime |
 | | `delegate/adapters.rs`, `delegate/choice.rs`, `delegate/options.rs` | One descriptor per delegated agent CLI, how the `agent` tool describes each agent and names the others after a failure, and the model and effort values each ACP agent last offered (public as `scv_tools::agent_options`) |
-| | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs and the per-conversation line busy calls wait in (`background/lane.rs`), multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
+| | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, the per-conversation line busy calls wait in (`background/lane.rs`), and the durable job ledger (`background/ledger.rs`, public as `scv_tools::background::ledger`), multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
+| | `delegate/activity.rs`, `delegate/worktree.rs` | Each delegated run's activity log and state (public as `scv_tools::activity`), and the git worktrees jobs run in (public as `scv_tools::worktree`) |
+| | `workbench.rs` | The workbench: snapshots assembled from the records and live sessions, run logs, and the owner's actions (start, send, cancel, resume, dismiss, attended approvals) |
 | | `delegate/review.rs` | Reviewed jobs: the builder and fresh-reviewer loop, reviewer routing, the landing confirmation, and its parts: the verdict and landing blocks (`blocks`), the live state every surface reads (`state`), SCV's prompt texts (`prompts`), and the journal (`journal`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
@@ -184,16 +196,19 @@ What lives where in the largest crates:
 | | `runtime.rs` | `AgentRuntime` and its turn loop |
 | `scv-protocol` | `client.rs`, `server.rs` | `ClientMessage` and `ServerEvent` |
 | | `daemon.rs`, `attachment.rs`, `background.rs`, `review.rs` | Daemon control and status, attached files, background-job reporting, and reviewed jobs' outcomes with SCV's lines for them (`describe_outcome`, `outcome_notice`) |
+| | `workbench.rs` | The workbench's wire types: `AgentState`, snapshots of sessions, jobs, runs, approvals, and kept queues, run-log pages, and worktrees |
 | | `error.rs` | `ErrorCode` (why a request or turn failed) and `ToolErrorKind` (why a tool call did) |
 | `scv-provider-openai` | `request.rs` | `OpenAiProvider`: requests, retries, and error reporting |
 | | `stream.rs`, `wire.rs`, `encode.rs` | Assembling a response from its event stream, the wire shapes, and replaying history as input |
-| `scv-tui` | `app.rs`, `transcript.rs` | What the UI shows and how server events change it; bounded transcript and prompt history |
-| | `input.rs`, `render.rs`, `terminal.rs` | Keys and the composer, drawing, and terminal setup |
-| | `client.rs`, `exec.rs` | The server connection, and headless `scv exec` |
+| `scv-tui` | `app.rs`, `transcript.rs` | What a chat shows and how server events change it; bounded transcript and prompt history |
+| | `ui.rs`, `keys.rs` | The dashboard: tabs, panes, the sidebar, overlays, and where each key goes; the bindings and `[tui.keys]` |
+| | `workbench.rs`, `poller.rs` | The dashboard's copy of the workbench (snapshot, notifications, agent views' logs), and its own daemon connection |
+| | `input.rs`, `render.rs`, `terminal.rs` | A chat's keys and composer, drawing, and terminal setup |
+| | `client.rs`, `exec.rs` | A chat's server connection, and headless `scv exec` |
 
 Black-box tests of the binaries are one test program, `tests/it/`, with a
 module per area (`server`, `daemon`, `config`, `confirm`, `delegation`,
-`restart`, `update`, and `feature_flow` for the landing skill's scripts) and
+`restart`, `update`, `workbench`, and `feature_flow` for the landing skill's scripts) and
 shared helpers in `tests/it/support.rs`.
 
 Each channel account is a component hosted by the daemon's supervisor, which
@@ -241,8 +256,20 @@ available for one-shot local clients such as `scv exec`.
 Each `session.start` request can carry provider, model, and base-URL overrides.
 The daemon resolves those values when creating the session, so model/provider
 selection can change between TUI clients without restarting the daemon or
-mutating another session's runtime. Queue state survives neither client
-disconnect nor server restart.
+mutating another session's runtime. A session's queue ends with its client;
+a TUI session keeps it on disk while it runs, so after a daemon restart or
+crash the reconnecting TUI restores it, paused (see
+[TUI](tui.md#shared-turn-queue)).
+
+The daemon also hosts the workbench: it reads the activity logs and job
+ledger every SCV process of the instance writes, keeps one session per
+workspace for jobs the owner starts (created on first use, dropped after an
+hour without jobs, shut down with the daemon), and, in the loop that
+reconciles delegated runs at startup and every 60 seconds, marks jobs and
+runs whose process died as interrupted and prunes old records. Delegated
+processes never outlive the daemon's sessions; what survives a restart is
+their record, from which the owner resumes an interrupted job in the agent's
+own conversation.
 
 The managed daemon is started as a user-level systemd service and defaults to
 the `on-risk` approval policy. `scv start --allow-sudo` may authenticate the
@@ -255,8 +282,9 @@ available.
 restarts an active user daemon through systemd; a release landed through the
 feature flow restarts through a planned restart instead (below). The socket closes as the old
 process exits; TUI clients retry the socket and establish a new session after
-the replacement daemon is ready. Canonical history and the queue belong to the
-old server session and are not restored. The TUI never automatically replays
+the replacement daemon is ready. Canonical history belongs to the old server
+session and is not restored; the queue is restored paused, and the turn that
+was running is named but never sent again. The TUI never automatically replays
 submitted work. A foreground `scv run` daemon requires an explicit restart
 after installing the published binary.
 
@@ -692,7 +720,13 @@ interaction contract is:
 - an explicit `y`/`n` approval prompt that includes the tool name, risk, working
   directory, and summary;
 - prompt history and `/help`, `/clear`, `/context`, and `/quit` local commands;
-- terminal restoration after normal exit, errors, panics, and child shutdown.
+- terminal restoration after normal exit, errors, panics, and child shutdown;
+- a dashboard around the chats: a chat tab per workspace, each its own daemon
+  session, agent views of delegated runs and jobs, one or two panes, a
+  sidebar grouped by workspace, notifications, and `[tui.keys]` bindings.
+  The dashboard reads the workbench over a connection of its own with
+  `daemon.control` and acts only through its actions; it keeps no
+  authoritative job state (see [TUI](tui.md#dashboard)).
 
 Queued steering, file completion, session trees, model pickers, images, themes,
 and rich Markdown are follow-up UX layers on the same event protocol.

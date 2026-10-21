@@ -244,6 +244,7 @@ impl AgentRuntime {
                             workspace: self.workspace.clone(),
                             cancellation: cancellation.child_token(),
                             background_job: false,
+                            job: None,
                             progress: progress.clone(),
                             approvals: ToolApprovals::new(Arc::clone(&approvals), call.id.clone()),
                         },

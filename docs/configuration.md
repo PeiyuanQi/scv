@@ -40,7 +40,7 @@ configuration cannot set `[agents]`.
 ## Instance layout
 
 An instance keeps everything under its home, `SCV_HOME` (default `~/.scv`), in
-six places:
+seven places:
 
 ```text
 ~/.scv/
@@ -56,9 +56,12 @@ six places:
 │   │                          address and OAuth client
 │   └── email/<account>.grants an OAuth mailbox's refresh tokens (0600)
 ├── agents/<name>/     private homes of the delegated agents (claude,
-│                      claude-ai, codex, grok, dsh, pi, scv), with their own
-│                      sign-ins
+│                      claude-ai, codex, grok, dsh, pi, gemini, qwen,
+│                      opencode, copilot, cursor, amp, kimi, scv), with their
+│                      own sign-ins
 ├── skills/            your SCV skills
+├── worktrees/         git worktrees SCV created for jobs (`worktree: true`),
+│   └── <repository>-<8 hex>/<agent>-<6 hex>/   one per job, kept until removed (0700)
 ├── history/           the chat log of each account owner's direct chat, and of
 │                      each Feishu or Slack thread in it (0700)
 │   └── <channel>/<account>/<conversation>/
@@ -69,6 +72,12 @@ six places:
     ├── server.sock, server.lock
     ├── config.lock
     ├── delegations/<handle>.json
+    ├── runs/<handle>.jsonl, <handle>.state.json  each delegated run's activity
+    │                  log and state, kept 7 days (0700/0600)
+    ├── jobs/<session>/<job>.json  the background job ledger, kept 7 days
+    │                  after a job finishes (0700/0600)
+    ├── sessions/<session>.json  a TUI session's queue, until the TUI leaves
+    │                  or it is restored (0600)
     ├── conversations/
     ├── reviews/rev-<seconds>-<hex>.jsonl  one journal per reviewed job, kept 30 days (0700/0600)
     ├── imports/<agent>.json
@@ -105,10 +114,14 @@ The rules behind it:
   `agents/codex/auth.json`). `scv agents login|logout` manage them, and
   `scv config show` reports each file without reading it.
 - **State is not configuration.** `state/` holds only what SCV writes and
-  reads back: the daemon socket, delegated-run records, review journals, the
-  model and effort values each agent offers, channel delivery checkpoints,
-  chat media, and locks. Nothing there is meant to be edited; review journals
+  reads back: the daemon socket, delegated-run records and activity logs,
+  the job ledger, kept queues, review journals, the model and effort values
+  each agent offers, channel delivery checkpoints, chat media, and locks. Nothing there is meant to be edited; review journals
   are there to be read (see [Reviewed jobs](tools.md#the-journal)).
+- **Worktrees are work.** `worktrees/` holds checkouts agents worked in,
+  often with changes not yet committed. SCV never deletes one by itself;
+  `scv agents worktrees --remove` does when the owner asks (see
+  [worktrees](tools.md#delegated-agents-agent)).
 - **History is kept.** `history/` holds the owners' conversations and the
   files they kept, meant to last (see [chat history](channels.md#chat-history));
   back it up like any other personal data.
@@ -222,6 +235,10 @@ max_transcript_items = 10000
 max_prompt_history_bytes = 1048576
 max_prompt_history_items = 200
 
+[tui.keys]          # dashboard key bindings; see "Terminal UI keys"
+# split = "alt+s"
+# focus_sidebar = "ctrl+g"
+
 [provider_limits]
 max_sse_event_bytes = 1048576
 max_response_bytes = 4194304
@@ -307,6 +324,36 @@ args = ["-p"]
 model_args = ["--model", "{model}"]
 effort_args = ["--thinking", "{effort}"]
 
+[agents.gemini]     # also qwen, the same shape
+command = "gemini"
+args = []
+prompt_args = ["-p"]
+model_args = ["-m", "{model}"]
+
+[agents.opencode]
+command = "opencode"
+args = ["run"]
+model_args = ["-m", "{model}"]
+
+[agents.copilot]
+command = "copilot"
+args = []
+prompt_args = ["-p"]
+model_args = ["--model", "{model}"]
+
+[agents.cursor]
+command = "cursor-agent"
+args = ["-p"]
+model_args = ["--model", "{model}"]
+
+[agents.amp]
+command = "amp"
+args = []
+prompt_args = ["-x"]
+
+[agents.kimi]       # over ACP only
+command = "kimi"
+
 [agents.scv]
 command = "scv"
 args = ["server", "--stdio"]
@@ -318,7 +365,8 @@ remote_tools = "none"                     # or "owner"
 # senders = "anyone"                      # omitted, only the owner is answered
 ```
 
-Every table also accepts `prompt_args` (default `[]` except Grok),
+Every table also accepts `prompt_args` (default `[]` except Grok, Gemini CLI,
+Qwen Code, Copilot, and Amp),
 `permissions` (default `"default"`; see [Agent permissions](#agent-permissions)),
 `transport` (default `"auto"`; see [Agent transport](#agent-transport)), and
 `use_for`, an optional one-line note (at most 500 bytes) on when to choose that
@@ -569,6 +617,11 @@ own prompts:
 | `grok` | `--always-approve` | on by default |
 | `dsh` | `DSH_PERMISSION_MODE=danger-full-access` (sandbox off, approvals `never`) | its own web tool |
 | `pi` | nothing: pi has no approval prompts or sandbox | none built in |
+| `gemini`, `qwen` | `--yolo` | the CLI's own (Google Search for Gemini CLI) |
+| `opencode` | nothing: its permissions are its own configuration | the CLI's own, if any |
+| `copilot` | `--allow-all-tools` | the CLI's own, if any |
+| `cursor` | `--force` | the CLI's own, if any |
+| `amp` | `--dangerously-allow-all` | the CLI's own |
 
 ```toml
 [agents.claude]
@@ -591,6 +644,8 @@ instead:
 | `codex` | `agent-full-access` session mode and `CODEX_CONFIG={"web_search":"live"}` | native `web_search` tool (if the provider supports it) |
 | `grok` | `grok agent --always-approve stdio` | on by default |
 | `dsh` | the same `DSH_PERMISSION_MODE` variable | its own web tool |
+| `gemini`, `qwen` | `--yolo` before `--experimental-acp` | as above |
+| `opencode`, `kimi` | nothing; permission requests are relayed | the CLI's own, if any |
 
 `codex-acp` takes no `-c` overrides; `CODEX_CONFIG` is its JSON form of them,
 merged into every session, so SCV sets it on the ACP server rather than
@@ -600,24 +655,51 @@ rewriting the imported `$SCV_HOME/agents/codex/config.toml`. An inherited
 ### Agent transport
 
 `[agents.<name>] transport` chooses how SCV talks to Claude Code, Codex, Grok
-Build, or DeepSeek Harness, which also speak the Agent Client Protocol (ACP):
+Build, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, or Kimi CLI, which
+also speak the Agent Client Protocol (ACP):
 
 - `"auto"` (default): the agent's ACP server when it resolves and `command` is
   the built-in one, otherwise one CLI process per turn. A custom `command`
-  keeps one process per turn because the ACP server would not run it.
+  keeps one process per turn because the ACP server would not run it. Kimi
+  CLI has no verified one-process-per-turn mode, so for it `auto` requires
+  the ACP server like `"acp"`.
 - `"acp"`: only the ACP server; the agent is not offered while the server is
-  missing. A startup error for pi and `scv`, which have none.
+  missing. A startup error for pi, Copilot, Cursor, Amp, and `scv`, which
+  have none.
 - `"resume"`: always one CLI process per turn, continued through the CLI's own
-  resume.
+  resume where it has one. A startup error for Kimi CLI.
 
 The ACP servers are `claude-agent-acp` (npm
 `@agentclientprotocol/claude-agent-acp`), `codex-acp` (npm
-`@agentclientprotocol/codex-acp`), `grok agent stdio`, and `dsh --profile acp`;
-see [the ACP transport](tools.md#agent-client-protocol-transport).
+`@agentclientprotocol/codex-acp`), `grok agent stdio`, `dsh --profile acp`,
+`gemini --experimental-acp`, `qwen --experimental-acp`, `opencode acp`, and
+`kimi --acp`; see [the ACP transport](tools.md#agent-client-protocol-transport).
 
 ```toml
 [agents.codex]
 transport = "resume"
+```
+
+### Terminal UI keys
+
+`[tui.keys]` rebinds the TUI dashboard's keys: each entry is an action name
+and a key specification, such as `split = "alt+s"`. The actions are
+`focus_sidebar`, `toggle_sidebar`, `next_tab`, `prev_tab`, `new_tab`,
+`close_tab`, `split`, `focus_other_pane`, `notifications`, `help`, and
+`tab_1` to `tab_9`; their defaults and the key syntax are in
+[the TUI contract](tui.md#keys). At most 64 entries; a name is lowercase
+letters, digits, and `_`, at most 32 bytes, and a value is printable text of
+at most 32 bytes, else configuration fails to load. The server sends the
+table to the TUI, which keeps a default for an action or key it does not know
+and says so. Only the home configuration may set it: a project's
+`.scv/config.toml` that does is refused, since keys belong to the person at
+the terminal.
+
+```toml
+[tui.keys]
+split = "alt+s"
+next_tab = "ctrl+pagedown"
+prev_tab = "ctrl+pageup"
 ```
 
 ### Project skills

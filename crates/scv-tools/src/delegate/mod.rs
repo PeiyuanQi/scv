@@ -7,6 +7,8 @@
 //! `scv server --stdio`. The rest is shared:
 //!
 //! - [`adapters`]: the built-in agents and how to launch each one.
+//! - [`activity`]: each run's activity log and current state, which the
+//!   workbench shows as the agent's live view.
 //! - [`request`]: the arguments every agent call takes.
 //! - [`choice`]: what the model is told to choose between agents.
 //! - [`options`]: the model and effort values each ACP agent offers, as
@@ -18,11 +20,13 @@
 //!   listing, stopping, and cleanup.
 //! - [`stores`]: the credential files each agent CLI reads, in its own
 //!   format, inside SCV's private agent homes.
+//! - [`worktree`]: git worktrees SCV creates for a call's agent to work in.
 //! - [`live`]: a long-lived child process read line by line.
 //! - [`output`] and [`progress`]: reading a run's output into one bounded
 //!   result, and its progress into short lines.
 
 pub(crate) mod acp;
+pub mod activity;
 pub mod adapters;
 pub(crate) mod agent;
 pub mod background;
@@ -39,3 +43,4 @@ pub(crate) mod request;
 pub(crate) mod review;
 pub(crate) mod scv;
 pub mod stores;
+pub mod worktree;

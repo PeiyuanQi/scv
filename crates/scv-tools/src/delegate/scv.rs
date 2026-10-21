@@ -37,13 +37,14 @@ use crate::{
     DelegationContext,
     args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
+        activity::{RunHeader, RunTransport},
         agent::{Accepts, Backend},
         choice,
         conversation::{Attachment, ConversationStore, TurnGuard},
         live::{LiveChild, LiveLine, LiveSpec, LiveTurn},
         output::{AgentResult, AgentUsage, RunStatus, truncate_utf8},
         records,
-        request::{AgentArgs, resolve_agent_cwd, valid_model_name, validate_agent_cwd},
+        request::{AgentArgs, resolve_call_cwd, valid_model_name, validate_agent_cwd},
     },
     process::{APPROVAL_TIMEOUT, approval_deadline, startup_deadline},
     sync::lock,
@@ -316,6 +317,8 @@ pub(crate) struct ScvAgentTool {
     pub(crate) output_limit: usize,
     pub(crate) delegation: Option<DelegationContext>,
     pub(crate) conversations: Arc<ConversationStore>,
+    /// Where worktrees SCV created live, which a call may name as `cwd`.
+    pub(crate) worktrees: Option<PathBuf>,
 }
 
 /// Why waiting for the nested SCV stopped early.
@@ -409,6 +412,21 @@ impl ScvAgentTool {
             Some(pending) => environment.extend(pending.environment.iter().cloned()),
             None => environment.push((records::DEPTH_VARIABLE.into(), depth.to_string().into())),
         }
+        let activity =
+            self.delegation
+                .as_ref()
+                .zip(pending.as_ref())
+                .and_then(|(delegation, pending)| {
+                    delegation.registry.open_activity(RunHeader {
+                        handle: pending.handle.clone(),
+                        agent: AGENT.to_owned(),
+                        session: delegation.session.clone(),
+                        transport: RunTransport::Scv,
+                        cwd: cwd.to_owned(),
+                        conversation: Some((turn.handle.clone(), turn.turn)),
+                        streams: true,
+                    })
+                });
         let registration = self
             .delegation
             .as_ref()
@@ -421,6 +439,7 @@ impl ScvAgentTool {
                 cwd: cwd.to_owned(),
                 environment,
                 max_line_bytes: MAX_FRAME_BYTES,
+                activity,
             },
             registration,
             cancellation.clone(),
@@ -468,6 +487,8 @@ impl ScvAgentTool {
                     auto_approve: None,
                     chat: None,
                     system_prompt: None,
+                    persist_queue: None,
+                    restore: None,
                 },
                 Some(deadline),
                 cancellation,
@@ -541,6 +562,7 @@ impl ScvAgentTool {
         let mut turn_id: Option<String> = None;
         let mut reply = Reply::new(self.output_limit);
         let mut progress = LineProgress::default();
+        let activity = nested.live.activity();
         loop {
             let event = match nested
                 .next_event(Some(&request_id), deadline, &context.cancellation)
@@ -569,6 +591,9 @@ impl ScvAgentTool {
                 ServerEvent::AssistantDelta { content, .. } => {
                     reply.delta(&content);
                     progress.push(&content, &context.progress);
+                    if let Some(activity) = activity {
+                        activity.text(&content);
+                    }
                 }
                 ServerEvent::AssistantCompleted { content, .. } => {
                     reply.completed(content);
@@ -576,14 +601,23 @@ impl ScvAgentTool {
                 }
                 ServerEvent::ToolStarted { name, .. } => {
                     progress.flush(&context.progress);
+                    if let Some(activity) = activity {
+                        activity.tool(&name);
+                    }
                     context.progress.report(&format!("{name} …"));
                 }
                 ServerEvent::ToolProgress { text, .. } => {
                     for line in text.lines() {
+                        if let Some(activity) = activity {
+                            activity.tool(line);
+                        }
                         context.progress.report(line);
                     }
                 }
                 ServerEvent::ToolCompleted { name, success, .. } => {
+                    if !success && let Some(activity) = activity {
+                        activity.tool(&format!("{name} failed"));
+                    }
                     context.progress.report(&format!(
                         "{name} {}",
                         if success { "done" } else { "failed" }
@@ -597,15 +631,23 @@ impl ScvAgentTool {
                     summary,
                     ..
                 } => {
+                    let summary = format!("{label} {summary}");
+                    if let Some(activity) = activity {
+                        activity.approval_requested(&risk, &summary);
+                    }
                     let request = context.approvals.request_until(
                         name,
                         ToolRisk::parse(&risk).unwrap_or(ToolRisk::Delegate),
                         PathBuf::from(cwd),
-                        format!("{label} {summary}"),
+                        summary,
                         context.cancellation.child_token(),
                         Some(approval_deadline(deadline)),
                     );
-                    let approved = match request.await {
+                    let answer = request.await;
+                    if let Some(activity) = activity {
+                        activity.approval_resolved(matches!(answer, Ok(true)));
+                    }
+                    let approved = match answer {
                         Ok(approved) => approved,
                         Err(error) => {
                             let timed_out = matches!(error, AgentError::ToolLimit(_))
@@ -919,7 +961,14 @@ impl Backend for ScvAgentTool {
     ) -> Result<ToolOutput, ToolError> {
         let args: AgentArgs = parse_args(&arguments)?;
         self.validate(&args)?;
-        let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
+        let cwd = resolve_call_cwd(
+            &context.workspace,
+            self.worktrees.as_deref(),
+            args.cwd.as_deref(),
+            args.session
+                .as_deref()
+                .and_then(|handle| self.conversations.cwd(handle)),
+        )?;
         let limit = self.timeouts.resolve(args.timeout_seconds)?;
         let deadline = self.timeouts.deadline(
             args.timeout_seconds,
@@ -967,6 +1016,15 @@ impl Backend for ScvAgentTool {
         let serving = child.serve(turn.turn).await;
         let handle = turn.handle.clone();
         let number = turn.turn;
+        let activity = child.nested.live.activity().cloned();
+        let ended = |status: RunStatus, error: Option<&str>| {
+            if let Some(activity) = &activity {
+                activity.turn_ended(status.as_str(), error);
+            }
+        };
+        if let Some(activity) = &activity {
+            activity.turn_started(Some(&handle), number, &args.prompt, context.job.as_deref());
+        }
         let end = self
             .run_turn(&child, &handle, args.prompt, &context, deadline)
             .await;
@@ -988,6 +1046,7 @@ impl Backend for ScvAgentTool {
                     format!("timed out after {} seconds", limit.as_secs())
                 };
                 if !settled {
+                    ended(RunStatus::Timeout, Some(&detail));
                     live.close().await;
                     turn.forget();
                     return Ok(result(
@@ -1004,6 +1063,7 @@ impl Backend for ScvAgentTool {
                 (RunStatus::Timeout, reply, None, Some(detail))
             }
             TurnEnd::Cancelled { settled } => {
+                ended(RunStatus::Cancelled, None);
                 if settled {
                     drop(serving);
                     drop(turn.finish(Some(child.nested.session_id.clone()), false));
@@ -1014,6 +1074,7 @@ impl Backend for ScvAgentTool {
                 return Err(ToolError::cancelled("nested SCV turn cancelled"));
             }
             TurnEnd::Lost(reason) => {
+                ended(RunStatus::Failed, Some(&reason));
                 let tail = live.stderr_tail().await;
                 live.close().await;
                 turn.forget();
@@ -1034,6 +1095,7 @@ impl Backend for ScvAgentTool {
                 return Ok(output);
             }
         };
+        ended(status, error.as_deref());
         drop(serving);
         let conversation = turn
             .finish(

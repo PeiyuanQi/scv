@@ -27,6 +27,7 @@ mod restart;
 mod session;
 #[cfg(test)]
 mod test_support;
+mod workbench;
 
 pub use daemon::{run_socket, run_stdio};
 pub use restart::{BuildInfo, build_info, watchdog as restart_watchdog};

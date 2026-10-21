@@ -905,7 +905,22 @@ args = [\"--always-approve\"]
     assert_eq!(config.agents.0["grok"].prompt_args, ["-p"]);
     assert_eq!(
         config.agents.0.keys().collect::<Vec<_>>(),
-        ["claude", "claude-ai", "codex", "dsh", "grok", "pi", "scv"]
+        [
+            "amp",
+            "claude",
+            "claude-ai",
+            "codex",
+            "copilot",
+            "cursor",
+            "dsh",
+            "gemini",
+            "grok",
+            "kimi",
+            "opencode",
+            "pi",
+            "qwen",
+            "scv"
+        ]
     );
 
     merge(
@@ -1087,4 +1102,57 @@ fn the_provider_in_effect_brings_its_own_reasoning_effort() {
     write("[provider]\nmodel = \"gpt-6-sol\"\nreasoning_effort = \"xhigh\"\n");
     let config = load(ConfigOverrides::default()).unwrap();
     assert_eq!(config.provider.reasoning_effort.as_deref(), Some("xhigh"));
+}
+
+#[test]
+fn tui_key_bindings_are_checked_for_shape_and_belong_to_the_user() {
+    let config = |text: &str| -> Config {
+        let mut value: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(&mut value, toml::from_str(text).unwrap());
+        value.try_into().unwrap()
+    };
+    let bound = config("[tui.keys]\nnext_tab = \"ctrl+pagedown\"\nfocus_sidebar = \"f2\"\n");
+    bound.validate().unwrap();
+    assert_eq!(bound.tui.keys["focus_sidebar"], "f2");
+    for (text, error) in [
+        ("[tui.keys]\n\"Next Tab\" = \"f2\"\n", "lowercase"),
+        (
+            "[tui.keys]\nnext_tab = \"ctrl + t\"\n",
+            "printable characters",
+        ),
+        ("[tui.keys]\nnext_tab = \"\"\n", "printable characters"),
+    ] {
+        let message = config(text).validate().unwrap_err().to_string();
+        assert!(message.contains(error), "{text}: {message}");
+    }
+    let project: toml::Value = toml::from_str("[tui.keys]\nhelp = \"f2\"\n").unwrap();
+    let message = validate_project_keys(&project).unwrap_err().to_string();
+    assert!(message.contains("tui.keys"), "{message}");
+}
+
+#[test]
+fn an_agent_that_runs_over_acp_only_cannot_be_set_to_one_process_per_turn() {
+    let mut value: toml::Value =
+        toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+    merge(
+        &mut value,
+        toml::from_str("[agents.kimi]\ntransport = \"resume\"\n").unwrap(),
+    );
+    let config: Config = value.try_into().unwrap();
+    let message = config.validate().unwrap_err().to_string();
+    assert!(message.contains("ACP server only"), "{message}");
+    // Over `auto` it needs its ACP server, even with a custom command.
+    let mut value: toml::Value =
+        toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+    merge(
+        &mut value,
+        toml::from_str("[agents.kimi]\ncommand = \"/opt/kimi\"\n").unwrap(),
+    );
+    let config: Config = value.try_into().unwrap();
+    config.validate().unwrap();
+    let kimi = config.adapters().remove("kimi").unwrap();
+    let launch = kimi.acp.unwrap();
+    assert!(launch.required);
+    assert_eq!(launch.args, ["--acp"]);
 }

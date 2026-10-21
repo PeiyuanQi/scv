@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     delegate::{
+        activity::RunActivity,
         output::TailBuffer,
         records::{
             self, DelegationGuard, DelegationRegistry, PendingDelegation, STOP_GRACE, group_exists,
@@ -67,6 +68,8 @@ pub(crate) struct LiveSpec {
     pub(crate) environment: Vec<(OsString, OsString)>,
     /// Longest stdout line accepted; a longer one ends the child.
     pub(crate) max_line_bytes: usize,
+    /// The run's activity log, ended when the child exits.
+    pub(crate) activity: Option<RunActivity>,
 }
 
 /// One line from a live child's stdout.
@@ -98,6 +101,7 @@ pub(crate) struct LiveChild {
     guard: Arc<StdMutex<Option<DelegationGuard>>>,
     life: watch::Receiver<Life>,
     closed: AtomicBool,
+    activity: Option<RunActivity>,
 }
 
 impl std::fmt::Debug for LiveChild {
@@ -167,7 +171,13 @@ impl LiveChild {
             tokio::spawn(read_lines(stdout, sender, spec.max_line_bytes));
         }
         let (life_tx, life) = watch::channel(Life::Running);
-        tokio::spawn(reap(pid, child, Arc::clone(&guard), life_tx));
+        tokio::spawn(reap(
+            pid,
+            child,
+            Arc::clone(&guard),
+            life_tx,
+            spec.activity.clone(),
+        ));
         Ok(Arc::new(Self {
             pid,
             stdin: Mutex::new(stdin),
@@ -176,6 +186,7 @@ impl LiveChild {
             guard,
             life,
             closed: AtomicBool::new(false),
+            activity: spec.activity,
         }))
     }
 
@@ -257,6 +268,11 @@ impl LiveChild {
         !self.closed.load(Ordering::Acquire) && *self.life.borrow() == Life::Running
     }
 
+    /// The child's activity log, when it keeps one.
+    pub(crate) fn activity(&self) -> Option<&RunActivity> {
+        self.activity.as_ref()
+    }
+
     /// Record that this child serves `turn` of its conversation until the
     /// returned guard drops, which records it idle between turns. A planned
     /// restart waits for a live child only while a turn runs.
@@ -299,6 +315,11 @@ impl Drop for LiveTurn<'_> {
     fn drop(&mut self) {
         if let Some(guard) = lock(&self.0.guard).as_ref() {
             guard.set_idle();
+        }
+        if self.0.is_running()
+            && let Some(activity) = &self.0.activity
+        {
+            activity.idle();
         }
     }
 }
@@ -349,9 +370,16 @@ async fn reap(
     mut child: Child,
     guard: Arc<StdMutex<Option<DelegationGuard>>>,
     life: watch::Sender<Life>,
+    activity: Option<RunActivity>,
 ) {
     let _ = child.wait().await;
     let _ = life.send(Life::Exited);
+    let killed = lock(&guard)
+        .as_ref()
+        .is_some_and(DelegationGuard::was_killed);
+    if let Some(activity) = activity {
+        activity.run_ended(if killed { "killed" } else { "exited" });
+    }
     // Descendants may outlive the leader, so the group always goes.
     if group_exists(pid) {
         kill_group(pid);

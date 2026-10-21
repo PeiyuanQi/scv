@@ -105,6 +105,8 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
         auto_approve: None,
         chat: None,
         system_prompt: None,
+        persist_queue: None,
+        restore: None,
     })
     .await;
     let mut session_id = None;

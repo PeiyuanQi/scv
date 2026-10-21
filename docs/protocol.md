@@ -159,6 +159,50 @@ know these commands.
 {"type":"daemon.control","request_id":"d14","command":{"action":"mail_cancel","account":"default","id":"a0123456789abcdef0123456789abcdef","all":false}}
 ```
 
+#### The workbench
+
+These actions read and act on the [workbench](tools.md#the-workbench): the
+instance's delegated runs and background jobs, for the TUI dashboard and
+`scv jobs`. They are additive and keep protocol version 3; a daemon before
+0.4.3 answers them with `invalid_json`, which clients take as "no
+workbench".
+
+```json
+{"type":"daemon.control","request_id":"w1","command":{"action":"workbench","watch":true}}
+{"type":"daemon.control","request_id":"w2","command":{"action":"run_log","handle":"codex-3f9a2c","after":0,"limit":200}}
+{"type":"daemon.control","request_id":"w3","command":{"action":"workbench_start","workspace":"/workspace/project","agent":"codex","prompt":"Fix the flaky test.","cwd":"shop","effort":"high","worktree":true}}
+{"type":"daemon.control","request_id":"w4","command":{"action":"workbench_send","session":"5d1c…","conversation":"codex-2","prompt":"Also run clippy.","mode":"auto"}}
+{"type":"daemon.control","request_id":"w5","command":{"action":"workbench_cancel","session":"5d1c…","job":"job-3"}}
+{"type":"daemon.control","request_id":"w6","command":{"action":"workbench_approve","id":"7c2e…","approved":true}}
+{"type":"daemon.control","request_id":"w7","command":{"action":"workbench_resume","session":"5d1c…","job":"job-3"}}
+{"type":"daemon.control","request_id":"w8","command":{"action":"workbench_dismiss","session":"5d1c…","job":"job-3"}}
+{"type":"daemon.control","request_id":"w9","command":{"action":"worktrees"}}
+{"type":"daemon.control","request_id":"w10","command":{"action":"worktree_remove","path":"/home/u/.scv/worktrees/shop-1a2b3c4d/codex-9f3e21","force":false}}
+```
+
+`workbench` replies with the snapshot in `daemon.status.workbench`; `watch:
+true` also counts the owner as watching for 15 seconds, during which a
+background job's approval request the session would deny unattended waits
+up to two minutes for `workbench_approve`. `run_log` returns up to `limit`
+(default and at most 500, and at most 256 KiB) events of a run's activity log
+after byte position `after` in `run_log`; a client passes the page's `next`
+back as `after` to follow the run. `workbench_start` starts the owner's own
+background job in the daemon's workbench session for `workspace` (an
+existing absolute directory) with the given `agent` call arguments;
+`workbench_send` gives a live session's conversation the owner's prompt, its
+`mode` saying what to do while a turn runs (`auto`, the default, steers when
+the agent can and queues otherwise; `queue`; `steer`, which fails when it
+cannot); `workbench_cancel`, `workbench_resume`, and `workbench_dismiss` act
+on one job; `workbench_approve` answers a waiting approval request.
+`worktrees` lists the worktrees SCV created, and `worktree_remove` removes
+one (with uncommitted changes only with `force`), keeping its branch. A
+refused action (an unknown session, job, conversation, run, approval, or
+worktree, a job in the wrong state, or the call's own validation error) is a
+`workbench_error` with SCV's reason. Each action's reply carries
+`workbench_note`, SCV's sentence about what it did, and `workbench_job`
+(`<session>/<job>`) for the job it started; every action but `run_log` and
+the worktree ones also carries a fresh snapshot.
+
 Component management is unsupported on stdio. The client helper bounds its
 exchange and never automatically retries a mutation after an ambiguous failure;
 query status before retrying.
@@ -234,6 +278,16 @@ other use is refused with `invalid_request` (`system_prompt requires
 no_tools`). Mail triage sends its fixed frame this way, so nothing of the
 owner's own configuration reaches a model reading untrusted mail (see
 [Email](channels.md#email)). It is additive and keeps protocol version 3.
+
+`persist_queue: true` keeps the session's queued prompts, and the prompt of
+its running turn, in `$SCV_HOME/state/sessions/<session>.json` (mode 0600)
+after every change, until the client closes the connection. `restore` names
+a session whose daemon stopped or died with such a record: when it was in
+the same workspace, its queued prompts join the new session's queue, the
+queue starts paused, the record goes, and `session.started` says so in
+`restored`. A session that cannot be restored (unknown, still running, in
+another workspace) starts normally without `restored`. The TUI sets both;
+both are additive, and a server that predates them ignores them.
 
 ```json
 {"type":"session.start","request_id":"2","cwd":"/workspace/project"}
@@ -317,7 +371,13 @@ clears its transcript only after that event.
 ```json
 {"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.14"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
+{"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200,"keys":{"split":"alt+s"},"restored":{"from":"9a0e…","queued":2,"interrupted":"Run the release checklist."}}
 ```
+
+`keys` carries the home configuration's `[tui.keys]` (omitted when empty) for
+the TUI to apply. `restored` answers `restore`: the session the queue came
+from, how many prompts joined, and the first line (at most 200 characters)
+of the prompt that was running when it stopped, which is not sent again.
 
 ### `daemon.status`
 
@@ -335,6 +395,27 @@ successful contact and is a historical timestamp, not a guarantee of current
 connectivity. Errors are sanitized; credentials never appear in status.
 Loading credentials alone cannot produce `connected`. Management responses
 carry the request ID but no session or sequence number.
+
+Workbench actions add `workbench` (a snapshot: `generated_unix_seconds`,
+and, each omitted when empty, `sessions` with `id`, `label`, `workspace`,
+`live`, `state`, and `detail`; `jobs` with `session`, `job`, `agent`,
+`task`, `workspace`, `cwd`, `state`, `detail`, `started_by` (`model` or
+`owner`), `conversation`, `run`, `worktree`, `reviewed`, `resumable`,
+`resumed_as`, and their times; `runs` with `handle`, `agent`, `session`,
+`transport` (`cli`, `acp`, or `scv`), `conversation`, `turn`, `job`, `cwd`,
+`state`, `detail`, times, `live`, and `steerable`; `approvals` waiting for
+the owner with `id`, `session`, `job`, `name`, `risk`, `cwd`, `summary`, and
+since and expiry; and `restorable` queues with `id`, `label`, `workspace`,
+`queued`, `interrupted`, and when saved), `run_log` (`handle`, `events`,
+`next`, `ended`, `more`; each event has `seq`, `ts_ms`, `kind`, and, as it
+applies, `text`, `turn`, `status`, `job`, `risk`, and `by`), `workbench_note`,
+`workbench_job`, and `worktrees` (each `path`, `branch`, `repo`, `dirty`, and
+the jobs recorded in it). A state (`scv_protocol::AgentState`: `starting`,
+`working`, `awaiting_input`, `idle`, `queued`, `completed`, `failed`,
+`declined`, `timeout`, `cancelled`, `interrupted`, `unknown`), origin, or
+event kind a client does not know parses as `unknown`. A job's
+`conversation` is given only while the process that holds it runs, since a
+handle names nothing in another process.
 
 `status` contains `version`, `pid`, `components`, and `delegations`, and
 `restart` while a planned restart is scheduled: `to_version`, `waiting_for`
@@ -637,8 +718,8 @@ in snake_case; that enum is the list of codes and says what each means. An
 (`invalid_json`, also for a message type or `daemon.control` action it does not
 know), one before `initialize` (`not_initialized`), a different protocol
 version (`version_mismatch`, fatal), or a request it declines, such as
-`invalid_request`, `session_not_found`, `queue_limit`, `component_error`, or
-`confirm_error`.
+`invalid_request`, `session_not_found`, `queue_limit`, `component_error`,
+`confirm_error`, or `workbench_error`.
 `turn.failed` carries `provider_error`, one of the `*_limit` codes, or
 `internal_error`. Component failures use sanitized messages without credential
 or raw transport details. An error after `turn.started`, including a provider

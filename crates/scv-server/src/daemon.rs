@@ -17,7 +17,7 @@ use crate::{
     components,
     config::{ConfigOverrides, Instance},
     confirm,
-    connection::run_managed,
+    connection::{Shared, run_managed},
     disk, restart,
 };
 
@@ -37,8 +37,11 @@ pub async fn run_stdio(layout: &Layout, overrides: ConfigOverrides) -> Result<()
             layout: layout.clone(),
             overrides,
         },
-        None,
-        registry,
+        Shared {
+            components: None,
+            registry,
+            hosts: None,
+        },
         CancellationToken::new(),
         tasks.clone(),
     )
@@ -116,6 +119,7 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
         Arc::clone(&hub),
     )?));
     let registry = instance_delegations(layout);
+    let hosts = crate::workbench::Hosts::new(instance.clone(), Arc::clone(&registry));
     // Descendants a delegated agent leaves behind reparent to the daemon, not init.
     if !delegations::become_child_subreaper() {
         tracing::debug!("SCV daemon is not a child subreaper on this platform");
@@ -160,8 +164,10 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
     let _monitor_abort = AbortGuard(monitor.abort_handle());
     let delegation_registry = Arc::clone(&registry);
     let delegation_cancel = cancellation.clone();
+    let maintained = Arc::clone(&hosts);
     let mut delegation_task = tokio::spawn(async move {
-        // The first tick is immediate: orphans from before a restart go first.
+        // The first tick is immediate: orphans from before a restart go
+        // first, and jobs and runs they left unfinished become interrupted.
         let mut interval = tokio::time::interval(DELEGATION_RECONCILE_INTERVAL);
         loop {
             tokio::select! {
@@ -173,6 +179,7 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
                     if zombies > 0 {
                         tracing::debug!("Reaped {zombies} exited orphan processes");
                     }
+                    crate::workbench::maintain(&maintained).await;
                 }
             }
         }
@@ -209,11 +216,12 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
                 let instance = instance.clone();
                 let components = components.clone();
                 let registry = Arc::clone(&registry);
+                let hosts = Arc::clone(&hosts);
                 let cancellation = cancellation.clone();
                 let tasks = tasks.clone();
                 clients.spawn(async move {
                     let (reader, writer) = stream.into_split();
-                    if let Err(error) = run_managed(reader, writer, instance, Some(components), registry, cancellation, tasks).await {
+                    if let Err(error) = run_managed(reader, writer, instance, Shared { components: Some(components), registry, hosts: Some(hosts) }, cancellation, tasks).await {
                         tracing::warn!(error = format!("{error:#}"), "SCV socket client stopped");
                     }
                 });
@@ -228,6 +236,8 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
     let _ = (&mut refresh_task).await;
     let _ = (&mut delegation_task).await;
     components.lock().await.shutdown().await;
+    // The owner's own jobs stop with the daemon, like every session's.
+    hosts.shutdown().await;
     if tokio::time::timeout(Duration::from_secs(8), async {
         while clients.join_next().await.is_some() {}
     })

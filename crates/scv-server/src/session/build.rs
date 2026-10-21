@@ -13,7 +13,7 @@ use scv_core::{AgentRuntime, ApprovalGate, BudgetContextPolicy, ToolRegistry};
 use scv_provider_openai::OpenAiProvider;
 use scv_tools::{
     DelegationContext, background::BackgroundJobs, builtin_registry,
-    delegation::DelegationRegistry, stores,
+    delegation::DelegationRegistry, stores, workbench::Workbench,
 };
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
@@ -63,6 +63,7 @@ pub(crate) async fn build_session(
     overrides: ConfigOverrides,
     delegation_depth: u32,
     registry: &Arc<DelegationRegistry>,
+    workbench: Option<&Arc<Workbench>>,
     client: SessionClient,
 ) -> Result<(Session, Option<mpsc::UnboundedReceiver<()>>)> {
     let id = Uuid::new_v4().to_string();
@@ -105,19 +106,32 @@ pub(crate) async fn build_session(
         provider = provider.with_web_search();
     }
     let provider = Arc::new(provider);
+    // Registered before the tools, which attach the session's job store.
+    let registration = workbench
+        .map(|workbench| Arc::new(workbench.register_session(&id, &client.label, &workspace)));
     let (background, finished) = if !no_tools && config.agent.max_background > 0 {
         let (finished_tx, finished_rx) = mpsc::unbounded_channel();
         let unattended: Arc<dyn ApprovalGate> = Arc::new(UnattendedGate {
             policy: config.tools.approval_policy,
             client_approves_all: client.auto_approve,
         });
-        (
-            Some(Arc::new(
-                BackgroundJobs::new(config.agent.max_background, Some(finished_tx))
-                    .with_approvals(unattended),
-            )),
-            Some(finished_rx),
-        )
+        // While the owner watches the workbench, a background request the
+        // session would deny waits for the owner's answer.
+        let gate = match workbench {
+            Some(workbench) => workbench.attended_gate(&id, unattended),
+            None => unattended,
+        };
+        let mut jobs = BackgroundJobs::new(config.agent.max_background, Some(finished_tx))
+            .with_approvals(gate);
+        if let Some(ledger) = scv_tools::background::ledger::JobLedger::new(
+            &layout.jobs(),
+            &id,
+            &client.label,
+            &workspace,
+        ) {
+            jobs = jobs.with_ledger(ledger);
+        }
+        (Some(Arc::new(jobs)), Some(finished_rx))
     } else {
         (None, None)
     };
@@ -132,6 +146,10 @@ pub(crate) async fn build_session(
         });
         tools.background = background.clone();
         tools.reviews = Some(layout.reviews());
+        tools.worktrees = Some(layout.worktrees());
+        tools.workbench = workbench.cloned();
+        tools.label.clone_from(&client.label);
+        tools.workspace.clone_from(&workspace);
         if client.channel.is_some() {
             // Of the kept files, only this chat's own may be sent back.
             let kept = client.chat.as_ref().map(|conversation| {
@@ -213,6 +231,8 @@ pub(crate) async fn build_session(
             paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             background,
             tools: !no_tools,
+            label: client.label,
+            workbench: registration,
         },
         finished,
     ))

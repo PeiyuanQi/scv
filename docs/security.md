@@ -237,9 +237,13 @@ requests are denied and it acts within the agent's own permissions (a step
 that needs approval fails), while an owner chat session, whose bridge already
 approves every request, grants its jobs the same. `auto_approve` is the
 client's own statement about how it answers, so it grants nothing that client
-could not already grant. `agent_cancel` stops a job at the model's request and
+could not already grant. While the owner watches the workbench (a TUI
+dashboard is open), a request that answer would deny waits up to two minutes
+for the owner instead; the owner is the person the TUI would have asked in
+the foreground, so this too grants nothing more, and an unanswered request is
+denied as before. `agent_cancel` stops a job at the model's request and
 has process risk. Jobs belong to their session and are cancelled, with their
-processes, when it closes. The turn the server starts to report a finished job has the session's
+processes, when it closes; the job ledger then records them as interrupted. The turn the server starts to report a finished job has the session's
 own tools and approval policy, like any turn; its prompt quotes the job's
 bounded reply, which is untrusted delegated-agent output. Over WeChat or Feishu
 the report goes only to the owner's direct chat, as an unprompted message.
@@ -251,6 +255,39 @@ under a line saying that is the agent's reply, unedited: the block vouches
 for SCV's line, not for the quoted reply. The history note that tells the
 model about it is a user message, quoting the same untrusted reply, as the
 report turn's prompt would have.
+
+The [workbench](tools.md#the-workbench) acts for the owner, through the
+daemon's socket, which only the user can reach. Its actions (starting a job,
+sending a conversation a prompt, cancelling, resuming, approving, removing a
+worktree) are the owner's own, so a job the owner starts asks no approval
+for its launch; the requests its agent relays still go through the session's
+policy, attended or not, as above. The owner's jobs are never reported to a
+model, and a prompt the owner sends a conversation is the owner's text, so
+nothing a model wrote is executed as an owner action. The `scv jobs` command
+refuses every action inside a delegated run, so an agent cannot start,
+steer, resume, or approve work through it, and in particular cannot approve
+its own relayed request. Like the other delegated-run rules this is
+cooperative: an agent running as the user that speaks the socket protocol
+itself can do what the owner can, as it could already run anything the user
+can. Resuming an interrupted job re-sends its recorded prompt (bounded,
+private, and the owner's or the model's own text) in the agent's own
+conversation or as a new run; a reviewed job is never resumed, since its
+journal, not a replay, is its record.
+
+Activity logs, the job ledger, and kept queues are private files (0700
+directories, 0600 files) under `state/`, written atomically or appended by
+the SCV process that owns them. Activity logs hold the agent's message text
+and the same redacted one-line tool summaries as progress, never tool
+output, with control characters removed; agent text is untrusted and the TUI
+renders it inert. They can still contain whatever the agent wrote, so they
+are pruned after seven days. A kept queue holds the owner's queued prompts
+and is removed when the TUI leaves. Worktrees are created only on an
+explicit `worktree: true` (approved like the call) or the owner's
+`--worktree`, with fixed `git worktree add` arguments, `GIT_TERMINAL_PROMPT=0`,
+and a time limit; SCV removes one only on the owner's request, refusing
+uncommitted changes without `--force`, and never deletes branches. Removal
+accepts only a worktree under SCV's own `worktrees/` whose `.git` link and
+repository record agree.
 
 SCV never auto-invokes another agent after a refusal. A run whose model
 refused (`declined`) gets no availability `fallback` field. When the session

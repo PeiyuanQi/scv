@@ -51,6 +51,8 @@ pub(crate) struct ProtocolApprovalGate {
     pub(crate) broker: Arc<ApprovalBroker>,
     pub(crate) meta: TurnMeta,
     pub(crate) output: OutboundSender,
+    /// The session's place in the workbench, which shows it waiting.
+    pub(crate) workbench: Option<Arc<scv_tools::workbench::SessionHandle>>,
 }
 
 /// Decides a background job's nested approval requests, which outlive the
@@ -87,6 +89,7 @@ impl ApprovalGate for ProtocolApprovalGate {
         let approval_id = Uuid::new_v4().to_string();
         let (sender, receiver) = oneshot::channel();
         self.broker.insert(approval_id.clone(), sender).await;
+        let waiting = Waiting::new(self.workbench.as_ref(), &request.summary);
         let event = ServerEvent::ApprovalRequested {
             request_id: self.meta.request_id.clone(),
             session_id: self.meta.session_id.clone(),
@@ -110,12 +113,41 @@ impl ApprovalGate for ProtocolApprovalGate {
             self.broker.remove(&approval_id).await;
             return Err(error);
         }
-        tokio::select! {
+        let answer = tokio::select! {
             result = receiver => result.map_err(|_| AgentError::Cancelled),
             () = cancellation.cancelled() => {
                 self.broker.remove(&approval_id).await;
                 Err(AgentError::Cancelled)
             }
+        };
+        drop(waiting);
+        answer
+    }
+}
+
+/// The session shown waiting for its client's approval while this lives.
+struct Waiting<'a>(Option<&'a Arc<scv_tools::workbench::SessionHandle>>);
+
+impl<'a> Waiting<'a> {
+    fn new(
+        registration: Option<&'a Arc<scv_tools::workbench::SessionHandle>>,
+        summary: &str,
+    ) -> Self {
+        if let Some(registration) = registration {
+            let summary: String = summary.chars().take(200).collect();
+            registration.set_state(
+                scv_protocol::AgentState::AwaitingInput,
+                Some(format!("waiting for approval: {summary}")),
+            );
+        }
+        Self(registration)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Some(registration) = self.0 {
+            registration.set_state(scv_protocol::AgentState::Working, None);
         }
     }
 }

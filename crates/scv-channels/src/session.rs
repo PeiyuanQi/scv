@@ -137,6 +137,8 @@ impl Session {
                 auto_approve: Some(tools),
                 chat,
                 system_prompt: None,
+                persist_queue: None,
+                restore: None,
             })
             .await?;
         loop {

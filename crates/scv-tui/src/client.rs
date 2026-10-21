@@ -33,6 +33,10 @@ pub struct LaunchOptions {
 
 pub(crate) struct SessionInfo {
     pub(crate) id: String,
+    /// The user's `[tui.keys]`, from `session.started`.
+    pub(crate) keys: std::collections::BTreeMap<String, String>,
+    /// What the session restored from one that stopped.
+    pub(crate) restored: Option<scv_protocol::RestoredQueue>,
     pub(crate) cwd: String,
     pub(crate) model: String,
     pub(crate) context_max_tokens: usize,
@@ -69,6 +73,18 @@ impl Client {
         cwd: &Path,
         options: &LaunchOptions,
     ) -> Result<(Self, SessionInfo)> {
+        Self::connect_restoring(path, cwd, options, None).await
+    }
+
+    /// Connect and start a session that keeps its queue on disk, restoring
+    /// the queue of session `restore` when that one stopped with a daemon
+    /// restart or crash.
+    pub(crate) async fn connect_restoring(
+        path: &Path,
+        cwd: &Path,
+        options: &LaunchOptions,
+        restore: Option<String>,
+    ) -> Result<(Self, SessionInfo)> {
         tokio::time::timeout(SOCKET_TIMEOUT, async {
             let stream = UnixStream::connect(path).await.with_context(|| {
                 format!(
@@ -85,7 +101,17 @@ impl Client {
                 max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
                 decoder: frame_decoder(DEFAULT_SERVER_FRAME_LIMIT),
             };
-            client.initialize(cwd, options).await
+            client
+                .initialize(
+                    cwd,
+                    options,
+                    Start {
+                        name: "scv-tui",
+                        persist_queue: true,
+                        restore,
+                    },
+                )
+                .await
         })
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "server connection timed out"))?
@@ -122,15 +148,26 @@ impl Client {
             max_server_frame: DEFAULT_SERVER_FRAME_LIMIT,
             decoder: frame_decoder(DEFAULT_SERVER_FRAME_LIMIT),
         };
-        client.initialize(cwd, options).await
+        client
+            .initialize(
+                cwd,
+                options,
+                Start {
+                    name: "scv-exec",
+                    persist_queue: false,
+                    restore: None,
+                },
+            )
+            .await
     }
 
     async fn initialize(
         mut self,
         cwd: &Path,
         options: &LaunchOptions,
+        start: Start,
     ) -> Result<(Self, SessionInfo)> {
-        self.send(&ClientMessage::initialize("initialize", "scv-tui"))
+        self.send(&ClientMessage::initialize("initialize", start.name))
             .await?;
         match self.read_event().await? {
             Some(ServerEvent::Initialized { .. }) => {}
@@ -151,6 +188,8 @@ impl Client {
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: start.persist_queue.then_some(true),
+            restore: start.restore,
         })
         .await?;
         let session = match self.read_event().await? {
@@ -164,9 +203,13 @@ impl Client {
                 max_transcript_items,
                 max_prompt_history_bytes,
                 max_prompt_history_items,
+                keys,
+                restored,
                 ..
             }) => SessionInfo {
                 id: session_id,
+                keys,
+                restored,
                 cwd,
                 model,
                 context_max_tokens,
@@ -240,17 +283,37 @@ impl Client {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn reconnect_client(
     path: &Path,
     cwd: &Path,
     options: &LaunchOptions,
 ) -> (Client, SessionInfo) {
+    reconnect_restoring(path, cwd, options, None).await
+}
+
+/// Reconnect until a daemon answers, asking the new session to restore the
+/// queue of `restore`, the session the daemon had before it stopped.
+pub(crate) async fn reconnect_restoring(
+    path: &Path,
+    cwd: &Path,
+    options: &LaunchOptions,
+    restore: Option<String>,
+) -> (Client, SessionInfo) {
     loop {
-        if let Ok(connection) = Client::connect(path, cwd, options).await {
+        if let Ok(connection) = Client::connect_restoring(path, cwd, options, restore.clone()).await
+        {
             return connection;
         }
         tokio::time::sleep(RECONNECT_DELAY).await;
     }
+}
+
+/// How a client introduces itself and starts its session.
+struct Start {
+    name: &'static str,
+    persist_queue: bool,
+    restore: Option<String>,
 }
 
 pub(crate) fn is_transport_error(error: &anyhow::Error) -> bool {

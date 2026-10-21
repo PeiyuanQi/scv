@@ -144,6 +144,8 @@ async fn server_completes_a_streamed_turn_with_a_fake_provider() {
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     )
     .await;
@@ -253,6 +255,8 @@ async fn a_provider_stream_error_fails_the_turn_instead_of_completing_empty() {
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     )
     .await;
@@ -375,6 +379,8 @@ async fn tool_results_are_replayed_after_their_calls() {
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     )
     .await;
@@ -561,6 +567,8 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     )
     .await;
@@ -725,6 +733,8 @@ async fn tool_free_sessions_get_no_web_access() {
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     )
     .await;
@@ -838,6 +848,8 @@ async fn chat_sessions_attach_files_and_show_images() {
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     )
     .await;
@@ -1008,6 +1020,8 @@ async fn chat_sessions_carry_on_their_open_episode_and_can_search_their_log() {
             conversation: conversation.into(),
         }),
         system_prompt: None,
+        persist_queue: None,
+        restore: None,
     };
     // A log named with anything but plain parts is refused.
     send(&mut input, &start("../0a1b")).await;
@@ -1154,6 +1168,8 @@ async fn a_tool_free_session_may_replace_the_whole_system_prompt() {
         auto_approve: None,
         chat: None,
         system_prompt: Some(prompt.into()),
+        persist_queue: None,
+        restore: None,
     };
     for (no_tools, prompt) in [
         (None, "MAIL FRAME"),
@@ -1288,6 +1304,8 @@ async fn the_configured_reasoning_effort_reaches_the_provider_and_the_prompt() {
                 auto_approve: None,
                 chat: None,
                 system_prompt: None,
+                persist_queue: None,
+                restore: None,
             },
         )
         .await;

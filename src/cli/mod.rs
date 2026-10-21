@@ -8,6 +8,7 @@ pub(crate) mod common;
 pub(crate) mod config;
 pub(crate) mod confirm;
 pub(crate) mod daemon;
+pub(crate) mod jobs;
 pub(crate) mod mail;
 pub(crate) mod project;
 pub(crate) mod prompt;
@@ -119,6 +120,7 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf, layout: Layout) -> Result<()> {
         Command::Mail { command } => mail::mail(&layout, command).await,
         Command::Agents { command } => agents::agents(&layout, &overrides, command).await,
         Command::Project { command } => project::run(&layout, command, &cwd).await,
+        Command::Jobs { command } => jobs::run(&layout, command, &cwd).await,
         Command::BuildInfo => {
             println!("{}", serde_json::to_string(&scv_server::build_info())?);
             Ok(())

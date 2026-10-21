@@ -226,18 +226,26 @@ One tool, `agent`, hands work to another agent, and its `agent` argument names
 which one. SCV knows two Claude Code billing variants: claude (Anthropic
 API-key billing) and claude-ai (the owner's Claude subscription), plus Codex
 (`codex`),
-Grok Build (`grok`), DeepSeek Harness (`dsh`), and pi (`pi`), plus a nested
-SCV (`scv`, see [Nested SCV](#nested-scv-scv)). Claude Code, Codex, Grok
-Build, and DeepSeek Harness run over the
-[Agent Client Protocol](#agent-client-protocol-transport) when its server is
-installed. Each is one descriptor in `scv_tools::adapters` holding its default
+Grok Build (`grok`), DeepSeek Harness (`dsh`), pi (`pi`), Gemini CLI
+(`gemini`), Qwen Code (`qwen`), OpenCode (`opencode`), GitHub Copilot CLI
+(`copilot`), Cursor CLI (`cursor`), Amp (`amp`), and Kimi CLI (`kimi`), plus
+a nested SCV (`scv`, see [Nested SCV](#nested-scv-scv)). Claude Code, Codex,
+Grok Build, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, and Kimi CLI
+run over the [Agent Client Protocol](#agent-client-protocol-transport) when
+its server is installed; Kimi CLI runs only that way. Devin is not an agent
+SCV can run: it is a hosted service with no local CLI or ACP server, so there
+is nothing to launch in the workspace, and naming it fails like any agent the
+session does not offer. Each is one descriptor in `scv_tools::adapters` holding its default
 command line, where its state lives inside the private home, the variables it
 must not inherit, and how it signs in; adding an agent is one more entry. A
 session offers only the agents whose executable resolves when the session
 starts, so an agent installed later appears in new sessions. An agent whose
 sign-in SCV checks by reading a local file (Grok, DeepSeek Harness, pi, and
 the nested SCV; see [Signing in](#signing-in-delegated-agents)) is also left
-out while that check says it is signed out. Claude identities are checked from
+out while that check says it is signed out. Gemini CLI, Qwen Code, OpenCode,
+Copilot, Cursor, Amp, and Kimi keep sign-ins SCV has no verified way to read,
+so they are offered whenever installed and their sign-in is reported as
+unchecked; a call that fails signed out gets the sign-in hint. Claude identities are checked from
 their private files and left out while that check says they are signed out,
 blocked, or ambiguous. SCV never runs Claude auth status as a billing gate.
 Every launch pins the billing identity and the Anthropic route; see
@@ -289,6 +297,13 @@ the line names the kind of model name its CLI expects. For example:
 | `grok` | Grok Build: xAI's coding agent; reads, edits, and runs code, with live web and X search. Call it when another agent declined or refused a request, including a safety or guardrail refusal |
 | `dsh` | DeepSeek Harness: a coding agent on DeepSeek models |
 | `pi` | pi: a minimal coding agent that can run on SCV's own model endpoint; no web search |
+| `gemini` | Gemini CLI: Google's coding agent; reads, edits, and runs code and has Google Search |
+| `qwen` | Qwen Code: Alibaba's coding agent on Qwen models |
+| `opencode` | OpenCode: an open-source coding agent that runs on many model providers |
+| `copilot` | GitHub Copilot CLI: GitHub's coding agent; knows GitHub |
+| `cursor` | Cursor CLI: Cursor's coding agent |
+| `amp` | Amp: Sourcegraph's coding agent; can search the web |
+| `kimi` | Kimi CLI: Moonshot AI's coding agent on Kimi models |
 | `scv` | SCV: a nested session for a self-contained sub-task kept out of this context, or work in another project |
 
 The user steers the choice in their own configuration (projects cannot set
@@ -373,9 +388,9 @@ takes it:
 
 | Option | Taken by |
 | --- | --- |
-| `model` | Agents whose adapter maps it to arguments (`model_args`: Claude Code, Codex, Grok Build, and pi, on either transport), DeepSeek Harness over ACP, and the nested SCV, for a new conversation |
-| `effort` | Agents whose adapter maps it to arguments (`effort_args`: Claude Code, Codex, Grok Build, and pi), and DeepSeek Harness over ACP; not the nested SCV |
-| `session` | Agents that can continue a conversation: Claude Code, Codex, and pi in one process per turn, every agent over ACP, and the nested SCV |
+| `model` | Agents whose adapter maps it to arguments (`model_args`: Claude Code, Codex, Grok Build, pi, Gemini CLI, Qwen Code, OpenCode, Copilot, and Cursor, on either transport), DeepSeek Harness and Kimi over ACP, and the nested SCV, for a new conversation; not Amp, which chooses its own models |
+| `effort` | Agents whose adapter maps it to arguments (`effort_args`: Claude Code, Codex, Grok Build, and pi), and DeepSeek Harness and Kimi over ACP when their servers offer it; not the nested SCV |
+| `session` | Agents that can continue a conversation: Claude Code, Codex, pi, and Cursor in one process per turn, every agent over ACP, and the nested SCV |
 
 A call that passes one of them to an agent that does not take it fails before
 anything launches, naming the agents that do: `scv does not take effort; these
@@ -386,13 +401,39 @@ is never put to the user.
 `cwd` is optional: a directory inside the workspace, relative (such as a
 project directory) or absolute. It resolves, following symlinks, when the call
 runs and must be an existing directory under the workspace; otherwise the call
-fails without launching anything. Without it the agent runs in the workspace
-root. Running in a project directory is how a delegated agent picks up that
+fails without launching anything. A worktree SCV created for a job (below)
+counts as part of the workspace that holds its repository, so a later call
+may name it. Without `cwd` a new conversation runs in the workspace root and
+a continued one in its own directory. Running in a project directory is how a delegated agent picks up that
 project's `AGENTS.md` or `CLAUDE.md` and its skills (`.agents/skills` for
 Codex, `.claude/skills` for Claude Code), exactly as when the user starts the
 CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 (default 3600) and may be raised up to `tools.max_timeout_seconds` (default
 14400) for long work such as builds, releases, or landing a change.
+
+`worktree: true` runs a new conversation in a git worktree of its own, so its
+changes stay apart from the repository's checkout and from other jobs. When
+the call runs (after approval, whose summary says so), SCV finds the
+repository holding the resolved `cwd`, adds a worktree on a new branch
+`scv/<agent>-<6 hex>` from its current `HEAD` under
+`$SCV_HOME/worktrees/<repository>-<8 hex>/<agent>-<6 hex>`, and runs the agent
+in the same directory inside it (the worktree's top when that directory is
+not tracked). The result gains `"worktree":{"path","branch","repo"}`, and a
+background job records it, so the workbench groups jobs by worktree. A call
+whose `cwd` is not in a git repository fails before launching; `worktree`
+with `session` is refused before approval, since a continued conversation
+keeps its directory. SCV runs `git` only to add, list, and remove these
+worktrees, with fixed arguments, `GIT_TERMINAL_PROMPT=0`, and a 30-second
+limit; it never commits, merges, pushes, or deletes a branch. The worktree
+stays after the job, with the agent's work in it, until the owner removes it:
+
+```sh
+scv agents worktrees                              # each worktree, branch, repository, dirty or clean, and its jobs
+scv agents worktrees --remove <path> [--force]    # git worktree remove; uncommitted changes need --force
+```
+
+Removing keeps the branch and says how to delete it. Sessions offer
+`worktree` whenever they offer the `agent` tool.
 
 `no_timeout: true` runs a background call with no main deadline, for work that
 must run until it is done however long that takes. It is offered only when the
@@ -441,12 +482,17 @@ runs the same install the user's shell does.
 Native adapters receive an instance-private `HOME`, `SCV_HOME`, and XDG
 configuration/data/state directory, plus the agent's own state location inside
 it: `CODEX_HOME`, `GROK_HOME` (`.grok`), `DSH_HOME` (`.dsh`), or
-`PI_CODING_AGENT_DIR` (`.pi/agent`). Grok also gets
+`PI_CODING_AGENT_DIR` (`.pi/agent`). Gemini CLI, Qwen Code, OpenCode,
+Copilot, Cursor, Amp, and Kimi have no such variable and keep their state
+wherever they put it under the private `HOME` and XDG directories. Grok also gets
 `GROK_DISABLE_AUTOUPDATER=1`. Before those are set, SCV removes every inherited
 variable ending in `_API_KEY`, SCV's selector variables, and each adapter's
 credential, endpoint, and state variables (`ANTHROPIC_*` keys and tokens,
 `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `OPENAI_BASE_URL`,
-`CODEX_BASE_URL`, `GROK_*`, `DSH_*`, `DEEPSEEK_BASE_URL`, `PI_*`, and similar),
+`CODEX_BASE_URL`, `GROK_*`, `DSH_*`, `DEEPSEEK_BASE_URL`, `PI_*`, `GEMINI_*`,
+`GOOGLE_GENAI_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `QWEN_*`, `DASHSCOPE_*`,
+`OPENCODE_*`, `COPILOT_*`, `CURSOR_*`, `AMP_*`, `KIMI_*`, `MOONSHOT_*`, and
+similar),
 so no nested agent reuses the parent's configuration or another agent's
 credentials from outside its private home. The `bash` tool retains the normal
 inherited environment for compatibility.
@@ -627,8 +673,15 @@ log never reaches the parent model:
   file in a private `tmp` directory of Codex's agent home holding the final
   message, used if the stream carried none and deleted afterwards.
 - pi's `--mode json` gives the last assistant `message_end` text and usage.
-- Grok and DeepSeek Harness stay plain text: stdout is the reply. Grok's JSON
-  output exists but its success shape could not be verified signed out.
+- Gemini CLI's `--output-format stream-json` gives its `message` deltas (or a
+  whole message) as the reply, `result` usage, and `error` events; a single
+  `{"response":…}` object reads too.
+- Cursor CLI's `--output-format stream-json` and Amp's `--stream-json` follow
+  Claude Code's event shapes (`system` init with the session ID, `assistant`,
+  `result`), plus Cursor's `tool_call` events.
+- Grok, DeepSeek Harness, Qwen Code, OpenCode, and Copilot stay plain text:
+  stdout is the reply. Their JSON outputs exist but their success shapes
+  could not be verified here.
 
 Unknown events and fields are ignored, lines over 4 MiB are skipped, and a
 structured stream with no JSON at all falls back to its text. The tool result
@@ -664,7 +717,13 @@ clients see as `tool.progress` (see [protocol](protocol.md#tool-lifecycle-and-ap
   its interim text.
 - pi: `$ <command>` for bash, `<tool> <file>` for file tools, the tool name
   otherwise, and `<tool> failed` for a failed call.
-- Grok and DeepSeek Harness: none, since their output is plain text.
+- Gemini CLI: `$ <command>` for shell commands, `<tool> <file>` for file
+  tools, `search:`/`fetch` for web tools, the tool name otherwise, and
+  `<tool> failed` for a failed call.
+- Cursor: `$ <command>`, `<Tool> <file>` for file tools, the pattern of a
+  search, and the tool name otherwise. Amp: as Claude Code.
+- Grok, DeepSeek Harness, Qwen Code, OpenCode, and Copilot: none, since their
+  output is plain text.
 
 Lines never include command output. Paths show their last two components,
 URLs lose their query, and values that look like credentials (`Bearer` tokens,
@@ -686,15 +745,20 @@ a conversation needs no `agent`:
 | `claude`, `claude-ai` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
 | `codex` | nothing; the thread ID comes from `thread.started` | `codex exec resume … <thread-id> <prompt>` |
 | `pi` | `--session-id <uuid>` (chosen by SCV) | `--session-id <uuid>` |
+| `cursor` | nothing; the chat ID comes from its `system` init event | `--resume <chat-id>` |
 
-Grok and DeepSeek Harness start a fresh conversation on every call: their
-resume options could not be verified headless here, so in one process per
-turn they take no `session`, and a call that passes one fails before launch.
+Grok, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, Copilot, and Amp
+start a fresh conversation on every call in one process per turn: their resume
+options could not be verified headless here (Gemini CLI resumes by list
+index, which SCV cannot pin to one conversation), so they take no `session`
+that way, and a call that passes one fails before launch. Over ACP each of
+them that has a server continues conversations as usual.
 
 The model only ever sees handles. The CLI's own session IDs stay inside SCV,
 and a value that is not one of this session's handles, such as a raw vendor
-ID, is refused. A conversation keeps its agent and `cwd`: continuing it
-elsewhere is an error, so start a new one there instead. One turn runs at a
+ID, is refused. A conversation keeps its agent and `cwd`: a call that
+continues it without `cwd` runs there, and continuing it elsewhere is an
+error, so start a new one there instead. One turn runs at a
 time; a call that continues a conversation while a turn runs, or while
 prompts wait for it, follows the session's busy policy (see
 [Busy conversations](#busy-conversations)). A turn that
@@ -821,9 +885,12 @@ request would get in the foreground:
 So a WeChat, Feishu, or Slack owner's background agents get the approvals the owner's
 foreground turns get, while in the TUI, which asks a person, a background
 job's non-read-only requests are denied and it relies on the agent's own
-permissions, such as `permissions = "full"`. Jobs belong to their session:
+permissions, such as `permissions = "full"`, unless the owner is watching the
+[workbench](#the-workbench): then a request the session would deny waits up
+to two minutes for the owner's answer instead. Jobs belong to their session:
 closing it (a TUI or `scv exec` exiting, an idle channel conversation ending)
-cancels every job still running and kills its processes. A channel
+cancels every job still running and kills its processes, and the
+[job ledger](#the-workbench) records each as interrupted. A channel
 conversation stays open while its jobs run, and a full channel session table
 never closes it to make room.
 
@@ -863,8 +930,10 @@ A background call follows the same policy, so `background: true` never
 starts a second turn beside a running one. A [reviewed call](#reviewed-jobs)
 never steers or waits: it queues, or fails with `fail`. Without background jobs
 (`agent.max_background = 0`) nothing can queue, so `queue` refuses the call
-as busy. Queued prompts live only in the session's memory: a daemon restart
-or the end of the session drops them, as it cancels the session's jobs.
+as busy. Queued prompts run only in the session's memory: a daemon restart
+or the end of the session drops them, as it cancels the session's jobs, but
+each is a job in the [ledger](#the-workbench), recorded as interrupted, so the
+owner can still run it.
 
 ### Reviewed jobs
 
@@ -1321,8 +1390,11 @@ arguments: `--permission-mode bypassPermissions` for Claude Code (which also
 allows WebSearch and WebFetch), `--dangerously-bypass-approvals-and-sandbox -c
 web_search="live"` for Codex (`codex exec` has no `--search` flag), and
 `--always-approve` for Grok (web search is on by default); DeepSeek Harness
-gets `DSH_PERMISSION_MODE=danger-full-access`, and pi, which has no approval
-prompts, sandbox, or built-in web search, gets nothing. The approval summary
+gets `DSH_PERMISSION_MODE=danger-full-access`, Gemini CLI and Qwen Code get
+`--yolo`, Copilot `--allow-all-tools`, Cursor `--force`, and Amp
+`--dangerously-allow-all`, while pi, which has no approval prompts, sandbox,
+or built-in web search, and OpenCode and Kimi, whose permissions are their own
+configuration, get nothing. The approval summary
 then states `FULL PERMISSIONS`. See
 [Agent permissions](configuration.md#agent-permissions).
 
@@ -1338,7 +1410,117 @@ Adapter processes use instance-private state directories under
 `$SCV_HOME/agents/<name>`. In particular, `codex` receives
 `CODEX_HOME=$SCV_HOME/agents/codex` and does not read the user's normal
 `~/.codex` state, `claude` does not read `~/.claude`, and Grok, DeepSeek
-Harness, and pi never read `~/.grok`, `~/.dsh`, or `~/.pi`.
+Harness, pi, and the other CLIs never read `~/.grok`, `~/.dsh`, `~/.pi`, or
+the user's own state. `GH_TOKEN` and `GITHUB_TOKEN` are not removed for any
+agent, although Copilot also reads them: they are how `gh` and git hosting
+tools sign in, which every coding agent runs as part of its work.
+
+### The workbench
+
+The workbench is the daemon's view of every delegated agent and background
+job of the instance, and what the owner can do with them. The TUI dashboard
+([TUI](tui.md#dashboard)) and `scv jobs` show it; both talk to the daemon
+through [`daemon.control`](protocol.md#the-workbench). It is built from
+durable records every SCV process of the instance writes, so it lists jobs
+and runs of `scv exec` servers and of processes that stopped; it can act
+only on the daemon's own sessions (TUI chats, channel conversations, and its
+own workbench sessions below).
+
+**Activity logs.** Every delegated run (a CLI process for one turn, or an
+ACP server or nested SCV for a whole conversation) keeps two private files
+in `$SCV_HOME/state/runs`: `<handle>.jsonl`, an append-only log of events
+(the run's start, each turn's prompt, the agent's message text, its tool
+calls as the same redacted one-line summaries as progress, plans, approval
+requests and answers, prompts steered into a turn, each turn's outcome, and
+the run's end), and `<handle>.state.json`, what the run is doing now. Tool
+output is never logged. An event's text is at most 2,000 characters (a
+prompt 4,000), control characters are removed, and a log stops taking
+message and tool lines at 4 MiB, keeping turns, approvals, and the end.
+Logs are read in pages by byte position, so a reader follows a live run
+without reading it twice. Ended runs are kept seven days, and at most 500.
+
+**States.** A run or job is `starting`, `working`, `awaiting_input` (an
+approval request it relayed waits for an answer), `idle` (a live ACP agent
+or nested SCV between turns), `queued` (behind its conversation's running
+turn), `completed`, `failed`, `declined`, `timeout`, `cancelled`,
+`interrupted` (the SCV process running it stopped first), or `unknown`. Each
+comes with why: the approval's summary, the reason it stopped, or, for a
+working run that has reported nothing for five minutes, `unknown` with `no
+activity for N min` and its last line, because SCV cannot tell an agent
+thinking from one stuck. A CLI whose output says nothing until it finishes
+(plain-text agents) stays `working` with that explained instead. CLIs run
+headless cannot ask for input, so only agents that relay requests (ACP
+agents and nested SCVs) are ever `awaiting_input`.
+
+**Job ledger.** Every background job is recorded in
+`$SCV_HOME/state/jobs/<session>/<job>.json` (mode 0600) when it starts, when a
+queued job's turn begins, when it ends, and when its result is reported:
+agent, task, the prompt (up to 16 KiB) and other arguments, workspace, who
+started it (the model, or the owner), its conversation, worktree, state,
+and bounded reply or error. A job whose session closes unfinished is
+recorded `interrupted` then; one whose process died is found by the daemon
+at startup and every 60 seconds. Finished jobs are kept seven days. A
+session that comes back under its ID numbers its jobs after the recorded
+ones.
+
+**Owner actions.** The owner can, from the dashboard or `scv jobs`:
+
+- *start* a job of their own, `agent` call arguments (`agent`, `prompt`,
+  `cwd`, `model`, `effort`, `worktree`) checked exactly as the model's would
+  be. It runs as a background job of the daemon's workbench session for the
+  workspace, one per workspace (`workbench-<16 hex>`), configured like a TUI
+  session there and dropped after an hour without jobs. No approval is asked
+  for the launch, since the owner asked for it; no model is told about it,
+  and its result stays in the ledger and log. Background jobs must be on.
+- *send* a prompt to a job's or run's conversation: into its running turn
+  when the agent can take steering, else as its next turn, queued behind a
+  running one (`--queue` always queues; `--steer` fails when it cannot
+  steer). The turn runs as a job of the owner's in the conversation's
+  session.
+- *cancel* a running or queued job. A model's job the owner cancels is
+  reported to the model as `cancelled`, with a note that the user stopped
+  it, so it does not start it again unasked.
+- *resume* an interrupted job (not a reviewed one, whose journal is its
+  record, and only once). When the run that served it recorded the agent's
+  own session ID, the agent can continue from that alone (a CLI that resumes
+  by ID, or an ACP server that loads sessions), and its directory still
+  exists, the workbench session adopts that conversation and sends a turn
+  beginning `[SCV] SCV stopped before your last turn on this task finished`
+  with the task. Otherwise it runs the task again, beginning `[SCV] An
+  earlier attempt at this task was cut off`, in the job's worktree when it
+  is still there. A model or effort the agent does not take is left out, and
+  the job's timeout carries over. The new job is the owner's; the records
+  link each other (`resumed_as`, `resumed_from`).
+- *dismiss* a finished or interrupted job's record, and *approve* or *deny*
+  an approval request a job waits on.
+
+**Attended approvals.** A background job's relayed approval request normally
+gets the session's unattended answer at once (above). While the owner
+watches (a dashboard has asked for the workbench in the last 15 seconds), a
+request that answer would deny waits up to two minutes for the owner
+instead, listed with its ID, risk, summary, and deadline; with no answer it
+is denied as before. A request the session approves unasked is not held,
+and the owner's answer is the one the TUI would have asked for in the
+foreground, so nothing gets more than it would there.
+
+```sh
+scv jobs                                  # unfinished jobs, live runs, approvals, restorable queues
+scv jobs list --all                       # also finished jobs and ended runs
+scv jobs log job-3 [--follow]             # a job's activity (or a run handle such as codex-3f9a2c)
+scv jobs start --agent codex [--cwd DIR] [--model M] [--effort E] [--worktree] "PROMPT"
+scv jobs send job-3 "PROMPT" [--queue | --steer]
+scv jobs cancel job-3
+scv jobs resume job-3
+scv jobs dismiss job-3
+scv jobs approve <id> | scv jobs deny <id>
+```
+
+A job is named `job-3` when one session has it, else `<session prefix>/job-3`.
+Listing and logs read the records on disk when no daemon runs; acting needs a
+daemon of this release. Inside a delegated run, `scv jobs` only reads: the
+workbench acts for the owner, so a delegated agent cannot start, steer,
+cancel, resume, or approve through it (cooperative, like the other
+[delegated-run limits](security.md#delegated-runs)).
 
 ### Nested SCV (`scv`)
 
@@ -1416,7 +1598,8 @@ work.
 
 ### Agent Client Protocol transport
 
-Claude Code, Codex, Grok Build, and DeepSeek Harness also speak the
+Claude Code, Codex, Grok Build, DeepSeek Harness, Gemini CLI, Qwen Code,
+OpenCode, and Kimi CLI also speak the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP, version 1):
 JSON-RPC 2.0 over stdio, one long-running server per conversation. SCV
 prefers it when the server is installed, because it relays the agent's own
@@ -1429,9 +1612,16 @@ permission requests and reports progress as it happens:
 | `codex` | `codex-acp` | npm `@agentclientprotocol/codex-acp` (ACP organisation) |
 | `grok` | `grok agent stdio` | built in |
 | `dsh` | `dsh --profile acp` | built in (0.1.7-rc.1) |
+| `gemini` | `gemini --experimental-acp` | built in |
+| `qwen` | `qwen --experimental-acp` | built in (a Gemini CLI fork) |
+| `opencode` | `opencode acp` | built in |
+| `kimi` | `kimi --acp` | built in |
 
-pi has only a community adapter and stays on one process per turn, and the
-`scv` agent speaks SCV's own protocol. `[agents.<name>] transport`
+pi has only a community adapter and stays on one process per turn; Copilot,
+Cursor, and Amp have no ACP server SCV has verified and do the same; and the
+`scv` agent speaks SCV's own protocol. Kimi CLI's one-prompt mode is not
+verified, so it runs over ACP only: `auto` then requires its server like
+`acp`, and `transport = "resume"` is a configuration error. `[agents.<name>] transport`
 chooses: `auto` (the default) uses the ACP server when it resolves (on `PATH`
 or in `~/.local/bin`) and the agent's `command` is the built-in one, and
 otherwise one CLI process per turn; `acp` requires the server and offers the
@@ -1497,7 +1687,10 @@ nowhere. Between turns SCV sends no steering request.
 - `permissions = "full"` maps onto each agent's own switch: Claude's
   `bypassPermissions` and Codex's `agent-full-access` session modes (selected
   with `session/set_mode` in every new session), `grok agent --always-approve
-  stdio`, and DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`. A
+  stdio`, DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`, and
+  `--yolo` before `--experimental-acp` for Gemini CLI and Qwen Code. OpenCode
+  and Kimi have no such switch (their permissions are their own
+  configuration), so their requests are relayed. A
   permission request that still arrives is relayed as usual. `codex-acp` takes
   no `-c` overrides, so for Codex `"full"` also sets
   `CODEX_CONFIG={"web_search":"live"}` on the ACP server, its JSON form of
@@ -1509,6 +1702,12 @@ nowhere. Between turns SCV sends no steering request.
   error fails it with the agent's redacted message as its `error` and, when
   that reads like a sign-in problem (including `session/new`'s "Authentication
   required"), the `scv agents login <name>` hint.
+- A conversation an [interrupted job](#the-workbench) ran is continued in a
+  new server with `session/load {sessionId, cwd, mcpServers: []}` when
+  `initialize` advertised `agentCapabilities.loadSession`. History the server
+  replays while loading is not shown or logged. A server that does not offer
+  it fails the resumed job with that reason before any prompt is sent; the
+  owner then starts the task again.
 - A cancelled or timed-out call sends `session/cancel`; an agent that answers
   within 2 seconds keeps the conversation (a timed-out turn is resumable),
   otherwise it is shut down and the conversation forgotten. A permission
@@ -1544,6 +1743,13 @@ scv agents login dsh                     # prompts for a DeepSeek API key
 scv agents login pi                      # opens pi: run /login, then /quit
 scv agents login pi --openai-compatible  # or point pi at any OpenAI-compatible endpoint
 scv agents import pi --from-scv-provider # or reuse SCV's own provider
+scv agents login gemini                  # opens Gemini CLI: choose how to sign in, then /quit
+scv agents login qwen                    # opens Qwen Code the same way
+scv agents login opencode                # opencode auth login
+scv agents login copilot                 # opens Copilot CLI: run /login, then /exit
+scv agents login cursor                  # cursor-agent login
+scv agents login amp                     # amp login
+scv agents login kimi                    # opens Kimi CLI: /setup or /login, then /exit
 scv agents status                        # every agent's sign-in state
 scv agents check                         # does each one work as SCV runs it?
 scv agents logout claude                 # removes only the API key file
@@ -1602,6 +1808,14 @@ and records a digest of what it copied, never the content, in
 `scv config show` then compare the source with that digest and print either
 `up to date` or that the source has changed since, with the import command to
 run; see [imported agent setups](configuration.md#imported-agent-setups).
+
+Gemini CLI, Qwen Code, Copilot, and Kimi sign in inside their own interactive
+CLI, which `login` opens in the private home with a hint naming the steps;
+OpenCode, Cursor, and Amp have sign-in commands, which `login` runs there.
+`logout` runs their sign-out command, or opens the CLI with a hint naming
+its own. SCV reads none of their credential files, so `scv agents status`
+says their sign-in is not checked and names `scv agents check <name>`, which
+finds out by calling the agent.
 
 DeepSeek Harness signs in with an API key only. `scv agents login dsh` reads
 it without echo, or from stdin when stdin is not a terminal, and writes it as
@@ -1775,6 +1989,15 @@ that passes an unlisted model through. It shows a check call returning only
 after the server and a process it left behind are gone. Unit tests cover
 reading, sanitizing, and invalidating the saved file. A fake `dsh` covers
 `scv agents check` end to end, both a passing call and a signed-out one.
+Canned Gemini CLI, Cursor, and Amp event streams cover their replies,
+sessions, and progress lines; the adapter table's tests cover each new
+agent's arguments, removed variables, and that Kimi runs over ACP only. The
+workbench's unit tests cover activity logs (paging, truncation, quiet and
+orphaned runs), the job ledger (records, interruption, pruning, numbering),
+snapshots, owner start, send, cancel, and resume, attended approvals, and
+worktrees in a scratch repository; integration tests run an owner job from
+`scv jobs` against a daemon and resume a job a SIGKILLed daemon interrupted
+through the agent's own conversation.
 
 ## Tool extension contract
 

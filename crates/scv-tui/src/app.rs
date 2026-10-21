@@ -66,11 +66,14 @@ pub(crate) struct App {
     pub(crate) skipped_events: u64,
     pub(crate) connected: bool,
     pub(crate) quit: bool,
+    /// What the session restored from one that stopped, until shown.
+    pub(crate) restored: Option<scv_protocol::RestoredQueue>,
 }
 
 impl App {
     pub(crate) fn new(session: SessionInfo) -> Self {
         Self {
+            restored: session.restored,
             session_id: session.id,
             cwd: session.cwd,
             model: session.model,
@@ -114,6 +117,7 @@ impl App {
     }
 
     pub(crate) fn reconnect(&mut self, session: SessionInfo) {
+        self.restored = session.restored;
         self.session_id = session.id;
         self.cwd = session.cwd;
         self.model = session.model;
@@ -140,7 +144,7 @@ impl App {
         self.history_index = None;
         self.prompt_history.trim();
         self.push_item(TranscriptItem::System(
-            "Reconnected with a fresh session. Prior transcript is display-only; server history was not restored. Interrupted prompts and queued work were not replayed.".into(),
+            "Reconnected with a fresh session. Prior transcript is display-only; server history was not restored. The interrupted prompt was not replayed; queued prompts come back paused only when the daemon kept them across its restart.".into(),
         ));
         self.items.trim();
     }

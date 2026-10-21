@@ -18,13 +18,14 @@ use crate::{
     AgentAdapterConfig, AgentAuthPlan, DelegationContext,
     args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
+        activity::{RunHeader, RunTransport},
         adapters::{self, OutputFormat, Resume},
         agent::{Accepts, Backend},
         conversation::{self, ConversationStore},
         output::{self, AgentStream, RunExit, STDERR_TAIL_BYTES, TailBuffer, add_sign_in_hint},
         records::{self, DelegationGuard, DelegationRegistry},
         request::{
-            AgentArgs, resolve_agent_cwd, valid_effort, valid_model_name, validate_agent_cwd,
+            AgentArgs, resolve_call_cwd, valid_effort, valid_model_name, validate_agent_cwd,
         },
     },
     process::{ProcessSpec, child_pid, drain_output, spawn_process, supervise},
@@ -52,6 +53,8 @@ pub(crate) struct NativeAgentTool {
     delegation: Option<DelegationContext>,
     conversations: Arc<ConversationStore>,
     auth: AgentAuthPlan,
+    /// Where worktrees SCV created live, which a call may name as `cwd`.
+    worktrees: Option<PathBuf>,
 }
 
 impl NativeAgentTool {
@@ -160,7 +163,14 @@ impl NativeAgentTool {
             delegation,
             conversations,
             auth: config.auth,
+            worktrees: None,
         }
+    }
+
+    /// Let calls name directories in the worktrees SCV created under `root`.
+    pub(crate) fn with_worktrees(mut self, root: Option<PathBuf>) -> Self {
+        self.worktrees = root;
+        self
     }
 
     /// Arguments that name per-run files or IDs, placed after the fixed and
@@ -178,9 +188,12 @@ impl NativeAgentTool {
                 let file = dir.join(format!("scv-{id}.last-message"));
                 (vec!["-o".into(), file.clone().into()], Some(file))
             }
-            OutputFormat::Text | OutputFormat::ClaudeStreamJson | OutputFormat::PiJson => {
-                (Vec::new(), None)
-            }
+            OutputFormat::Text
+            | OutputFormat::ClaudeStreamJson
+            | OutputFormat::PiJson
+            | OutputFormat::GeminiStreamJson
+            | OutputFormat::CursorStreamJson
+            | OutputFormat::AmpStreamJson => (Vec::new(), None),
         }
     }
 }
@@ -261,6 +274,10 @@ impl Backend for NativeAgentTool {
             .is_some_and(|h| self.conversations.is_busy(h)))
     }
 
+    fn adoptable(&self) -> bool {
+        self.resume.is_supported()
+    }
+
     async fn wait_idle(
         &self,
         arguments: &Value,
@@ -285,7 +302,14 @@ impl Backend for NativeAgentTool {
             args.no_timeout,
             context.background_job,
         )?;
-        let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
+        let cwd = resolve_call_cwd(
+            &context.workspace,
+            self.worktrees.as_deref(),
+            args.cwd.as_deref(),
+            args.session
+                .as_deref()
+                .and_then(|handle| self.conversations.cwd(handle)),
+        )?;
         let executable = self.resolved.as_ref().ok_or_else(|| {
             ToolError::unavailable(format!(
                 "{} executable {:?} was not found on PATH or in the user's install directories",
@@ -332,6 +356,33 @@ impl Backend for NativeAgentTool {
             || uuid::Uuid::new_v4().simple().to_string(),
             |pending| pending.handle.clone(),
         );
+        let activity =
+            self.delegation
+                .as_ref()
+                .zip(pending.as_ref())
+                .and_then(|(delegation, pending)| {
+                    delegation.registry.open_activity(RunHeader {
+                        handle: pending.handle.clone(),
+                        agent: agent.to_owned(),
+                        session: delegation.session.clone(),
+                        transport: RunTransport::Cli,
+                        cwd: cwd.clone(),
+                        conversation: turn.as_ref().map(|turn| (turn.handle.clone(), turn.turn)),
+                        streams: self.output != OutputFormat::Text,
+                    })
+                });
+        if let Some(activity) = &activity {
+            activity.turn_started(
+                turn.as_ref().map(|turn| turn.handle.as_str()),
+                turn.as_ref().map_or(1, |turn| turn.turn),
+                &args.prompt,
+                context.job.as_deref(),
+            );
+            // A session ID SCV chose, or the one a continued turn resumes.
+            if let Some(vendor) = turn.as_ref().and_then(|turn| turn.vendor.as_deref()) {
+                activity.set_vendor(vendor);
+            }
+        }
         let fixed_len = self.args.len()
             + if matches!(self.auth, AgentAuthPlan::Claude { .. }) {
                 2
@@ -413,7 +464,8 @@ impl Backend for NativeAgentTool {
                     AgentAuthPlan::Claude { mode, .. } => *mode,
                     AgentAuthPlan::None => adapters::AgentAuth::None,
                 })
-                .with_progress(context.progress),
+                .with_progress(context.progress)
+                .with_activity(activity.clone()),
             registration,
             context.cancellation,
         )
@@ -421,7 +473,22 @@ impl Backend for NativeAgentTool {
         let fallback = last_message
             .as_deref()
             .and_then(|path| take_file(path, self.output_limit));
-        let run = run?;
+        let run = match run {
+            Ok(run) => run,
+            Err(error) => {
+                if let Some(activity) = &activity {
+                    let status = if error.kind == scv_core::ToolFailure::Cancelled {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    };
+                    activity.turn_ended(status, Some(&error.message));
+                    activity.run_ended("lost");
+                }
+                return Err(error);
+            }
+        };
+        let killed = run.exit == RunExit::Killed;
         let mut result = run.stream.finish(run.exit, fallback);
         // A failed CLI's stderr is its own diagnostics, never the reply.
         let stderr = run.stderr_tail.trim();
@@ -436,6 +503,13 @@ impl Backend for NativeAgentTool {
                 Some(error) => format!("{error}\n{stderr}"),
                 None => stderr.to_owned(),
             });
+        }
+        if let Some(activity) = &activity {
+            if let Some(vendor) = &result.session {
+                activity.set_vendor(vendor);
+            }
+            activity.turn_ended(result.status.as_str(), result.error.as_deref());
+            activity.run_ended(if killed { "killed" } else { "exited" });
         }
         let conversation = turn.and_then(|turn| {
             let number = turn.turn;

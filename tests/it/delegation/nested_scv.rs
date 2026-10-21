@@ -274,6 +274,8 @@ impl Parent {
                 auto_approve: None,
                 chat: None,
                 system_prompt: None,
+                persist_queue: None,
+                restore: None,
             })
             .await;
         parent.session_id = loop {

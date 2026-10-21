@@ -1,0 +1,521 @@
+//! Unit tests for `src/workbench.rs`.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_trait::async_trait;
+use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
+use scv_protocol::JobOrigin;
+use tokio::sync::Notify;
+
+use super::*;
+use crate::delegate::{
+    activity::{RunActivity, RunHeader, RunTransport},
+    agent::{Accepts, AgentTool, Backend},
+    background::ledger::{JobLedger, JobRecord},
+    records::ProcessIdentity,
+};
+
+struct Bench {
+    _dir: tempfile::TempDir,
+    layout: Layout,
+    workbench: Arc<Workbench>,
+}
+
+fn bench() -> Bench {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout::new(dir.path());
+    let registry = Arc::new(DelegationRegistry::for_test(&layout));
+    Bench {
+        workbench: Workbench::new(&layout, registry),
+        layout,
+        _dir: dir,
+    }
+}
+
+fn record(session: &str, job: &str, state: AgentState, owner: ProcessIdentity) -> JobRecord {
+    JobRecord {
+        v: 1,
+        session: session.into(),
+        job: job.into(),
+        agent: "codex".into(),
+        task: "Fix it".into(),
+        prompt: "Fix it\nfully".into(),
+        arguments: json!({"agent":"codex","cwd":"shop","effort":"high"}),
+        workspace: PathBuf::from("/w"),
+        label: "TUI".into(),
+        started_by: JobOrigin::Model,
+        reviewed: false,
+        owner,
+        state,
+        created_unix: 10,
+        updated_unix: 10,
+        finished_unix: None,
+        conversation: None,
+        worktree: None,
+        reply: None,
+        error: None,
+        reported: false,
+        interrupted: None,
+        resumed_as: None,
+        resumed_from: None,
+    }
+}
+
+fn dead() -> ProcessIdentity {
+    ProcessIdentity {
+        pid: u32::MAX - 3,
+        start_time: 1,
+    }
+}
+
+fn run(
+    bench: &Bench,
+    handle: &str,
+    session: &str,
+    job: &str,
+    owner: ProcessIdentity,
+) -> RunActivity {
+    let activity = RunActivity::open(
+        &bench.layout.runs(),
+        owner,
+        RunHeader {
+            handle: handle.into(),
+            agent: "codex".into(),
+            session: session.into(),
+            transport: RunTransport::Cli,
+            cwd: PathBuf::from("/w/shop"),
+            conversation: Some(("codex-1".into(), 1)),
+            streams: true,
+        },
+    )
+    .unwrap();
+    activity.turn_started(Some("codex-1"), 1, "Fix it", Some(job));
+    activity
+}
+
+#[test]
+fn a_snapshot_joins_jobs_with_their_runs_and_finds_interrupted_ones() {
+    let bench = bench();
+    let me = ProcessIdentity::current().unwrap();
+    let jobs = bench.layout.jobs();
+    ledger::save(
+        &jobs,
+        &record("other-session", "job-1", AgentState::Working, dead()),
+    )
+    .unwrap();
+    ledger::save(
+        &jobs,
+        &record("other-session", "job-2", AgentState::Working, me),
+    )
+    .unwrap();
+    let mut done = record("other-session", "job-3", AgentState::Failed, me);
+    done.error = Some("tests fail\nmore".into());
+    ledger::save(&jobs, &done).unwrap();
+    let live = run(&bench, "codex-0000a1", "other-session", "job-2", me);
+    live.tool("$ cargo test");
+    let snapshot = bench.workbench.snapshot();
+    let job = |name: &str| {
+        snapshot
+            .jobs
+            .iter()
+            .find(|job| job.job == name)
+            .unwrap()
+            .clone()
+    };
+    let crashed = job("job-1");
+    assert_eq!(crashed.state, AgentState::Interrupted);
+    assert!(crashed.resumable);
+    // job-2's own process (this one) still runs it, but its session is not
+    // live here, so it ended with that session.
+    let orphan = job("job-2");
+    assert_eq!(orphan.state, AgentState::Interrupted);
+    assert_eq!(orphan.run.as_deref(), Some("codex-0000a1"));
+    assert_eq!(orphan.cwd, "/w/shop");
+    assert_eq!(orphan.conversation.as_deref(), Some("codex-1"));
+    let failed = job("job-3");
+    assert_eq!(failed.state, AgentState::Failed);
+    assert_eq!(failed.detail.as_deref(), Some("tests fail"));
+    assert_eq!(failed.cwd, "/w/shop");
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == "other-session")
+        .unwrap();
+    assert_eq!(session.label, "TUI");
+    assert_eq!(snapshot.runs[0].handle, "codex-0000a1");
+}
+
+/// An agent that finishes when released.
+struct Waiting {
+    release: Arc<Notify>,
+    ran: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Backend for Waiting {
+    fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
+        Ok(ToolRisk::Delegate)
+    }
+    fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
+        Ok(String::new())
+    }
+    fn adoptable(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.ran.store(true, Ordering::SeqCst);
+        tokio::select! {
+            () = self.release.notified() => Ok(ToolOutput::success(
+                json!({"agent":"codex","status":"completed","reply":arguments["prompt"],"session":arguments.get("session").cloned().unwrap_or(json!("codex-1"))})
+                    .to_string(),
+            )),
+            () = context.cancellation.cancelled() => Err(ToolError::cancelled("cancelled")),
+        }
+    }
+}
+
+/// A live session of this process with an `agent` tool offering
+/// [`Waiting`] as `codex`.
+struct Live {
+    _handle: SessionHandle,
+    tool: Arc<BackgroundCapable>,
+    jobs: Arc<BackgroundJobs>,
+    release: Arc<Notify>,
+}
+
+fn live(bench: &Bench, session: &str) -> Live {
+    let handle = bench
+        .workbench
+        .register_session(session, "TUI", Path::new("/w"));
+    let release = Arc::new(Notify::new());
+    let jobs = Arc::new(BackgroundJobs::new(4, None).with_ledger(
+        JobLedger::new(&bench.layout.jobs(), session, "TUI", Path::new("/w")).unwrap(),
+    ));
+    let accepts = Accepts {
+        session: true,
+        ..Accepts::default()
+    };
+    let tool = Arc::new(BackgroundCapable::plain(
+        Arc::new(AgentTool::beside(
+            "codex",
+            Arc::new(Waiting {
+                release: Arc::clone(&release),
+                ran: Arc::default(),
+            }),
+            accepts,
+            &[],
+        )),
+        Arc::clone(&jobs),
+    ));
+    bench
+        .workbench
+        .attach(session, Arc::downgrade(&tool), Arc::downgrade(&jobs));
+    Live {
+        _handle: handle,
+        tool,
+        jobs,
+        release,
+    }
+}
+
+#[tokio::test]
+async fn the_owner_starts_sends_to_and_stops_jobs_of_live_sessions() {
+    let bench = bench();
+    let live = live(&bench, "session-a");
+    let started = bench
+        .workbench
+        .start("session-a", json!({"agent":"codex","prompt":"look"}))
+        .await
+        .unwrap();
+    assert_eq!(started, "session-a/job-1");
+    let snapshot = bench.workbench.snapshot();
+    let job = &snapshot.jobs[0];
+    assert_eq!(job.started_by, JobOrigin::Owner);
+    assert_eq!(job.state, AgentState::Working);
+    assert_eq!(snapshot.sessions[0].id, "session-a");
+    assert!(snapshot.sessions[0].live);
+    // Sending to a conversation that is not this session's fails cleanly.
+    assert!(
+        bench
+            .workbench
+            .send("nobody", "codex-1", "hi", SendMode::Auto)
+            .await
+            .unwrap_err()
+            .contains("does not run in this daemon")
+    );
+    let note = bench.workbench.cancel("session-a", "job-1").unwrap();
+    assert!(note.contains("Stopping job-1"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while live.jobs.running() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        ledger::load(&bench.layout.jobs(), "session-a", "job-1")
+            .unwrap()
+            .state,
+        AgentState::Cancelled
+    );
+    // A finished job can be forgotten; a running one cannot.
+    bench
+        .workbench
+        .start("session-a", json!({"agent":"codex","prompt":"two"}))
+        .await
+        .unwrap();
+    assert!(bench.workbench.dismiss("session-a", "job-2").is_err());
+    assert!(bench.workbench.dismiss("session-a", "job-1").is_ok());
+    assert!(ledger::load(&bench.layout.jobs(), "session-a", "job-1").is_none());
+    live.release.notify_waiters();
+    drop(live.tool);
+}
+
+/// An unattended gate that always answers `answer`.
+struct Fixed(bool);
+
+#[async_trait]
+impl ApprovalGate for Fixed {
+    async fn approve(
+        &self,
+        _request: ApprovalRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<bool, AgentError> {
+        Ok(self.0)
+    }
+}
+
+fn request() -> ApprovalRequest {
+    ApprovalRequest {
+        call_id: "job-7".into(),
+        name: "agent".into(),
+        risk: scv_core::ToolRisk::Process,
+        cwd: PathBuf::from("/w"),
+        summary: "[codex-1 acp] Run make deploy (execute)".into(),
+    }
+}
+
+#[tokio::test]
+async fn a_watched_background_request_waits_for_the_owner_and_never_loses_an_approval() {
+    let bench = bench();
+    // What the session approves unattended is never held.
+    let allowing = bench.workbench.attended_gate("s", Arc::new(Fixed(true)));
+    bench.workbench.watch();
+    assert!(
+        allowing
+            .approve(request(), CancellationToken::new())
+            .await
+            .unwrap()
+    );
+    assert_eq!(bench.workbench.snapshot().approvals, []);
+
+    let denying = bench.workbench.attended_gate("s", Arc::new(Fixed(false)));
+    let asked = tokio::spawn({
+        let denying = Arc::clone(&denying);
+        async move { denying.approve(request(), CancellationToken::new()).await }
+    });
+    let id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(approval) = bench.workbench.snapshot().approvals.pop() {
+                break approval;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        (id.session.as_str(), id.job.as_str(), id.risk.as_str()),
+        ("s", "job-7", "process")
+    );
+    let note = bench.workbench.approve(&id.id, true).unwrap();
+    assert!(note.starts_with("Approved job-7"), "{note}");
+    assert!(asked.await.unwrap().unwrap());
+    assert!(bench.workbench.approve(&id.id, true).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_or_unwatched_request_gets_the_unattended_answer() {
+    let bench = bench();
+    let denying = bench.workbench.attended_gate("s", Arc::new(Fixed(false)));
+    // Nobody watches: denied at once.
+    assert!(
+        !denying
+            .approve(request(), CancellationToken::new())
+            .await
+            .unwrap()
+    );
+    bench.workbench.watch();
+    let asked = tokio::spawn({
+        let denying = Arc::clone(&denying);
+        async move { denying.approve(request(), CancellationToken::new()).await }
+    });
+    tokio::time::sleep(ATTENDED_WAIT + Duration::from_secs(1)).await;
+    assert!(!asked.await.unwrap().unwrap());
+    assert_eq!(bench.workbench.snapshot().approvals, []);
+    // A cancelled request is withdrawn.
+    bench.workbench.watch();
+    let cancellation = CancellationToken::new();
+    let asked = tokio::spawn({
+        let denying = Arc::clone(&denying);
+        let cancellation = cancellation.clone();
+        async move { denying.approve(request(), cancellation).await }
+    });
+    tokio::task::yield_now().await;
+    cancellation.cancel();
+    assert!(matches!(asked.await.unwrap(), Err(AgentError::Cancelled)));
+    assert_eq!(bench.workbench.snapshot().approvals, []);
+}
+
+#[tokio::test]
+async fn an_interrupted_job_resumes_its_agents_own_conversation_once() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let mut crashed = record("old-session", "job-4", AgentState::Interrupted, dead());
+    crashed.interrupted = Some("the SCV process that ran it stopped".into());
+    ledger::save(&jobs, &crashed).unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+    let activity = RunActivity::open(
+        &bench.layout.runs(),
+        dead(),
+        RunHeader {
+            handle: "codex-00f00d".into(),
+            agent: "codex".into(),
+            session: "old-session".into(),
+            transport: RunTransport::Cli,
+            cwd: workdir.path().to_owned(),
+            conversation: Some(("codex-3".into(), 2)),
+            streams: true,
+        },
+    )
+    .unwrap();
+    activity.turn_started(Some("codex-3"), 2, "Fix it", Some("job-4"));
+    activity.set_vendor("019a-thread-id");
+    std::mem::forget(activity);
+
+    let host = live(&bench, "workbench-host");
+    let resumed = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-4")
+        .await
+        .unwrap();
+    assert_eq!(resumed, "workbench-host/job-1");
+    let new = ledger::load(&jobs, "workbench-host", "job-1").unwrap();
+    assert_eq!(new.resumed_from.as_deref(), Some("old-session/job-4"));
+    assert_eq!(new.started_by, JobOrigin::Owner);
+    // It continues the adopted conversation, told it was cut off.
+    assert_eq!(new.arguments["session"], "codex-1");
+    assert!(
+        new.prompt
+            .starts_with("[SCV] SCV stopped before your last turn"),
+        "{}",
+        new.prompt
+    );
+    assert!(new.prompt.ends_with("Fix it\nfully"));
+    let old = ledger::load(&jobs, "old-session", "job-4").unwrap();
+    assert_eq!(old.resumed_as.as_deref(), Some("workbench-host/job-1"));
+    let again = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-4")
+        .await
+        .unwrap_err();
+    assert!(again.contains("already resumed"), "{again}");
+    host.release.notify_waiters();
+}
+
+#[tokio::test]
+async fn a_job_without_a_saved_conversation_starts_over_and_a_running_one_is_refused() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    ledger::save(
+        &jobs,
+        &record("old", "job-1", AgentState::Interrupted, dead()),
+    )
+    .unwrap();
+    let me = ProcessIdentity::current().unwrap();
+    ledger::save(&jobs, &record("busy", "job-1", AgentState::Completed, me)).unwrap();
+    let mut reviewed = record("old", "job-2", AgentState::Interrupted, dead());
+    reviewed.reviewed = true;
+    ledger::save(&jobs, &reviewed).unwrap();
+    let _host = live(&bench, "host");
+    let resumed = bench
+        .workbench
+        .resume("host", "old", "job-1")
+        .await
+        .unwrap();
+    let new = ledger::load(&jobs, "host", resumed.split('/').nth(1).unwrap()).unwrap();
+    assert_eq!(new.arguments["agent"], "codex");
+    assert_eq!(new.arguments["cwd"], "shop");
+    assert!(new.arguments.get("session").is_none());
+    assert!(
+        new.prompt.starts_with("[SCV] An earlier attempt"),
+        "{}",
+        new.prompt
+    );
+    assert!(
+        bench
+            .workbench
+            .resume("host", "busy", "job-1")
+            .await
+            .unwrap_err()
+            .contains("not interrupted")
+    );
+    assert!(
+        bench
+            .workbench
+            .resume("host", "old", "job-2")
+            .await
+            .unwrap_err()
+            .contains("reviewed job")
+    );
+}
+
+#[test]
+fn maintenance_settles_what_dead_processes_left_and_hosts_are_stable() {
+    let bench = bench();
+    ledger::save(
+        &bench.layout.jobs(),
+        &record("s", "job-1", AgentState::Working, dead()),
+    )
+    .unwrap();
+    std::mem::forget(run(&bench, "codex-0000b2", "s", "job-1", dead()));
+    let done = bench.workbench.maintain();
+    assert_eq!(done.interrupted_jobs, vec!["s/job-1".to_owned()]);
+    assert_eq!(done.interrupted_runs, vec!["codex-0000b2".to_owned()]);
+    assert_eq!(bench.workbench.maintain(), Maintenance::default());
+    let host = host_session(Path::new("/w/project"));
+    assert!(host.starts_with("workbench-") && host.len() == "workbench-".len() + 16);
+    assert_eq!(host, host_session(Path::new("/w/project")));
+    assert_ne!(host, host_session(Path::new("/w/other")));
+    assert!(ledger::valid_name(&host));
+}
+
+#[test]
+fn a_session_state_shows_until_its_handle_drops() {
+    let bench = bench();
+    let handle = bench
+        .workbench
+        .register_session("s1", "WeChat", Path::new("/w"));
+    handle.set_state(
+        AgentState::AwaitingInput,
+        Some("waiting for approval: x".into()),
+    );
+    let session = bench.workbench.snapshot().sessions.pop().unwrap();
+    assert_eq!(
+        (session.label.as_str(), session.state, session.live),
+        ("WeChat", AgentState::AwaitingInput, true)
+    );
+    drop(handle);
+    assert_eq!(bench.workbench.snapshot().sessions, []);
+    assert!(
+        bench
+            .workbench
+            .run_log("codex-ffffff", 0, 10)
+            .unwrap_err()
+            .contains("no activity log")
+    );
+}

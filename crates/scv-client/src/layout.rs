@@ -10,8 +10,11 @@
 //! - `history/`: the chat log of the owner's conversations, by channel,
 //!   account, and conversation, and files the owner asked to keep (see
 //!   [`crate::history`]);
+//! - `worktrees/`: git worktrees SCV created so a background job's agent
+//!   works apart from its repository's own checkout;
 //! - `state/`: runtime data SCV writes: the daemon socket and lock, delegated
-//!   run records, conversation markers, review journals, import records, the
+//!   run records and activity logs, the background job ledger, saved session
+//!   queues, conversation markers, review journals, import records, the
 //!   model and effort values each agent offers, channel delivery state and
 //!   locks, and chat media.
 //!
@@ -26,12 +29,13 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Top-level entries of an instance home, in display order.
-pub(crate) const ENTRIES: [&str; 6] = [
+pub(crate) const ENTRIES: [&str; 7] = [
     "config.toml",
     "credentials",
     "agents",
     "skills",
     "history",
+    "worktrees",
     "state",
 ];
 
@@ -167,6 +171,30 @@ impl Layout {
     /// Markers of live delegated conversations, for `scv agents gc`.
     pub fn conversations(&self) -> PathBuf {
         self.state().join("conversations")
+    }
+
+    /// Each delegated run's activity log (`<handle>.jsonl`) and its current
+    /// state (`<handle>.state.json`), kept seven days.
+    pub fn runs(&self) -> PathBuf {
+        self.state().join("runs")
+    }
+
+    /// The background job ledger: one record per job, under its session
+    /// (`<session>/<job>.json`).
+    pub fn jobs(&self) -> PathBuf {
+        self.state().join("jobs")
+    }
+
+    /// Queues of sessions that keep theirs (`persist_queue`), one
+    /// `<session>.json` each, for a session started after a restart.
+    pub fn session_queues(&self) -> PathBuf {
+        self.state().join("sessions")
+    }
+
+    /// Git worktrees SCV created for jobs, under
+    /// `<repository>-<digest>/<name>`.
+    pub fn worktrees(&self) -> PathBuf {
+        self.home.join("worktrees")
     }
 
     /// Journals of reviewed delegated jobs, one JSONL file per review, kept

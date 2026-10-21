@@ -55,6 +55,21 @@ pub struct ToolsConfig {
     /// Refuse a model an ACP agent's saved list lacks before the call starts.
     /// `scv agents check` turns it off so the agent's own list decides.
     pub precheck_agent_models: bool,
+    /// Where `agent` calls with `worktree: true` get their git worktrees
+    /// (`$SCV_HOME/worktrees`); `None` leaves `worktree` out of the tool.
+    pub worktrees: Option<PathBuf>,
+    /// The daemon's workbench, which lists the session's jobs and lets the
+    /// owner send its conversations prompts; `None` outside the daemon.
+    pub workbench: Option<Arc<crate::workbench::Workbench>>,
+    /// Who the session serves, such as `TUI` or `WeChat`, for the job
+    /// ledger and the workbench.
+    pub label: String,
+    /// The session's background jobs are recorded in this job ledger
+    /// directory (`$SCV_HOME/state/jobs`), when the registry makes the job
+    /// store itself; `None` keeps no record.
+    pub jobs: Option<PathBuf>,
+    /// The session's workspace, which the job ledger records.
+    pub workspace: PathBuf,
 }
 
 impl Default for ToolsConfig {
@@ -80,6 +95,11 @@ impl Default for ToolsConfig {
             chat_attach: None,
             chat_history: None,
             precheck_agent_models: true,
+            worktrees: None,
+            workbench: None,
+            label: String::new(),
+            jobs: None,
+            workspace: PathBuf::new(),
         }
     }
 }

@@ -126,3 +126,51 @@ fn details_are_one_bounded_line() {
     assert!(line.ends_with('…'));
     assert_eq!(detail("a\n  b\tc"), "a b c");
 }
+
+#[test]
+fn gemini_and_cursor_report_their_tool_calls() {
+    let shell = json!({"type":"tool_use","tool_name":"run_shell_command","tool_id":"1","parameters":{"command":"bash -lc 'cargo test'"}});
+    assert_eq!(
+        progress_lines(OutputFormat::GeminiStreamJson, "tool_use", &shell),
+        ["$ cargo test"]
+    );
+    let read = json!({"type":"tool_use","tool_name":"read_file","parameters":{"absolute_path":"/w/crates/core/src/lib.rs"}});
+    assert_eq!(
+        progress_lines(OutputFormat::GeminiStreamJson, "tool_use", &read),
+        ["read_file …/src/lib.rs"]
+    );
+    let failed = json!({"type":"tool_result","tool_id":"1","status":"error"});
+    assert_eq!(
+        progress_lines(OutputFormat::GeminiStreamJson, "tool_result", &failed),
+        ["tool failed"]
+    );
+    let edit = json!({"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/src/cart.rs"}}}});
+    assert_eq!(
+        progress_lines(OutputFormat::CursorStreamJson, "tool_call", &edit),
+        ["Edit …/src/cart.rs"]
+    );
+    let done = json!({"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{}}});
+    assert_eq!(
+        progress_lines(OutputFormat::CursorStreamJson, "tool_call", &done),
+        [] as [String; 0]
+    );
+    let secret = json!({"type":"tool_call","subtype":"started","tool_call":{"shellToolCall":{"args":{"command":"curl -H 'Authorization: Bearer abc123' x"}}}});
+    let line = progress_lines(OutputFormat::CursorStreamJson, "tool_call", &secret).remove(0);
+    assert!(!line.contains("abc123"), "{line}");
+}
+
+#[test]
+fn tool_lines_leave_out_message_text_that_the_activity_log_keeps_whole() {
+    let assistant = json!({"type":"assistant","message":{"content":[
+        {"type":"text","text":"Thinking aloud."},
+        {"type":"tool_use","name":"Bash","input":{"command":"ls"}}
+    ]}});
+    assert_eq!(
+        tool_lines(OutputFormat::ClaudeStreamJson, "assistant", &assistant),
+        ["$ ls"]
+    );
+    assert_eq!(
+        progress_lines(OutputFormat::ClaudeStreamJson, "assistant", &assistant),
+        ["Thinking aloud.", "$ ls"]
+    );
+}

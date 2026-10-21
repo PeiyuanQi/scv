@@ -36,8 +36,11 @@ async fn nonreading_management_client_does_not_hold_component_lock() {
         server_input,
         server_output,
         crate::test_support::test_instance("/unused"),
-        Some(components.clone()),
-        test_registry(),
+        Shared {
+            components: Some(components.clone()),
+            registry: test_registry(),
+            hosts: None,
+        },
         cancel.clone(),
         tasks.clone(),
     ));
@@ -78,8 +81,11 @@ async fn forced_connection_abort_drops_and_joins_writer_descendants() {
         server_input,
         server_output,
         crate::test_support::test_instance("/unused"),
-        None,
-        test_registry(),
+        Shared {
+            components: None,
+            registry: test_registry(),
+            hosts: None,
+        },
         CancellationToken::new(),
         tasks.clone(),
     ));

@@ -22,6 +22,8 @@
 //!   finishing the whole group.
 //! - `registry`, `config`, and `args`: assembling a session's tools, their
 //!   settings, and the argument helpers they share.
+//! - [`workbench`]: the daemon's view of every delegated agent, background
+//!   job, and session of the instance, and the owner's actions on them.
 
 mod args;
 mod builtin;
@@ -31,6 +33,7 @@ mod process;
 pub mod project_environment;
 mod registry;
 mod sync;
+pub mod workbench;
 
 pub use builtin::{chat_attach, chat_history, web};
 pub use config::{
@@ -38,12 +41,12 @@ pub use config::{
     DelegationContext, Skill, SkillMap, ToolsConfig,
 };
 pub use delegate::{
-    adapters,
+    activity, adapters,
     agent::offered_agents,
     background, choice as agent_choice, claude_auth, conversation, options as agent_options,
     records as delegation,
     request::{AGENT_EFFORTS, valid_effort, valid_model_name},
-    stores,
+    stores, worktree,
 };
 pub use process::apply_agent_environment;
 pub use registry::{Reach, builtin_registry, call_agent, reach};

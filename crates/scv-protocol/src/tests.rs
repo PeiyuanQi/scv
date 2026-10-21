@@ -88,6 +88,8 @@ fn tool_progress_and_delegation_depth_round_trip() {
         auto_approve: None,
         chat: None,
         system_prompt: None,
+        persist_queue: None,
+        restore: None,
     };
     let nested = serde_json::to_string(&start(Some(2))).unwrap();
     assert!(nested.contains(r#""delegation_depth":2"#));
@@ -120,6 +122,8 @@ fn chat_sessions_name_their_channel_and_approval_mode() {
         auto_approve: Some(true),
         chat: None,
         system_prompt: None,
+        persist_queue: None,
+        restore: None,
     };
     let wire = serde_json::to_string(&chat).unwrap();
     assert!(wire.contains(r#""channel":"WeChat""#), "{wire}");

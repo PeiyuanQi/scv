@@ -380,6 +380,11 @@ impl Components {
             project: None,
             mail_actions: Vec::new(),
             mail_note: None,
+            workbench: None,
+            run_log: None,
+            workbench_note: None,
+            workbench_job: None,
+            worktrees: Vec::new(),
         }
     }
 
@@ -562,7 +567,17 @@ impl Components {
             | DaemonCommand::ConfirmAsk { .. }
             | DaemonCommand::ConfirmStatus { .. }
             | DaemonCommand::MailStatus { .. }
-            | DaemonCommand::MailCancel { .. } => return Ok(self.status()),
+            | DaemonCommand::MailCancel { .. }
+            | DaemonCommand::Workbench { .. }
+            | DaemonCommand::RunLog { .. }
+            | DaemonCommand::WorkbenchStart { .. }
+            | DaemonCommand::WorkbenchSend { .. }
+            | DaemonCommand::WorkbenchCancel { .. }
+            | DaemonCommand::WorkbenchApprove { .. }
+            | DaemonCommand::WorkbenchResume { .. }
+            | DaemonCommand::WorkbenchDismiss { .. }
+            | DaemonCommand::Worktrees
+            | DaemonCommand::WorktreeRemove { .. } => return Ok(self.status()),
             DaemonCommand::Reload => {}
             DaemonCommand::ChannelSet {
                 channel,

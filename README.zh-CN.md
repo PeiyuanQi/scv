@@ -42,8 +42,10 @@ Codex 等），写好任务说明，作为后台任务交给它，完成后发�
 ### 一个智能体，带领众多智能体
 
 一个 `agent` 工具就能把工作委派给 Claude Code、Codex、Grok Build、
-DeepSeek Harness、pi 或一个嵌套的 SCV。条件允许时，它们通过
-[Agent Client Protocol](https://agentclientprotocol.com)（ACP）运行。
+DeepSeek Harness、pi、Gemini CLI、Qwen Code、OpenCode、GitHub Copilot CLI、
+Cursor CLI、Amp、Kimi CLI 或一个嵌套的 SCV。条件允许时，它们通过
+[Agent Client Protocol](https://agentclientprotocol.com)（ACP）运行；每个任务也可以
+在它自己的 git worktree 里进行。
 由你的 `prefer` 列表和 `use_for` 备注决定谁做什么，每个智能体的默认模型和推理强度
 （以及困难任务单独使用的推理强度）决定怎么做；`agent_wait`、`agent_status`
 和 `agent_cancel` 管理后台任务。你要求审查时，另一个工具上的全新智能体会按结构化结论
@@ -51,6 +53,14 @@ DeepSeek Harness、pi 或一个嵌套的 SCV。条件允许时，它们通过
 并原样传递，而不是去猜那些随版本变化的名字。内置的 `delegating` 技能教它
 如何给智能体写任务说明，以及调用失败时该怎么办；`scv agents check` 可以
 逐个确认每个智能体都能正常工作。
+
+### 所有智能体的工作台
+
+终端界面是一个仪表盘：每个工作区一个聊天标签页，智能体视图实时跟随每个被委派的智能体
+（它说了什么、运行了哪些命令、在等哪些审批），并能把你的提示发进它的对话。侧边栏列出
+每个工作区的任务、状态及原因：工作中、等你处理、空闲、太久没有动静，或被中断。你可以
+自己启动任务、停止任务、在旁观时回答它们的审批，并在智能体自己的对话里继续一个被重启
+打断的任务；排队的提示也会恢复。`scv jobs` 在命令行里提供同样的功能。
 
 ### 独立的主目录，独立的密钥
 
@@ -143,7 +153,8 @@ scv agents check                 # 版本、可用模型，以及每个智能体
 | `scv run`、`start`、`stop`、`status`、`reload` | 运行或管理守护进程 |
 | `scv channels login`、`run`、`stop`、`status`、`logout` | 管理聊天账号（`feishu`、`lark`、`wechat`、`slack`）和邮箱（`email`：未开启 `mail.actions` 时只读） |
 | `scv mail status`、`cancel` | 列出或撤回等待批准的邮件操作；批准只能在邮件聊天中进行 |
-| `scv agents login`、`status`、`check`、`ps`、`kill` | 登录并检查智能体，列出或停止它们的运行 |
+| `scv agents login`、`status`、`check`、`ps`、`kill`、`worktrees` | 登录并检查智能体，列出或停止它们的运行，列出或删除任务的 worktree |
+| `scv jobs`、`log`、`start`、`send`、`cancel`、`resume`、`approve` | 工作台：所有任务和运行、实时日志、你自己的任务，以及对它们的操作 |
 | `scv confirm "…"` | 在聊天中向主人提一个是/否问题；只有回答"是"时退出码为 0 |
 | `scv config show` | 列出生效的每个路径和设置，隐藏密钥 |
 | `scv update` | 安装最新版本并重启守护进程 |
@@ -187,7 +198,8 @@ Codex 工作时，SCV 自己回答了简单的问题；Codex 汇报后，SCV 不
                                  │ 工具，受审批策略约束
                                  ▼
      read · write · bash · web_fetch · read_skill · chat_attach
-     agent ─► Claude Code · Codex · Grok Build · DeepSeek Harness · pi · SCV
+     agent ─► Claude Code · Codex · Grok Build · DeepSeek Harness · pi ·
+              Gemini · Qwen · OpenCode · Copilot · Cursor · Amp · Kimi · SCV
               通过 ACP、智能体的命令行或 SCV 协议，运行在私有主目录中
 ```
 
@@ -251,12 +263,12 @@ SCV **不是沙箱**：你批准的命令和被委派的智能体以你的用户
 | --- | --- |
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | crate 划分、智能体循环、计划重启，以及从哪里开始读代码 |
 | [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | 飞书/Lark、微信和 Slack：登录、媒体、后台汇报、向主人提问 |
-| [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | 内置工具、被委派的智能体及其模型和检查、ACP、后台任务、智能体登录 |
+| [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | 内置工具、被委派的智能体及其模型和检查、ACP、后台任务、worktree、工作台、智能体登录 |
 | [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | 实例目录结构、所有设置、模型提供方、守护进程和通知 |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | 信任边界、审批、远程工具和委派运行 |
 | [Context management](https://github.com/PeiyuanQi/scv/blob/main/docs/context-management.md) | token 预算和确定性压缩 |
 | [Protocol](https://github.com/PeiyuanQi/scv/blob/main/docs/protocol.md) | 面向客户端的 JSONL 协议 |
-| [Terminal UI](https://github.com/PeiyuanQi/scv/blob/main/docs/tui.md) | 按键、布局、审批，以及无界面的 `scv exec` |
+| [Terminal UI](https://github.com/PeiyuanQi/scv/blob/main/docs/tui.md) | 仪表盘、按键、布局、审批，以及无界面的 `scv exec` |
 | [Release](https://github.com/PeiyuanQi/scv/blob/main/docs/release.md) | 支持的平台、兼容性、升级说明和发布流程 |
 | [Quality](https://github.com/PeiyuanQi/scv/blob/main/docs/quality.md) 和 [evaluation](https://github.com/PeiyuanQi/scv/blob/main/docs/evaluation.md) | 测试和性能约定，以及 v0.1 的测量结果 |
 

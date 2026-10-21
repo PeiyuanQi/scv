@@ -101,6 +101,8 @@ async fn accept_session(listener: &UnixListener, id: &str) -> BufReader<UnixStre
             max_transcript_items: 100,
             max_prompt_history_bytes: 1024,
             max_prompt_history_items: 10,
+            keys: std::collections::BTreeMap::new(),
+            restored: None,
         },
     )
     .await;
@@ -462,6 +464,8 @@ fn transient_io_errors_are_distinct_from_protocol_errors() {
 fn app() -> App {
     App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -526,6 +530,8 @@ fn running_tools_show_their_latest_progress_line() {
     let meta = |seq| (String::from("r"), String::from("s"), String::from("t"), seq);
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -606,6 +612,8 @@ fn running_tools_show_their_latest_progress_line() {
 fn tool_status_comes_from_the_error_kind_never_the_output_text() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -700,6 +708,8 @@ fn tool_status_comes_from_the_error_kind_never_the_output_text() {
 fn events_of_unknown_types_are_skipped_without_a_sequence_warning() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -745,6 +755,8 @@ async fn client_reader_rejects_frames_before_unbounded_allocation() {
 fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -792,6 +804,8 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
 fn a_failed_report_says_when_it_is_tried_again_and_a_direct_report_shows_the_reply() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -901,6 +915,8 @@ fn agent_calls_are_labelled_with_the_agent_they_run_on() {
 fn roomy_app() -> App {
     App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -1069,6 +1085,8 @@ fn a_reconnected_sessions_reused_job_handle_is_not_taken_for_the_old_one() {
     app.disconnect();
     app.reconnect(SessionInfo {
         id: "new-session".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -1106,3 +1124,5 @@ fn a_reconnected_sessions_reused_job_handle_is_not_taken_for_the_old_one() {
         TranscriptItem::System(text) if text.contains("rev-new-session") && text.contains("still open")
     )));
 }
+
+mod dashboard;

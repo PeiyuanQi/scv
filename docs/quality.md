@@ -231,7 +231,25 @@ Daemon and component changes require focused coverage for:
   `scv exec`, the TUI, and a nested SCV's count following all of it, with the
   owner never sent a bare failure line;
 - TUI reconnect creating a fresh session without history restoration or
-  automatic replay of submitted work.
+  automatic replay of submitted work, its kept queue restored paused once,
+  and the running prompt named but never sent again, including after a
+  SIGKILLed daemon;
+- the workbench: activity logs paged by position, bounded, truncated past
+  their size, redacted, and shown `unknown` when quiet or `interrupted` when
+  their process died; the job ledger recording each job's life, marking
+  unfinished jobs interrupted, pruning, and numbering a returning session's
+  jobs after its records; snapshots joining jobs, runs, approvals, and kept
+  queues; the owner's start, send, steer, cancel (reported to the model
+  as the user's stop), resume through the agent's own conversation or a
+  rerun, and attended approvals that wait only while watched and never grant
+  more than the foreground; worktrees created, listed, counted as the
+  workspace, and removed only when SCV made them; `scv jobs` refusing
+  actions inside a delegated run; and, end to end, an owner job started and
+  read from `scv jobs`, and a job a SIGKILLed daemon interrupted resumed in
+  its agent's own conversation;
+- the dashboard: key specifications and `[tui.keys]` conflicts, tabs, panes,
+  sidebar grouping and actions, agent-view paging and sending, notifications
+  from snapshot changes, and an older daemon without the workbench.
 
 Mail changes require focused coverage for:
 

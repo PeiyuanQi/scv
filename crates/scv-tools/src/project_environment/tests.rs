@@ -447,6 +447,7 @@ async fn live_launch_used_by_acp_and_nested_scv_receives_project_tools() {
         cwd: fixture.project.clone(),
         environment: fixture.launch_environment(),
         max_line_bytes: 1024,
+        activity: None,
     };
     let child = LiveChild::spawn(spec(), None, CancellationToken::new())
         .await
