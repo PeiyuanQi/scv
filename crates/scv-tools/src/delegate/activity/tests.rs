@@ -264,3 +264,106 @@ fn only_delegation_handles_name_logs() {
         assert!(!valid_handle(bad), "{bad}");
     }
 }
+
+#[test]
+fn relayed_tool_lines_and_approval_summaries_are_scrubbed() {
+    // A nested SCV relays its own tools' summaries and lines, which SCV
+    // did not shorten: the log scrubs them all the same.
+    let dir = runs();
+    let activity = open(&dir.path(), "scv-000010");
+    activity.turn_started(None, 1, "deploy", None);
+    activity.approval_requested(
+        "process",
+        "Run with /bin/bash -lc: curl -H \"Authorization: Bearer ghp_abcdefghijklmnopqrstuvwx\"\nhttps://api.example.com/v1?token=hunter2",
+    );
+    activity.tool("$ export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwx && fetch https://x.example/a?sig=s3cret#frag");
+    activity.plan("call https://x.example/b?key=k3y");
+    let logged: String = events(&dir.path(), "scv-000010")
+        .iter()
+        .map(|event| event.text.clone())
+        .collect();
+    let state = load_state(&dir.path(), "scv-000010").unwrap();
+    let kept = format!("{logged}{:?}{:?}", state.detail, state.last_line);
+    for secret in ["ghp_abcdefghijklmnopqrstuvwx", "hunter2", "s3cret", "k3y"] {
+        assert!(!kept.contains(secret), "{secret} in {kept}");
+    }
+    assert!(logged.contains("https://api.example.com/v1"), "{logged}");
+}
+
+#[test]
+fn a_run_whose_process_ends_mid_turn_logs_the_turns_end_first() {
+    let dir = runs();
+    let activity = open(&dir.path(), "codex-000011");
+    activity.turn_started(Some("codex-1"), 1, "work", Some("job-1"));
+    // The reaper sees the process go before the call reports why.
+    activity.run_ended("exited");
+    let page = read_page(&dir.path(), "codex-000011", 0, 100).unwrap();
+    assert!(!page.ended, "a reader keeps following");
+    assert_eq!(
+        load_state(&dir.path(), "codex-000011").unwrap().state,
+        AgentState::Failed
+    );
+    // An answer arriving now changes nothing.
+    activity.approval_resolved(true);
+    activity.turn_ended("failed", Some("connection lost: segfault"));
+    let kinds: Vec<RunEventKind> = events(&dir.path(), "codex-000011")
+        .iter()
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        &kinds[kinds.len() - 2..],
+        [RunEventKind::TurnEnded, RunEventKind::RunEnded]
+    );
+    let page = read_page(&dir.path(), "codex-000011", page.next, 100).unwrap();
+    assert!(page.ended);
+    let state = load_state(&dir.path(), "codex-000011").unwrap();
+    assert!(state.ended && state.ended_unix.is_some());
+    assert_eq!(state.state, AgentState::Failed);
+
+    // A call dropped before it logged the turn's end ends the run as it
+    // lets go of the turn.
+    let dropped = open(&dir.path(), "codex-000012");
+    dropped.turn_started(None, 1, "work", None);
+    dropped.run_ended("killed");
+    assert!(!load_state(&dir.path(), "codex-000012").unwrap().ended);
+    dropped.turn_released();
+    assert!(load_state(&dir.path(), "codex-000012").unwrap().ended);
+}
+
+#[test]
+fn a_run_ending_between_turns_ends_as_its_last_turn_did() {
+    let dir = runs();
+    let activity = open(&dir.path(), "codex-000013");
+    activity.turn_started(Some("codex-1"), 1, "work", Some("job-1"));
+    activity.turn_ended("timeout", Some("timed out after 60 seconds"));
+    activity.idle();
+    activity.turn_started(Some("codex-1"), 2, "more", Some("job-2"));
+    activity.turn_ended("timeout", Some("timed out after 60 seconds"));
+    activity.idle();
+    activity.run_ended("exited");
+    let state = load_state(&dir.path(), "codex-000013").unwrap();
+    assert!(state.ended);
+    assert_eq!(state.state, AgentState::Timeout);
+    // Both jobs whose turns it served still find it.
+    assert_eq!(state.jobs, ["job-1", "job-2"]);
+    assert_eq!(state.job.as_deref(), Some("job-2"));
+}
+
+#[test]
+fn an_interrupted_run_is_kept_for_the_full_time_after_it_is_settled() {
+    let dir = runs();
+    let dead = ProcessIdentity {
+        pid: u32::MAX - 1,
+        start_time: 1,
+    };
+    let activity = RunActivity::open(&dir.path(), dead, header("codex-000014")).unwrap();
+    activity.turn_started(None, 1, "work", Some("job-1"));
+    std::mem::forget(activity);
+    // Its last activity was long ago: the host was down for weeks.
+    let mut state = load_state(&dir.path(), "codex-000014").unwrap();
+    state.last_activity_unix = 1;
+    write_private_json(&dir.path(), "codex-000014.state.json", &state).unwrap();
+    settle_orphans(&dir.path());
+    assert_eq!(prune(&dir.path(), Duration::from_secs(3600), 10), 0);
+    assert!(load_state(&dir.path(), "codex-000014").is_some());
+}

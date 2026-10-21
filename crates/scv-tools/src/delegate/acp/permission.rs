@@ -47,6 +47,18 @@ pub(super) fn describe_permission(params: &Value, label: &str) -> (ToolRisk, Str
     if !unnamed.is_empty() {
         summary.push_str(&format!(" on {}", bounded(&unnamed.join(", "), 500)));
     }
+    // The agent's text, shown to the owner: no control characters (escape
+    // sequences included) get through.
+    let summary = summary
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
     (risk, summary)
 }
 

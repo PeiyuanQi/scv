@@ -76,6 +76,29 @@ impl ApprovalGate for UnattendedGate {
     }
 }
 
+/// A background job's gate while the owner may answer from the workbench:
+/// what the policy decides on its own stands, so only a request the
+/// foreground would have put to a person reaches `attended`, which holds it
+/// for the owner when the unattended answer would deny it.
+pub(crate) struct PolicyFirstGate {
+    pub(crate) policy: ApprovalPolicy,
+    pub(crate) attended: Arc<dyn ApprovalGate>,
+}
+
+#[async_trait]
+impl ApprovalGate for PolicyFirstGate {
+    async fn approve(
+        &self,
+        request: ApprovalRequest,
+        cancellation: CancellationToken,
+    ) -> Result<bool, AgentError> {
+        if let Some(decision) = policy_decision(self.policy, request.risk) {
+            return Ok(decision);
+        }
+        self.attended.approve(request, cancellation).await
+    }
+}
+
 #[async_trait]
 impl ApprovalGate for ProtocolApprovalGate {
     async fn approve(

@@ -236,7 +236,7 @@ max_prompt_history_bytes = 1048576
 max_prompt_history_items = 200
 
 [tui.keys]          # dashboard key bindings; see "Terminal UI keys"
-# split = "alt+s"
+# split = "f2"
 # focus_sidebar = "ctrl+g"
 
 [provider_limits]
@@ -606,7 +606,9 @@ own prompts:
 
 - `"default"` adds nothing; the CLI's own configuration decides. This is the
   built-in value, so no install bypasses an agent's safeguards unless its user
-  asks.
+  asks. An agent whose own defaults ask nothing acts unprompted either way:
+  pi, which has no approval prompts, and OpenCode, which allows edits and
+  commands unless its configuration (in the private home) says `ask`.
 - `"full"` adds the CLI's own full-autonomy switches after `args`, so the agent
   can research, edit files, run commands, and use the network without asking:
 
@@ -618,7 +620,7 @@ own prompts:
 | `dsh` | `DSH_PERMISSION_MODE=danger-full-access` (sandbox off, approvals `never`) | its own web tool |
 | `pi` | nothing: pi has no approval prompts or sandbox | none built in |
 | `gemini`, `qwen` | `--yolo` | the CLI's own (Google Search for Gemini CLI) |
-| `opencode` | nothing: its permissions are its own configuration | the CLI's own, if any |
+| `opencode` | nothing: its permissions are its own configuration, which by default ask nothing | the CLI's own, if any |
 | `copilot` | `--allow-all-tools` | the CLI's own, if any |
 | `cursor` | `--force` | the CLI's own, if any |
 | `amp` | `--dangerously-allow-all` | the CLI's own |
@@ -645,7 +647,7 @@ instead:
 | `grok` | `grok agent --always-approve stdio` | on by default |
 | `dsh` | the same `DSH_PERMISSION_MODE` variable | its own web tool |
 | `gemini`, `qwen` | `--yolo` before `--experimental-acp` | as above |
-| `opencode`, `kimi` | nothing; permission requests are relayed | the CLI's own, if any |
+| `opencode`, `kimi` | nothing; what their own configuration asks is relayed | the CLI's own, if any |
 
 `codex-acp` takes no `-c` overrides; `CODEX_CONFIG` is its JSON form of them,
 merged into every session, so SCV sets it on the ACP server rather than
@@ -683,21 +685,23 @@ transport = "resume"
 ### Terminal UI keys
 
 `[tui.keys]` rebinds the TUI dashboard's keys: each entry is an action name
-and a key specification, such as `split = "alt+s"`. The actions are
+and a key specification, such as `split = "f2"`. The actions are
 `focus_sidebar`, `toggle_sidebar`, `next_tab`, `prev_tab`, `new_tab`,
 `close_tab`, `split`, `focus_other_pane`, `notifications`, `help`, and
 `tab_1` to `tab_9`; their defaults and the key syntax are in
 [the TUI contract](tui.md#keys). At most 64 entries; a name is lowercase
 letters, digits, and `_`, at most 32 bytes, and a value is printable text of
 at most 32 bytes, else configuration fails to load. The server sends the
-table to the TUI, which keeps a default for an action or key it does not know
-and says so. Only the home configuration may set it: a project's
+table to the TUI, which applies it as [the TUI contract](tui.md#keys) says (a
+key needs `ctrl` or `alt` unless it is a function key, and the keys a chat's
+composer and agent views use stay theirs), and says once which bindings it
+could not use. Only the home configuration may set it: a project's
 `.scv/config.toml` that does is refused, since keys belong to the person at
 the terminal.
 
 ```toml
 [tui.keys]
-split = "alt+s"
+split = "f2"
 next_tab = "ctrl+pagedown"
 prev_tab = "ctrl+pageup"
 ```

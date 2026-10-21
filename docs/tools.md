@@ -413,27 +413,36 @@ CLI there. `timeout_seconds` defaults to `tools.agent_timeout_seconds`
 
 `worktree: true` runs a new conversation in a git worktree of its own, so its
 changes stay apart from the repository's checkout and from other jobs. When
-the call runs (after approval, whose summary says so), SCV finds the
-repository holding the resolved `cwd`, adds a worktree on a new branch
+the call runs (after approval, whose summary says so), SCV finds the checkout
+holding the resolved `cwd` (a repository's top, or a linked worktree's),
+which must be inside the workspace, adds a worktree on a new branch
 `scv/<agent>-<6 hex>` from its current `HEAD` under
-`$SCV_HOME/worktrees/<repository>-<8 hex>/<agent>-<6 hex>`, and runs the agent
-in the same directory inside it (the worktree's top when that directory is
-not tracked). The result gains `"worktree":{"path","branch","repo"}`, and a
-background job records it, so the workbench groups jobs by worktree. A call
-whose `cwd` is not in a git repository fails before launching; `worktree`
-with `session` is refused before approval, since a continued conversation
-keeps its directory. SCV runs `git` only to add, list, and remove these
-worktrees, with fixed arguments, `GIT_TERMINAL_PROMPT=0`, and a 30-second
-limit; it never commits, merges, pushes, or deletes a branch. The worktree
-stays after the job, with the agent's work in it, until the owner removes it:
+`$SCV_HOME/worktrees/<checkout>-<8 hex>/<agent>-<6 hex>`, with a private
+record beside it naming the checkout, and runs the agent in the same
+directory inside it (the worktree's top when that directory is not tracked).
+The result gains `"worktree":{"path","branch","repo"}` (`repo` is that
+checkout), and a background job records it, so the workbench groups jobs by
+worktree. A call whose `cwd` is not in a git repository, or in one reaching
+outside the workspace (the workspace is a directory of a larger repository),
+fails before anything is created; `worktree` with `session` is refused before
+approval, since a continued conversation keeps its directory. SCV runs `git`
+only to add, list, and remove these worktrees, with fixed arguments, the
+repository's hooks and file-system monitor off (`core.hooksPath=/dev/null`,
+`core.fsmonitor=false`), no `*_API_KEY` variables, `GIT_TERMINAL_PROMPT=0`, and a 30-second limit; a worktree whose
+creation fails or is cut off is removed again (its new branch may stay). It
+never commits, merges, pushes, or deletes a branch. The worktree stays after
+the job, with the agent's work in it, until the owner removes it:
 
 ```sh
 scv agents worktrees                              # each worktree, branch, repository, dirty or clean, and its jobs
 scv agents worktrees --remove <path> [--force]    # git worktree remove; uncommitted changes need --force
 ```
 
-Removing keeps the branch and says how to delete it. Sessions offer
-`worktree` whenever they offer the `agent` tool.
+Removing keeps the branch and says how to delete it. It is refused, for a
+path anywhere inside the worktree and whether a daemon runs or not, while a
+job not yet finished recorded the worktree or a delegated process works in
+it; `--force` also removes changes and a worktree a cut-off creation left
+locked. Sessions offer `worktree` whenever they offer the `agent` tool.
 
 `no_timeout: true` runs a background call with no main deadline, for work that
 must run until it is done however long that takes. It is offered only when the
@@ -578,8 +587,15 @@ The default invocation contracts are:
 | `grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
 | `dsh` | `dsh --profile headless <prompt>` |
 | `pi` | `pi -p --mode json [--model <model>] [--thinking <effort>] <prompt>` |
+| `gemini` | `gemini [--yolo] --output-format stream-json [-m <model>] -p <prompt>` |
+| `qwen` | `qwen [--yolo] [-m <model>] -p <prompt>` |
+| `opencode` | `opencode run [-m <model>] <prompt>` |
+| `copilot` | `copilot [--allow-all-tools] [--model <model>] -p <prompt>` |
+| `cursor` | `cursor-agent -p [--force] --output-format stream-json [--resume <chat-id>] [--model <model>] <prompt>` |
+| `amp` | `amp [--dangerously-allow-all] --stream-json -x <prompt>` |
 
-Grok's `-p` and pi's `-p` run one prompt and exit. DeepSeek Harness run once
+Kimi CLI runs only over ACP (`kimi --acp`). Grok's `-p` and pi's `-p` run one
+prompt and exit. DeepSeek Harness run once
 per turn takes its model and effort from its profile, so it takes neither
 `model` nor `effort` then; over ACP (the default once `dsh` is installed) it
 takes both (see [Agent Client Protocol transport](#agent-client-protocol-transport)).
@@ -886,8 +902,9 @@ So a WeChat, Feishu, or Slack owner's background agents get the approvals the ow
 foreground turns get, while in the TUI, which asks a person, a background
 job's non-read-only requests are denied and it relies on the agent's own
 permissions, such as `permissions = "full"`, unless the owner is watching the
-[workbench](#the-workbench): then a request the session would deny waits up
-to two minutes for the owner's answer instead. Jobs belong to their session:
+[workbench](#the-workbench): then a request the policy would put to a person
+waits up to two minutes for the owner's answer instead. Jobs belong to their
+session:
 closing it (a TUI or `scv exec` exiting, an idle channel conversation ending)
 cancels every job still running and kills its processes, and the
 [job ledger](#the-workbench) records each as interrupted. A channel
@@ -1394,7 +1411,9 @@ gets `DSH_PERMISSION_MODE=danger-full-access`, Gemini CLI and Qwen Code get
 `--yolo`, Copilot `--allow-all-tools`, Cursor `--force`, and Amp
 `--dangerously-allow-all`, while pi, which has no approval prompts, sandbox,
 or built-in web search, and OpenCode and Kimi, whose permissions are their own
-configuration, get nothing. The approval summary
+configuration, get nothing. OpenCode's own defaults ask for nothing (they
+allow edits and commands), so like pi it acts unprompted either way unless
+its configuration in the private home says `ask`. The approval summary
 then states `FULL PERMISSIONS`. See
 [Agent permissions](configuration.md#agent-permissions).
 
@@ -1411,9 +1430,16 @@ Adapter processes use instance-private state directories under
 `CODEX_HOME=$SCV_HOME/agents/codex` and does not read the user's normal
 `~/.codex` state, `claude` does not read `~/.claude`, and Grok, DeepSeek
 Harness, pi, and the other CLIs never read `~/.grok`, `~/.dsh`, `~/.pi`, or
-the user's own state. `GH_TOKEN` and `GITHUB_TOKEN` are not removed for any
-agent, although Copilot also reads them: they are how `gh` and git hosting
-tools sign in, which every coding agent runs as part of its work.
+the user's own state, with one exception SCV cannot close: Gemini CLI and
+Qwen Code load the first `.gemini/.env` (`.qwen/.env`) or `.env` they find
+walking up from their working directory, before the one in their home, and
+set its variables where unset. With the workspace inside the user's home, a
+`~/.gemini/.env` or `~/.env` is found that way, so its keys (a personal
+`GEMINI_API_KEY`, say) reach the delegated agent and hide the private home's
+`.gemini/.env`. Keep such keys elsewhere, or sign SCV's Gemini CLI in with
+Google. `GH_TOKEN` and `GITHUB_TOKEN` are not removed for any agent, although
+Copilot also reads them: they are how `gh` and git hosting tools sign in,
+which every coding agent runs as part of its work.
 
 ### The workbench
 
@@ -1433,11 +1459,20 @@ in `$SCV_HOME/state/runs`: `<handle>.jsonl`, an append-only log of events
 calls as the same redacted one-line summaries as progress, plans, approval
 requests and answers, prompts steered into a turn, each turn's outcome, and
 the run's end), and `<handle>.state.json`, what the run is doing now. Tool
-output is never logged. An event's text is at most 2,000 characters (a
-prompt 4,000), control characters are removed, and a log stops taking
-message and tool lines at 4 MiB, keeping turns, approvals, and the end.
-Logs are read in pages by byte position, so a reader follows a live run
-without reading it twice. Ended runs are kept seven days, and at most 500.
+output is never logged. Every line is scrubbed as it is written, whoever
+produced it (a nested SCV relays its own tools' summaries and lines): values
+that look like credentials are hidden and URLs lose their query, as in
+progress lines, and control characters are removed. An event's text is at
+most 2,000 characters (a prompt 4,000), and a log stops taking message and
+tool lines at 4 MiB, keeping turns, approvals, and the end. A run whose
+process ends mid-turn logs that turn's end, with why, before its own;
+nothing is logged after the end, so a reader that stops there missed
+nothing. Logs are read in pages by byte position, so a reader follows a live
+run without reading it twice. The state file is rewritten without syncing to
+disk, since it only says what is happening now. Ended runs are kept seven
+days from their end (an interrupted one from when it was found so), and at
+most 500. A run of a live conversation serves the turns of several jobs and
+lists them all, so each job finds its log.
 
 **States.** A run or job is `starting`, `working`, `awaiting_input` (an
 approval request it relayed waits for an answer), `idle` (a live ACP agent
@@ -1460,8 +1495,10 @@ started it (the model, or the owner), its conversation, worktree, state,
 and bounded reply or error. A job whose session closes unfinished is
 recorded `interrupted` then; one whose process died is found by the daemon
 at startup and every 60 seconds. Finished jobs are kept seven days. A
-session that comes back under its ID numbers its jobs after the recorded
-ones.
+session that comes back under its ID numbers its jobs, and its
+conversations, after the recorded ones, so a handle a record names never
+comes to mean another conversation; and the workbench shows a job's or run's
+conversation only while the live session that made it still has it.
 
 **Owner actions.** The owner can, from the dashboard or `scv jobs`:
 
@@ -1469,9 +1506,10 @@ ones.
   `cwd`, `model`, `effort`, `worktree`) checked exactly as the model's would
   be. It runs as a background job of the daemon's workbench session for the
   workspace, one per workspace (`workbench-<16 hex>`), configured like a TUI
-  session there and dropped after an hour without jobs. No approval is asked
-  for the launch, since the owner asked for it; no model is told about it,
-  and its result stays in the ledger and log. Background jobs must be on.
+  session there and dropped, with its conversations, an hour after its last
+  job ended and the owner last acted on it. No approval is asked for the
+  launch, since the owner asked for it; no model is told about it, and its
+  result stays in the ledger and log. Background jobs must be on.
 - *send* a prompt to a job's or run's conversation: into its running turn
   when the agent can take steering, else as its next turn, queued behind a
   running one (`--queue` always queues; `--steer` fails when it cannot
@@ -1479,29 +1517,39 @@ ones.
   session.
 - *cancel* a running or queued job. A model's job the owner cancels is
   reported to the model as `cancelled`, with a note that the user stopped
-  it, so it does not start it again unasked.
+  it, so it does not start it again unasked. A model can see the owner's
+  jobs in its session (`agent_status`) but `agent_cancel` refuses to stop
+  one.
 - *resume* an interrupted job (not a reviewed one, whose journal is its
-  record, and only once). When the run that served it recorded the agent's
+  record; only once, one request at a time; and not while an agent process
+  of its run still goes, which SCV stops within a minute of its SCV process
+  stopping). When the run that served it recorded the agent's
   own session ID, the agent can continue from that alone (a CLI that resumes
   by ID, or an ACP server that loads sessions), and its directory still
   exists, the workbench session adopts that conversation and sends a turn
   beginning `[SCV] SCV stopped before your last turn on this task finished`
   with the task. Otherwise it runs the task again, beginning `[SCV] An
   earlier attempt at this task was cut off`, in the job's worktree when it
-  is still there. A model or effort the agent does not take is left out, and
-  the job's timeout carries over. The new job is the owner's; the records
-  link each other (`resumed_as`, `resumed_from`).
-- *dismiss* a finished or interrupted job's record, and *approve* or *deny*
-  an approval request a job waits on.
+  is still there, else in a new worktree of the same checkout. A model or
+  effort the agent does not take is left out, and the job's timeout carries
+  over. The new job is the owner's; the records link each other
+  (`resumed_as`, `resumed_from`).
+- *dismiss* a finished or interrupted job's record (not one whose result its
+  session has yet to report): its content goes, and what is left keeps the
+  job's number taken until it is pruned. And *approve* or *deny* an approval
+  request a job waits on.
 
 **Attended approvals.** A background job's relayed approval request normally
 gets the session's unattended answer at once (above). While the owner
 watches (a dashboard has asked for the workbench in the last 15 seconds), a
-request that answer would deny waits up to two minutes for the owner
-instead, listed with its ID, risk, summary, and deadline; with no answer it
-is denied as before. A request the session approves unasked is not held,
-and the owner's answer is the one the TUI would have asked for in the
-foreground, so nothing gets more than it would there.
+request the approval policy would put to a person in the foreground, and the
+unattended answer would deny, waits up to two minutes for the owner instead,
+listed with its ID, risk, summary, and deadline; with no answer it is denied
+as before. What the policy decides on its own is never held: `never` denies
+side effects outright, and a request the session approves unasked goes on.
+The owner's answer is the one the TUI would have asked for in the
+foreground, so nothing gets more than it would there. A request held near
+the job's own deadline can end the job by its timeout rather than a denial.
 
 ```sh
 scv jobs                                  # unfinished jobs, live runs, approvals, restorable queues
@@ -1689,8 +1737,9 @@ nowhere. Between turns SCV sends no steering request.
   with `session/set_mode` in every new session), `grok agent --always-approve
   stdio`, DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`, and
   `--yolo` before `--experimental-acp` for Gemini CLI and Qwen Code. OpenCode
-  and Kimi have no such switch (their permissions are their own
-  configuration), so their requests are relayed. A
+  and Kimi have no such switch: their permissions are their own
+  configuration, and what it has them ask is relayed (OpenCode's defaults
+  ask nothing). A
   permission request that still arrives is relayed as usual. `codex-acp` takes
   no `-c` overrides, so for Codex `"full"` also sets
   `CODEX_CONFIG={"web_search":"live"}` on the ACP server, its JSON form of
@@ -1992,12 +2041,16 @@ reading, sanitizing, and invalidating the saved file. A fake `dsh` covers
 Canned Gemini CLI, Cursor, and Amp event streams cover their replies,
 sessions, and progress lines; the adapter table's tests cover each new
 agent's arguments, removed variables, and that Kimi runs over ACP only. The
-workbench's unit tests cover activity logs (paging, truncation, quiet and
-orphaned runs), the job ledger (records, interruption, pruning, numbering),
-snapshots, owner start, send, cancel, and resume, attended approvals, and
-worktrees in a scratch repository; integration tests run an owner job from
-`scv jobs` against a daemon and resume a job a SIGKILLed daemon interrupted
-through the agent's own conversation.
+workbench's unit tests cover activity logs (paging, truncation, scrubbing
+relayed lines, a run's end after its turn's, quiet and orphaned runs), the
+job ledger (records, interruption, pruning, numbering, dismissal), snapshots
+and the conversations they show, owner start, send, cancel, and resume (once,
+and back in a removed worktree's checkout), attended approvals and the
+policy they never override, and worktrees in scratch repositories (a linked
+worktree's, one reaching outside the workspace, hooks, a locked one);
+integration tests run an owner job from `scv jobs` against a daemon and
+resume a job a SIGKILLed daemon interrupted through the agent's own
+conversation.
 
 ## Tool extension contract
 

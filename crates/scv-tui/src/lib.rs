@@ -90,6 +90,10 @@ async fn run_event_loop(
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     loop {
+        if let Ok(size) = terminal.size() {
+            ui.size = (size.width, size.height);
+        }
+        ui.normalize_focus();
         terminal.draw(|frame| render_ui(frame, ui))?;
         if std::mem::take(&mut ui.workbench.bell) {
             use std::io::Write as _;
@@ -107,7 +111,12 @@ async fn run_event_loop(
             _ = terminate.recv() => ui.quit = true,
             _ = hangup.recv() => ui.quit = true,
             (opening, result) = next_connection(&mut connecting) => match result {
-                Ok((client, session)) => ui.opened(&opening, client, session),
+                Ok((client, session)) => {
+                    // A tab closed while it reconnected: its new session ends.
+                    if let Some(mut client) = ui.opened(&opening, client, session) {
+                        client.shutdown().await;
+                    }
+                }
                 Err(error) => ui.open_failed(&opening, &error),
             },
             Some(answer) = answers.recv() => {

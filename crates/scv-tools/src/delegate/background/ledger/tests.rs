@@ -161,3 +161,56 @@ fn a_session_back_under_its_id_numbers_its_jobs_after_the_recorded_ones() {
     let jobs = crate::delegate::background::BackgroundJobs::new(2, None).with_ledger(ledger);
     assert_eq!(jobs.state().next, 10);
 }
+
+#[test]
+fn a_late_older_revision_never_replaces_a_newer_one() {
+    // Records are written after the job table is let go, so two writes of
+    // one job can land in either order; the newest stays.
+    let root = tempfile::tempdir().unwrap();
+    let ledger = ledger(root.path());
+    let arguments = json!({"prompt":"p"});
+    let mut record = ledger.record(&new_job("job-1", &arguments)).unwrap();
+    let older = record.clone();
+    record.state = AgentState::Completed;
+    record.reported = true;
+    ledger.save_revision(&record, 3);
+    ledger.save_revision(&older, 2);
+    assert_eq!(
+        load(root.path(), "session-1", "job-1"),
+        Some(record.clone())
+    );
+    record.reply = Some("done".into());
+    ledger.save_revision(&record, 4);
+    assert_eq!(
+        load(root.path(), "session-1", "job-1")
+            .unwrap()
+            .reply
+            .as_deref(),
+        Some("done")
+    );
+}
+
+#[test]
+fn a_dismissed_record_keeps_only_its_number() {
+    let root = tempfile::tempdir().unwrap();
+    let ledger = ledger(root.path());
+    let arguments = json!({"prompt":"secret plan","cwd":"shop"});
+    let mut record = ledger.record(&new_job("job-2", &arguments)).unwrap();
+    record.state = AgentState::Failed;
+    record.error = Some("boom".into());
+    ledger.save(&record);
+    dismiss(root.path(), "session-1", "job-2").unwrap();
+    assert_eq!(load(root.path(), "session-1", "job-2"), None);
+    assert_eq!(list(root.path()), []);
+    assert_eq!(ledger.last_number(), 2);
+    let kept = std::fs::read_to_string(root.path().join("session-1/job-2.json")).unwrap();
+    assert!(
+        !kept.contains("secret plan") && !kept.contains("boom"),
+        "{kept}"
+    );
+    assert!(dismiss(root.path(), "session-1", "job-2").is_err());
+    // It goes with the rest once old enough.
+    assert_eq!(prune(root.path(), Duration::ZERO), 0);
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(prune(root.path(), Duration::ZERO), 1);
+}

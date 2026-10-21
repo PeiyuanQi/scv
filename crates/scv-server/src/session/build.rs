@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use super::{Session, SessionClient, reload};
 use crate::{
-    approval::UnattendedGate,
+    approval::{PolicyFirstGate, UnattendedGate},
     config::{Config, ConfigOverrides},
     prompt::{PromptContext, SkillListings, build_system_prompt, skills::discover_skills},
 };
@@ -116,9 +116,14 @@ pub(crate) async fn build_session(
             client_approves_all: client.auto_approve,
         });
         // While the owner watches the workbench, a background request the
-        // session would deny waits for the owner's answer.
-        let gate = match workbench {
-            Some(workbench) => workbench.attended_gate(&id, unattended),
+        // foreground would have asked a person about, and the session would
+        // deny unattended, waits for the owner's answer. What the policy
+        // decides on its own is never put to the owner.
+        let gate: Arc<dyn ApprovalGate> = match workbench {
+            Some(workbench) => Arc::new(PolicyFirstGate {
+                policy: config.tools.approval_policy,
+                attended: workbench.attended_gate(&id, unattended),
+            }),
             None => unattended,
         };
         let mut jobs = BackgroundJobs::new(config.agent.max_background, Some(finished_tx))

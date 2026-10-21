@@ -27,7 +27,7 @@ use scv_tools::{
 use tokio::sync::Mutex;
 
 use crate::{
-    approval::UnattendedGate,
+    approval::{PolicyFirstGate, UnattendedGate},
     config::{ConfigOverrides, Instance},
     session::{build::offered_adapters, persist},
 };
@@ -76,7 +76,7 @@ impl Hosts {
 
     /// The workbench's session for `workspace`, an existing absolute
     /// directory, created on first use.
-    pub(crate) async fn session_for(&self, workspace: &str) -> Result<String> {
+    pub(crate) async fn session_for(self: &Arc<Self>, workspace: &str) -> Result<String> {
         let path = Path::new(workspace);
         if !path.is_absolute() {
             bail!("the workspace must be an absolute directory");
@@ -91,7 +91,12 @@ impl Hosts {
             host.last_used = Instant::now();
             return Ok(host.session.clone());
         }
-        let host = self.build(&workspace)?;
+        // Loading the configuration and building the tools reads files.
+        let this = Arc::clone(self);
+        let path = workspace.clone();
+        let host = tokio::task::spawn_blocking(move || this.build(&path))
+            .await
+            .context("build the workbench session")??;
         let session = host.session.clone();
         hosts.insert(workspace, host);
         Ok(session)
@@ -114,14 +119,19 @@ impl Hosts {
         config.prepare_adapter_homes()?;
         let session = scv_tools::workbench::host_session(workspace);
         let registration = self.workbench.register_session(&session, LABEL, workspace);
-        // Nobody is asked for a job of the owner's own; while the owner
-        // watches, a request the policy would deny waits for the owner.
+        // Nobody is asked for a job of the owner's own: what the policy
+        // decides on its own stands, and while the owner watches, a request
+        // it would put to a person waits for the owner instead of being
+        // denied.
         let unattended: Arc<dyn ApprovalGate> = Arc::new(UnattendedGate {
             policy: config.tools.approval_policy,
             client_approves_all: false,
         });
-        let mut jobs = BackgroundJobs::new(config.agent.max_background, None)
-            .with_approvals(self.workbench.attended_gate(&session, unattended));
+        let gate: Arc<dyn ApprovalGate> = Arc::new(PolicyFirstGate {
+            policy: config.tools.approval_policy,
+            attended: self.workbench.attended_gate(&session, unattended),
+        });
+        let mut jobs = BackgroundJobs::new(config.agent.max_background, None).with_approvals(gate);
         if let Some(ledger) = ledger::JobLedger::new(&layout.jobs(), &session, LABEL, workspace) {
             jobs = jobs.with_ledger(ledger);
         }
@@ -158,13 +168,30 @@ impl Hosts {
         })
     }
 
-    /// Drop workbench sessions with nothing running or waiting that were
-    /// unused for [`HOST_IDLE`].
+    /// Drop workbench sessions that have had nothing running or waiting,
+    /// and no owner action, for [`HOST_IDLE`]. A session with a job going
+    /// counts as used, so the hour starts when its last job ends.
     pub(crate) async fn expire_idle(&self) {
-        self.hosts
+        self.hosts.lock().await.retain(|_, host| {
+            if host.jobs.pending() > 0 {
+                host.last_used = Instant::now();
+            }
+            host.last_used.elapsed() < HOST_IDLE
+        });
+    }
+
+    /// An owner action reached workbench session `session`: it counts as
+    /// used now.
+    pub(crate) async fn touch(&self, session: &str) {
+        if let Some(host) = self
+            .hosts
             .lock()
             .await
-            .retain(|_, host| host.jobs.pending() > 0 || host.last_used.elapsed() < HOST_IDLE);
+            .values_mut()
+            .find(|host| host.session == session)
+        {
+            host.last_used = Instant::now();
+        }
     }
 
     /// Drop every workbench session, which stops their jobs, and wait a
@@ -267,20 +294,23 @@ pub(crate) async fn control(
             conversation,
             prompt,
             mode,
-        } => match workbench
-            .send(&session, &conversation, &prompt, mode)
-            .await?
-        {
-            scv_tools::workbench::Sent::Job(job) => {
-                status.workbench_note = Some(format!("Sent to {conversation} as {job}."));
-                status.workbench_job = Some(job);
+        } => {
+            hosts.touch(&session).await;
+            match workbench
+                .send(&session, &conversation, &prompt, mode)
+                .await?
+            {
+                scv_tools::workbench::Sent::Job(job) => {
+                    status.workbench_note = Some(format!("Sent to {conversation} as {job}."));
+                    status.workbench_job = Some(job);
+                }
+                scv_tools::workbench::Sent::Steered => {
+                    status.workbench_note = Some(format!(
+                        "{conversation} took the prompt into its running turn."
+                    ));
+                }
             }
-            scv_tools::workbench::Sent::Steered => {
-                status.workbench_note = Some(format!(
-                    "{conversation} took the prompt into its running turn."
-                ));
-            }
-        },
+        }
         DaemonCommand::WorkbenchCancel { session, job } => {
             status.workbench_note = Some(workbench.cancel(&session, &job)?);
         }
@@ -300,13 +330,25 @@ pub(crate) async fn control(
             status.workbench_job = Some(resumed);
         }
         DaemonCommand::WorkbenchDismiss { session, job } => {
-            status.workbench_note = Some(workbench.dismiss(&session, &job)?);
+            let workbench = Arc::clone(workbench);
+            status.workbench_note = Some(
+                tokio::task::spawn_blocking(move || workbench.dismiss(&session, &job))
+                    .await
+                    .map_err(|error| error.to_string())??,
+            );
         }
         DaemonCommand::Worktrees => {
             status.worktrees = worktrees(hosts).await;
             snapshot = false;
         }
         DaemonCommand::WorktreeRemove { path, force } => {
+            {
+                let workbench = Arc::clone(workbench);
+                let path = PathBuf::from(&path);
+                tokio::task::spawn_blocking(move || workbench.check_worktree_unused(&path))
+                    .await
+                    .map_err(|error| error.to_string())??;
+            }
             let root = hosts.instance.layout.worktrees();
             status.workbench_note =
                 Some(scv_tools::worktree::remove(&root, Path::new(&path), force).await?);
@@ -334,7 +376,10 @@ pub(crate) async fn control(
 /// The worktrees SCV created, with the jobs recorded in each.
 async fn worktrees(hosts: &Hosts) -> Vec<WorktreeInfo> {
     let mut found = scv_tools::worktree::list(&hosts.instance.layout.worktrees()).await;
-    let records = ledger::list(&hosts.instance.layout.jobs());
+    let jobs = hosts.instance.layout.jobs();
+    let records = tokio::task::spawn_blocking(move || ledger::list(&jobs))
+        .await
+        .unwrap_or_default();
     for info in &mut found {
         info.jobs = records
             .iter()

@@ -228,11 +228,17 @@ impl AgentTool {
             ToolError::invalid_arguments("worktree is not available in this session")
         })?;
         let (agent, _) = self.route(arguments)?;
-        let cwd =
-            crate::delegate::request::resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
-        let created =
-            crate::delegate::worktree::create(root, &cwd, &agent.name, &context.cancellation)
-                .await?;
+        let workspace = std::fs::canonicalize(&context.workspace)
+            .map_err(|error| ToolError::failed(format!("resolve workspace: {error}")))?;
+        let cwd = crate::delegate::request::resolve_agent_cwd(&workspace, args.cwd.as_deref())?;
+        let created = crate::delegate::worktree::create(
+            root,
+            &cwd,
+            &workspace,
+            &agent.name,
+            &context.cancellation,
+        )
+        .await?;
         context.progress.report(&format!(
             "worktree {} on branch {}",
             created.worktree.path, created.worktree.branch

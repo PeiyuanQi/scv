@@ -362,8 +362,29 @@ async fn a_killed_daemon_leaves_the_queue_for_the_next_session_to_restore_paused
     let restorable = snapshot(&home).await.restorable;
     assert_eq!(restorable.len(), 1);
     assert_eq!(restorable[0].id, session_id);
-    let (mut reader, _write, started) = session(&home, &workspace, Some(session_id.clone())).await;
-    let ServerEvent::SessionStarted { restored, .. } = started else {
+    // Two restores of it at once (a tab reconnecting while `r` opens
+    // another): only one gets the queue.
+    let (first, second) = tokio::join!(
+        session(&home, &workspace, Some(session_id.clone())),
+        session(&home, &workspace, Some(session_id.clone())),
+    );
+    let restoring = |started: &ServerEvent| {
+        matches!(
+            started,
+            ServerEvent::SessionStarted {
+                restored: Some(_),
+                ..
+            }
+        )
+    };
+    assert_ne!(restoring(&first.2), restoring(&second.2));
+    let (mut reader, mut write, started) = if restoring(&first.2) { first } else { second };
+    let ServerEvent::SessionStarted {
+        restored,
+        session_id: new_session,
+        ..
+    } = started
+    else {
         unreachable!()
     };
     let restored = restored.unwrap();
@@ -381,5 +402,20 @@ async fn a_killed_daemon_leaves_the_queue_for_the_next_session_to_restore_paused
     assert_eq!(entries[0].prompt, "the queued one");
     // It was restored once: nothing is left to restore.
     assert_eq!(snapshot(&home).await.restorable, []);
+    // Resuming the idle session's queue runs the restored prompt at once.
+    send(
+        &mut write,
+        &ClientMessage::SessionPause {
+            request_id: "resume".into(),
+            session_id: new_session,
+            paused: false,
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(next(&mut reader).await, ServerEvent::QueueDequeued { .. }) {}
+    })
+    .await
+    .unwrap();
     terminate(&mut daemon).await;
 }

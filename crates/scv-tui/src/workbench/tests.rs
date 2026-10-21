@@ -35,6 +35,7 @@ fn run(handle: &str, session: &str, job: Option<&str>, started: u64) -> Workbenc
         conversation: Some("codex-1".into()),
         turn: Some(1),
         job: job.map(str::to_owned),
+        jobs: job.into_iter().map(str::to_owned).collect(),
         cwd: "/w/projects/shop".into(),
         state: AgentState::Working,
         detail: None,
@@ -276,20 +277,22 @@ fn an_open_view_reads_its_runs_logs_once_each_and_in_order() {
     let requests = workbench.due(now + Duration::from_secs(10));
     let logs: Vec<&Request> = requests
         .iter()
-        .filter(|request| matches!(request.tag, Tag::Log(_)))
+        .filter(|request| matches!(request.tag, Tag::Log(..)))
         .collect();
     assert_eq!(logs.len(), 1);
     assert!(matches!(
         &logs[0].command,
         DaemonCommand::RunLog { handle, after: 0, .. } if handle == "codex-0000a1"
     ));
-    // A page read from where the view was arrives once.
+    // A page read from where the view was arrives once: the same page
+    // again, as a request repeated after a reconnection brings it, is a
+    // page from before the view's position now.
     workbench.answer(Answer::Status(
-        Tag::Log("codex-0000a1".into()),
+        Tag::Log("codex-0000a1".into(), 0),
         page("codex-0000a1", &["one", "two"], 40, false),
     ));
     workbench.answer(Answer::Status(
-        Tag::Log("codex-0000a1".into()),
+        Tag::Log("codex-0000a1".into(), 0),
         page("codex-0000a1", &["one", "two"], 40, false),
     ));
     let view = &workbench.views[&target];
@@ -302,14 +305,14 @@ fn an_open_view_reads_its_runs_logs_once_each_and_in_order() {
             .any(|request| matches!(&request.command, DaemonCommand::RunLog { after: 40, .. }))
     );
     workbench.answer(Answer::Status(
-        Tag::Log("codex-0000a1".into()),
+        Tag::Log("codex-0000a1".into(), 40),
         page("codex-0000a1", &["three"], 60, true),
     ));
     let next = workbench.due(now + Duration::from_secs(30));
     assert!(
         !next
             .iter()
-            .any(|request| matches!(request.tag, Tag::Log(_)))
+            .any(|request| matches!(request.tag, Tag::Log(..)))
     );
     assert_eq!(
         workbench.conversation(&target),
@@ -320,22 +323,89 @@ fn an_open_view_reads_its_runs_logs_once_each_and_in_order() {
 
 #[test]
 fn an_old_daemon_or_a_lost_connection_is_shown_not_retried_in_a_loop() {
+    let now = Instant::now();
     let mut workbench = Workbench::default();
+    workbench.due(now);
     let note = workbench.answer(Answer::Unsupported).unwrap();
     assert!(note.contains("no workbench"));
     assert_eq!(workbench.availability, Availability::Unsupported);
-    assert!(workbench.due(Instant::now()).is_empty());
+    assert!(workbench.due(now + Duration::from_secs(2)).is_empty());
+    // A daemon restarted into this release is found within half a minute,
+    // and an old one is not announced twice.
+    assert_eq!(workbench.due(now + Duration::from_secs(31)).len(), 1);
+    assert_eq!(workbench.answer(Answer::Unsupported), None);
+    workbench.answer(Answer::Status(
+        Tag::Snapshot,
+        status(WorkbenchSnapshot::default()),
+    ));
+    assert_eq!(workbench.availability, Availability::Ready);
+
     let mut workbench = Workbench::default();
-    workbench.due(Instant::now());
-    workbench.answer(Answer::Disconnected);
+    workbench.open(Target::Run {
+        handle: "codex-0000a1".into(),
+    });
+    workbench.due(now);
+    workbench.answer(Answer::Disconnected(Tag::Snapshot));
     assert_eq!(workbench.availability, Availability::Disconnected);
-    // The next tick asks again.
-    assert_eq!(
-        workbench.due(Instant::now() + Duration::from_secs(2)).len(),
-        1
-    );
+    // The next tick asks for the snapshot again, and nothing else until
+    // the daemon answers.
+    let again = workbench.due(now + Duration::from_secs(2));
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].tag, Tag::Snapshot);
     let refused = workbench.answer(Answer::Refused(Tag::Action, "no such job".into()));
     assert_eq!(refused.as_deref(), Some("no such job"));
+    // An action whose connection broke is not silently dropped.
+    let lost = workbench.answer(Answer::Disconnected(Tag::Action)).unwrap();
+    assert!(lost.contains("check whether"), "{lost}");
+}
+
+#[test]
+fn a_sent_prompt_comes_back_when_it_is_refused_or_lost() {
+    let mut workbench = Workbench::default();
+    let target = Target::Run {
+        handle: "codex-0000a1".into(),
+    };
+    workbench.open(target.clone()).sent = Some("also run clippy".into());
+    let note = workbench
+        .answer(Answer::Refused(
+            Tag::Send(target.clone()),
+            "conversation codex-1 is unknown".into(),
+        ))
+        .unwrap();
+    assert!(note.contains("unknown"));
+    assert_eq!(workbench.views[&target].input, "also run clippy");
+    let view = workbench.views.get_mut(&target).unwrap();
+    view.input.clear();
+    view.sent = Some("again".into());
+    workbench.answer(Answer::Disconnected(Tag::Send(target.clone())));
+    assert_eq!(workbench.views[&target].input, "again");
+}
+
+#[test]
+fn a_job_seen_first_already_finished_or_waiting_is_news() {
+    let mut workbench = Workbench::default();
+    workbench.answer(Answer::Status(
+        Tag::Snapshot,
+        status(WorkbenchSnapshot::default()),
+    ));
+    workbench.answer(Answer::Status(
+        Tag::Snapshot,
+        status(WorkbenchSnapshot {
+            jobs: vec![
+                job("s", "job-1", AgentState::Failed),
+                job("s", "job-2", AgentState::Working),
+            ],
+            ..WorkbenchSnapshot::default()
+        }),
+    ));
+    let texts: Vec<&str> = workbench
+        .notices
+        .iter()
+        .map(|notice| notice.text.as_str())
+        .collect();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].starts_with("job-1"), "{texts:?}");
+    assert!(workbench.bell);
 }
 
 #[test]

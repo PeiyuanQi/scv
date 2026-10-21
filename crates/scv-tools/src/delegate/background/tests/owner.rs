@@ -124,6 +124,7 @@ async fn the_owners_jobs_are_watched_not_reported_and_say_who_started_them() {
             json!({"prompt":"look around"}),
             std::env::temp_dir(),
             SendMode::Auto,
+            JobMeta::default(),
         )
         .await
         .unwrap();
@@ -186,6 +187,7 @@ async fn the_owners_prompt_to_a_busy_conversation_queues_or_refuses_to_steer() {
             json!({"prompt":"steer it","session":"codex-1"}),
             std::env::temp_dir(),
             SendMode::Steer,
+            JobMeta::default(),
         )
         .await
         .unwrap_err();
@@ -200,6 +202,7 @@ async fn the_owners_prompt_to_a_busy_conversation_queues_or_refuses_to_steer() {
             json!({"prompt":"owner","session":"codex-1"}),
             std::env::temp_dir(),
             SendMode::Auto,
+            JobMeta::default(),
         )
         .await
         .unwrap();
@@ -218,6 +221,7 @@ async fn the_owners_prompt_to_a_busy_conversation_queues_or_refuses_to_steer() {
             json!({"prompt":"again","session":"codex-2"}),
             std::env::temp_dir(),
             SendMode::Queue,
+            JobMeta::default(),
         )
         .await
         .unwrap();
@@ -290,4 +294,116 @@ fn only_agents_that_resume_by_id_take_in_a_saved_conversation() {
             .adopt("fake", std::path::Path::new("/w"), "x1")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn the_model_cannot_stop_the_owners_own_job() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = recorded(root.path());
+    fixture
+        .tool
+        .owner_call(
+            json!({"prompt":"look around"}),
+            std::env::temp_dir(),
+            SendMode::Auto,
+            JobMeta::default(),
+        )
+        .await
+        .unwrap();
+    let refused = fixture.jobs.cancel("job-1", "call-1").await.unwrap_err();
+    assert!(refused.message.contains("user's own job"), "{refused}");
+    assert!(!fixture.cancelled.load(Ordering::SeqCst));
+    fixture.release.notify_one();
+    settled(&mut fixture).await;
+    assert_eq!(record(root.path(), "job-1").state, AgentState::Completed);
+}
+
+#[tokio::test]
+async fn a_resumed_jobs_record_keeps_what_it_resumes_after_it_ends() {
+    // What the workbench passes in is in the record from its first write,
+    // so the job's own later writes keep it.
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = recorded(root.path());
+    let worktree = scv_protocol::WorktreeRef {
+        path: "/w/.scv/worktrees/shop-1a2b3c4d/codex-9f3e21".into(),
+        branch: "scv/codex-9f3e21".into(),
+        repo: "/w/shop".into(),
+    };
+    fixture
+        .tool
+        .owner_call(
+            json!({"prompt":"again"}),
+            std::env::temp_dir(),
+            SendMode::Auto,
+            JobMeta {
+                resumed_from: Some("old/job-4".into()),
+                worktree: Some(worktree.clone()),
+                ..JobMeta::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture.release.notify_one();
+    settled(&mut fixture).await;
+    let done = record(root.path(), "job-1");
+    assert_eq!(done.state, AgentState::Completed);
+    assert!(done.reported);
+    assert_eq!(done.resumed_from.as_deref(), Some("old/job-4"));
+    assert_eq!(done.worktree, Some(worktree));
+    assert_eq!(done.started_by, scv_protocol::JobOrigin::Owner);
+}
+
+#[test]
+fn a_session_back_under_its_id_numbers_conversations_after_its_records() {
+    let root = tempfile::tempdir().unwrap();
+    let ledger =
+        JobLedger::new(root.path(), "session-1", "TUI", std::path::Path::new("/w")).unwrap();
+    let mut first = ledger
+        .record(&ledger::NewJob {
+            job: "job-1",
+            agent: "codex",
+            task: "t",
+            arguments: &json!({"prompt":"p"}),
+            started_by: scv_protocol::JobOrigin::Owner,
+            reviewed: false,
+            queued: false,
+        })
+        .unwrap();
+    first.conversation = Some("codex-3".into());
+    ledger.save(&first);
+    let mut second = first.clone();
+    second.job = "job-2".into();
+    second.conversation = None;
+    second.arguments = json!({"session":"claude-ai-2"});
+    ledger.save(&second);
+    let mut names = ledger.conversations().unwrap();
+    names.sort();
+    assert_eq!(names, ["claude-ai-2", "codex-3"]);
+
+    let accepts = Accepts {
+        session: true,
+        ..Accepts::default()
+    };
+    let tool = BackgroundCapable::plain(
+        Arc::new(AgentTool::beside(
+            "codex",
+            Arc::new(Resumable),
+            accepts,
+            &[],
+        )),
+        Arc::new(BackgroundJobs::new(1, None).with_ledger(ledger)),
+    );
+    tool.conversations.continue_after(
+        tool.jobs
+            .recorded_conversations()
+            .unwrap()
+            .iter()
+            .map(String::as_str),
+    );
+    let handle = tool
+        .adopt("codex", std::path::Path::new("/w"), "019a-thread")
+        .unwrap();
+    assert_eq!(handle, "codex-4");
+    assert!(tool.knows("codex-4"));
+    assert!(!tool.knows("codex-3"));
 }

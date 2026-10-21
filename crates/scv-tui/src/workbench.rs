@@ -22,6 +22,9 @@ use crate::{
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(1000);
 /// How often an open agent view's logs are read.
 const LOG_EVERY: Duration = Duration::from_millis(400);
+/// How often a daemon without the workbench is asked again, since it may be
+/// restarted into a release with it.
+const UNSUPPORTED_RETRY: Duration = Duration::from_secs(30);
 /// Notifications kept.
 const MAX_NOTICES: usize = 100;
 /// How long the newest notification stays in the status line.
@@ -87,6 +90,9 @@ pub(crate) struct AgentView {
     last_run: Option<String>,
     /// A cancel waiting to be pressed again.
     pub(crate) confirm_cancel: Option<Instant>,
+    /// The prompt sent last and not answered yet, which comes back to the
+    /// composer if it is refused or lost.
+    pub(crate) sent: Option<String>,
 }
 
 impl AgentView {
@@ -101,6 +107,17 @@ impl AgentView {
             follow: true,
             last_run: None,
             confirm_cancel: None,
+            sent: None,
+        }
+    }
+
+    /// The sent prompt did not arrive: back into an empty composer.
+    fn unsend(&mut self) {
+        if let Some(prompt) = self.sent.take()
+            && self.input.is_empty()
+        {
+            self.cursor = prompt.chars().count();
+            self.input = prompt;
         }
     }
 }
@@ -123,6 +140,19 @@ impl Item {
     pub(crate) fn selectable(&self) -> bool {
         !matches!(self, Self::Header(_))
     }
+
+    /// What the entry is, whatever row it is on: the sidebar's selection
+    /// and its confirmations follow it as the list changes.
+    pub(crate) fn key(&self) -> Option<String> {
+        match self {
+            Self::Header(_) => None,
+            Self::Tab(id, _) => Some(format!("tab:{id}")),
+            Self::Approval(approval) => Some(format!("approval:{}", approval.id)),
+            Self::Job(job) => Some(format!("job:{}/{}", job.session, job.job)),
+            Self::Run(run) => Some(format!("run:{}", run.handle)),
+            Self::Restorable(session) => Some(format!("queue:{}", session.id)),
+        }
+    }
 }
 
 /// The dashboard's workbench state.
@@ -134,8 +164,8 @@ pub(crate) struct Workbench {
     pub(crate) bell: bool,
     pub(crate) views: HashMap<Target, AgentView>,
     pub(crate) worktrees: Option<Vec<WorktreeInfo>>,
-    /// The sidebar's selected entry, by index into its items.
-    pub(crate) selected: usize,
+    /// The sidebar's selected entry ([`Item::key`]), and the row it was on.
+    selected: Option<(String, usize)>,
     last_snapshot: Option<Instant>,
     snapshot_pending: bool,
     /// Log pages asked for, by run, with the position each was read from.
@@ -152,7 +182,7 @@ impl Default for Workbench {
             bell: false,
             views: HashMap::new(),
             worktrees: None,
-            selected: 0,
+            selected: None,
             last_snapshot: None,
             snapshot_pending: false,
             logs_pending: HashMap::new(),
@@ -166,13 +196,15 @@ impl Workbench {
     /// view's unread logs, never two of one kind at once.
     pub(crate) fn due(&mut self, now: Instant) -> Vec<Request> {
         let mut requests = Vec::new();
-        if self.availability == Availability::Unsupported {
-            return requests;
-        }
+        let every = if self.availability == Availability::Unsupported {
+            UNSUPPORTED_RETRY
+        } else {
+            SNAPSHOT_EVERY
+        };
         if !self.snapshot_pending
             && self
                 .last_snapshot
-                .is_none_or(|last| now.duration_since(last) >= SNAPSHOT_EVERY)
+                .is_none_or(|last| now.duration_since(last) >= every)
         {
             self.snapshot_pending = true;
             self.last_snapshot = Some(now);
@@ -180,6 +212,10 @@ impl Workbench {
                 tag: Tag::Snapshot,
                 command: DaemonCommand::Workbench { watch: true },
             });
+        }
+        // Logs wait until the snapshot says the workbench answers again.
+        if self.availability != Availability::Ready && self.availability != Availability::Unknown {
+            return requests;
         }
         if self
             .last_logs
@@ -191,7 +227,7 @@ impl Workbench {
                 if !self.logs_pending.contains_key(&handle) {
                     self.logs_pending.insert(handle.clone(), after);
                     requests.push(Request {
-                        tag: Tag::Log(handle.clone()),
+                        tag: Tag::Log(handle.clone(), after),
                         command: DaemonCommand::RunLog {
                             handle,
                             after,
@@ -239,8 +275,8 @@ impl Workbench {
                         }
                         None
                     }
-                    Tag::Log(handle) => {
-                        let after = self.logs_pending.remove(&handle).unwrap_or(0);
+                    Tag::Log(handle, after) => {
+                        self.log_answered(&handle, after);
                         if let Some(page) = status.run_log {
                             self.take_page(after, page);
                         }
@@ -250,7 +286,12 @@ impl Workbench {
                         self.worktrees = Some(status.worktrees);
                         status.workbench_note
                     }
-                    Tag::Action => {
+                    Tag::Action | Tag::Send(_) => {
+                        if let Tag::Send(target) = &tag
+                            && let Some(view) = self.views.get_mut(target)
+                        {
+                            view.sent = None;
+                        }
                         if let Some(snapshot) = status.workbench {
                             self.take_snapshot(snapshot);
                         }
@@ -261,8 +302,8 @@ impl Workbench {
             Answer::Refused(tag, message) => {
                 match &tag {
                     Tag::Snapshot => self.snapshot_pending = false,
-                    Tag::Log(handle) => {
-                        self.logs_pending.remove(handle);
+                    Tag::Log(handle, after) => {
+                        self.log_answered(handle, *after);
                         // A log that is gone is read no more.
                         for view in self.views.values_mut() {
                             if let Some(cursor) = view.cursors.get_mut(handle) {
@@ -270,23 +311,86 @@ impl Workbench {
                             }
                         }
                     }
+                    Tag::Send(target) => {
+                        if let Some(view) = self.views.get_mut(target) {
+                            view.unsend();
+                        }
+                    }
                     Tag::Action | Tag::Worktrees => {}
                 }
-                matches!(tag, Tag::Action | Tag::Worktrees).then_some(message)
+                matches!(tag, Tag::Action | Tag::Worktrees | Tag::Send(_)).then_some(message)
             }
             Answer::Unsupported => {
+                let first = self.availability != Availability::Unsupported;
                 self.availability = Availability::Unsupported;
                 self.snapshot_pending = false;
                 self.logs_pending.clear();
-                Some("This daemon has no workbench; restart it into this release to use the dashboard.".into())
+                first.then(|| {
+                    "This daemon has no workbench; restart it into this release to use the \
+                     dashboard (the TUI checks again every 30 seconds)."
+                        .into()
+                })
             }
-            Answer::Disconnected => {
+            Answer::Disconnected(tag) => {
                 self.availability = Availability::Disconnected;
                 self.snapshot_pending = false;
                 self.logs_pending.clear();
-                None
+                match tag {
+                    Tag::Send(target) => {
+                        if let Some(view) = self.views.get_mut(&target) {
+                            view.unsend();
+                        }
+                        Some(
+                            "The prompt may not have reached the daemon (its connection broke); \
+                             it is back in the composer."
+                                .into(),
+                        )
+                    }
+                    Tag::Action | Tag::Worktrees => Some(
+                        "The daemon did not answer (its connection broke); check whether that \
+                         took effect."
+                            .into(),
+                    ),
+                    Tag::Snapshot | Tag::Log(..) => None,
+                }
             }
         }
+    }
+
+    /// The page of `handle`'s log read from `after` came back: that request
+    /// is no longer pending, unless a newer one is.
+    fn log_answered(&mut self, handle: &str, after: u64) {
+        if self.logs_pending.get(handle) == Some(&after) {
+            self.logs_pending.remove(handle);
+        }
+    }
+
+    /// The sidebar row selected among `items`: the selected entry wherever
+    /// it is now, else the selectable row nearest where it was.
+    pub(crate) fn selection(&self, items: &[Item]) -> Option<usize> {
+        if let Some((key, _)) = &self.selected
+            && let Some(index) = items
+                .iter()
+                .position(|item| item.key().as_ref() == Some(key))
+        {
+            return Some(index);
+        }
+        let row = self.selected.as_ref().map_or(0, |(_, row)| *row);
+        let selectable = || {
+            items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.selectable())
+        };
+        selectable()
+            .find(|(index, _)| *index >= row)
+            .or_else(|| selectable().next_back())
+            .map(|(index, _)| index)
+    }
+
+    /// Select row `index` of `items`.
+    pub(crate) fn select(&mut self, items: &[Item], index: usize) {
+        self.selected = items.get(index).and_then(Item::key).map(|key| (key, index));
     }
 
     fn take_snapshot(&mut self, snapshot: WorkbenchSnapshot) {
@@ -561,6 +665,7 @@ pub(crate) fn runs_of<'a>(
             Target::Job { session, job: name } => {
                 &run.session == session
                     && (run.job.as_ref() == Some(name)
+                        || run.jobs.contains(name)
                         || job.and_then(|job| job.conversation.as_ref()).is_some_and(
                             |conversation| {
                                 run.conversation.as_ref() == Some(conversation)
@@ -604,9 +709,12 @@ fn changes(before: &WorkbenchSnapshot, after: &WorkbenchSnapshot) -> Vec<(String
         .map(|job| ((job.session.as_str(), job.job.as_str()), job.state))
         .collect();
     for job in &after.jobs {
-        let Some(&was) = previous.get(&(job.session.as_str(), job.job.as_str())) else {
-            continue;
-        };
+        // A job first seen already past starting (it began and ended, or
+        // asked for input, between two snapshots) is news as well.
+        let was = previous
+            .get(&(job.session.as_str(), job.job.as_str()))
+            .copied()
+            .unwrap_or(AgentState::Starting);
         if was == job.state {
             continue;
         }

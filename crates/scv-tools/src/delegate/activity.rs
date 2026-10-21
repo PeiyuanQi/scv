@@ -34,8 +34,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     delegate::{
-        progress::redact,
-        records::{ProcessIdentity, write_private_json},
+        progress::{redact, scrub},
+        records::{ProcessIdentity, write_private_json, write_private_json_unsynced},
     },
     sync::lock,
 };
@@ -56,6 +56,8 @@ const MAX_PAGE_BYTES: usize = 256 * 1024;
 /// A working run that has reported nothing for this long is shown as
 /// `unknown`: SCV cannot tell whether it is thinking or stuck.
 pub const QUIET_AFTER: Duration = Duration::from_secs(5 * 60);
+/// Jobs a run remembers having served, newest last.
+const MAX_RUN_JOBS: usize = 32;
 
 /// How SCV reaches a run's agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,10 @@ pub struct RunState {
     /// The background job the current or last turn serves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<String>,
+    /// Every background job its turns served, oldest first (at most 32): a
+    /// live conversation's run serves the turns of several.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
     pub state: AgentState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -132,6 +138,9 @@ pub struct RunState {
     /// The run's process ended; nothing more is logged.
     #[serde(default)]
     pub ended: bool,
+    /// When it ended, which is what its age counts from once it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_unix: Option<u64>,
     /// The last event's position and the log's size.
     #[serde(default)]
     pub seq: u64,
@@ -165,6 +174,14 @@ struct Writer {
     pending: String,
     truncated: bool,
     last_state_write: Instant,
+    /// The process ended mid-turn (`exited`, `killed`, `lost`): the run's
+    /// end is logged after that turn's, so a reader that stops at the end
+    /// has seen why the turn failed.
+    ending: Option<String>,
+    /// How its last turn ended, which a run that ends between turns ends as.
+    last_turn: Option<AgentState>,
+    /// A turn has started and its end is not logged yet.
+    turn_open: bool,
 }
 
 impl RunActivity {
@@ -199,6 +216,7 @@ impl RunActivity {
                 conversation,
                 turn,
                 job: None,
+                jobs: Vec::new(),
                 state: AgentState::Starting,
                 detail: None,
                 started_unix: now,
@@ -209,12 +227,16 @@ impl RunActivity {
                 steerable: false,
                 streams: header.streams,
                 ended: false,
+                ended_unix: None,
                 seq: 0,
                 bytes: 0,
             },
             pending: String::new(),
             truncated: false,
             last_state_write: Instant::now(),
+            ending: None,
+            last_turn: None,
+            turn_open: false,
         })));
         {
             let mut writer = lock(&activity.0);
@@ -246,9 +268,18 @@ impl RunActivity {
         }
         writer.state.turn = Some(turn);
         writer.state.job = job.map(str::to_owned);
+        writer.turn_open = true;
+        if let Some(job) = job
+            && !writer.state.jobs.iter().any(|served| served == job)
+        {
+            if writer.state.jobs.len() >= MAX_RUN_JOBS {
+                writer.state.jobs.remove(0);
+            }
+            writer.state.jobs.push(job.to_owned());
+        }
         writer.event(
             RunEventKind::TurnStarted,
-            bounded_chars(prompt, MAX_PROMPT_CHARS),
+            bounded_chars(&redact(prompt), MAX_PROMPT_CHARS),
             |event| {
                 event.turn = Some(turn);
                 event.job = job.map(str::to_owned);
@@ -282,8 +313,11 @@ impl RunActivity {
         writer.active();
     }
 
-    /// A tool call or command the agent started, as a progress line.
+    /// A tool call or command the agent started, as a progress line. Lines
+    /// are scrubbed here whoever made them: a nested SCV relays its own.
     pub(crate) fn tool(&self, line: &str) {
+        let line = scrub(line);
+        let line = line.as_str();
         let mut writer = lock(&self.0);
         writer.flush_text();
         let failed = line.ends_with(" failed") || line.starts_with("exit ");
@@ -303,17 +337,18 @@ impl RunActivity {
         writer.flush_text();
         writer.event(
             RunEventKind::Plan,
-            bounded_chars(step, MAX_EVENT_CHARS),
+            bounded_chars(&scrub(step), MAX_EVENT_CHARS),
             |_| {},
         );
         writer.active();
     }
 
-    /// The agent asked for approval; it waits for an answer.
+    /// The agent asked for approval; it waits for an answer. The summary
+    /// is scrubbed here, as a nested SCV's is its own tool's.
     pub(crate) fn approval_requested(&self, risk: &str, summary: &str) {
         let mut writer = lock(&self.0);
         writer.flush_text();
-        let summary = bounded_chars(summary, MAX_EVENT_CHARS);
+        let summary = bounded_chars(&scrub(summary), MAX_EVENT_CHARS);
         writer.event(RunEventKind::ApprovalRequested, summary.clone(), |event| {
             event.risk = Some(risk.to_owned());
         });
@@ -342,7 +377,7 @@ impl RunActivity {
         writer.flush_text();
         writer.event(
             RunEventKind::Steered,
-            bounded_chars(prompt, MAX_PROMPT_CHARS),
+            bounded_chars(&redact(prompt), MAX_PROMPT_CHARS),
             |_| {},
         );
         writer.active();
@@ -370,39 +405,61 @@ impl RunActivity {
             "cancelled" => AgentState::Cancelled,
             _ => AgentState::Failed,
         };
+        writer.last_turn = Some(state);
+        writer.turn_open = false;
         writer.transition(state, error.map(|error| bounded_chars(&redact(error), 300)));
+        if let Some(how) = writer.ending.take() {
+            writer.end(&how);
+            writer.save();
+        }
     }
 
-    /// A live child finished its turn and waits for the next prompt.
+    /// A live child finished its turn, or the call serving it let go, and
+    /// waits for the next prompt: no turn is open.
     pub(crate) fn idle(&self) {
         let mut writer = lock(&self.0);
-        if !writer.state.ended {
-            writer.transition(AgentState::Idle, None);
+        writer.turn_open = false;
+        writer.transition(AgentState::Idle, None);
+    }
+
+    /// The call serving a turn let go of it after the run's process ended:
+    /// if the turn's own end was never logged (the call was dropped), the
+    /// run's end is logged now.
+    pub(crate) fn turn_released(&self) {
+        let mut writer = lock(&self.0);
+        writer.turn_open = false;
+        if let Some(how) = writer.ending.take() {
+            writer.end(&how);
+            writer.save();
         }
     }
 
     /// The run's process ended: `exited`, `killed`, or `lost`.
+    ///
+    /// Between turns, the run ends as its last turn did (or failed, when
+    /// killed, or before any turn ended). Mid-turn it fails, and its end is
+    /// logged after the turn's own end, which says why, or once the turn is
+    /// let go of.
     pub(crate) fn run_ended(&self, how: &str) {
         let mut writer = lock(&self.0);
-        if writer.state.ended {
+        if writer.state.ended || writer.ending.is_some() {
             return;
         }
         writer.flush_text();
-        writer.event(RunEventKind::RunEnded, String::new(), |event| {
-            event.status = Some(how.to_owned());
-        });
-        writer.state.ended = true;
-        // A run between turns ended as its last turn did; one that ended
-        // mid-turn failed.
-        if writer.state.state.is_final() {
+        let state = writer.state.state;
+        if writer.turn_open {
+            writer.transition(AgentState::Failed, Some(format!("its process {how}")));
+            writer.ending = Some(how.to_owned());
+        } else if state.is_final() {
+            writer.end(how);
             writer.save();
         } else {
-            let state = if how == "exited" && writer.state.state == AgentState::Idle {
-                AgentState::Completed
-            } else {
-                AgentState::Failed
+            let ended = match writer.last_turn {
+                Some(last) if how == "exited" && state == AgentState::Idle => last,
+                _ => AgentState::Failed,
             };
-            writer.transition(state, Some(format!("its process {how}")));
+            writer.end(how);
+            writer.transition(ended, Some(format!("its process {how}")));
         }
     }
 
@@ -426,6 +483,16 @@ impl RunActivity {
 }
 
 impl Writer {
+    /// Log the run's end: nothing is logged after it.
+    fn end(&mut self, how: &str) {
+        self.flush_text();
+        self.append(RunEventKind::RunEnded, String::new(), |event| {
+            event.status = Some(how.to_owned());
+        });
+        self.state.ended = true;
+        self.state.ended_unix = Some(unix_now());
+    }
+
     fn text_line(&mut self, line: &str) {
         let line = redact(line);
         if !line.trim().is_empty() {
@@ -507,6 +574,10 @@ impl Writer {
     }
 
     fn transition(&mut self, state: AgentState, detail: Option<String>) {
+        // A run whose process ended only settles on how it ended.
+        if (self.state.ended || self.ending.is_some()) && !state.is_final() {
+            return;
+        }
         let now = unix_now();
         if self.state.state != state {
             self.state.since_unix = now;
@@ -520,7 +591,10 @@ impl Writer {
     fn save(&mut self) {
         self.last_state_write = Instant::now();
         let name = format!("{}.state.json", self.state.handle);
-        if let Err(error) = write_private_json(&self.dir, &name, &self.state) {
+        // Rewritten on the agent's own output path, so never synced: a
+        // machine crash at worst loses the latest state, which then settles
+        // as interrupted.
+        if let Err(error) = write_private_json_unsynced(&self.dir, &name, &self.state) {
             tracing::debug!(handle = %self.state.handle, %error, "could not save a run's state");
         }
     }
@@ -530,11 +604,8 @@ impl Drop for Writer {
     fn drop(&mut self) {
         // The run's last owner let go: whatever it was doing has ended.
         if !self.state.ended {
-            self.flush_text();
-            self.append(RunEventKind::RunEnded, String::new(), |event| {
-                event.status = Some("exited".to_owned());
-            });
-            self.state.ended = true;
+            let how = self.ending.take().unwrap_or_else(|| "exited".to_owned());
+            self.end(&how);
             if !self.state.state.is_final() {
                 self.state.state = if self.state.state == AgentState::Idle {
                     AgentState::Completed
@@ -714,6 +785,7 @@ pub fn settle_orphans(dir: &Path) -> Vec<String> {
             tracing::debug!(handle = %state.handle, "could not end an interrupted run's log");
         }
         state.ended = true;
+        state.ended_unix = Some(unix_now());
         if !state.state.is_final() {
             state.state = AgentState::Interrupted;
             state.detail = Some("the SCV process that ran it stopped".into());
@@ -757,18 +829,20 @@ fn append_existing(
     Ok(())
 }
 
-/// Remove the logs of runs that ended more than `keep` ago, then the oldest
-/// ended ones beyond `max_runs`. Runs still going are never removed.
+/// Remove the logs of runs that ended more than `keep` ago (a run settled
+/// as interrupted counts from then), then the oldest ended ones beyond
+/// `max_runs`. Runs still going are never removed.
 pub fn prune(dir: &Path, keep: Duration, max_runs: usize) -> usize {
     let now = unix_now();
     let mut ended: Vec<RunState> = list_states(dir)
         .into_iter()
         .filter(|state| state.ended)
         .collect();
-    ended.sort_by_key(|state| std::cmp::Reverse(state.last_activity_unix));
+    let ended_at = |state: &RunState| state.ended_unix.unwrap_or(state.last_activity_unix);
+    ended.sort_by_key(|state| std::cmp::Reverse(ended_at(state)));
     let mut removed = 0;
     for (index, state) in ended.iter().enumerate() {
-        let old = now.saturating_sub(state.last_activity_unix) > keep.as_secs();
+        let old = now.saturating_sub(ended_at(state)) > keep.as_secs();
         if old || index >= max_runs {
             let _ = std::fs::remove_file(dir.join(format!("{}.jsonl", state.handle)));
             let _ = std::fs::remove_file(dir.join(format!("{}.state.json", state.handle)));

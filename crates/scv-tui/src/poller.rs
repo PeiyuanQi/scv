@@ -3,7 +3,10 @@
 //! time and hands their answers back, reconnecting when the daemon
 //! restarts. It holds no session, so closing it cancels nothing.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use scv_client::{read_frame, write_message};
 use scv_protocol::{
@@ -39,10 +42,12 @@ pub(crate) struct Request {
 pub(crate) enum Tag {
     /// The periodic snapshot.
     Snapshot,
-    /// A page of run `handle`'s log.
-    Log(String),
+    /// A page of run `handle`'s log, read from byte position `after`.
+    Log(String, u64),
     /// An owner's action, whose note or refusal is shown.
     Action,
+    /// A prompt an agent view sent, which it gets back if refused.
+    Send(crate::workbench::Target),
     /// The worktree list.
     Worktrees,
 }
@@ -55,8 +60,9 @@ pub(crate) enum Answer {
     Refused(Tag, String),
     /// The daemon predates the workbench.
     Unsupported,
-    /// The connection broke; the poller connects again.
-    Disconnected,
+    /// The request got no answer: the connection broke or could not be
+    /// made. The poller connects again for the next request.
+    Disconnected(Tag),
 }
 
 /// Start the poller for the daemon at `socket`: requests go in, answers
@@ -71,30 +77,44 @@ pub(crate) fn spawn(
     let (answers, received) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         let mut connection: Option<Connection> = None;
+        // After a failed connection, requests until then are answered at
+        // once, so none wait in line behind the retries.
+        let mut down_until: Option<Instant> = None;
         while let Some(request) = incoming.recv().await {
             if connection.is_none() {
-                connection = Connection::open(&socket).await;
-                if connection.is_none() {
-                    if answers.send(Answer::Disconnected).is_err() {
+                if down_until.is_some_and(|until| Instant::now() < until) {
+                    if answers.send(Answer::Disconnected(request.tag)).is_err() {
                         return;
                     }
-                    tokio::time::sleep(RETRY_DELAY).await;
                     continue;
                 }
+                connection = Connection::open(&socket).await;
+                if connection.is_none() {
+                    down_until = Some(Instant::now() + RETRY_DELAY);
+                    if answers.send(Answer::Disconnected(request.tag)).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                down_until = None;
             }
             let Some(open) = connection.as_mut() else {
                 continue;
             };
-            let answer =
-                match tokio::time::timeout(REQUEST_TIMEOUT, open.ask(&request.command)).await {
-                    Ok(Ok(Reply::Status(status))) => Answer::Status(request.tag, status),
-                    Ok(Ok(Reply::Error(ErrorCode::InvalidJson, _))) => Answer::Unsupported,
-                    Ok(Ok(Reply::Error(_, message))) => Answer::Refused(request.tag, message),
-                    Ok(Err(())) | Err(_) => {
-                        connection = None;
-                        Answer::Disconnected
-                    }
-                };
+            let answer = match tokio::time::timeout(
+                scv_client::control_timeout(&request.command),
+                open.ask(&request.command),
+            )
+            .await
+            {
+                Ok(Ok(Reply::Status(status))) => Answer::Status(request.tag, status),
+                Ok(Ok(Reply::Error(ErrorCode::InvalidJson, _))) => Answer::Unsupported,
+                Ok(Ok(Reply::Error(_, message))) => Answer::Refused(request.tag, message),
+                Ok(Err(())) | Err(_) => {
+                    connection = None;
+                    Answer::Disconnected(request.tag)
+                }
+            };
             if answers.send(answer).is_err() {
                 return;
             }

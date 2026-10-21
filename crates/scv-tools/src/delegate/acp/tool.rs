@@ -560,14 +560,16 @@ impl Backend for AcpAgentTool {
             }
             TurnEnd::Lost(reason) => {
                 let tail = child.rpc.live.stderr_tail().await;
-                child.rpc.live.close().await;
-                turn.forget();
                 let detail = if tail.is_empty() {
                     reason
                 } else {
                     format!("{reason}: {}", bounded(&redact(&tail), 1000))
                 };
+                // Logged before the shutdown, so the reason comes before
+                // the run's end.
                 ended(RunStatus::Failed, Some(&detail));
+                child.rpc.live.close().await;
+                turn.forget();
                 return Ok(self.result(
                     RunStatus::Failed,
                     (String::new(), false),

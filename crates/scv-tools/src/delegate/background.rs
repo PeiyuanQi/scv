@@ -188,8 +188,23 @@ struct Job {
     queued_waiting: bool,
     /// The owner stopped it from the workbench, so the model was not told.
     owner_cancelled: bool,
-    /// Its durable record, when the session keeps a ledger.
+    /// Its durable record, when the session keeps a ledger, and that
+    /// record's revision: each change bumps it, and it is written after the
+    /// job table's lock is let go ([`BackgroundJobs::persist`]).
     record: Option<JobRecord>,
+    record_revision: u64,
+}
+
+/// A revision of a job's record to write once the job table is let go.
+type RecordWrite = (JobRecord, u64);
+
+impl Job {
+    /// The record as it is now, under a new revision, to write.
+    fn record_changed(&mut self) -> Option<RecordWrite> {
+        let record = self.record.as_ref()?;
+        self.record_revision += 1;
+        Some((record.clone(), self.record_revision))
+    }
 }
 
 /// `agent_cancel` waiting for a job to stop. Settled after the wait, or,
@@ -358,7 +373,11 @@ impl BackgroundJobs {
         review: Option<&Arc<ReviewedTool>>,
         meta: JobMeta,
     ) -> Result<Value, ToolError> {
-        let JobMeta { origin, worktree } = meta;
+        let JobMeta {
+            origin,
+            worktree,
+            resumed_from,
+        } = meta;
         let task = task_line(
             arguments
                 .get("prompt")
@@ -379,7 +398,7 @@ impl BackgroundJobs {
             }
             None => None,
         };
-        let (id, progress, done_tx, cancellation) = {
+        let (id, progress, done_tx, cancellation, first) = {
             let mut state = self.state();
             // Checked again: another call may have started a job meanwhile.
             self.room(&state, queued)?;
@@ -401,9 +420,10 @@ impl BackgroundJobs {
                     queued,
                 })?;
                 record.worktree.clone_from(&worktree);
-                ledger.save(&record);
+                record.resumed_from = resumed_from;
                 Some(record)
             });
+            let first = record.clone().map(|record| (record, 1));
             state.record(
                 &context.call_id,
                 JobChange {
@@ -439,9 +459,11 @@ impl BackgroundJobs {
                 queued_waiting: queued,
                 owner_cancelled: false,
                 record,
+                record_revision: 1,
             });
-            (id, progress, done_tx, cancel)
+            (id, progress, done_tx, cancel, first)
         };
+        self.persist(first);
         let jobs = Arc::downgrade(self);
         let job = id.clone();
         let approvals = self.approvals.clone();
@@ -519,25 +541,67 @@ impl BackgroundJobs {
 
     /// A queued job's turn has come: it runs now.
     fn began(&self, id: &str) {
-        let mut state = self.state();
-        if let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) {
-            job.queued_waiting = false;
-            if let (Some(ledger), Some(record)) = (&self.ledger, job.record.as_mut()) {
-                record.state = AgentState::Working;
-                record.updated_unix = ledger::now();
-                ledger.save(record);
-            }
-        }
+        let write = {
+            let mut state = self.state();
+            state
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .and_then(|job| {
+                    job.queued_waiting = false;
+                    let record = job.record.as_mut()?;
+                    record.state = AgentState::Working;
+                    record.updated_unix = ledger::now();
+                    job.record_changed()
+                })
+        };
+        self.persist(write);
     }
 
-    /// Mark `job`'s result reported in its durable record.
-    fn mark_reported(&self, job: &mut Job) {
-        if let (Some(ledger), Some(record)) = (&self.ledger, job.record.as_mut())
-            && !record.reported
-        {
-            record.reported = true;
-            record.updated_unix = ledger::now();
-            ledger.save(record);
+    /// The conversation handles the session's job records name; `None`
+    /// when it has none, so the session was not here before.
+    pub(crate) fn recorded_conversations(&self) -> Option<Vec<String>> {
+        self.ledger.as_ref().and_then(JobLedger::conversations)
+    }
+
+    /// Whether the session still owes its client `job`'s result: dropping
+    /// its record now would lose it.
+    pub(crate) fn unreported(&self, job: &str) -> bool {
+        self.state()
+            .jobs
+            .iter()
+            .any(|entry| entry.id == job && !entry.reported)
+    }
+
+    /// Mark `job`'s result reported in its durable record; the change to
+    /// write, when there is one.
+    fn mark_reported(job: &mut Job) -> Option<RecordWrite> {
+        let record = job.record.as_mut().filter(|record| !record.reported)?;
+        record.reported = true;
+        record.updated_unix = ledger::now();
+        job.record_changed()
+    }
+
+    /// Write the record changes `writes`, outside the job table's lock, so
+    /// a slow disk never holds up the session's job calls. The write syncs
+    /// to disk, so on a runtime's worker thread the runtime is told it
+    /// blocks, and moves its other tasks elsewhere meanwhile.
+    fn persist(&self, writes: impl IntoIterator<Item = RecordWrite>) {
+        let Some(ledger) = &self.ledger else {
+            return;
+        };
+        let write = || {
+            for (record, revision) in writes {
+                ledger.save_revision(&record, revision);
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime)
+                if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                tokio::task::block_in_place(write);
+            }
+            _ => write(),
         }
     }
 
@@ -618,7 +682,7 @@ impl BackgroundJobs {
     /// `background.updated` follows ([`Self::take_updates`]). The wait
     /// reads only the job's live state, never its journal.
     async fn cancel(&self, job: &str, call_id: &str) -> Result<Value, ToolError> {
-        let (mut done, owed) = {
+        let (mut done, owed, write) = {
             let mut state = self.state();
             let index = state
                 .jobs
@@ -626,12 +690,25 @@ impl BackgroundJobs {
                 .position(|candidate| candidate.id == job)
                 .ok_or_else(|| unknown_job(job))?;
             let entry = &mut state.jobs[index];
+            if entry.origin == JobOrigin::Owner && entry.outcome.is_none() {
+                return Err(ToolError::invalid_arguments(format!(
+                    "{job} is the user's own job, started from the SCV workbench; only the \
+                     user stops it"
+                )));
+            }
             if entry.outcome.is_some() {
                 let (mut value, change) = entry.describe();
                 value["note"] = "The job had already finished.".into();
+                // The model has its result now, as `agent_status` gives it.
+                let write = change
+                    .is_some()
+                    .then(|| Self::mark_reported(entry))
+                    .flatten();
                 if let Some(change) = change {
                     state.record(call_id, change);
                 }
+                drop(state);
+                self.persist(write);
                 return Ok(value);
             }
             entry.cancelled = true;
@@ -639,12 +716,10 @@ impl BackgroundJobs {
             entry.cancelling = true;
             let done = entry.done.clone();
             let mut owed = false;
+            let mut write = None;
             if !entry.reported {
                 entry.reported = true;
-                if let (Some(ledger), Some(record)) = (&self.ledger, entry.record.as_mut()) {
-                    record.reported = true;
-                    ledger.save(record);
-                }
+                write = Self::mark_reported(entry);
                 let change = entry.change(JobStatus::Cancelled);
                 owed = entry.review.is_some();
                 state.record(call_id, change);
@@ -652,8 +727,9 @@ impl BackgroundJobs {
                     state.owed.cancelling(job, call_id);
                 }
             }
-            (done, owed)
+            (done, owed, write)
         };
+        self.persist(write);
         let waiting = Waiting {
             jobs: self,
             job: job.to_owned(),
@@ -808,6 +884,7 @@ impl BackgroundJobs {
     fn describe(&self, job: Option<&str>, call_id: &str) -> Result<Value, ToolError> {
         let mut state = self.state();
         let mut changes = Vec::new();
+        let mut writes = Vec::new();
         let value = if let Some(job) = job {
             let entry = state
                 .jobs
@@ -816,7 +893,7 @@ impl BackgroundJobs {
                 .ok_or_else(|| unknown_job(job))?;
             let (value, change) = entry.describe();
             if change.is_some() {
-                self.mark_reported(entry);
+                writes.extend(Self::mark_reported(entry));
             }
             changes.extend(change);
             value
@@ -827,7 +904,7 @@ impl BackgroundJobs {
                 .map(|entry| {
                     let (value, change) = entry.describe();
                     if change.is_some() {
-                        self.mark_reported(entry);
+                        writes.extend(Self::mark_reported(entry));
                     }
                     changes.extend(change);
                     value
@@ -838,6 +915,8 @@ impl BackgroundJobs {
         for change in changes {
             state.record(call_id, change);
         }
+        drop(state);
+        self.persist(writes);
         Ok(value)
     }
 
@@ -885,13 +964,17 @@ impl BackgroundJobs {
     /// The report turn about `jobs` ended without failing: it completed, so
     /// the model has seen them, or the user cancelled it. Either settles them.
     pub fn report_settled(&self, jobs: &[String]) {
-        let mut state = self.state();
-        for job in state.jobs.iter_mut().filter(|job| jobs.contains(&job.id)) {
-            job.reporting = false;
-            job.reported = true;
-            job.report_due = None;
-            self.mark_reported(job);
+        let mut writes = Vec::new();
+        {
+            let mut state = self.state();
+            for job in state.jobs.iter_mut().filter(|job| jobs.contains(&job.id)) {
+                job.reporting = false;
+                job.reported = true;
+                job.report_due = None;
+                writes.extend(Self::mark_reported(job));
+            }
         }
+        self.persist(writes);
     }
 
     /// The report turn about `jobs` failed, so the model has not seen them
@@ -901,6 +984,20 @@ impl BackgroundJobs {
     /// directly. A turn that reported several jobs decides for all of them,
     /// by the one that failed most.
     pub fn report_failed(&self, jobs: &[String], retry: bool) -> ReportFailure {
+        let mut writes = Vec::new();
+        let failure = self.report_failed_locked(jobs, retry, &mut writes);
+        self.persist(writes);
+        failure
+    }
+
+    /// [`Self::report_failed`] under the job table's lock, gathering the
+    /// record changes to write in `writes`.
+    fn report_failed_locked(
+        &self,
+        jobs: &[String],
+        retry: bool,
+        writes: &mut Vec<RecordWrite>,
+    ) -> ReportFailure {
         let mut state = self.state();
         let mut failed: Vec<&mut Job> = state
             .jobs
@@ -931,7 +1028,7 @@ impl BackgroundJobs {
             .filter_map(|job| {
                 job.reported = true;
                 job.report_due = None;
-                self.mark_reported(job);
+                writes.extend(Self::mark_reported(job));
                 job.report()
             })
             .collect();
@@ -987,11 +1084,14 @@ impl BackgroundJobs {
     }
 }
 
-/// Who started a job, and the worktree SCV created for it.
+/// Who started a job, the worktree it runs in, and the interrupted job it
+/// resumes: what its record holds from the start.
 #[derive(Debug, Clone, Default)]
-pub(in crate::delegate) struct JobMeta {
-    pub(in crate::delegate) origin: JobOrigin,
-    pub(in crate::delegate) worktree: Option<scv_protocol::WorktreeRef>,
+pub(crate) struct JobMeta {
+    pub(crate) origin: JobOrigin,
+    pub(crate) worktree: Option<scv_protocol::WorktreeRef>,
+    /// `<session>/<job>` of the interrupted job it runs again.
+    pub(crate) resumed_from: Option<String>,
 }
 
 /// What an owner's prompt to the workbench became.
@@ -1050,6 +1150,7 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
     let Some(jobs) = jobs.upgrade() else {
         return;
     };
+    let mut write = None;
     {
         let mut state = jobs.state();
         let mut last = None;
@@ -1067,9 +1168,9 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
                 job_status(&output, &AgentReply::read(&result).unwrap_or_default())
             };
             job.outcome = Some(Outcome { output, elapsed });
-            if let (Some(ledger), Some(record)) = (&jobs.ledger, job.record.as_mut()) {
+            if let Some(record) = job.record.as_mut() {
                 ledger::finish(record, agent_state(status), &result, job.reported);
-                ledger.save(record);
+                write = job.record_changed();
             }
             last = job.outcome();
         }
@@ -1093,6 +1194,8 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
             }
         });
     }
+    // Recorded before anyone hears the job finished.
+    jobs.persist(write);
     if let Some(finished) = &jobs.finished {
         let _ = finished.send(());
     }
@@ -1500,6 +1603,7 @@ impl Tool for BackgroundCapable {
                     JobMeta {
                         origin: JobOrigin::Model,
                         worktree,
+                        resumed_from: None,
                     },
                 )?;
                 Ok(ToolOutput::success(started.to_string()))
@@ -1697,6 +1801,7 @@ impl BackgroundCapable {
             JobMeta {
                 origin: JobOrigin::Model,
                 worktree,
+                resumed_from: None,
             },
         )?;
         let first = reviewers.first().cloned().unwrap_or_default();
@@ -1764,12 +1869,15 @@ impl BackgroundCapable {
     /// session: no approval request, since it is the owner's own action,
     /// and no report turn, since the owner watches it. A call continuing a
     /// conversation that runs a turn steers it when `mode` allows and the
-    /// agent can take the prompt, and otherwise queues behind it.
+    /// agent can take the prompt, and otherwise queues behind it. `meta`'s
+    /// worktree is recorded when the call makes none of its own, and its
+    /// `resumed_from` as given; it is always the owner's.
     pub(crate) async fn owner_call(
         &self,
         mut arguments: Value,
         workspace: std::path::PathBuf,
         mode: scv_protocol::SendMode,
+        meta: JobMeta,
     ) -> Result<OwnerCall, ToolError> {
         use scv_protocol::SendMode;
         let context = ToolContext::new(workspace, CancellationToken::new());
@@ -1786,7 +1894,8 @@ impl BackgroundCapable {
         let (agent, routed) = self.inner.route(&arguments)?;
         let meta = JobMeta {
             origin: JobOrigin::Owner,
-            worktree,
+            worktree: worktree.or(meta.worktree),
+            resumed_from: meta.resumed_from,
         };
         let Some(handle) = parse_args::<AgentArgs>(&routed)?
             .session
@@ -1831,6 +1940,12 @@ impl BackgroundCapable {
             "session" => offered.accepts.session,
             _ => false,
         })
+    }
+
+    /// Whether the session has conversation `handle`, so the owner can send
+    /// it a prompt.
+    pub(crate) fn knows(&self, handle: &str) -> bool {
+        self.conversations.knows(handle)
     }
 
     /// Take in conversation `vendor` that `agent` saved, so a call can

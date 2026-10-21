@@ -64,27 +64,71 @@ fn the_users_bindings_replace_defaults_and_bad_ones_keep_them_with_a_warning() {
 }
 
 #[test]
-fn a_key_taken_twice_unbinds_the_later_action() {
+fn a_configured_key_wins_over_another_actions_default() {
     let configured = BTreeMap::from([("split".to_owned(), "ctrl+g".to_owned())]);
     let (keys, warnings) = KeyMap::with(&configured);
     assert_eq!(
         keys.action(press(KeyCode::Char('g'), KeyModifiers::CONTROL)),
-        Some(Action::FocusSidebar)
+        Some(Action::Split)
     );
-    assert_eq!(keys.label(Action::Split), "unbound");
-    assert_eq!(warnings.len(), 1);
+    assert_eq!(keys.label(Action::FocusSidebar), "unbound");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("focus_sidebar"), "{warnings:?}");
+}
+
+#[test]
+fn a_refused_binding_keeps_its_default_and_the_composers_keys_stay_its_own() {
+    let configured = BTreeMap::from([
+        // The sidebar's default, taken by the user's own binding first.
+        ("split".to_owned(), "alt+s".to_owned()),
+        // Configured twice: the later one keeps its default.
+        ("notifications".to_owned(), "alt+s".to_owned()),
+        // Keys a chat needs to send, cancel, and quit.
+        ("help".to_owned(), "enter".to_owned()),
+        ("new_tab".to_owned(), "ctrl+c".to_owned()),
+    ]);
+    let (keys, warnings) = KeyMap::with(&configured);
+    assert_eq!(
+        keys.action(press(KeyCode::Char('s'), KeyModifiers::ALT)),
+        Some(Action::Split)
+    );
+    assert_eq!(keys.label(Action::Notifications), "Alt+N");
+    assert_eq!(keys.label(Action::Help), "F1");
+    assert_eq!(keys.label(Action::NewTab), "Ctrl+T");
+    assert_eq!(keys.label(Action::ToggleSidebar), "unbound");
+    assert_eq!(
+        keys.action(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        None
+    );
+    assert_eq!(keys.action(press(KeyCode::Enter, KeyModifiers::NONE)), None);
+    assert_eq!(warnings.len(), 4, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("chat or agent view uses")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
 fn key_specifications_parse_like_people_write_them() {
     let parsed = |spec: &str| Key::parse(spec);
+    // Terminals send shift+tab as BackTab, which is how it matches.
     assert_eq!(
         parsed("Ctrl+Shift+Tab"),
         Some(Key {
-            code: KeyCode::Tab,
-            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            code: KeyCode::BackTab,
+            modifiers: KeyModifiers::CONTROL
         })
     );
+    assert_eq!(
+        Key::of(press(
+            KeyCode::BackTab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )),
+        parsed("ctrl+shift+tab").unwrap()
+    );
+    assert_eq!(parsed("ctrl+shift+x"), parsed("ctrl+x"));
     assert_eq!(
         parsed("alt++"),
         Some(Key {
@@ -102,6 +146,10 @@ fn key_specifications_parse_like_people_write_them() {
         "shift+x",
         "ctrl+",
         "ctrl+enterr",
+        "enter",
+        "esc",
+        "shift+tab",
+        "pagedown",
     ] {
         assert_eq!(parsed(bad), None, "{bad}");
     }

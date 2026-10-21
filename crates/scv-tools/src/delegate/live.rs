@@ -316,10 +316,12 @@ impl Drop for LiveTurn<'_> {
         if let Some(guard) = lock(&self.0.guard).as_ref() {
             guard.set_idle();
         }
-        if self.0.is_running()
-            && let Some(activity) = &self.0.activity
-        {
-            activity.idle();
+        if let Some(activity) = &self.0.activity {
+            if self.0.is_running() {
+                activity.idle();
+            } else {
+                activity.turn_released();
+            }
         }
     }
 }

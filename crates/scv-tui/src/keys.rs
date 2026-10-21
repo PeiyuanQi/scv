@@ -3,10 +3,42 @@
 //!
 //! A binding is a key specification such as `alt+.`, `ctrl+t`, `f1`, or
 //! `ctrl+pagedown`: modifiers (`ctrl`, `alt`, `shift`) joined to one key by
-//! `+`. An action or key the TUI does not know keeps its default, and the
-//! TUI says so once at startup.
+//! `+`. It needs `ctrl` or `alt` unless it is a function key, and may not be
+//! a key a chat or agent view uses ([`RESERVED`]). Configured bindings come
+//! first; an action whose configured key the TUI cannot use, or that another
+//! action's configured key took, keeps its default, or is unbound when that
+//! is taken too. The TUI says which once at startup.
 
 use std::collections::BTreeMap;
+
+/// Keys a chat's composer or an agent view uses, which no dashboard action
+/// may take: editing (`ctrl+a`/`b`/`e`/`f`/`k`/`u`/`w`, `alt+b`/`f`, word
+/// movement), newlines (`ctrl+j`, `alt+enter`), cancelling and quitting
+/// (`ctrl+c`), tool details (`ctrl+o`), the queue (`alt+p`, `alt+up`,
+/// `alt+down`, `ctrl+x`), and an agent view's stop and resume (`ctrl+x`,
+/// `ctrl+r`).
+pub(crate) const RESERVED: &[&str] = &[
+    "ctrl+a",
+    "ctrl+b",
+    "ctrl+c",
+    "ctrl+e",
+    "ctrl+f",
+    "ctrl+j",
+    "ctrl+k",
+    "ctrl+o",
+    "ctrl+r",
+    "ctrl+u",
+    "ctrl+w",
+    "ctrl+x",
+    "alt+b",
+    "alt+f",
+    "alt+p",
+    "alt+enter",
+    "alt+left",
+    "alt+right",
+    "alt+up",
+    "alt+down",
+];
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -89,7 +121,7 @@ impl Action {
     fn default_key(self) -> String {
         match self {
             Self::FocusSidebar => "ctrl+g".into(),
-            Self::ToggleSidebar => "alt+b".into(),
+            Self::ToggleSidebar => "alt+s".into(),
             Self::NextTab => "alt+.".into(),
             Self::PrevTab => "alt+,".into(),
             Self::NewTab => "ctrl+t".into(),
@@ -111,7 +143,8 @@ pub(crate) struct Key {
 }
 
 impl Key {
-    /// A pressed key, normalized: a character's case carries `shift`.
+    /// A pressed key, normalized: a character's case carries `shift`, and
+    /// so does `BackTab`, which is how terminals send `shift+tab`.
     pub(crate) fn of(event: KeyEvent) -> Self {
         let mut modifiers =
             event.modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
@@ -119,6 +152,10 @@ impl Key {
             KeyCode::Char(character) => {
                 modifiers.remove(KeyModifiers::SHIFT);
                 KeyCode::Char(character.to_ascii_lowercase())
+            }
+            KeyCode::BackTab => {
+                modifiers.remove(KeyModifiers::SHIFT);
+                KeyCode::BackTab
             }
             other => other,
         };
@@ -173,13 +210,30 @@ impl Key {
             }
             _ => return None,
         };
-        // A plain character is text for the composer, never a binding.
-        if matches!(code, KeyCode::Char(_))
+        // Pressed, a character's case and `BackTab` carry `shift`.
+        let code = match code {
+            KeyCode::Tab if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+            other => other,
+        };
+        if matches!(code, KeyCode::Char(_) | KeyCode::BackTab) {
+            modifiers.remove(KeyModifiers::SHIFT);
+        }
+        // A key without `ctrl` or `alt` is the composer's or the views'
+        // own (text, Enter, Esc, arrows, ...); only function keys are free.
+        if !matches!(code, KeyCode::F(_))
             && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
             return None;
         }
         Some(Self { code, modifiers })
+    }
+
+    /// Whether a chat or agent view uses this key ([`RESERVED`]).
+    fn reserved(self) -> bool {
+        RESERVED
+            .iter()
+            .filter_map(|spec| Self::parse(spec))
+            .any(|key| key == self)
     }
 }
 
@@ -200,45 +254,69 @@ impl KeyMap {
     /// each binding the TUI could not use.
     pub(crate) fn with(configured: &BTreeMap<String, String>) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
-        let mut bindings = BTreeMap::new();
-        for action in Action::all() {
-            let name = action.name();
-            let key = match configured.get(&name) {
-                Some(spec) => Key::parse(spec).unwrap_or_else(|| {
-                    warnings.push(format!(
-                        "tui.keys.{name} = {spec:?} is not a key the TUI can bind; it keeps {}",
-                        action.default_key()
-                    ));
-                    Key::parse(&action.default_key()).unwrap_or(Key {
-                        code: KeyCode::Null,
-                        modifiers: KeyModifiers::NONE,
-                    })
-                }),
-                None => Key::parse(&action.default_key()).unwrap_or(Key {
-                    code: KeyCode::Null,
-                    modifiers: KeyModifiers::NONE,
-                }),
-            };
-            bindings.insert(name, (action, key));
-        }
         let known: Vec<String> = Action::all().into_iter().map(Action::name).collect();
         for name in configured.keys().filter(|name| !known.contains(name)) {
             warnings.push(format!("tui.keys.{name} is not an action the TUI knows"));
         }
-        // Two actions on one key: the later one in help order loses it.
-        let mut seen: Vec<Key> = Vec::new();
+        // Who holds each key: configured bindings first, in help order.
+        let mut bindings: BTreeMap<String, (Action, Key)> = BTreeMap::new();
+        let holder = |bindings: &BTreeMap<String, (Action, Key)>, key: Key| {
+            bindings
+                .iter()
+                .find(|(_, (_, held))| *held == key)
+                .map(|(name, _)| name.clone())
+        };
+        // Actions left to their defaults, with why when one was configured.
+        let mut defaulted: Vec<(Action, Option<String>)> = Vec::new();
         for action in Action::all() {
             let name = action.name();
-            let Some((_, key)) = bindings.get(&name).copied() else {
+            let Some(spec) = configured.get(&name) else {
+                defaulted.push((action, None));
                 continue;
             };
-            if seen.contains(&key) {
-                warnings.push(format!(
-                    "tui.keys.{name} uses a key another action already has; it is unbound"
+            let refusal = match Key::parse(spec) {
+                None => Some(
+                    "is not a key the TUI can bind (it needs ctrl or alt, or is a function key)"
+                        .to_owned(),
+                ),
+                Some(key) if key.reserved() => {
+                    Some("is a key a chat or agent view uses".to_owned())
+                }
+                Some(key) => {
+                    let taken = holder(&bindings, key);
+                    if taken.is_none() {
+                        bindings.insert(name.clone(), (action, key));
+                    }
+                    taken.map(|other| format!("is tui.keys.{other}'s already"))
+                }
+            };
+            if let Some(refusal) = refusal {
+                defaulted.push((
+                    action,
+                    Some(format!("tui.keys.{name} = {spec:?} {refusal}")),
                 ));
-                bindings.remove(&name);
-            } else {
-                seen.push(key);
+            }
+        }
+        for (action, refused) in defaulted {
+            let name = action.name();
+            let Some(key) = Key::parse(&action.default_key()) else {
+                continue;
+            };
+            let taken = holder(&bindings, key);
+            let outcome = match &taken {
+                Some(other) => format!(
+                    "its default {} is tui.keys.{other}'s, so {name} has no key",
+                    describe(key)
+                ),
+                None => format!("it keeps its default {}", describe(key)),
+            };
+            match refused {
+                Some(refused) => warnings.push(format!("{refused}; {outcome}")),
+                None if taken.is_some() => warnings.push(format!("{name}: {outcome}")),
+                None => {}
+            }
+            if taken.is_none() {
+                bindings.insert(name, (action, key));
             }
         }
         (Self { bindings }, warnings)

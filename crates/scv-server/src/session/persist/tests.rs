@@ -93,5 +93,33 @@ fn session_ids_cannot_name_other_files() {
     );
     assert!(!home.path().join("state/escape.json").exists());
     assert!(valid_session("3f2a9c1e-0b7d-4e5f-8a6b-1234567890ab"));
-    assert_eq!(active_line(&"x".repeat(400)).chars().count(), 301);
+    assert_eq!(active_line(&"x".repeat(400)).chars().count(), 201);
+    assert_eq!(
+        active_line("Run the checklist.\nThen land it."),
+        "Run the checklist.…"
+    );
+    assert_eq!(active_line("  Fix it.  "), "Fix it.");
+}
+
+#[test]
+fn a_saved_queue_is_claimed_by_one_restore_at_a_time() {
+    let home = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path());
+    save(&layout, &queue("stopped-1", dead()));
+    let first = claim(&layout, "stopped-1").unwrap();
+    // Another restore gets nothing, and failing does not release the first.
+    assert!(claim(&layout, "stopped-1").is_none());
+    assert!(claim(&layout, "stopped-1").is_none());
+    // The same session in another instance is another queue.
+    let other = tempfile::tempdir().unwrap();
+    assert!(claim(&Layout::new(other.path()), "stopped-1").is_some());
+    assert!(claim(&layout, "../x").is_none());
+    // A restore that gave up releases it, the record kept.
+    drop(first);
+    let second = claim(&layout, "stopped-1").unwrap();
+    assert!(load(&layout, "stopped-1").is_some());
+    // One that kept the prompts removes the record as it releases it.
+    second.remove();
+    assert!(load(&layout, "stopped-1").is_none());
+    assert!(claim(&layout, "stopped-1").is_some());
 }

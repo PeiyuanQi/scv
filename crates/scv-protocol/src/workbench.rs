@@ -218,6 +218,10 @@ pub struct WorkbenchRun {
     /// The background job it serves, when it serves one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<String>,
+    /// Every background job its turns served, oldest first: a live
+    /// conversation's run serves several.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
     /// Its working directory.
     pub cwd: String,
     /// What it is doing.

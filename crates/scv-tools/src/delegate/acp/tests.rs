@@ -927,6 +927,12 @@ fn permission_risks_follow_scvs_own_tools() {
         "[claude-1 acp]",
     );
     assert_eq!(summary, "[claude-1 acp] Edit file (edit) on /tmp/a");
+    // An escape sequence in the agent's text reaches no terminal.
+    let (_, summary) = describe_permission(
+        &json!({"toolCall":{"kind":"ex\u{7}","title":"Run \u{1b}]52;c;eA==\u{7}"}}),
+        "[claude-1 acp]",
+    );
+    assert_eq!(summary, "[claude-1 acp] Run  ]52;c;eA==  (ex )");
     assert_eq!(
         choose_option(Some(&json!([{"optionId":"x","kind":"allow_always"}])), true),
         json!({"outcome":"selected","optionId":"x"})

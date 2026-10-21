@@ -129,7 +129,6 @@ fn fixture(capacity: usize) -> Fixture {
         }),
         active_prompt: None,
         persist: false,
-        client_closed: false,
         background_rx: None,
         background_ready: false,
         fatal: false,

@@ -11,7 +11,7 @@ use super::*;
 use crate::{
     poller::{Answer, Request, Tag},
     render::render_ui,
-    ui::{ChatTab, Focus, TabKind, Ui},
+    ui::{ChatTab, Focus, Opening, TabKind, Ui},
     workbench::{Item, Target},
 };
 
@@ -142,7 +142,7 @@ async fn the_sidebar_opens_a_jobs_live_view_whose_keys_answer_and_send() {
         .iter()
         .position(|item| matches!(item, Item::Approval(_)))
         .unwrap();
-    ui.workbench.selected = approval;
+    ui.workbench.select(&items, approval);
     // y on a waiting approval answers it.
     ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
         .await
@@ -354,4 +354,228 @@ async fn a_tab_in_the_background_that_asks_for_approval_raises_a_notice() {
     ui.show(chat);
     let shown = screen(&ui, 48, 10);
     assert!(shown.contains("approval required"), "{shown}");
+}
+
+fn running_job(session: &str, name: &str, created: u64) -> WorkbenchJob {
+    let mut job = snapshot().jobs.remove(0);
+    job.session = session.into();
+    job.job = name.into();
+    job.state = AgentState::Working;
+    job.detail = None;
+    job.created_unix_seconds = created;
+    job
+}
+
+#[tokio::test]
+async fn a_second_stop_press_counts_only_on_the_same_job_wherever_its_row_went() {
+    let (mut ui, mut requests, _peer, _path) = dashboard().await;
+    let mut two = snapshot();
+    two.approvals.clear();
+    two.jobs = vec![
+        running_job("chat-session", "job-3", 3),
+        running_job("chat-session", "job-4", 4),
+    ];
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(two.clone())));
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let select = |ui: &mut Ui, name: &str| {
+        let items = ui.sidebar_items();
+        let row = items
+            .iter()
+            .position(|item| matches!(item, Item::Job(job) if job.job == name))
+            .unwrap();
+        ui.workbench.select(&items, row);
+    };
+    select(&mut ui, "job-3");
+    ui.key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    // A press on another job starts its own confirmation.
+    select(&mut ui, "job-4");
+    ui.key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(requests.try_recv().is_err(), "nothing stopped yet");
+    // A job listed above it moves job-4's row; the selection follows it.
+    two.jobs.insert(0, running_job("chat-session", "job-5", 5));
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(two)));
+    ui.key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert_eq!(
+        requests.try_recv().unwrap().command,
+        DaemonCommand::WorkbenchCancel {
+            session: "chat-session".into(),
+            job: "job-4".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_tab_reconnects_once_however_many_keys_come_while_it_is_down() {
+    let (mut ui, _requests, _peer, _path) = dashboard().await;
+    let chat = ui.tabs[0].id;
+    if let TabKind::Chat(tab) = &mut ui.tabs[0].kind {
+        tab.app.connected = false;
+    }
+    for character in "hello".chars() {
+        ui.key(key(KeyCode::Char(character), KeyModifiers::NONE))
+            .await
+            .unwrap();
+    }
+    assert_eq!(ui.openings.len(), 1);
+    // Taken by the event loop, it is still under way: no second one.
+    let opening = ui.openings.pop().unwrap();
+    assert_eq!(opening.tab, Some(chat));
+    assert_eq!(opening.restore.as_deref(), Some("old-session"));
+    ui.chat_event(chat, Ok(None)).unwrap();
+    ui.key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert_eq!(ui.openings, []);
+    // Once it failed, the next key tries again.
+    ui.open_failed(&opening, &anyhow::anyhow!("refused"));
+    ui.key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert_eq!(ui.openings.len(), 1);
+}
+
+#[tokio::test]
+async fn a_chats_approval_prompt_takes_its_answer_keys_wherever_focus_is() {
+    let (mut ui, mut requests, mut peer, _path) = dashboard().await;
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let items = ui.sidebar_items();
+    let approval = items
+        .iter()
+        .position(|item| matches!(item, Item::Approval(_)))
+        .unwrap();
+    ui.workbench.select(&items, approval);
+    if let TabKind::Chat(tab) = &mut ui.tabs[0].kind {
+        tab.app.pending_approval = Some(crate::app::PendingApproval {
+            id: "chat-approval".into(),
+            name: "bash".into(),
+            risk: "process".into(),
+            cwd: "/tmp".into(),
+            summary: "Run make".into(),
+        });
+    }
+    // The prompt on screen is the chat's: y answers it, not the sidebar's
+    // selected request.
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(requests.try_recv().is_err());
+    assert!(matches!(
+        receive(&mut peer).await,
+        ClientMessage::ApprovalResolve { approval_id, approved: true, .. } if approval_id == "chat-approval"
+    ));
+}
+
+#[tokio::test]
+async fn quitting_while_a_chat_has_jobs_running_asks_again() {
+    let (mut ui, _requests, _peer, _path) = dashboard().await;
+    let mut busy = snapshot();
+    busy.jobs = vec![running_job("old-session", "job-1", 1)];
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(busy)));
+    ui.key(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(!ui.quit);
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("1 background job"), "{notice}");
+    ui.key(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(ui.quit);
+}
+
+#[tokio::test]
+async fn keys_never_go_to_a_sidebar_too_narrow_to_draw() {
+    let (mut ui, _requests, _peer, _path) = dashboard().await;
+    ui.size = (60, 30);
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(0));
+    assert!(
+        ui.workbench
+            .notices
+            .back()
+            .unwrap()
+            .text
+            .contains("70 columns")
+    );
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    let TabKind::Chat(tab) = &ui.tabs[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(tab.app.input, "y", "typing went to the chat");
+}
+
+#[tokio::test]
+async fn a_chat_drawn_alone_after_a_resize_is_the_one_its_keys_answer() {
+    let (mut ui, _requests, mut first_peer, _path) = dashboard().await;
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    let (connection, mut second_peer) = tokio::join!(
+        Client::connect(&path.0, Path::new("/tmp"), &options),
+        accept_session(&listener, "second-session"),
+    );
+    let (client, session) = connection.unwrap();
+    let opening = Opening {
+        cwd: "/tmp".into(),
+        restore: None,
+        tab: None,
+    };
+    assert!(ui.opened(&opening, client, session).is_none());
+    // The first chat in the first pane, the second in the focused second.
+    ui.key(key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('v'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(1));
+    for (index, tool) in ["first-tool", "second-tool"].into_iter().enumerate() {
+        if let TabKind::Chat(tab) = &mut ui.tabs[index].kind {
+            tab.app.pending_approval = Some(PendingApproval {
+                id: format!("{tool}-approval"),
+                name: tool.into(),
+                risk: "process".into(),
+                cwd: "/tmp".into(),
+                summary: "Run make".into(),
+            });
+        }
+    }
+    // The terminal shrinks, as the event loop sees it before drawing: the
+    // focused chat is drawn alone, and y answers its prompt.
+    ui.size = (48, 10);
+    ui.normalize_focus();
+    let shown = screen(&ui, 48, 10);
+    assert!(shown.contains("second-tool"), "{shown}");
+    assert!(!shown.contains("first-tool"), "{shown}");
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut second_peer).await,
+        ClientMessage::ApprovalResolve { approval_id, approved: true, .. } if approval_id == "second-tool-approval"
+    ));
+    let mut line = String::new();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), first_peer.read_line(&mut line))
+            .await
+            .is_err(),
+        "the first chat was answered: {line}"
+    );
 }

@@ -7,11 +7,14 @@
 //! (a restart or a crash) leaves it, so a session started afterwards can
 //! restore the prompts that never started (`session.start` `restore`),
 //! paused. The prompt whose turn was running is never sent again: its
-//! outcome is unknown, so SCV only names it.
+//! outcome is unknown, so SCV only names it. A restore claims the file
+//! first ([`claim`]), so two at once cannot both take its prompts.
 
 use std::{
+    collections::HashSet,
     io::Read as _,
     path::{Path, PathBuf},
+    sync::{LazyLock, Mutex, MutexGuard, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,10 +25,14 @@ use serde::{Deserialize, Serialize};
 
 /// Longest saved queue file read.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// Characters of a running turn's prompt kept, to name it.
-const ACTIVE_CHARS: usize = 300;
+/// Characters of a running turn's prompt kept, to name it: its first line,
+/// at most this long.
+const ACTIVE_CHARS: usize = 200;
 /// Saved queues older than this are removed.
 pub(crate) const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// The saved queues some session is restoring now, by file.
+static RESTORING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
 
 /// One session's saved queue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,15 +85,60 @@ pub(crate) fn save(layout: &Layout, queue: &SavedQueue) {
 /// Forget `session`'s saved queue.
 pub(crate) fn remove(layout: &Layout, session: &str) {
     if valid_session(session) {
-        let _ = std::fs::remove_file(layout.session_queues().join(format!("{session}.json")));
+        let _ = std::fs::remove_file(queue_file(layout, session));
     }
 }
 
 /// `session`'s saved queue.
 pub(crate) fn load(layout: &Layout, session: &str) -> Option<SavedQueue> {
     valid_session(session)
-        .then(|| read(&layout.session_queues().join(format!("{session}.json"))))
+        .then(|| read(&queue_file(layout, session)))
         .flatten()
+}
+
+/// One restore's hold on a saved queue, released when dropped: while it
+/// is held, no other restore may read the queue.
+pub(crate) struct Claim {
+    path: PathBuf,
+}
+
+/// Claim `session`'s saved queue for a restore, or `None` while another
+/// restore holds it. The queue is read only after it is claimed, and its
+/// record goes before the claim does, so it is restored at most once.
+pub(crate) fn claim(layout: &Layout, session: &str) -> Option<Claim> {
+    if !valid_session(session) {
+        return None;
+    }
+    let path = queue_file(layout, session);
+    if restoring().insert(path.clone()) {
+        Some(Claim { path })
+    } else {
+        None
+    }
+}
+
+impl Claim {
+    /// Forget the claimed saved queue, once its prompts are kept elsewhere,
+    /// and release it.
+    pub(crate) fn remove(self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        restoring().remove(&self.path);
+    }
+}
+
+/// [`RESTORING`], locked.
+fn restoring() -> MutexGuard<'static, HashSet<PathBuf>> {
+    RESTORING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Where `session`'s saved queue lives.
+fn queue_file(layout: &Layout, session: &str) -> PathBuf {
+    layout.session_queues().join(format!("{session}.json"))
 }
 
 fn read(path: &Path) -> Option<SavedQueue> {
@@ -140,10 +192,13 @@ pub(crate) fn restorable(layout: &Layout) -> Vec<RestorableSession> {
     found
 }
 
-/// The start of `prompt`, to name a running turn.
+/// The first line of `prompt`, at most [`ACTIVE_CHARS`] characters, to
+/// name a running turn; `…` marks that more followed.
 pub(crate) fn active_line(prompt: &str) -> String {
-    let mut line: String = prompt.chars().take(ACTIVE_CHARS).collect();
-    if prompt.chars().count() > ACTIVE_CHARS {
+    let trimmed = prompt.trim();
+    let first = trimmed.lines().next().unwrap_or_default();
+    let mut line: String = first.chars().take(ACTIVE_CHARS).collect();
+    if line.len() < trimmed.len() {
         line.push('…');
     }
     line

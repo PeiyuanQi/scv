@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use scv_core::{ToolContext, ToolError, ToolOutput, ToolRisk};
+use scv_core::{Tool as _, ToolContext, ToolError, ToolOutput, ToolRisk};
 use scv_protocol::JobOrigin;
 use tokio::sync::Notify;
 
@@ -58,6 +58,7 @@ fn record(session: &str, job: &str, state: AgentState, owner: ProcessIdentity) -
         interrupted: None,
         resumed_as: None,
         resumed_from: None,
+        dismissed: false,
     }
 }
 
@@ -131,7 +132,11 @@ fn a_snapshot_joins_jobs_with_their_runs_and_finds_interrupted_ones() {
     assert_eq!(orphan.state, AgentState::Interrupted);
     assert_eq!(orphan.run.as_deref(), Some("codex-0000a1"));
     assert_eq!(orphan.cwd, "/w/shop");
-    assert_eq!(orphan.conversation.as_deref(), Some("codex-1"));
+    // Its session is not live here, so its conversation names nothing the
+    // owner could send to.
+    assert_eq!(orphan.conversation, None);
+    assert_eq!(snapshot.runs[0].conversation, None);
+    assert_eq!(snapshot.runs[0].jobs, ["job-2"]);
     let failed = job("job-3");
     assert_eq!(failed.state, AgentState::Failed);
     assert_eq!(failed.detail.as_deref(), Some("tests fail"));
@@ -518,4 +523,175 @@ fn a_session_state_shows_until_its_handle_drops() {
             .unwrap_err()
             .contains("no activity log")
     );
+}
+
+#[tokio::test]
+async fn a_conversation_shows_only_while_its_live_session_holds_it() {
+    let bench = bench();
+    let me = ProcessIdentity::current().unwrap();
+    let jobs = bench.layout.jobs();
+    let mut done = record("workbench-host", "job-1", AgentState::Completed, me);
+    done.conversation = Some("codex-1".into());
+    ledger::save(&jobs, &done).unwrap();
+    let first = live(&bench, "workbench-host");
+    assert_eq!(
+        first.tool.adopt("codex", Path::new("/w"), "019a-thread"),
+        Some("codex-1".into())
+    );
+    let shown = bench.workbench.snapshot();
+    assert_eq!(shown.jobs[0].conversation.as_deref(), Some("codex-1"));
+    // The session goes and comes back under its ID, as a workbench session
+    // does: the old handle names nothing now, so it is not offered.
+    drop(first);
+    let _second = live(&bench, "workbench-host");
+    let hidden = bench.workbench.snapshot();
+    assert_eq!(hidden.jobs[0].conversation, None);
+}
+
+#[tokio::test]
+async fn a_job_is_resumed_once_at_a_time() {
+    let bench = bench();
+    ledger::save(
+        &bench.layout.jobs(),
+        &record("old", "job-1", AgentState::Interrupted, dead()),
+    )
+    .unwrap();
+    let _host = live(&bench, "host");
+    lock(&bench.workbench.resuming).insert("old/job-1".into());
+    let refused = bench
+        .workbench
+        .resume("host", "old", "job-1")
+        .await
+        .unwrap_err();
+    assert!(refused.contains("being resumed already"), "{refused}");
+    lock(&bench.workbench.resuming).clear();
+    bench
+        .workbench
+        .resume("host", "old", "job-1")
+        .await
+        .unwrap();
+    assert!(lock(&bench.workbench.resuming).is_empty(), "released");
+}
+
+#[tokio::test]
+async fn a_job_another_names_as_what_it_resumes_was_resumed() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    ledger::save(
+        &jobs,
+        &record("old", "job-1", AgentState::Interrupted, dead()),
+    )
+    .unwrap();
+    // SCV stopped after the new job's record, before the old one's said so.
+    let mut successor = record("host-old", "job-3", AgentState::Interrupted, dead());
+    successor.resumed_from = Some("old/job-1".into());
+    ledger::save(&jobs, &successor).unwrap();
+    let snapshot = bench.workbench.snapshot();
+    let old = snapshot.jobs.iter().find(|job| job.job == "job-1").unwrap();
+    assert!(!old.resumable);
+    assert_eq!(old.resumed_as.as_deref(), Some("host-old/job-3"));
+    let _host = live(&bench, "host");
+    let refused = bench
+        .workbench
+        .resume("host", "old", "job-1")
+        .await
+        .unwrap_err();
+    assert!(
+        refused.contains("already resumed as host-old/job-3"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_job_another_live_process_has_yet_to_report_is_not_dismissed() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let other = ProcessIdentity::of(child.id()).unwrap();
+    let mut finished = record("exec", "job-1", AgentState::Completed, other);
+    ledger::save(&jobs, &finished).unwrap();
+    let refused = bench.workbench.dismiss("exec", "job-1").unwrap_err();
+    assert!(refused.contains("not reached its session"), "{refused}");
+    finished.reported = true;
+    ledger::save(&jobs, &finished).unwrap();
+    bench.workbench.dismiss("exec", "job-1").unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // One left unfinished by a dead process is settled as it is dismissed,
+    // so pruning removes it in time.
+    ledger::save(&jobs, &record("gone", "job-2", AgentState::Working, dead())).unwrap();
+    bench.workbench.dismiss("gone", "job-2").unwrap();
+    let left = std::fs::read(jobs.join("gone/job-2.json")).unwrap();
+    let left: JobRecord = serde_json::from_slice(&left).unwrap();
+    assert!(left.dismissed);
+    assert_eq!(left.state, AgentState::Interrupted);
+}
+
+#[tokio::test]
+async fn a_dismissed_job_keeps_its_number_and_an_unreported_one_stays() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let live = live(&bench, "session-a");
+    // A model's job whose result the session has not reported yet.
+    live.tool
+        .execute(
+            json!({"agent":"codex","prompt":"look","background":true}),
+            ToolContext::new(PathBuf::from("/w"), CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while live.jobs.running() > 0 {
+            live.release.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let refused = bench.workbench.dismiss("session-a", "job-1").unwrap_err();
+    assert!(refused.contains("not reached its session"), "{refused}");
+    live.jobs.report_settled(&["job-1".into()]);
+    bench.workbench.dismiss("session-a", "job-1").unwrap();
+    assert!(ledger::load(&jobs, "session-a", "job-1").is_none());
+    assert!(
+        !bench
+            .workbench
+            .snapshot()
+            .jobs
+            .iter()
+            .any(|job| job.job == "job-1")
+    );
+    // A session back under its ID does not give job-1 to another job.
+    let again = JobLedger::new(&jobs, "session-a", "TUI", Path::new("/w")).unwrap();
+    assert_eq!(again.last_number(), 1);
+    drop(live);
+}
+
+#[test]
+fn a_rerun_stays_in_its_worktree_or_gets_a_new_one_once_it_was_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("shop");
+    let worktree = dir.path().join("worktrees/shop-1a2b3c4d/codex-9f3e21");
+    std::fs::create_dir_all(worktree.join("api")).unwrap();
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    let mut job = record("old", "job-1", AgentState::Interrupted, dead());
+    job.arguments = json!({
+        "agent":"codex",
+        "cwd": worktree.join("api").display().to_string(),
+    });
+    job.worktree = Some(scv_protocol::WorktreeRef {
+        path: worktree.display().to_string(),
+        branch: "scv/codex-9f3e21".into(),
+        repo: repo.display().to_string(),
+    });
+    let kept = rerun_arguments(&job, |_| true);
+    assert_eq!(kept["cwd"], worktree.join("api").display().to_string());
+    assert_eq!(kept.get("worktree"), None);
+    std::fs::remove_dir_all(&worktree).unwrap();
+    let fresh = rerun_arguments(&job, |_| true);
+    assert_eq!(fresh["cwd"], repo.join("api").display().to_string());
+    assert_eq!(fresh["worktree"], true);
 }

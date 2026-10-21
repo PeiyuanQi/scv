@@ -41,7 +41,7 @@ use crate::{
     delegate::{
         activity::{self, RunState},
         background::{
-            BackgroundCapable, BackgroundJobs, LiveJob, OwnerCall,
+            BackgroundCapable, BackgroundJobs, JobMeta, LiveJob, OwnerCall,
             ledger::{self, JobRecord},
         },
         records::{DelegationRegistry, ProcessIdentity},
@@ -66,9 +66,12 @@ pub const MAX_RUNS: usize = 500;
 pub struct Workbench {
     runs: PathBuf,
     jobs: PathBuf,
+    worktrees: PathBuf,
     delegations: Arc<DelegationRegistry>,
     inner: Mutex<Inner>,
     watched_until: Mutex<Option<Instant>>,
+    /// Jobs being resumed now, `<session>/<job>`: each is resumed once.
+    resuming: Mutex<HashSet<String>>,
 }
 
 impl std::fmt::Debug for Workbench {
@@ -176,9 +179,11 @@ impl Workbench {
         Arc::new(Self {
             runs: layout.runs(),
             jobs: layout.jobs(),
+            worktrees: layout.worktrees(),
             delegations,
             inner: Mutex::default(),
             watched_until: Mutex::new(None),
+            resuming: Mutex::default(),
         })
     }
 
@@ -319,13 +324,7 @@ impl Workbench {
     /// server, which keeps session queues.
     pub fn snapshot(&self) -> WorkbenchSnapshot {
         let now = unix_now();
-        let live_handles: HashSet<String> = self
-            .delegations
-            .list(true)
-            .into_iter()
-            .filter(|entry| entry.processes > 0)
-            .map(|entry| entry.record.handle)
-            .collect();
+        let live_handles = self.live_handles();
         let (slots, approvals): (Vec<_>, Vec<_>) = {
             let inner = lock(&self.inner);
             (
@@ -338,6 +337,7 @@ impl Workbench {
                         workspace: slot.workspace.clone(),
                         state: slot.state,
                         detail: slot.detail.clone(),
+                        agent: slot.agent.as_ref().and_then(Weak::upgrade),
                         jobs: slot.jobs.as_ref().and_then(Weak::upgrade),
                     })
                     .collect(),
@@ -366,18 +366,27 @@ impl Workbench {
             .map(|approval| ((approval.session.clone(), approval.job.clone()), approval))
             .collect();
 
-        // Conversation handles belong to the process that made them: one an
-        // earlier daemon left names nothing (or another conversation) now,
-        // even under a session ID that came back.
+        // A conversation handle is shown only while the live session that
+        // made it still has it, so the owner can send it a prompt: one an
+        // earlier daemon, or an earlier session under an ID that came back
+        // (a workbench session), left names nothing now. Such a session
+        // numbers its conversations after the ones its records name, so a
+        // handle never comes to mean another conversation.
         let me = ProcessIdentity::current();
-        let ours = |owner: &ProcessIdentity| me.as_ref() == Some(owner);
+        let held = |owner: &ProcessIdentity, session: &str, handle: &str| {
+            me.as_ref() == Some(owner)
+                && slots.iter().any(|slot| {
+                    slot.id == session
+                        && slot.agent.as_ref().is_some_and(|agent| agent.knows(handle))
+                })
+        };
         let mut states = activity::list_states(&self.runs);
         states
             .sort_by_key(|state| std::cmp::Reverse((state.last_activity_unix, state.started_unix)));
         let mut runs: Vec<WorkbenchRun> = Vec::new();
         let mut job_runs: HashMap<(String, String), &RunState> = HashMap::new();
         for state in &states {
-            if let Some(job) = &state.job {
+            for job in state.jobs.iter().chain(&state.job) {
                 job_runs
                     .entry((state.session.clone(), job.clone()))
                     .or_insert(state);
@@ -407,9 +416,13 @@ impl Workbench {
                 agent: state.agent.clone(),
                 session: state.session.clone(),
                 transport: state.transport.clone(),
-                conversation: state.conversation.clone().filter(|_| ours(&state.owner)),
+                conversation: state
+                    .conversation
+                    .clone()
+                    .filter(|handle| held(&state.owner, &state.session, handle)),
                 turn: state.turn,
                 job: state.job.clone(),
+                jobs: state.jobs.clone(),
                 cwd: state.cwd.display().to_string(),
                 state: current,
                 detail,
@@ -424,8 +437,22 @@ impl Workbench {
         records.sort_by_key(|record| std::cmp::Reverse((record.created_unix, record.job.clone())));
         let mut jobs = Vec::new();
         let mut finished_listed = 0;
+        // What each job was resumed as, by the record of the job resuming
+        // it too, which is written first.
+        let successors: HashMap<&str, String> = records
+            .iter()
+            .filter_map(|record| {
+                let from = record.resumed_from.as_deref()?;
+                Some((from, format!("{}/{}", record.session, record.job)))
+            })
+            .collect();
         for record in &records {
             let key = (record.session.clone(), record.job.clone());
+            let resumed_as = record.resumed_as.clone().or_else(|| {
+                successors
+                    .get(format!("{}/{}", record.session, record.job).as_str())
+                    .cloned()
+            });
             let live = live_jobs.get(&key);
             let run = job_runs.get(&key).copied();
             let (state, detail) = job_state(
@@ -478,14 +505,14 @@ impl Workbench {
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                     })
-                    .filter(|_| ours(&record.owner)),
+                    .filter(|handle| held(&record.owner, &record.session, handle)),
                 run: run.map(|run| run.handle.clone()),
                 worktree: record.worktree.clone(),
                 reviewed: record.reviewed,
                 resumable: state == AgentState::Interrupted
                     && !record.reviewed
-                    && record.resumed_as.is_none(),
-                resumed_as: record.resumed_as.clone(),
+                    && resumed_as.is_none(),
+                resumed_as,
                 created_unix_seconds: record.created_unix,
                 updated_unix_seconds: record.updated_unix,
             });
@@ -531,6 +558,60 @@ impl Workbench {
         }
     }
 
+    /// The runs whose processes still run, in any SCV process of the
+    /// instance.
+    fn live_handles(&self) -> HashSet<String> {
+        self.delegations
+            .list(true)
+            .into_iter()
+            .filter(|entry| entry.processes > 0)
+            .map(|entry| entry.record.handle)
+            .collect()
+    }
+
+    /// Refuse to remove the worktree holding `path` while anything still
+    /// works in it ([`Self::worktree_users`]).
+    pub fn check_worktree_unused(&self, path: &Path) -> Result<(), String> {
+        let users = self.worktree_users(path);
+        if users.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "{} still work in {}; stop them before removing it",
+            users.join(", "),
+            path.display()
+        ))
+    }
+
+    /// What still runs in the SCV worktree holding `path` (its top, or any
+    /// directory in it): jobs not yet finished that recorded it, and
+    /// delegated runs whose processes work inside it.
+    pub fn worktree_users(&self, path: &Path) -> Vec<String> {
+        let path = crate::delegate::worktree::worktree_path(&self.worktrees, path)
+            .or_else(|| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| path.to_owned());
+        let mut users: Vec<String> = ledger::list(&self.jobs)
+            .into_iter()
+            .filter(|record| {
+                !record.state.is_final()
+                    && record.owner.is_alive()
+                    && record
+                        .worktree
+                        .as_ref()
+                        .is_some_and(|worktree| Path::new(&worktree.path) == path)
+            })
+            .map(|record| format!("{}/{}", record.session, record.job))
+            .collect();
+        users.extend(
+            self.delegations
+                .list(true)
+                .into_iter()
+                .filter(|entry| entry.processes > 0 && entry.record.cwd.starts_with(&path))
+                .map(|entry| entry.record.handle),
+        );
+        users
+    }
+
     /// One page of run `handle`'s activity log after byte position `after`.
     pub fn run_log(&self, handle: &str, after: u64, limit: usize) -> Result<RunLogPage, String> {
         activity::read_page(&self.runs, handle, after, limit).map_err(|error| {
@@ -571,6 +652,7 @@ impl Workbench {
                 json!({"session": conversation, "prompt": prompt}),
                 workspace,
                 mode,
+                JobMeta::default(),
             )
             .await
             .map_err(|error| error.message)?;
@@ -583,9 +665,20 @@ impl Workbench {
     /// Start the owner's own job in live session `session` with the `agent`
     /// call `arguments`. Returns `<session>/<job>`.
     pub async fn start(&self, session: &str, arguments: Value) -> Result<String, String> {
+        self.start_with(session, arguments, JobMeta::default())
+            .await
+    }
+
+    /// [`Self::start`], with what the job's record holds from the start.
+    async fn start_with(
+        &self,
+        session: &str,
+        arguments: Value,
+        meta: JobMeta,
+    ) -> Result<String, String> {
         let (agent, workspace) = self.agent(session)?;
         match agent
-            .owner_call(arguments, workspace, SendMode::Queue)
+            .owner_call(arguments, workspace, SendMode::Queue, meta)
             .await
             .map_err(|error| error.message)?
         {
@@ -598,8 +691,28 @@ impl Workbench {
     /// live session `host`, which serves the job's workspace. It continues
     /// the agent's own conversation when the agent saved one and can resume
     /// it; otherwise it starts over, told that an earlier attempt may have
-    /// left changes. Returns `<host>/<new job>`.
+    /// left changes. Each job is resumed once, and not while an agent
+    /// process of its run still goes. Returns `<host>/<new job>`.
     pub async fn resume(&self, host: &str, session: &str, job: &str) -> Result<String, String> {
+        let key = format!("{session}/{job}");
+        if !lock(&self.resuming).insert(key.clone()) {
+            return Err(format!("{job} is being resumed already"));
+        }
+        // Released however this ends, a dropped request included.
+        let _claim = Claim {
+            claims: &self.resuming,
+            key: &key,
+        };
+        self.resume_once(host, session, job, &key).await
+    }
+
+    async fn resume_once(
+        &self,
+        host: &str,
+        session: &str,
+        job: &str,
+        key: &str,
+    ) -> Result<String, String> {
         let record = ledger::load(&self.jobs, session, job)
             .ok_or_else(|| format!("no record of {session}/{job}"))?;
         let session_live = lock(&self.inner).sessions.contains_key(session);
@@ -625,10 +738,48 @@ impl Workbench {
             return Err(format!("{job} was already resumed as {resumed}"));
         }
         let (agent, _) = self.agent(host)?;
-        let run = activity::list_states(&self.runs)
-            .into_iter()
-            .filter(|state| state.session == session && state.job.as_deref() == Some(job))
-            .max_by_key(|state| state.started_unix);
+        // Reading every record, run state, and the process table takes a
+        // while.
+        let (successor, run, live) = {
+            let (jobs, runs) = (self.jobs.clone(), self.runs.clone());
+            let delegations = Arc::clone(&self.delegations);
+            let (session, job, key) = (session.to_owned(), job.to_owned(), key.to_owned());
+            tokio::task::spawn_blocking(move || {
+                // A job that names it as what it resumes settles it, should
+                // SCV have stopped before this record said so.
+                let successor = ledger::list(&jobs)
+                    .into_iter()
+                    .find(|record| record.resumed_from.as_deref() == Some(key.as_str()))
+                    .map(|record| format!("{}/{}", record.session, record.job));
+                let run = activity::list_states(&runs)
+                    .into_iter()
+                    .filter(|state| {
+                        state.session == session
+                            && (state.job.as_deref() == Some(job.as_str())
+                                || state.jobs.contains(&job))
+                    })
+                    .max_by_key(|state| state.started_unix);
+                let live = run.as_ref().is_some_and(|run| {
+                    delegations
+                        .list(true)
+                        .iter()
+                        .any(|entry| entry.record.handle == run.handle && entry.processes > 0)
+                });
+                (successor, run, live)
+            })
+            .await
+            .map_err(|error| error.to_string())?
+        };
+        if let Some(resumed) = successor {
+            return Err(format!("{job} was already resumed as {resumed}"));
+        }
+        if live {
+            return Err(format!(
+                "{job}'s agent ({}) still runs; SCV stops what a stopped SCV process left \
+                 within a minute (or `scv agents kill` it now). Resume it after that",
+                run.as_ref().map_or("", |run| run.handle.as_str())
+            ));
+        }
         let cwd = run
             .as_ref()
             .map(|run| run.cwd.clone())
@@ -657,14 +808,16 @@ impl Workbench {
                 }
             }
         }
-        let resumed = self.start(host, arguments).await?;
-        let (host_session, new_job) = resumed.split_once('/').unwrap_or((host, &resumed));
-        ledger::update(&self.jobs, host_session, new_job, |new| {
-            new.resumed_from = Some(format!("{session}/{job}"));
-            if new.worktree.is_none() {
-                new.worktree.clone_from(&record.worktree);
-            }
-        });
+        // The new job's record says what it resumes from its first write.
+        let meta = JobMeta {
+            resumed_from: Some(key.to_owned()),
+            worktree: record
+                .worktree
+                .clone()
+                .filter(|worktree| Path::new(&worktree.path).is_dir()),
+            ..JobMeta::default()
+        };
+        let resumed = self.start_with(host, arguments, meta).await?;
         ledger::update(&self.jobs, session, job, |old| {
             old.resumed_as = Some(resumed.clone());
             if !old.state.is_final() {
@@ -701,20 +854,30 @@ impl Workbench {
     pub fn dismiss(&self, session: &str, job: &str) -> Result<String, String> {
         let record = ledger::load(&self.jobs, session, job)
             .ok_or_else(|| format!("no record of {session}/{job}"))?;
-        let running = lock(&self.inner)
+        let jobs = lock(&self.inner)
             .sessions
             .get(session)
             .and_then(|slot| slot.jobs.as_ref())
-            .and_then(Weak::upgrade)
-            .is_some_and(|jobs| {
-                jobs.live()
-                    .iter()
-                    .any(|live| live.id == job && live.running)
-            });
+            .and_then(Weak::upgrade);
+        let running = jobs.as_ref().is_some_and(|jobs| {
+            jobs.live()
+                .iter()
+                .any(|live| live.id == job && live.running)
+        });
         if running || (!record.state.is_final() && record.owner.is_alive()) {
             return Err(format!("{job} is still running; stop it first"));
         }
-        ledger::remove(&self.jobs, session, job).map_err(|error| error.to_string())?;
+        // A session that has yet to report the result writes its record
+        // again when it does: this daemon's says so itself, and one of
+        // another live SCV process by its record.
+        let elsewhere =
+            record.owner.is_alive() && ProcessIdentity::current().as_ref() != Some(&record.owner);
+        if jobs.is_some_and(|jobs| jobs.unreported(job)) || (elsewhere && !record.reported) {
+            return Err(format!(
+                "{job}'s result has not reached its session yet; dismiss it once it has"
+            ));
+        }
+        ledger::dismiss(&self.jobs, session, job).map_err(|error| error.to_string())?;
         Ok(format!("Forgot {session}/{job}."))
     }
 
@@ -740,12 +903,25 @@ impl Workbench {
     }
 }
 
+/// A job claimed for resuming, released when dropped.
+struct Claim<'a> {
+    claims: &'a Mutex<HashSet<String>>,
+    key: &'a str,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        lock(self.claims).remove(self.key);
+    }
+}
+
 struct SlotView {
     id: String,
     label: String,
     workspace: PathBuf,
     state: AgentState,
     detail: Option<String>,
+    agent: Option<Arc<BackgroundCapable>>,
     jobs: Option<Arc<BackgroundJobs>>,
 }
 
@@ -890,8 +1066,10 @@ fn unix_now() -> u64 {
 
 /// The `agent` call that runs interrupted job `record` again from its
 /// prompt in a new conversation: its options but those the host agent does
-/// not `take`, a note that an earlier attempt may have left changes, and
-/// the worktree it ran in when that is still there.
+/// not `take`, and a note that an earlier attempt may have left changes. A
+/// job that ran in a worktree runs in the same directory of it while the
+/// worktree is there, and in a new worktree of its repository once it was
+/// removed, so its work never lands in the repository's own checkout.
 fn rerun_arguments(record: &JobRecord, takes: impl Fn(&str) -> bool) -> Value {
     let mut arguments = record.arguments.clone();
     if let Some(object) = arguments.as_object_mut() {
@@ -916,12 +1094,28 @@ fn rerun_arguments(record: &JobRecord, takes: impl Fn(&str) -> bool) -> Value {
             )
             .into(),
         );
-        if let Some(worktree) = record
-            .worktree
-            .as_ref()
-            .filter(|worktree| Path::new(&worktree.path).is_dir())
-        {
-            object.insert("cwd".into(), worktree.path.clone().into());
+        if let Some(worktree) = &record.worktree {
+            let top = Path::new(&worktree.path);
+            // The call's directory inside the worktree, as it was recorded.
+            let inside = object
+                .get("cwd")
+                .and_then(Value::as_str)
+                .and_then(|cwd| Path::new(cwd).strip_prefix(top).ok())
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            if top.is_dir() {
+                let cwd = Some(top.join(&inside))
+                    .filter(|cwd| cwd.is_dir())
+                    .unwrap_or_else(|| top.to_owned());
+                object.insert("cwd".into(), cwd.display().to_string().into());
+            } else {
+                let repo = Path::new(&worktree.repo);
+                let cwd = Some(repo.join(&inside))
+                    .filter(|cwd| cwd.is_dir())
+                    .unwrap_or_else(|| repo.to_owned());
+                object.insert("cwd".into(), cwd.display().to_string().into());
+                object.insert("worktree".into(), true.into());
+            }
         }
     }
     arguments

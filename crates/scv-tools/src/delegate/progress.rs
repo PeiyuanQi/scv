@@ -324,6 +324,24 @@ const SECRET_PREFIXES: [&str; 9] = [
     "AKIA",
 ];
 
+/// `text` as one display line: whitespace runs collapsed, every URL without
+/// its query or fragment (which can carry tokens), and credentials
+/// [`redact`]ed. For lines SCV keeps, such as activity logs, whatever
+/// produced them.
+pub(crate) fn scrub(text: &str) -> String {
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("://") {
+                &word[..word.find(['?', '#']).unwrap_or(word.len())]
+            } else {
+                word
+            }
+        })
+        .collect();
+    redact(&words.join(" "))
+}
+
 /// Replace values that look like credentials with `…`. A heuristic for
 /// display lines, not a guarantee: it covers `Bearer <token>`,
 /// `NAME=value` and `--name value` where the name mentions a key, token,

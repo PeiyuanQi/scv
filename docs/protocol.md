@@ -182,8 +182,9 @@ workbench".
 
 `workbench` replies with the snapshot in `daemon.status.workbench`; `watch:
 true` also counts the owner as watching for 15 seconds, during which a
-background job's approval request the session would deny unattended waits
-up to two minutes for `workbench_approve`. `run_log` returns up to `limit`
+background job's approval request that the approval policy would put to a
+person, and the session would deny unattended, waits up to two minutes for
+`workbench_approve`. `run_log` returns up to `limit`
 (default and at most 500, and at most 256 KiB) events of a run's activity log
 after byte position `after` in `run_log`; a client passes the page's `next`
 back as `after` to follow the run. `workbench_start` starts the owner's own
@@ -195,7 +196,9 @@ the agent can and queues otherwise; `queue`; `steer`, which fails when it
 cannot); `workbench_cancel`, `workbench_resume`, and `workbench_dismiss` act
 on one job; `workbench_approve` answers a waiting approval request.
 `worktrees` lists the worktrees SCV created, and `worktree_remove` removes
-one (with uncommitted changes only with `force`), keeping its branch. A
+one (with uncommitted changes, or locked by a cut-off creation, only with
+`force`), keeping its branch, and refuses while a job or a delegated process
+still works in it. A
 refused action (an unknown session, job, conversation, run, approval, or
 worktree, a job in the wrong state, or the call's own validation error) is a
 `workbench_error` with SCV's reason. Each action's reply carries
@@ -286,7 +289,8 @@ a session whose daemon stopped or died with such a record: when it was in
 the same workspace, its queued prompts join the new session's queue, the
 queue starts paused, the record goes, and `session.started` says so in
 `restored`. A session that cannot be restored (unknown, still running, in
-another workspace) starts normally without `restored`. The TUI sets both;
+another workspace, or being restored by another `session.start` at the same
+time) starts normally without `restored`. The TUI sets both;
 both are additive, and a server that predates them ignores them.
 
 ```json
@@ -331,7 +335,8 @@ since is replaced by a note.
 `queue.update`, `queue.move`, and `queue.remove` apply only to queued work and
 require the entry's current revision. Stale changes receive `queue_conflict`
 with the current entry. `session.pause` prevents automatic dequeue without
-altering queue order.
+altering queue order; resuming (`paused: false`) a session with no turn
+running starts its next queued prompt at once, as a restored queue needs.
 
 ### `turn.cancel`
 
@@ -371,7 +376,7 @@ clears its transcript only after that event.
 ```json
 {"type":"initialized","request_id":"1","protocol_version":3,"server":{"name":"scv-server","version":"0.3.14"}}
 {"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200}
-{"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200,"keys":{"split":"alt+s"},"restored":{"from":"9a0e…","queued":2,"interrupted":"Run the release checklist."}}
+{"type":"session.started","request_id":"2","session_id":"...","cwd":"/workspace/project","model":"gpt-4.1-mini","context_max_tokens":128000,"max_server_frame_bytes":8388608,"max_transcript_bytes":8388608,"max_transcript_items":10000,"max_prompt_history_bytes":1048576,"max_prompt_history_items":200,"keys":{"split":"f2"},"restored":{"from":"9a0e…","queued":2,"interrupted":"Run the release checklist."}}
 ```
 
 `keys` carries the home configuration's `[tui.keys]` (omitted when empty) for
@@ -402,7 +407,8 @@ and, each omitted when empty, `sessions` with `id`, `label`, `workspace`,
 `task`, `workspace`, `cwd`, `state`, `detail`, `started_by` (`model` or
 `owner`), `conversation`, `run`, `worktree`, `reviewed`, `resumable`,
 `resumed_as`, and their times; `runs` with `handle`, `agent`, `session`,
-`transport` (`cli`, `acp`, or `scv`), `conversation`, `turn`, `job`, `cwd`,
+`transport` (`cli`, `acp`, or `scv`), `conversation`, `turn`, `job`, `jobs`
+(every job whose turns it served), `cwd`,
 `state`, `detail`, times, `live`, and `steerable`; `approvals` waiting for
 the owner with `id`, `session`, `job`, `name`, `risk`, `cwd`, `summary`, and
 since and expiry; and `restorable` queues with `id`, `label`, `workspace`,
@@ -413,9 +419,9 @@ applies, `text`, `turn`, `status`, `job`, `risk`, and `by`), `workbench_note`,
 the jobs recorded in it). A state (`scv_protocol::AgentState`: `starting`,
 `working`, `awaiting_input`, `idle`, `queued`, `completed`, `failed`,
 `declined`, `timeout`, `cancelled`, `interrupted`, `unknown`), origin, or
-event kind a client does not know parses as `unknown`. A job's
-`conversation` is given only while the process that holds it runs, since a
-handle names nothing in another process.
+event kind a client does not know parses as `unknown`. A job's or run's
+`conversation` is given only while the live session that made it still has
+it, since a handle names nothing elsewhere.
 
 `status` contains `version`, `pid`, `components`, and `delegations`, and
 `restart` while a planned restart is scheduled: `to_version`, `waiting_for`
@@ -760,8 +766,9 @@ aborted and joined rather than left in the background.
 
 SIGTERM or Ctrl+C stops the daemon with bounded cancellation and joining of
 supervised components and tracked session tasks. Reconnecting TUI clients
-initialize and start fresh sessions. Server history and queues are not restored,
-and submitted work is never automatically replayed.
+initialize and start fresh sessions. Server history is not restored; a queue
+a client kept (`persist_queue`) comes back only paused, when the client asks
+(`restore`), and submitted work is never automatically replayed.
 
 Writer and turn tasks are tracked and joined even if their connection handler
 must be aborted. Daemon management releases the component lock before response

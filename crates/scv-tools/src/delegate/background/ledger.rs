@@ -11,8 +11,10 @@
 //! fails a job: a write that fails is logged and skipped.
 
 use std::{
+    collections::HashMap,
     io::Read as _,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -78,6 +80,10 @@ pub struct JobRecord {
     /// The interrupted job this one resumes, `<session>/<job>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
+    /// The owner dismissed it: what is left only keeps its number taken
+    /// until it is pruned, and nothing lists or loads it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
 }
 
 impl JobRecord {
@@ -110,6 +116,9 @@ pub struct JobLedger {
     label: String,
     workspace: PathBuf,
     owner: Option<ProcessIdentity>,
+    /// The newest revision of each job's record written, so writes made
+    /// outside the job table's lock never put an older one back.
+    written: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl JobLedger {
@@ -123,6 +132,7 @@ impl JobLedger {
             label: label.to_owned(),
             workspace: workspace.to_owned(),
             owner: ProcessIdentity::current(),
+            written: Arc::default(),
         })
     }
 
@@ -165,6 +175,7 @@ impl JobLedger {
             interrupted: None,
             resumed_as: None,
             resumed_from: None,
+            dismissed: false,
         })
     }
 
@@ -190,11 +201,46 @@ impl JobLedger {
             .unwrap_or(0)
     }
 
+    /// The conversation handles this session's records name, so a session
+    /// that comes back under its ID numbers new conversations after them;
+    /// `None` when the session has no records, so it was not here before.
+    pub(crate) fn conversations(&self) -> Option<Vec<String>> {
+        let entries = std::fs::read_dir(self.root.join(&self.session)).ok()?;
+        let handles = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| read_record(&entry.path()))
+            .flat_map(|record| {
+                let continued = record
+                    .arguments
+                    .get("session")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                record.conversation.into_iter().chain(continued)
+            })
+            .collect();
+        Some(handles)
+    }
+
     /// Save `record`.
     pub(crate) fn save(&self, record: &JobRecord) {
         if let Err(error) = save(&self.root, record) {
             tracing::debug!(job = %record.job, %error, "could not record a background job");
         }
+    }
+
+    /// Save revision `revision` of `record`, unless a newer one of the job
+    /// was written already. Callers write after letting go of the job
+    /// table, so writes may arrive out of order; this keeps the newest.
+    pub(crate) fn save_revision(&self, record: &JobRecord, revision: u64) {
+        let mut written = crate::sync::lock(&self.written);
+        if written
+            .get(&record.job)
+            .is_some_and(|newest| *newest >= revision)
+        {
+            return;
+        }
+        self.save(record);
+        written.insert(record.job.clone(), revision);
     }
 }
 
@@ -213,15 +259,37 @@ pub fn save(root: &Path, record: &JobRecord) -> std::io::Result<()> {
     )
 }
 
-/// The record of `job` in `session`.
+/// The record of `job` in `session`, unless the owner dismissed it.
 pub fn load(root: &Path, session: &str, job: &str) -> Option<JobRecord> {
     if !valid_name(session) || !valid_name(job) {
         return None;
     }
-    read_record(&root.join(session).join(format!("{job}.json")))
+    read_record(&root.join(session).join(format!("{job}.json"))).filter(|record| !record.dismissed)
 }
 
-/// Forget `job` of `session`.
+/// Forget `job` of `session` for the owner: its record keeps only its
+/// name, so the job's number is not given to another job before the
+/// record is pruned.
+pub fn dismiss(root: &Path, session: &str, job: &str) -> std::io::Result<()> {
+    let mut record = load(root, session, job)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such job record"))?;
+    record.dismissed = true;
+    // Settled, so it is pruned like any other: nothing settles a dismissed
+    // record later.
+    if !record.state.is_final() {
+        interrupt(&mut record, "dismissed by the owner");
+    }
+    record.prompt.clear();
+    record.task.clear();
+    record.arguments = Value::Null;
+    record.reply = None;
+    record.error = None;
+    record.interrupted = None;
+    record.updated_unix = unix_now();
+    save(root, &record)
+}
+
+/// Remove `job`'s record of `session` from disk.
 pub fn remove(root: &Path, session: &str, job: &str) -> std::io::Result<()> {
     if !valid_name(session) || !valid_name(job) {
         return Err(std::io::Error::new(
@@ -249,8 +317,15 @@ pub fn update(
     Some(record)
 }
 
-/// Every job recorded under `root`.
+/// Every job recorded under `root` that the owner has not dismissed.
 pub fn list(root: &Path) -> Vec<JobRecord> {
+    let mut records = list_all(root);
+    records.retain(|record| !record.dismissed);
+    records
+}
+
+/// Every record under `root`, dismissed ones too.
+fn list_all(root: &Path) -> Vec<JobRecord> {
     let Ok(sessions) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -320,11 +395,11 @@ pub(crate) fn interrupt(record: &mut JobRecord, reason: &str) {
 }
 
 /// Remove finished jobs whose record has not changed for `keep`, and
-/// interrupted ones too once they are that old.
+/// interrupted and dismissed ones too once they are that old.
 pub fn prune(root: &Path, keep: Duration) -> usize {
     let now = unix_now();
     let mut removed = 0;
-    for record in list(root) {
+    for record in list_all(root) {
         if record.state.is_final()
             && now.saturating_sub(record.updated_unix) > keep.as_secs()
             && remove(root, &record.session, &record.job).is_ok()

@@ -204,6 +204,26 @@ impl ConversationStore {
         );
     }
 
+    /// Number new conversations after `handles` this session's ID already
+    /// used, so a session that comes back under its ID (a daemon's
+    /// workbench session) never reuses a handle an earlier record names.
+    pub(crate) fn continue_after<'a>(&self, handles: impl IntoIterator<Item = &'a str>) {
+        let mut inner = lock(&self.inner);
+        for handle in handles {
+            if let Some((agent, number)) = handle.rsplit_once('-')
+                && let Ok(number) = number.parse::<u32>()
+            {
+                let next = inner.next.entry(agent.to_owned()).or_insert(0);
+                *next = (*next).max(number);
+            }
+        }
+    }
+
+    /// Whether the session has conversation `handle`.
+    pub(crate) fn knows(&self, handle: &str) -> bool {
+        lock(&self.inner).conversations.contains_key(handle)
+    }
+
     /// Where conversation `handle` runs.
     pub(crate) fn cwd(&self, handle: &str) -> Option<PathBuf> {
         lock(&self.inner)

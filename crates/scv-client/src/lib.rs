@@ -95,12 +95,18 @@ impl std::error::Error for ControlError {
 
 /// How long a management exchange may take. A command that can stop a
 /// running account waits for it to stop, and an email account finishes a
-/// mail action under way first, for up to 65 seconds.
-fn control_timeout(command: &DaemonCommand) -> Duration {
+/// mail action under way first, for up to 65 seconds; a workbench action
+/// that may run `git` on worktrees (each command up to 30 seconds) gets as
+/// long.
+pub fn control_timeout(command: &DaemonCommand) -> Duration {
     match command {
         DaemonCommand::Reload
         | DaemonCommand::ChannelSet { .. }
-        | DaemonCommand::ChannelLogout { .. } => Duration::from_secs(90),
+        | DaemonCommand::ChannelLogout { .. }
+        | DaemonCommand::WorkbenchStart { .. }
+        | DaemonCommand::WorkbenchResume { .. }
+        | DaemonCommand::Worktrees
+        | DaemonCommand::WorktreeRemove { .. } => Duration::from_secs(90),
         _ => Duration::from_secs(20),
     }
 }

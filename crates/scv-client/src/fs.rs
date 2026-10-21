@@ -14,6 +14,18 @@ use std::path::Path;
 /// privacy their data needs. The temporary file is named for its target
 /// ([`temporary_prefix`]), so one a crash leaves shows whose it was.
 pub fn replace_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    replace(path, bytes, true)
+}
+
+/// [`replace_private`] without syncing: still atomic and private, but a
+/// machine crash may lose the change. For state that is rewritten often and
+/// only says what is happening now, written where a sync would hold up a
+/// busy task.
+pub fn replace_private_unsynced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    replace(path, bytes, false)
+}
+
+fn replace(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other(format!("{} has no parent", path.display())))?;
@@ -23,9 +35,14 @@ pub fn replace_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .suffix(".tmp")
         .tempfile_in(parent)?;
     temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
+    if sync {
+        temporary.as_file().sync_all()?;
+    }
     temporary.persist(path).map_err(|error| error.error)?;
-    sync_directory(parent)
+    if sync {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 /// The longest file name a temporary file is named for; a longer one would

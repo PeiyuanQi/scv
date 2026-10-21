@@ -80,7 +80,15 @@ the child environment SCV's selector variables, every variable ending in
 `_API_KEY`, and the credential, endpoint, and state variables that any adapter
 declares (such as `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
 `OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, and `PI_*`), so no agent inherits the
-user's or another agent's credentials. For Rust projects, launch preflight
+user's or another agent's model credentials. `GH_TOKEN` and `GITHUB_TOKEN`
+are kept for every agent, since they are how `gh` and git hosting tools sign
+in; Copilot reads them too, so with one set a delegated `copilot` runs on that
+GitHub identity. What an agent reads from files on its own is beyond that:
+Gemini CLI and Qwen Code load the first `.env` they find walking up from
+their working directory, so a `~/.gemini/.env` or `~/.env` above a workspace
+in the home directory reaches them, and reaches their sign-in too, which runs
+in the agent's home under `$SCV_HOME` (inside the user's home by default)
+(see [Delegated agents](tools.md#delegated-agents-agent)). For Rust projects, launch preflight
 shares the original `RUSTUP_HOME` installation and prepends verified tool
 directories to `PATH`, but places `CARGO_HOME` inside the private agent home
 so it does not reuse the user's Cargo config or registry credential files.
@@ -117,8 +125,10 @@ owner tools, it lets the owner's WeChat or Feishu account run unattended
 development work, equivalent to the owner running those agents unprompted in a terminal.
 
 A session offers only agents whose executable resolves. SCV looks in the
-user's per-user install directories (`~/.local/bin`, and `~/.grok/bin` for
-Grok) before `PATH`, as a login shell does; anything able to write those
+user's per-user install directories (`~/.local/bin`; `~/.grok/bin` for
+Grok, `~/.opencode/bin` for OpenCode, `~/.amp/bin` for Amp, and
+`~/.npm-global/bin` for the agents npm installs) before `PATH`, as a login
+shell does; anything able to write those
 directories can already run code as the user.
 
 Project skill discovery reads only `SKILL.md` files that resolve inside the
@@ -238,10 +248,12 @@ that needs approval fails), while an owner chat session, whose bridge already
 approves every request, grants its jobs the same. `auto_approve` is the
 client's own statement about how it answers, so it grants nothing that client
 could not already grant. While the owner watches the workbench (a TUI
-dashboard is open), a request that answer would deny waits up to two minutes
-for the owner instead; the owner is the person the TUI would have asked in
-the foreground, so this too grants nothing more, and an unanswered request is
-denied as before. `agent_cancel` stops a job at the model's request and
+dashboard is open), a request the approval policy would put to a person, and
+that answer would deny, waits up to two minutes for the owner instead; the
+owner is the person the TUI would have asked in the foreground, so this too
+grants nothing more. What the policy decides on its own is never put to the
+owner (`never` still denies side effects outright), and an unanswered
+request is denied as before. `agent_cancel` stops a job at the model's request and
 has process risk. Jobs belong to their session and are cancelled, with their
 processes, when it closes; the job ledger then records them as interrupted. The turn the server starts to report a finished job has the session's
 own tools and approval policy, like any turn; its prompt quotes the job's
@@ -263,7 +275,8 @@ worktree) are the owner's own, so a job the owner starts asks no approval
 for its launch; the requests its agent relays still go through the session's
 policy, attended or not, as above. The owner's jobs are never reported to a
 model, and a prompt the owner sends a conversation is the owner's text, so
-nothing a model wrote is executed as an owner action. The `scv jobs` command
+nothing a model wrote is executed as an owner action; a model cannot stop
+the owner's jobs either (`agent_cancel` refuses). The `scv jobs` command
 refuses every action inside a delegated run, so an agent cannot start,
 steer, resume, or approve work through it, and in particular cannot approve
 its own relayed request. Like the other delegated-run rules this is
@@ -277,17 +290,23 @@ journal, not a replay, is its record.
 Activity logs, the job ledger, and kept queues are private files (0700
 directories, 0600 files) under `state/`, written atomically or appended by
 the SCV process that owns them. Activity logs hold the agent's message text
-and the same redacted one-line tool summaries as progress, never tool
-output, with control characters removed; agent text is untrusted and the TUI
-renders it inert. They can still contain whatever the agent wrote, so they
-are pruned after seven days. A kept queue holds the owner's queued prompts
-and is removed when the TUI leaves. Worktrees are created only on an
-explicit `worktree: true` (approved like the call) or the owner's
-`--worktree`, with fixed `git worktree add` arguments, `GIT_TERMINAL_PROMPT=0`,
-and a time limit; SCV removes one only on the owner's request, refusing
-uncommitted changes without `--force`, and never deletes branches. Removal
-accepts only a worktree under SCV's own `worktrees/` whose `.git` link and
-repository record agree.
+and the same one-line tool summaries as progress, never tool output; every
+line is scrubbed as it is written, whoever produced it (credential-looking
+values hidden, URL queries dropped, control characters removed), and agent
+text is untrusted, so the TUI and `scv jobs` render it inert. Scrubbing is a
+heuristic, and logs can still contain whatever the agent wrote, so they are
+pruned seven days after their run ends. A kept queue holds the owner's
+queued prompts and is removed when the TUI leaves, by closing the connection
+or losing it; only a daemon that stops keeps it. Worktrees are created only
+on an explicit `worktree: true` (approved like the call) or the owner's
+`--worktree`, from a checkout inside the workspace, with fixed `git worktree
+add` arguments, the repository's hooks and file-system monitor off on
+every `git` call, no `*_API_KEY` variables,
+`GIT_TERMINAL_PROMPT=0`, and a time limit; SCV removes one only on the
+owner's request and while nothing works in it, refusing uncommitted changes
+without `--force`, and never deletes branches. Removal accepts only a
+worktree under SCV's own `worktrees/` with SCV's record beside it, whose
+`.git` link and repository record point at each other.
 
 SCV never auto-invokes another agent after a refusal. A run whose model
 refused (`declined`) gets no availability `fallback` field. When the session

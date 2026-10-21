@@ -63,6 +63,15 @@ async fn emit(peer: &mut BufReader<UnixStream>, event: ServerEvent) {
 }
 
 async fn accept_session(listener: &UnixListener, id: &str) -> BufReader<UnixStream> {
+    accept_session_after(listener, id, Duration::ZERO).await
+}
+
+/// Accept a connection and start session `id`, taking `delay` to build it.
+async fn accept_session_after(
+    listener: &UnixListener,
+    id: &str,
+    delay: Duration,
+) -> BufReader<UnixStream> {
     let (stream, _) = tokio::time::timeout(Duration::from_secs(6), listener.accept())
         .await
         .unwrap()
@@ -88,6 +97,7 @@ async fn accept_session(listener: &UnixListener, id: &str) -> BufReader<UnixStre
         receive(&mut peer).await,
         ClientMessage::SessionStart { .. }
     ));
+    tokio::time::sleep(delay).await;
     emit(
         &mut peer,
         ServerEvent::SessionStarted {
@@ -439,6 +449,28 @@ async fn reconnect_retries_a_stalled_handshake_with_a_bounded_wait() {
     .await
     .unwrap();
     assert_eq!(session.id, "new-session");
+}
+
+#[tokio::test]
+async fn a_session_start_slower_than_the_handshake_timeout_is_waited_for() {
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    // Giving up would end the new session, and the queue it restored.
+    let (connection, _peer) = tokio::join!(
+        Client::connect_restoring(
+            &path.0,
+            Path::new("/tmp"),
+            &options,
+            Some("old-session".into())
+        ),
+        accept_session_after(
+            &listener,
+            "new-session",
+            SOCKET_TIMEOUT + Duration::from_secs(1)
+        ),
+    );
+    assert_eq!(connection.unwrap().1.id, "new-session");
 }
 
 #[test]

@@ -142,6 +142,26 @@ pub(crate) async fn worktrees(layout: &Layout, remove: Option<&Path>, force: boo
     if let Some(path) = remove {
         refuse_delegated()?;
         let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        // A daemon removes it with what it knows of its own jobs; without
+        // one, the records on disk say what still works in it.
+        let command = DaemonCommand::WorktreeRemove {
+            path: path.display().to_string(),
+            force,
+        };
+        match control(layout, command).await {
+            Ok(status) => {
+                if let Some(note) = status.workbench_note {
+                    println!("{}", inert(&note));
+                }
+                return Ok(());
+            }
+            Err(error) if unavailable(&error) => {}
+            Err(error) => return Err(error),
+        }
+        let registry = std::sync::Arc::new(scv_tools::delegation::DelegationRegistry::new(layout));
+        scv_tools::workbench::Workbench::new(layout, registry)
+            .check_worktree_unused(&path)
+            .map_err(anyhow::Error::msg)?;
         let note = scv_tools::worktree::remove(&layout.worktrees(), &path, force)
             .await
             .map_err(anyhow::Error::msg)?;
@@ -234,8 +254,9 @@ async fn act(layout: &Layout, command: DaemonCommand) -> Result<()> {
             error
         }
     })?;
+    // A note can quote an agent's text, such as an approval's summary.
     if let Some(note) = status.workbench_note {
-        println!("{note}");
+        println!("{}", inert(&note));
     }
     Ok(())
 }
@@ -278,7 +299,10 @@ async fn log(layout: &Layout, target: &str, follow: bool) -> Result<()> {
         let mut runs: Vec<_> = snapshot
             .runs
             .iter()
-            .filter(|run| run.session == job.session && run.job.as_deref() == Some(&job.job))
+            .filter(|run| {
+                run.session == job.session
+                    && (run.job.as_deref() == Some(&job.job) || run.jobs.contains(&job.job))
+            })
             .collect();
         runs.sort_by_key(|run| run.started_unix_seconds);
         runs.into_iter().map(|run| run.handle.clone()).collect()
@@ -313,17 +337,7 @@ async fn log(layout: &Layout, target: &str, follow: bool) -> Result<()> {
 
 /// One log event as a line of text, control characters removed.
 fn describe(event: &RunEvent) -> String {
-    let text: String = event
-        .text
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
+    let text = inert(&event.text);
     match event.kind {
         RunEventKind::RunStarted => format!("· started: {text}"),
         RunEventKind::TurnStarted => format!(
@@ -364,6 +378,21 @@ fn describe(event: &RunEvent) -> String {
     }
 }
 
+/// `text` safe to print on one terminal line: every control character
+/// (escape sequences included, which an agent's text could carry) becomes a
+/// space.
+fn inert(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
     if !snapshot.approvals.is_empty() {
         println!("Waiting for your approval:");
@@ -374,7 +403,7 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
                 short(&approval.session),
                 approval.job,
                 approval.risk,
-                approval.summary.replace(['\n', '\r'], " ")
+                inert(&approval.summary)
             );
         }
         println!("  Answer with `scv jobs approve <id>` or `scv jobs deny <id>`.");
@@ -404,10 +433,10 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
                     scv_protocol::JobOrigin::Owner => "you",
                     _ => "model",
                 },
-                job.task.replace(['\n', '\r'], " ")
+                inert(&job.task)
             );
             if let Some(detail) = &job.detail {
-                println!("{:<18} {}", "", detail.replace(['\n', '\r'], " "));
+                println!("{:<18} {}", "", inert(detail));
             }
             if let Some(worktree) = &job.worktree {
                 println!(
@@ -439,10 +468,7 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
                 run.agent,
                 run.conversation.as_deref().unwrap_or("-"),
                 run.state.as_str(),
-                run.detail
-                    .as_deref()
-                    .unwrap_or("")
-                    .replace(['\n', '\r'], " ")
+                inert(run.detail.as_deref().unwrap_or(""))
             );
         }
     }

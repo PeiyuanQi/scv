@@ -46,12 +46,50 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
+/// What the dashboard draws in a terminal of a given size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Shown {
+    /// Too small for the dashboard: the active chat is drawn on its own.
+    pub(crate) alone: bool,
+    pub(crate) sidebar: bool,
+    /// Panes drawn: one, or two side by side.
+    pub(crate) panes: usize,
+}
+
+/// What `ui` shows in a `width` by `height` terminal; keys go only where
+/// it does.
+pub(crate) fn shown(ui: &Ui, width: u16, height: u16) -> Shown {
+    let active_chat = matches!(
+        ui.active_tab()
+            .and_then(|id| ui.tab(id))
+            .map(|tab| &tab.kind),
+        Some(TabKind::Chat(_))
+    );
+    let alone = (height < 12 || width < 50) && ui.overlay.is_none() && active_chat;
+    let sidebar = !alone && ui.sidebar && width >= 70;
+    let body = if sidebar {
+        width.saturating_sub(SIDEBAR_WIDTH)
+    } else {
+        width
+    };
+    let panes = if !alone && ui.panes.len() > 1 && body >= 60 {
+        2
+    } else {
+        1
+    };
+    Shown {
+        alone,
+        sidebar,
+        panes,
+    }
+}
+
 /// Draw the dashboard. A terminal too small for it shows the focused chat
 /// on its own.
 pub(crate) fn render_ui(frame: &mut Frame<'_>, ui: &Ui) {
     let area = frame.area();
-    if (area.height < 12 || area.width < 50)
-        && ui.overlay.is_none()
+    let shown = shown(ui, area.width, area.height);
+    if shown.alone
         && let Some(TabKind::Chat(chat)) = ui
             .active_tab()
             .and_then(|id| ui.tab(id))
@@ -78,7 +116,7 @@ pub(crate) fn render_ui(frame: &mut Frame<'_>, ui: &Ui) {
     frame.render_widget(Paragraph::new(tab_bar(ui)), layout[1]);
 
     // The sidebar gives way on a narrow terminal.
-    let sidebar = ui.sidebar && area.width >= 70;
+    let sidebar = shown.sidebar;
     let body = if sidebar {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -89,7 +127,7 @@ pub(crate) fn render_ui(frame: &mut Frame<'_>, ui: &Ui) {
     } else {
         layout[2]
     };
-    let panes = if ui.panes.len() > 1 && body.width >= 60 {
+    let panes = if shown.panes > 1 {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -265,8 +303,9 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, ui: &Ui) {
     let width = usize::from(area.width.saturating_sub(3));
     let mut lines = Vec::new();
     let mut selected_line = 0usize;
+    let current = ui.workbench.selection(&items);
     for (index, item) in items.iter().enumerate() {
-        let selected = focused && index == ui.workbench.selected;
+        let selected = focused && Some(index) == current;
         if selected {
             selected_line = lines.len();
         }
@@ -357,18 +396,10 @@ pub(crate) fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, focused:
         .constraints([Constraint::Min(3), Constraint::Length(composer_height)])
         .split(area);
 
-    let transcript = transcript_text(app);
-    let raw_lines = transcript.lines.len().min(usize::from(u16::MAX)) as u16;
-    let visible = layout[0].height.saturating_sub(2);
-    let bottom = raw_lines.saturating_sub(visible);
-    let scroll = if app.follow_output {
-        bottom
-    } else {
-        bottom.saturating_sub(app.scroll)
-    };
-    let transcript_widget = Paragraph::new(transcript)
+    let transcript = Paragraph::new(transcript_text(app)).wrap(Wrap { trim: false });
+    let scroll = scroll_to(&transcript, layout[0], app.follow_output, app.scroll);
+    let transcript_widget = transcript
         .block(Block::default().borders(Borders::LEFT | Borders::RIGHT))
-        .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(transcript_widget, layout[0]);
 
@@ -545,19 +576,10 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
         frame.render_widget(banner, layout[1]);
     }
 
-    let lines = agent_lines(view);
-    let raw = lines.len().min(usize::from(u16::MAX)) as u16;
-    let visible = layout[2].height.saturating_sub(2);
-    let bottom = raw.saturating_sub(visible);
-    let scroll = if view.follow {
-        bottom
-    } else {
-        bottom.saturating_sub(view.scroll)
-    };
+    let log = Paragraph::new(Text::from(agent_lines(view))).wrap(Wrap { trim: false });
+    let scroll = scroll_to(&log, layout[2], view.follow, view.scroll);
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0))
+        log.scroll((scroll, 0))
             .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)),
         layout[2],
     );
@@ -587,6 +609,21 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
     );
     if focused {
         set_cursor(frame, layout[3], &view.input, view.cursor);
+    }
+}
+
+/// Where `text` (wrapping, drawn in `area` between a left and a right
+/// border) scrolls to: its last rows when following, else `back` rows above
+/// them. Rows are counted after wrapping, so the newest line stays in view.
+fn scroll_to(text: &Paragraph<'_>, area: Rect, follow: bool, back: u16) -> u16 {
+    let rows = text.line_count(area.width.saturating_sub(2));
+    let bottom = u16::try_from(rows)
+        .unwrap_or(u16::MAX)
+        .saturating_sub(area.height);
+    if follow {
+        bottom
+    } else {
+        bottom.saturating_sub(back)
     }
 }
 

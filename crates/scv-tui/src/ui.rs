@@ -4,7 +4,7 @@
 //! keys still go to [`crate::input`]; this decides where a key goes first.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -87,8 +87,17 @@ pub(crate) struct Ui {
     pub(crate) requests: Option<UnboundedSender<Request>>,
     /// Chat tabs to connect: new ones and reconnecting ones.
     pub(crate) openings: Vec<Opening>,
-    /// A destructive sidebar key waiting to be pressed again.
-    confirm: Option<(char, Instant)>,
+    /// A destructive sidebar key waiting to be pressed again: the key, the
+    /// entry it was pressed on ([`Item::key`]), and when.
+    confirm: Option<(char, String, Instant)>,
+    /// Chat tabs reconnecting now; each reconnects once at a time.
+    reconnecting: HashSet<u64>,
+    /// Quitting (`0`) or closing chat tab `id` while chats have work
+    /// running, waiting to be asked again.
+    confirm_leave: Option<(u64, Instant)>,
+    /// The terminal's size at the last draw, which decides what is shown
+    /// and so where keys can go.
+    pub(crate) size: (u16, u16),
     pub(crate) options: LaunchOptions,
 }
 
@@ -114,6 +123,9 @@ impl Ui {
             requests: None,
             openings: Vec::new(),
             confirm: None,
+            reconnecting: HashSet::new(),
+            confirm_leave: None,
+            size: (u16::MAX, u16::MAX),
             options,
         };
         let id = ui.add_tab(TabKind::Chat(Box::new(tab)));
@@ -162,23 +174,27 @@ impl Ui {
         self.focus = Focus::Pane(pane);
     }
 
-    /// A chat tab connected: a new one, or one reconnecting.
+    /// A chat tab connected: a new one, or one reconnecting. Returns the
+    /// client of a tab closed while it reconnected, to be shut down.
     pub(crate) fn opened(
         &mut self,
         opening: &Opening,
         client: Client,
         session: crate::client::SessionInfo,
-    ) {
-        if let Some(id) = opening.tab
-            && let Some(Tab {
+    ) -> Option<Client> {
+        if let Some(id) = opening.tab {
+            self.reconnecting.remove(&id);
+            let Some(Tab {
                 kind: TabKind::Chat(chat),
                 ..
             }) = self.tab_mut(id)
-        {
+            else {
+                return Some(client);
+            };
             chat.client = client;
             chat.app.reconnect(session);
             note_restored(&mut chat.app);
-            return;
+            return None;
         }
         let mut app = App::new(session);
         note_restored(&mut app);
@@ -188,10 +204,14 @@ impl Ui {
             cwd: opening.cwd.clone(),
         })));
         self.show(id);
+        None
     }
 
     /// A chat tab could not be opened.
     pub(crate) fn open_failed(&mut self, opening: &Opening, error: &anyhow::Error) {
+        if let Some(id) = opening.tab {
+            self.reconnecting.remove(&id);
+        }
         self.workbench.notify(
             format!(
                 "Could not open a session in {}: {error:#}",
@@ -249,22 +269,30 @@ impl Ui {
             _ => None,
         };
         chat.app.handle_server_result(result)?;
-        let reconnect = (!chat.app.connected).then(|| Opening {
-            cwd: chat.cwd.clone(),
-            restore: Some(chat.app.session_id.clone()),
-            tab: Some(id),
-        });
+        let reconnect =
+            (!chat.app.connected).then(|| (chat.cwd.clone(), chat.app.session_id.clone()));
         let number = index.map_or(0, |index| index + 1);
         if let Some(summary) = approval {
             self.workbench
                 .notify(format!("Tab {number} asks for approval: {summary}"), true);
         }
-        if let Some(opening) = reconnect
-            && !self.openings.contains(&opening)
-        {
-            self.openings.push(opening);
+        if let Some((cwd, session)) = reconnect {
+            self.reconnect(id, cwd, session);
         }
         Ok(())
+    }
+
+    /// Reconnect chat tab `id`, restoring its session's queue, unless it is
+    /// reconnecting already: a second reconnection would end the first's
+    /// session, and the queue it restored with it.
+    fn reconnect(&mut self, id: u64, cwd: PathBuf, session: String) {
+        if self.reconnecting.insert(id) {
+            self.openings.push(Opening {
+                cwd,
+                restore: Some(session),
+                tab: Some(id),
+            });
+        }
     }
 
     /// One key press.
@@ -283,8 +311,23 @@ impl Ui {
             }
             return Ok(());
         }
+        self.normalize_focus();
+        // A chat's approval prompt covers the dashboard: its answer keys are
+        // the prompt's, wherever focus is.
+        if self.active_chat_asks()
+            && matches!(
+                key.code,
+                KeyCode::Char('y' | 'Y' | 'n' | 'N') | KeyCode::Esc
+            )
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return self.pane_key(key).await;
+        }
         if let Some(action) = self.keys.action(key) {
             self.act(action);
+            self.normalize_focus();
             return Ok(());
         }
         match self.focus {
@@ -293,6 +336,29 @@ impl Ui {
                 Ok(())
             }
             Focus::Pane(_) => self.pane_key(key).await,
+        }
+    }
+
+    /// Whether the chat whose approval prompt is drawn waits on it.
+    fn active_chat_asks(&self) -> bool {
+        self.active_tab().and_then(|id| self.tab(id)).is_some_and(
+            |tab| matches!(&tab.kind, TabKind::Chat(chat) if chat.app.pending_approval.is_some()),
+        )
+    }
+
+    /// Keep focus on what the terminal shows: a sidebar or second pane too
+    /// narrow to draw passes its keys to the first pane, and says so when
+    /// the owner asked for it. A chat drawn alone is the focused pane's and
+    /// keeps them. Runs before every draw too, so a resize never sends keys
+    /// to a chat that is not drawn.
+    pub(crate) fn normalize_focus(&mut self) {
+        let shown = crate::render::shown(self, self.size.0, self.size.1);
+        let hidden = match self.focus {
+            Focus::Sidebar => !shown.sidebar,
+            Focus::Pane(index) => !shown.alone && index >= shown.panes,
+        };
+        if hidden {
+            self.focus = Focus::Pane(0);
         }
     }
 
@@ -305,6 +371,15 @@ impl Ui {
                     self.sidebar = true;
                     Focus::Sidebar
                 };
+                if self.focus == Focus::Sidebar
+                    && !crate::render::shown(self, self.size.0, self.size.1).sidebar
+                {
+                    self.workbench.notify(
+                        "The sidebar needs a terminal at least 70 columns wide (and 12 rows)."
+                            .into(),
+                        false,
+                    );
+                }
             }
             Action::ToggleSidebar => {
                 self.sidebar = !self.sidebar;
@@ -337,9 +412,19 @@ impl Ui {
                 }
             }
             Action::NewTab => {
-                if let Some(app) = self.focused_chat_app() {
+                let Some(app) = self.focused_chat_app() else {
+                    return;
+                };
+                if app.input.is_empty() {
                     app.input = "/open ".into();
                     app.cursor = app.input.chars().count();
+                } else {
+                    self.workbench.notify(
+                        "The composer holds a draft; send or clear it, then open a tab with \
+                         /open <directory>."
+                            .into(),
+                        false,
+                    );
                 }
             }
             Action::CloseTab => self.close_tab(),
@@ -359,6 +444,16 @@ impl Ui {
                     if let Some(other) = other {
                         self.panes.push(other);
                         self.focus = Focus::Pane(1);
+                        if crate::render::shown(self, self.size.0, self.size.1).panes < 2 {
+                            // Keys stay with the pane on screen.
+                            self.focus = Focus::Pane(0);
+                            self.workbench.notify(
+                                "Two panes need 60 columns beside the sidebar; the second shows \
+                                 when the terminal is wider."
+                                    .into(),
+                                false,
+                            );
+                        }
                     }
                 }
             }
@@ -399,6 +494,9 @@ impl Ui {
                 "The last chat tab stays open; /quit leaves SCV.".into(),
                 false,
             );
+            return;
+        }
+        if is_chat && !self.leave(current) {
             return;
         }
         self.tabs.retain(|tab| tab.id != current);
@@ -459,22 +557,77 @@ impl Ui {
             return Ok(());
         };
         handle_key(&mut chat.client, &mut chat.app, key).await?;
-        let quit = chat.app.quit;
-        let reconnect = (!chat.app.connected).then(|| Opening {
-            cwd: chat.cwd.clone(),
-            restore: Some(chat.app.session_id.clone()),
-            tab: Some(id),
-        });
+        let quit = std::mem::take(&mut chat.app.quit);
+        let reconnect =
+            (!chat.app.connected).then(|| (chat.cwd.clone(), chat.app.session_id.clone()));
         if !chat.app.connected {
             chat.client.shutdown().await;
         }
-        self.quit |= quit;
-        if let Some(opening) = reconnect
-            && !self.openings.contains(&opening)
-        {
-            self.openings.push(opening);
+        if quit {
+            self.leave(0);
+        }
+        if let Some((cwd, session)) = reconnect {
+            self.reconnect(id, cwd, session);
         }
         Ok(())
+    }
+
+    /// What quitting (`only` = `None`) or closing chat tab `only` would
+    /// stop: chats running a turn, and their sessions' unfinished
+    /// background jobs.
+    fn running_work(&self, only: Option<u64>) -> Vec<String> {
+        let mut work = Vec::new();
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let TabKind::Chat(chat) = &tab.kind else {
+                continue;
+            };
+            if only.is_some_and(|only| only != tab.id) {
+                continue;
+            }
+            let jobs = self
+                .workbench
+                .snapshot
+                .iter()
+                .flat_map(|snapshot| snapshot.jobs.iter())
+                .filter(|job| job.session == chat.app.session_id && !job.state.is_final())
+                .count();
+            let number = index + 1;
+            match (chat.app.turn.is_some(), jobs) {
+                (false, 0) => {}
+                (true, 0) => work.push(format!("tab {number} runs a turn")),
+                (turn, jobs) => work.push(format!(
+                    "tab {number} has {jobs} background job(s){}",
+                    if turn { " and runs a turn" } else { "" }
+                )),
+            }
+        }
+        work
+    }
+
+    /// Quit (`target` 0) or close chat tab `target`: at once when that
+    /// stops nothing, else when asked again within [`CONFIRM_WINDOW`].
+    fn leave(&mut self, target: u64) -> bool {
+        let work = self.running_work((target != 0).then_some(target));
+        let now = Instant::now();
+        let again = self
+            .confirm_leave
+            .is_some_and(|(asked, at)| asked == target && now.duration_since(at) < CONFIRM_WINDOW);
+        if work.is_empty() || again {
+            self.confirm_leave = None;
+            if target == 0 {
+                self.quit = true;
+            }
+            return true;
+        }
+        self.confirm_leave = Some((target, now));
+        let what = if target == 0 {
+            "Quitting stops it; ask again (Ctrl+C or /quit) to quit"
+        } else {
+            "Closing the tab stops it; ask again to close it"
+        };
+        self.workbench
+            .notify(format!("{}. {what}.", work.join("; ")), false);
+        false
     }
 
     /// Run a dashboard command typed into chat tab `id`'s composer; false
@@ -642,11 +795,11 @@ impl Ui {
                     );
                     return;
                 };
-                view.input.clear();
+                view.sent = Some(std::mem::take(&mut view.input));
                 view.cursor = 0;
                 view.follow = true;
                 self.request(
-                    Tag::Action,
+                    Tag::Send(target.clone()),
                     DaemonCommand::WorkbenchSend {
                         session,
                         conversation,
@@ -716,15 +869,16 @@ impl Ui {
             }
             return;
         }
+        let current = self.workbench.selection(&items);
         let position = selectable
             .iter()
-            .position(|index| *index >= self.workbench.selected)
-            .unwrap_or(selectable.len() - 1);
+            .position(|index| Some(*index) == current)
+            .unwrap_or(0);
         let mut moved = |offset: isize| {
             let next = position
                 .saturating_add_signed(offset)
                 .min(selectable.len() - 1);
-            self.workbench.selected = selectable[next];
+            self.workbench.select(&items, selectable[next]);
         };
         match key.code {
             KeyCode::Up => moved(-1),
@@ -735,14 +889,14 @@ impl Ui {
             KeyCode::End => moved(isize::MAX / 2),
             KeyCode::Esc => self.focus = Focus::Pane(0),
             KeyCode::Enter => {
-                self.workbench.selected = selectable[position];
-                if let Some(item) = items.get(self.workbench.selected).cloned() {
+                self.workbench.select(&items, selectable[position]);
+                if let Some(item) = items.get(selectable[position]).cloned() {
                     self.open_item(item);
                 }
             }
             KeyCode::Char(letter) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.workbench.selected = selectable[position];
-                if let Some(item) = items.get(self.workbench.selected).cloned() {
+                self.workbench.select(&items, selectable[position]);
+                if let Some(item) = items.get(selectable[position]).cloned() {
                     self.item_key(&item, letter);
                 }
             }
@@ -778,16 +932,17 @@ impl Ui {
     }
 
     fn item_key(&mut self, item: &Item, letter: char) {
+        // A second press counts only on the same entry, wherever its row is.
+        let entry = item.key().unwrap_or_default();
         let confirmed = |ui: &mut Self, what: &str| {
             let now = Instant::now();
-            if ui
-                .confirm
-                .is_some_and(|(key, at)| key == letter && now.duration_since(at) < CONFIRM_WINDOW)
-            {
+            if ui.confirm.as_ref().is_some_and(|(key, pressed_on, at)| {
+                *key == letter && *pressed_on == entry && now.duration_since(*at) < CONFIRM_WINDOW
+            }) {
                 ui.confirm = None;
                 true
             } else {
-                ui.confirm = Some((letter, now));
+                ui.confirm = Some((letter, entry.clone(), now));
                 ui.workbench
                     .notify(format!("Press {letter} again to {what}."), false);
                 false
@@ -907,10 +1062,13 @@ fn insert(view: &mut crate::workbench::AgentView, character: char) {
 /// `path` as typed: `~` is the home directory, and a relative path is
 /// relative to `base`.
 fn expand(path: &str, base: &Path) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
+    if let Some(home) = std::env::var_os("HOME") {
+        if path == "~" {
+            return PathBuf::from(home);
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return PathBuf::from(home).join(rest);
+        }
     }
     let path = PathBuf::from(path);
     if path.is_absolute() {
