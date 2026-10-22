@@ -412,6 +412,115 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+#[tokio::test]
+async fn a_repository_at_a_submodule_path_does_not_run_its_filter_when_listed() {
+    if !git_installed() {
+        return;
+    }
+    let repo = repo();
+    let sub = repo.workspace.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    git_in(&sub, &["init", "-q", "-b", "main"]);
+    std::fs::write(sub.join("f"), "s\n").unwrap();
+    git_in(
+        &sub,
+        &["-c", "user.name=t", "-c", "user.email=t@t", "add", "."],
+    );
+    git_in(
+        &sub,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "s",
+        ],
+    );
+    let sha = {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sub)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git_in(
+        &repo.repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{sha},vendor"),
+        ],
+    );
+    git_in(
+        &repo.repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "link",
+        ],
+    );
+    let created = create(
+        &repo.root,
+        &repo.repo,
+        &repo.workspace,
+        "codex",
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let path = PathBuf::from(&created.worktree.path);
+    let vendor = path.join("vendor");
+    std::fs::create_dir_all(&vendor).unwrap();
+    git_in(&vendor, &["init", "-q"]);
+    std::fs::write(vendor.join("f"), "tracked\n").unwrap();
+    git_in(
+        &vendor,
+        &["-c", "user.name=t", "-c", "user.email=t@t", "add", "f"],
+    );
+    git_in(
+        &vendor,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "f",
+        ],
+    );
+    let marker = repo.workspace.join("filter-ran");
+    let config = std::fs::read_to_string(vendor.join(".git/config")).unwrap_or_default();
+    std::fs::write(
+        vendor.join(".git/config"),
+        format!(
+            "{config}[filter \"x\"]\n\tclean = touch '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(vendor.join(".gitattributes"), "* filter=x\n").unwrap();
+    std::fs::write(vendor.join("f"), "changed\n").unwrap();
+    let _ = list(&repo.root).await;
+    assert!(
+        !marker.exists(),
+        "git status ran a filter from the submodule path"
+    );
+}
+
 #[test]
 fn a_taken_worktree_name_is_not_reserved_again() {
     let dir = tempfile::tempdir().unwrap();

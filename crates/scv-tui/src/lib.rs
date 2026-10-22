@@ -120,6 +120,10 @@ async fn run_event_loop(
                 Err(error) => ui.open_failed(&opening, &error),
             },
             Some(answer) = answers.recv() => {
+                if ui.focus == ui::Focus::Sidebar {
+                    let items = ui.sidebar_items();
+                    ui.workbench.note_highlight(&items);
+                }
                 if let Some(note) = ui.workbench.answer(answer) {
                     ui.workbench.notify(note, false);
                 }

@@ -28,8 +28,12 @@ use crate::delegate::records::{ProcessIdentity, write_private_json};
 const MAX_PROMPT_BYTES: usize = 16 * 1024;
 /// Longest reply or error kept, in bytes.
 const MAX_REPLY_BYTES: usize = 8 * 1024;
-/// Largest record file read.
-const MAX_RECORD_BYTES: u64 = 128 * 1024;
+/// Largest record file read. A prompt, reply, and error at their bounds
+/// expand when JSON escapes control characters (`\u00XX` is six bytes), so
+/// the cap is above that expansion. [`fit_record`] still shrinks a record
+/// that would not fit, or a later read would skip it and the job would
+/// vanish.
+const MAX_RECORD_BYTES: u64 = 512 * 1024;
 
 /// Held around every write of a record, and around every change that reads
 /// one first (dismiss, update, settle, prune), so those changes are not
@@ -293,7 +297,50 @@ fn write(root: &Path, record: &JobRecord) -> std::io::Result<()> {
             record.resumed_from = existing.resumed_from;
         }
     }
+    fit_record(&mut record);
     write_private_json(&dir, &name, &record)
+}
+
+/// Shrink `record` until its JSON fits in [`MAX_RECORD_BYTES`]. A file over
+/// that cap is not read back, so the job would disappear from the ledger.
+fn fit_record(record: &mut JobRecord) {
+    let Some(limit) = usize::try_from(MAX_RECORD_BYTES).ok() else {
+        return;
+    };
+    for _ in 0..24 {
+        let Ok(bytes) = serde_json::to_vec(record) else {
+            return;
+        };
+        if bytes.len() <= limit {
+            return;
+        }
+        let prompt = record.prompt.len();
+        let reply = record.reply.as_ref().map(String::len).unwrap_or(0);
+        let error = record.error.as_ref().map(String::len).unwrap_or(0);
+        let longest = prompt.max(reply).max(error);
+        if longest == 0 {
+            record.arguments = Value::Null;
+            record.task.clear();
+            continue;
+        }
+        let keep = longest / 2;
+        if prompt == longest {
+            let next = scv_client::text::utf8_prefix(&record.prompt, keep).to_owned();
+            record.prompt = next;
+        } else if reply == longest {
+            let next = record
+                .reply
+                .as_deref()
+                .map(|text| scv_client::text::utf8_prefix(text, keep).to_owned());
+            record.reply = next;
+        } else {
+            let next = record
+                .error
+                .as_deref()
+                .map(|text| scv_client::text::utf8_prefix(text, keep).to_owned());
+            record.error = next;
+        }
+    }
 }
 
 /// The record of `job` in `session`, unless the owner dismissed it.

@@ -1517,8 +1517,8 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   result stays in the ledger and log. Background jobs must be on.
 - *send* a prompt to a job's or run's conversation: into its running turn
   when the agent can take steering, else as its next turn, queued behind a
-  running one (`--queue` always queues; `--steer` fails when it cannot
-  steer). The turn runs as a job of the owner's in the conversation's
+  running one (`--queue` always queues; `--steer` fails when a turn is
+  running and cannot take it, and starts a turn when none is). The turn runs as a job of the owner's in the conversation's
   session.
 - *cancel* a running or queued job. A model's job the owner cancels is
   reported to the model as `cancelled`, with a note that the user stopped

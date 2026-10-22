@@ -246,6 +246,20 @@ fn a_snapshot_taken_before_a_dismissal_or_a_resume_does_not_undo_either() {
 }
 
 #[test]
+fn a_control_heavy_prompt_still_loads() {
+    let root = tempfile::tempdir().unwrap();
+    let ledger = ledger(root.path());
+    let arguments = json!({"prompt":"p"});
+    let mut record = ledger.record(&new_job("job-1", &arguments)).unwrap();
+    record.prompt = "\u{1}".repeat(16 * 1024);
+    record.reply = Some("\u{1}".repeat(8 * 1024));
+    record.error = Some("\u{1}".repeat(8 * 1024));
+    ledger.save(&record);
+    let loaded = load(root.path(), "session-1", "job-1").expect("record over the old cap vanished");
+    assert!(!loaded.prompt.is_empty());
+}
+
+#[test]
 fn a_dismissed_record_keeps_only_its_number() {
     let root = tempfile::tempdir().unwrap();
     let ledger = ledger(root.path());

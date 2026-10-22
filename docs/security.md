@@ -313,8 +313,14 @@ from, and that directory and the worktree's `.git` file name each other.
 Those calls name the verified git directory, worktree, and common directory
 outright (`GIT_COMMON_DIR` is the one the check accepted), so an agent that
 rewrites its `.git` or `commondir` cannot make git read a configuration it
-wrote (a filter driver runs as the user); a worktree whose link does not
-check out is listed from SCV's record alone and not removed. Filter drivers
+wrote (a filter driver runs as the user). `git status` passes
+`--ignore-submodules=all`, so a repository the agent creates at a submodule
+path in its worktree is not entered and its filters do not run. A worktree
+whose link does not check out is listed from SCV's record alone and not
+removed. The record beside the worktree is trusted: it lives under
+`$SCV_HOME/worktrees`, which an unsandboxed agent can edit, and such an
+agent can already edit the source repository's git configuration. The checks
+defend an agent that can write only inside its worktree. Filter drivers
 and other commands the source repository's own configuration names still
 run, as they would for the owner's `git` (`git worktree add` runs its smudge
 filters, for one); only hooks and the file-system monitor are off.

@@ -25,12 +25,15 @@ between them) and joins them again. The **sidebar** groups, top to bottom:
 approvals waiting for the owner, this TUI's chat tabs, every workspace's jobs
 and live agent runs (each line a state mark, agent, job, and task), jobs a
 restart interrupted that can be resumed, and queues kept from sessions that
-stopped. `focus_sidebar` moves keys to it; there `Up`/`Down`,
+stopped. `focus_sidebar` moves keys to it and back to the pane they left; there `Up`/`Down`,
 `PageUp`/`PageDown`, and `Home`/`End` select, `Enter` opens the selection (a
 chat tab, or an agent view), `y`/`n` answer the selected approval, `x`
 pressed twice stops a running job, `r` resumes an interrupted job or
 restores a kept queue, `d` pressed twice forgets a finished job, `w` lists
-worktrees, and `Esc` returns to the pane. `Enter` on a tab or view the second
+worktrees, and `Esc` returns to the pane focus left. `y`/`n` on a job row
+name the request they will answer and act on the second press, so a new
+request on that job is not answered by a key meant for the previous one.
+`Enter` on a tab or view the second
 pane already shows focuses that pane. The selection stays on its entry as
 the list changes, and a second `x` or `d` counts only on the entry the first
 was pressed on, within three seconds. When the selected entry goes away (an
@@ -80,8 +83,9 @@ It follows new lines while at the bottom; `PageUp`/`PageDown` scroll and
 `End` returns. The view has its own one-line composer: `Enter` sends the
 text to the agent's conversation (into its running turn when the agent can
 take steering, else as the conversation's next turn, queued behind a running
-one), and the text comes back to an empty composer if the daemon refuses it
-or the connection breaks. One prompt is sent at a time: `Enter` while the
+one). If the daemon refuses it or the connection breaks, the text comes
+back; text typed while it was in flight stays after it, on the next line.
+One prompt is sent at a time: `Enter` while the
 last is unanswered keeps the text in the composer and says so. `Ctrl+J`
 inserts a newline, and `Esc` clears it. While the job waits for an approval,
 `Ctrl+Y` approves and `Ctrl+N` denies it; `y` and `n` are always text, so a

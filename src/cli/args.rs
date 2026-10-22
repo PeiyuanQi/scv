@@ -210,7 +210,8 @@ pub(crate) enum JobsCommand {
         /// Always queue behind a running turn.
         #[arg(long, conflicts_with = "steer")]
         queue: bool,
-        /// Only add it to the running turn; fail when that is not possible.
+        /// Only add it to the running turn; fail when a turn is running and
+        /// cannot take it. With no turn running, start one.
         #[arg(long)]
         steer: bool,
     },

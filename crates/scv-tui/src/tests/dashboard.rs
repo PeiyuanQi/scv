@@ -642,6 +642,162 @@ async fn a_key_meant_for_an_entry_that_went_away_only_moves_the_selection() {
 }
 
 #[tokio::test]
+async fn the_default_sidebar_highlight_does_not_act_after_its_entry_goes() {
+    let (mut ui, mut requests, _peer, _path) = dashboard().await;
+    let mut two = snapshot();
+    let mut second = two.approvals[0].clone();
+    second.id = "ap-2".into();
+    second.summary = "rm -rf /".into();
+    two.approvals.push(second);
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(two.clone())));
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    two.approvals.remove(0);
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(two)));
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(
+        requests.try_recv().is_err(),
+        "the default highlight approved the approval that moved into its row"
+    );
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert_eq!(
+        requests.try_recv().unwrap().command,
+        DaemonCommand::WorkbenchApprove {
+            id: "ap-2".into(),
+            approved: true
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_new_tab_from_the_sidebar_takes_the_keys_that_type_its_path() {
+    let (mut ui, mut requests, _peer, _path) = dashboard().await;
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(0));
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(requests.try_recv().is_err(), "y answered the sidebar");
+    let TabKind::Chat(tab) = &ui.tabs[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(tab.app.input, "/open y");
+}
+
+#[tokio::test]
+async fn sidebar_focus_returns_to_the_pane_it_left_and_shows_pane_0s_approval() {
+    let (mut ui, _requests, _first_peer, _path) = dashboard().await;
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    let (connection, _second_peer) = tokio::join!(
+        Client::connect(&path.0, Path::new("/tmp"), &options),
+        accept_session(&listener, "second-session"),
+    );
+    let (client, session) = connection.unwrap();
+    let opening = Opening {
+        cwd: "/tmp".into(),
+        restore: None,
+        tab: None,
+        from: (ui.focus, ui.active_tab()),
+    };
+    assert!(ui.opened(&opening, client, session).is_none());
+    ui.key(key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('v'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(1));
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Esc, KeyModifiers::NONE)).await.unwrap();
+    assert_eq!(ui.focus, Focus::Pane(1));
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(1));
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let first = ui.tabs[0].id;
+    ui.workbench.bell = false;
+    ui.chat_event(
+        first,
+        Ok(Some(ServerEvent::ApprovalRequested {
+            request_id: "r".into(),
+            session_id: "old-session".into(),
+            turn_id: "t".into(),
+            seq: 1,
+            approval_id: "pane-0".into(),
+            call_id: "c".into(),
+            name: "bash".into(),
+            risk: "process".into(),
+            cwd: "/tmp".into(),
+            summary: "Run make".into(),
+        })),
+    );
+    assert!(!ui.workbench.bell, "the drawn prompt also rang");
+    let shown = screen(&ui, 160, 40);
+    assert!(shown.contains("approval required"), "{shown}");
+    // The pane focus left is already asking, so pane 0's next request is
+    // not drawn and is announced.
+    if let TabKind::Chat(tab) = &mut ui.tabs[1].kind {
+        tab.app.pending_approval = Some(PendingApproval {
+            id: "pane-1".into(),
+            name: "bash".into(),
+            risk: "process".into(),
+            cwd: "/tmp".into(),
+            summary: "Run the other pane".into(),
+        });
+    }
+    if let TabKind::Chat(tab) = &mut ui.tabs[0].kind {
+        tab.app.pending_approval = None;
+    }
+    ui.workbench.bell = false;
+    ui.chat_event(
+        first,
+        Ok(Some(ServerEvent::ApprovalRequested {
+            request_id: "r2".into(),
+            session_id: "old-session".into(),
+            turn_id: "t".into(),
+            seq: 2,
+            approval_id: "pane-0-later".into(),
+            call_id: "c2".into(),
+            name: "bash".into(),
+            risk: "process".into(),
+            cwd: "/tmp".into(),
+            summary: "Run make again".into(),
+        })),
+    );
+    assert!(ui.workbench.bell);
+    assert!(
+        ui.workbench
+            .notices
+            .back()
+            .unwrap()
+            .text
+            .contains("asks for approval")
+    );
+}
+
+#[tokio::test]
 async fn an_agent_view_sends_one_prompt_at_a_time() {
     let (mut ui, mut requests, _peer, _path) = dashboard().await;
     let target = Target::Job {

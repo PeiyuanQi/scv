@@ -62,6 +62,31 @@ fn record(session: &str, job: &str, state: AgentState, owner: ProcessIdentity) -
     }
 }
 
+#[test]
+fn an_interrupted_job_stays_listed_past_the_finished_cap() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let owner = dead();
+    for n in 0..201 {
+        let mut done = record("s", &format!("job-{n}"), AgentState::Completed, owner);
+        done.created_unix = 1000 + n;
+        done.reported = true;
+        ledger::save(&jobs, &done).unwrap();
+    }
+    let mut interrupted = record("s", "job-old", AgentState::Interrupted, owner);
+    interrupted.created_unix = 1;
+    interrupted.interrupted = Some("the SCV process that ran it stopped".into());
+    ledger::save(&jobs, &interrupted).unwrap();
+    let snapshot = bench.workbench.snapshot();
+    assert!(
+        snapshot
+            .jobs
+            .iter()
+            .any(|job| job.job == "job-old" && job.resumable),
+        "the resumable job was dropped with the finished cap"
+    );
+}
+
 fn dead() -> ProcessIdentity {
     ProcessIdentity {
         pid: u32::MAX - 3,

@@ -168,19 +168,70 @@ impl Ui {
         }
     }
 
-    /// The chat whose approval prompt is drawn: the focused pane, or the
-    /// pane focus left when a dashboard key opened the sidebar.
-    pub(crate) fn covering_tab(&self) -> Option<u64> {
-        let index = match self.focus {
-            Focus::Pane(index) => index,
-            Focus::Sidebar => self.modal_pane?,
-        };
+    /// Pane indexes whose chat approval can cover the dashboard, first one
+    /// that is already asking wins. The sidebar keeps the pane focus left,
+    /// then the first pane: that is the chat `active_tab` treats as focused,
+    /// so an approval there is drawn instead of staying silent.
+    fn approval_panes(&self) -> Vec<usize> {
+        match self.focus {
+            Focus::Pane(index) => vec![index],
+            Focus::Sidebar => {
+                let mut panes = Vec::new();
+                if let Some(index) = self.modal_pane {
+                    panes.push(index);
+                }
+                if !panes.contains(&0) {
+                    panes.push(0);
+                }
+                panes
+            }
+        }
+    }
+
+    fn pane_tab(&self, index: usize) -> Option<u64> {
         let index = index.min(self.panes.len().saturating_sub(1));
-        let id = *self.panes.get(index)?;
-        self.tab(id).and_then(|tab| match &tab.kind {
-            TabKind::Chat(chat) if chat.app.pending_approval.is_some() => Some(id),
-            _ => None,
+        self.panes.get(index).copied()
+    }
+
+    fn chat_is_asking(&self, id: u64) -> bool {
+        self.tab(id).is_some_and(
+            |tab| matches!(&tab.kind, TabKind::Chat(chat) if chat.app.pending_approval.is_some()),
+        )
+    }
+
+    /// The chat whose approval prompt is drawn.
+    pub(crate) fn covering_tab(&self) -> Option<u64> {
+        self.approval_panes().into_iter().find_map(|index| {
+            let id = self.pane_tab(index)?;
+            self.chat_is_asking(id).then_some(id)
         })
+    }
+
+    /// Whether an approval request arriving for `id` will be the prompt on
+    /// screen. An earlier pane that is already asking keeps the prompt, so
+    /// this chat is told with a notice instead.
+    fn approval_would_cover(&self, id: u64) -> bool {
+        for index in self.approval_panes() {
+            let Some(pane) = self.pane_tab(index) else {
+                continue;
+            };
+            if pane == id {
+                return true;
+            }
+            if self.chat_is_asking(pane) {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// Leave the sidebar for the pane focus was on before it.
+    fn focus_pane_from_sidebar(&mut self) {
+        let index = self
+            .modal_pane
+            .unwrap_or(0)
+            .min(self.panes.len().saturating_sub(1));
+        self.focus = Focus::Pane(index);
     }
 
     /// The pane keys go to, or the first when the sidebar has focus.
@@ -306,7 +357,14 @@ impl Ui {
     /// failed. A failure is that tab's alone: it disconnects and reconnects
     /// as when its connection is lost, and the other tabs keep running.
     pub(crate) fn chat_event(&mut self, id: u64, result: Result<Option<ServerEvent>>) {
-        let focused = self.active_tab() == Some(id);
+        // While the sidebar is open, only the chat whose prompt will be
+        // drawn counts as focused. `active_tab` is pane 0 then, which hid
+        // that pane's approval and raised no notice when another pane held
+        // the prompt.
+        let focused = match self.focus {
+            Focus::Sidebar => self.approval_would_cover(id),
+            Focus::Pane(_) => self.active_tab() == Some(id),
+        };
         let index = self.tabs.iter().position(|tab| tab.id == id);
         let Some(Tab {
             kind: TabKind::Chat(chat),
@@ -431,12 +489,14 @@ impl Ui {
     fn act(&mut self, action: Action) {
         match action {
             Action::FocusSidebar => {
-                self.focus = if self.focus == Focus::Sidebar {
-                    Focus::Pane(0)
+                if self.focus == Focus::Sidebar {
+                    self.focus_pane_from_sidebar();
                 } else {
                     self.sidebar = true;
-                    Focus::Sidebar
-                };
+                    self.focus = Focus::Sidebar;
+                    let items = self.sidebar_items();
+                    self.workbench.note_highlight(&items);
+                }
                 if self.focus == Focus::Sidebar
                     && !crate::render::shown(self, self.size.0, self.size.1).sidebar
                 {
@@ -450,7 +510,7 @@ impl Ui {
             Action::ToggleSidebar => {
                 self.sidebar = !self.sidebar;
                 if !self.sidebar && self.focus == Focus::Sidebar {
-                    self.focus = Focus::Pane(0);
+                    self.focus_pane_from_sidebar();
                 }
             }
             Action::NextTab | Action::PrevTab => {
@@ -478,12 +538,24 @@ impl Ui {
                 }
             }
             Action::NewTab => {
-                let Some(app) = self.focused_chat_app() else {
-                    return;
+                let pane = self.active_pane();
+                let opened = {
+                    let Some(app) = self.focused_chat_app() else {
+                        return;
+                    };
+                    if app.input.is_empty() {
+                        app.input = "/open ".into();
+                        app.cursor = app.input.chars().count();
+                        true
+                    } else {
+                        false
+                    }
                 };
-                if app.input.is_empty() {
-                    app.input = "/open ".into();
-                    app.cursor = app.input.chars().count();
+                if opened {
+                    // Keys were on the sidebar: the path is typed into this
+                    // chat, so focus moves there. Otherwise `y` and `x`
+                    // answer the sidebar's highlighted entry.
+                    self.focus = Focus::Pane(pane);
                 } else {
                     self.workbench.notify(
                         "The composer holds a draft; send or clear it, then open a tab with \
@@ -987,7 +1059,7 @@ impl Ui {
             .collect();
         if selectable.is_empty() {
             if key.code == KeyCode::Esc {
-                self.focus = Focus::Pane(0);
+                self.focus_pane_from_sidebar();
             }
             return;
         }
@@ -1029,7 +1101,7 @@ impl Ui {
             KeyCode::PageDown => moved(10),
             KeyCode::Home => moved(isize::MIN / 2),
             KeyCode::End => moved(isize::MAX / 2),
-            KeyCode::Esc => self.focus = Focus::Pane(0),
+            KeyCode::Esc => self.focus_pane_from_sidebar(),
             KeyCode::Enter => {
                 self.workbench.select(&items, selectable[position]);
                 if let Some(item) = items.get(selectable[position]).cloned() {
@@ -1101,6 +1173,39 @@ impl Ui {
             _ => None,
         };
         match (letter, item) {
+            ('y' | 'n', Item::Job(_)) if approval.is_some() => {
+                // The row is the job, not the request. A second press counts
+                // only for the request the first press named, so a new
+                // request on the same job is not approved by a `y` meant
+                // for the old one.
+                let Some(approval) = approval else {
+                    return;
+                };
+                let identity = format!("approval:{}", approval.id);
+                let now = Instant::now();
+                let armed = self.confirm.as_ref().is_some_and(|(key, pressed_on, at)| {
+                    *key == letter
+                        && pressed_on == &identity
+                        && now.duration_since(*at) < CONFIRM_WINDOW
+                });
+                if !armed {
+                    self.confirm = Some((letter, identity, now));
+                    let verb = if letter == 'y' { "approve" } else { "deny" };
+                    self.workbench.notify(
+                        format!("Press {letter} again to {verb} {}.", approval.id),
+                        false,
+                    );
+                    return;
+                }
+                self.confirm = None;
+                self.request(
+                    Tag::Action,
+                    DaemonCommand::WorkbenchApprove {
+                        id: approval.id,
+                        approved: letter == 'y',
+                    },
+                );
+            }
             ('y' | 'n', _) if approval.is_some() => {
                 if let Some(approval) = approval {
                     self.request(

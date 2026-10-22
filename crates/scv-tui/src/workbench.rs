@@ -397,6 +397,18 @@ impl Workbench {
             .map(|(index, _)| index)
     }
 
+    /// Remember the entry the sidebar is showing when the owner has not
+    /// moved the selection. The default highlight is otherwise untracked, so
+    /// a later key acts on whatever moved into that row.
+    pub(crate) fn note_highlight(&mut self, items: &[Item]) {
+        if self.selected.is_some() {
+            return;
+        }
+        if let Some(index) = self.selection(items) {
+            self.select(items, index);
+        }
+    }
+
     /// Whether the selected entry is no longer among `items`, so
     /// [`Self::selection`] fell back to another entry.
     pub(crate) fn selection_gone(&self, items: &[Item]) -> bool {

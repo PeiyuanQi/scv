@@ -322,10 +322,18 @@ pub async fn list(root: &Path) -> Vec<WorktreeInfo> {
                             .await
                             .map(|branch| branch.trim().to_owned())
                             .unwrap_or_default();
-                    let dirty = git_in_worktree(&linked, &["status", "--porcelain"], &never)
-                        .await
-                        .ok()
-                        .map(|status| !status.trim().is_empty());
+                    // `--ignore-submodules=all`: a gitlink's directory is empty
+                    // until its agent fills it. `git status` would otherwise
+                    // enter that repository and run a clean filter the agent
+                    // wrote there.
+                    let dirty = git_in_worktree(
+                        &linked,
+                        &["status", "--porcelain", "--ignore-submodules=all"],
+                        &never,
+                    )
+                    .await
+                    .ok()
+                    .map(|status| !status.trim().is_empty());
                     (branch, dirty)
                 }
                 None => (record.branch, None),
@@ -385,6 +393,11 @@ pub async fn remove(root: &Path, path: &Path, force: bool) -> Result<String, Str
         .map_err(|error| {
             if force {
                 format!("git worktree remove failed: {error}")
+            } else if error.to_ascii_lowercase().contains("submodule") {
+                format!(
+                    "git worktree remove failed: {error}. A worktree that contains submodules is \
+                     removed only with force"
+                )
             } else {
                 format!(
                     "git worktree remove failed: {error}. A worktree with uncommitted changes is \
@@ -459,8 +472,13 @@ fn git_command() -> Command {
         "core.fsmonitor=false",
     ]);
     // Git and what it runs (filters) need no model or provider keys.
+    // Inherited `GIT_*` would redirect `rev-parse` and `worktree add`,
+    // which do not pass `--git-dir` themselves.
     for (name, _) in std::env::vars_os() {
-        if name.to_str().is_some_and(|name| name.ends_with("_API_KEY")) {
+        if name
+            .to_str()
+            .is_some_and(|name| name.ends_with("_API_KEY") || name.starts_with("GIT_"))
+        {
             command.env_remove(name);
         }
     }

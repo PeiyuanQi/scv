@@ -28,8 +28,10 @@ use scv_protocol::{
 use std::{fmt, path::Path, time::Duration};
 use tokio::{io::BufReader, net::UnixStream};
 
-/// Largest management reply, counting its line ending.
-const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
+/// Largest management reply, counting its line ending. Workbench actions
+/// reply with a snapshot the daemon may send up to its 8 MiB frame limit;
+/// a smaller cap here reports failure after the action already took effect.
+const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Environment variable carrying a delegated process's depth; SCV sets it on
 /// every agent it starts.

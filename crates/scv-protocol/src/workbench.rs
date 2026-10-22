@@ -370,8 +370,9 @@ pub struct RunEvent {
     /// An approval request's risk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,
-    /// Who sent a turn's prompt or answered an approval: `model`, `owner`,
-    /// or `policy`.
+    /// Reserved for who sent a turn's prompt or answered an approval:
+    /// `model`, `owner`, or `policy`. Logs omit it until a writer records
+    /// that actor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
 }

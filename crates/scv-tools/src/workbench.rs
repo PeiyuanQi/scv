@@ -287,7 +287,11 @@ impl Workbench {
                 answer: Some(sender),
             },
         );
+        // `biased` so an answer that arrives as the deadline fires is the
+        // one reported. Without it, `select` can take the sleep while
+        // `approve` already sent `true` and told the owner it was approved.
         let answer = tokio::select! {
+            biased;
             answer = receiver => Ok(answer.unwrap_or(false)),
             () = tokio::time::sleep(ATTENDED_WAIT) => Ok(false),
             () = cancellation.cancelled() => Err(AgentError::Cancelled),
@@ -465,7 +469,12 @@ impl Workbench {
                 live_sessions.contains(record.session.as_str()),
                 now,
             );
-            if state.is_final() {
+            // An interrupted job the owner can still resume stays listed
+            // after the cap of other finished jobs. Counting it as finished
+            // would hide it once newer completions filled the snapshot.
+            let resumable_interrupted =
+                state == AgentState::Interrupted && resumed_as.is_none() && !record.reviewed;
+            if state.is_final() && !resumable_interrupted {
                 if finished_listed >= MAX_LISTED {
                     continue;
                 }
