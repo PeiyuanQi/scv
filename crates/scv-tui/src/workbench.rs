@@ -111,14 +111,23 @@ impl AgentView {
         }
     }
 
-    /// The sent prompt did not arrive: back into an empty composer.
+    /// The sent prompt did not arrive. It comes back into the composer.
+    /// Text the owner typed while it was in flight stays after it, so
+    /// neither line is dropped.
     fn unsend(&mut self) {
-        if let Some(prompt) = self.sent.take()
-            && self.input.is_empty()
-        {
+        let Some(prompt) = self.sent.take() else {
+            return;
+        };
+        if self.input.is_empty() {
             self.cursor = prompt.chars().count();
             self.input = prompt;
+            return;
         }
+        let typed = std::mem::take(&mut self.input);
+        self.input = prompt;
+        self.input.push('\n');
+        self.input.push_str(&typed);
+        self.cursor = self.input.chars().count();
     }
 }
 

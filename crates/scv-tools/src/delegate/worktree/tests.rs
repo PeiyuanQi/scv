@@ -325,6 +325,93 @@ async fn a_worktree_whose_git_link_was_forged_gets_no_git_run_in_it() {
     assert!(!marker.exists(), "the forged filter ran");
 }
 
+#[tokio::test]
+async fn a_swapped_commondir_does_not_run_that_repositories_filter() {
+    if !git_installed() {
+        return;
+    }
+    // The link checks out, then the agent points `commondir` at a repository
+    // of its own whose clean filter fires from `git status`. Listing asks for
+    // status; the common directory the check accepted is what git must use.
+    let repo = repo();
+    let created = create(
+        &repo.root,
+        &repo.repo,
+        &repo.workspace,
+        "codex",
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let path = PathBuf::from(&created.worktree.path);
+    let linked = worktree_top(&repo.root, &path).unwrap();
+    let marker = repo.workspace.join("filter-ran");
+    let evil = repo.workspace.join("evil.git");
+    let orig = {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo.repo)
+            .args(["rev-parse", "--absolute-git-dir"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    };
+    git_in(
+        &repo.repo,
+        &["init", "-q", "--bare", &evil.display().to_string()],
+    );
+    for name in ["objects", "refs", "HEAD"] {
+        let from = orig.join(name);
+        let to = evil.join(name);
+        if from.is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+    let config = std::fs::read_to_string(evil.join("config")).unwrap();
+    std::fs::write(
+        evil.join("config"),
+        format!(
+            "{config}[filter \"z\"]\n\tclean = touch '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(path.join(".gitattributes"), "* filter=z\n").unwrap();
+    std::fs::write(
+        linked.git_dir.join("commondir"),
+        format!("{}\n", evil.display()),
+    )
+    .unwrap();
+    let _ = git_in_worktree(
+        &linked,
+        &["status", "--porcelain"],
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(
+        !marker.exists(),
+        "git status ran the filter from the swapped commondir"
+    );
+}
+
+/// Copy `from` into `to`, which must not exist yet. The test's bare
+/// repository needs the source repository's objects and refs.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
 #[test]
 fn a_taken_worktree_name_is_not_reserved_again() {
     let dir = tempfile::tempdir().unwrap();

@@ -153,8 +153,9 @@ pub(crate) fn render_ui(frame: &mut Frame<'_>, ui: &Ui) {
     }
     frame.render_widget(footer(ui, active_app), layout[3]);
 
-    if let Some(app) = active_app
-        && let Some(approval) = &app.pending_approval
+    if let Some(id) = ui.covering_tab()
+        && let Some(TabKind::Chat(chat)) = ui.tab(id).map(|tab| &tab.kind)
+        && let Some(approval) = &chat.app.pending_approval
     {
         render_approval(frame, approval);
     }
@@ -178,7 +179,7 @@ fn header_line(app: &App, extra: Option<Span<'static>>) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(app.model.clone(), Style::default().fg(Color::Cyan)),
+        Span::styled(clean(&app.model), Style::default().fg(Color::Cyan)),
         Span::raw("  ·  "),
         Span::raw(short_path(&app.cwd, 60)),
         Span::raw("  ·  "),

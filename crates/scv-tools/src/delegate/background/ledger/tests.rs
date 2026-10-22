@@ -191,6 +191,61 @@ fn a_late_older_revision_never_replaces_a_newer_one() {
 }
 
 #[test]
+fn a_snapshot_taken_before_a_dismissal_or_a_resume_does_not_undo_either() {
+    // The runtime copies a record, lets the job table go, then writes. The
+    // owner can dismiss or resume in between; that copy must not land over
+    // what they did.
+    let root = tempfile::tempdir().unwrap();
+    let ledger = ledger(root.path());
+    let arguments = json!({"prompt":"secret plan","cwd":"shop"});
+    let mut running = ledger.record(&new_job("job-1", &arguments)).unwrap();
+    ledger.save(&running);
+    let copied = running.clone();
+    finish(
+        &mut running,
+        AgentState::Completed,
+        &json!({"reply":"done"}),
+        true,
+    );
+    ledger.save(&running);
+    dismiss(root.path(), "session-1", "job-1").unwrap();
+    // Both copies were taken before the dismissal and are written now.
+    ledger.save_revision(&copied, 2);
+    ledger.save_revision(&running, 4);
+    assert_eq!(load(root.path(), "session-1", "job-1"), None);
+    let kept = std::fs::read_to_string(root.path().join("session-1/job-1.json")).unwrap();
+    assert!(
+        !kept.contains("secret plan") && !kept.contains("done"),
+        "{kept}"
+    );
+
+    let mut interrupted = ledger.record(&new_job("job-2", &arguments)).unwrap();
+    interrupted.state = AgentState::Interrupted;
+    ledger.save(&interrupted);
+    let mut before_resume = interrupted.clone();
+    update(root.path(), "session-1", "job-2", |record| {
+        record.resumed_as = Some("workbench-1/job-9".into());
+    });
+    // Reported after the resume, from the copy that does not know it.
+    before_resume.reported = true;
+    ledger.save_revision(&before_resume, 3);
+    let kept = load(root.path(), "session-1", "job-2").unwrap();
+    assert_eq!(kept.resumed_as.as_deref(), Some("workbench-1/job-9"));
+    assert!(kept.reported);
+
+    let mut successor = ledger.record(&new_job("job-3", &arguments)).unwrap();
+    successor.resumed_from = Some("session-1/job-2".into());
+    ledger.save(&successor);
+    let mut stale = successor.clone();
+    stale.resumed_from = None;
+    stale.reply = Some("continued".into());
+    ledger.save_revision(&stale, 2);
+    let kept = load(root.path(), "session-1", "job-3").unwrap();
+    assert_eq!(kept.resumed_from.as_deref(), Some("session-1/job-2"));
+    assert_eq!(kept.reply.as_deref(), Some("continued"));
+}
+
+#[test]
 fn a_dismissed_record_keeps_only_its_number() {
     let root = tempfile::tempdir().unwrap();
     let ledger = ledger(root.path());

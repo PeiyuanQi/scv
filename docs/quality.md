@@ -237,9 +237,10 @@ Daemon and component changes require focused coverage for:
 - the workbench: activity logs paged by position, bounded, truncated past
   their size, redacted, and shown `unknown` when quiet or `interrupted` when
   their process died; the job ledger recording each job's life, marking
-  unfinished jobs interrupted, pruning, and numbering a returning session's
-  jobs after its records; snapshots joining jobs, runs, approvals, and kept
-  queues; the owner's start, send, steer, cancel (reported to the model
+  unfinished jobs interrupted, pruning, numbering a returning session's
+  jobs after its records, and keeping a dismissal and a resume link against
+  a snapshot taken before either; snapshots joining jobs, runs, approvals,
+  and kept queues; the owner's start, send, steer, cancel (reported to the model
   as the user's stop), resume through the agent's own conversation or a
   rerun, and attended approvals that wait only while watched and never grant
   more than the foreground; worktrees created, listed, counted as the

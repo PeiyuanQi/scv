@@ -379,6 +379,16 @@ fn a_sent_prompt_comes_back_when_it_is_refused_or_lost() {
     view.sent = Some("again".into());
     workbench.answer(Answer::Disconnected(Tag::Send(target.clone())));
     assert_eq!(workbench.views[&target].input, "again");
+    // Typed while the send was in flight: both lines come back, the refused
+    // one first.
+    let view = workbench.views.get_mut(&target).unwrap();
+    view.input = "second".into();
+    view.sent = Some("first".into());
+    workbench.answer(Answer::Refused(
+        Tag::Send(target.clone()),
+        "still busy".into(),
+    ));
+    assert_eq!(workbench.views[&target].input, "first\nsecond");
 }
 
 #[test]

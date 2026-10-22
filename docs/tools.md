@@ -1501,7 +1501,9 @@ conversations, after the ones its records and its runs name (a run's log
 can outlive the records of the jobs it served), so a job ID or handle never
 comes to mean another job or conversation; and the workbench shows a job's
 or run's conversation only while the live session that made it still has
-it.
+it. A write never restores a job the owner dismissed, and never drops a
+resume link (`resumed_as`, `resumed_from`) a resume already recorded: the
+runtime writes a snapshot it took earlier, and those owner actions win.
 
 **Owner actions.** The owner can, from the dashboard or `scv jobs`:
 

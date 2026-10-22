@@ -310,8 +310,9 @@ without `--force`, and never deletes branches. SCV runs `git` in a worktree
 SCV's record beside it and its link checks out: its git directory is exactly
 `worktrees/<name>` of the common git directory of the repository it was made
 from, and that directory and the worktree's `.git` file name each other.
-Those calls name the verified git directory and worktree outright, so an
-agent that rewrites its `.git` cannot make git read a configuration it
+Those calls name the verified git directory, worktree, and common directory
+outright (`GIT_COMMON_DIR` is the one the check accepted), so an agent that
+rewrites its `.git` or `commondir` cannot make git read a configuration it
 wrote (a filter driver runs as the user); a worktree whose link does not
 check out is listed from SCV's record alone and not removed. Filter drivers
 and other commands the source repository's own configuration names still

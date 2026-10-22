@@ -32,9 +32,10 @@ const MAX_REPLY_BYTES: usize = 8 * 1024;
 const MAX_RECORD_BYTES: u64 = 128 * 1024;
 
 /// Held around every write of a record, and around every change that reads
-/// one first, so a change never puts back a copy older than another write
-/// (a settled job over its dismissal, or over what it was resumed as).
-/// Nothing that holds it takes it again.
+/// one first (dismiss, update, settle, prune), so those changes are not
+/// reordered with each other. A runtime snapshot is taken earlier, outside
+/// this lock; [`write`] is what keeps that snapshot from undoing a
+/// dismissal or a resume link. Nothing that holds the lock takes it again.
 static WRITES: Mutex<()> = Mutex::new(());
 
 fn writing() -> MutexGuard<'static, ()> {
@@ -261,6 +262,11 @@ pub fn save(root: &Path, record: &JobRecord) -> std::io::Result<()> {
 }
 
 /// [`save`], for a caller that holds [`WRITES`].
+///
+/// The job runtime writes a snapshot it took before this lock. A dismissal
+/// already on disk stays, prompt and reply included. A resume link already
+/// recorded stays when the snapshot was copied without it. When the job was
+/// not dismissed, the snapshot's other fields still land.
 fn write(root: &Path, record: &JobRecord) -> std::io::Result<()> {
     if !valid_name(&record.session) || !valid_name(&record.job) {
         return Err(std::io::Error::new(
@@ -268,11 +274,26 @@ fn write(root: &Path, record: &JobRecord) -> std::io::Result<()> {
             "not a session or job name",
         ));
     }
-    write_private_json(
-        &root.join(&record.session),
-        &format!("{}.json", record.job),
-        record,
-    )
+    let dir = root.join(&record.session);
+    let name = format!("{}.json", record.job);
+    let mut record = record.clone();
+    if let Some(existing) = read_record(&dir.join(&name)) {
+        // The owner's dismissal wins over a completion that was copied first
+        // and written second: the tombstone keeps the prompt and the reply
+        // off disk.
+        if existing.dismissed && !record.dismissed {
+            return Ok(());
+        }
+        // Resume records the link before the runtime's next snapshot, which
+        // was copied without it.
+        if record.resumed_as.is_none() {
+            record.resumed_as = existing.resumed_as;
+        }
+        if record.resumed_from.is_none() {
+            record.resumed_from = existing.resumed_from;
+        }
+    }
+    write_private_json(&dir, &name, &record)
 }
 
 /// The record of `job` in `session`, unless the owner dismissed it.

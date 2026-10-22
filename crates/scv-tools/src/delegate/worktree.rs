@@ -64,6 +64,10 @@ struct Linked {
     top: PathBuf,
     /// Its git directory, which the repository it was made from keeps.
     git_dir: PathBuf,
+    /// The common git directory that check accepted. Git is told it
+    /// outright: the worktree's agent can rewrite `commondir` after the
+    /// check, and a later read would use whatever repository that names.
+    common: PathBuf,
     /// The checkout it was made from.
     source: PathBuf,
 }
@@ -196,10 +200,11 @@ pub fn worktree_repo(root: &Path, path: &Path) -> Option<PathBuf> {
 /// out ([`verified_git_dir`]).
 fn worktree_top(root: &Path, path: &Path) -> Option<Linked> {
     let (top, record) = recorded(root, path)?;
-    let git_dir = verified_git_dir(&top, &record)?;
+    let (git_dir, common) = verified_git_dir(&top, &record)?;
     Some(Linked {
         top,
         git_dir,
+        common,
         source: record.source,
     })
 }
@@ -230,7 +235,7 @@ fn recorded(root: &Path, path: &Path) -> Option<(PathBuf, Record)> {
 /// from, and it and the worktree's `.git` file must name each other. An
 /// agent can rewrite its worktree's `.git`, but not make git read another
 /// git directory's configuration (filters, for one) through it.
-fn verified_git_dir(top: &Path, record: &Record) -> Option<PathBuf> {
+fn verified_git_dir(top: &Path, record: &Record) -> Option<(PathBuf, PathBuf)> {
     let common = record
         .common
         .clone()
@@ -243,7 +248,7 @@ fn verified_git_dir(top: &Path, record: &Record) -> Option<PathBuf> {
     let named = canonical(top, pointer.trim().strip_prefix("gitdir:")?)?;
     let back = canonical(&git_dir, &read_small(&git_dir.join("gitdir"))?)?;
     let shared = canonical(&git_dir, &read_small(&git_dir.join("commondir"))?)?;
-    (named == git_dir && back == top.join(".git") && shared == common).then_some(git_dir)
+    (named == git_dir && back == top.join(".git") && shared == common).then_some((git_dir, common))
 }
 
 /// The common git directory of the repository `checkout` (the top of a
@@ -305,10 +310,11 @@ pub async fn list(root: &Path) -> Vec<WorktreeInfo> {
             // One whose link does not check out is listed from SCV's record
             // alone, with no git run in it: its state is unknown.
             let (branch, dirty) = match verified_git_dir(&top, &record) {
-                Some(git_dir) => {
+                Some((git_dir, common)) => {
                     let linked = Linked {
                         top,
                         git_dir,
+                        common,
                         source: record.source.clone(),
                     };
                     let branch =
@@ -345,7 +351,7 @@ pub async fn list(root: &Path) -> Vec<WorktreeInfo> {
 pub async fn remove(root: &Path, path: &Path, force: bool) -> Result<String, String> {
     let (top, record) = recorded(root, path)
         .ok_or_else(|| format!("{} is not a worktree SCV created", path.display()))?;
-    let git_dir = verified_git_dir(&top, &record).ok_or_else(|| {
+    let (git_dir, common) = verified_git_dir(&top, &record).ok_or_else(|| {
         format!(
             "{} is not linked to the repository it was made from ({}) as SCV made it, so SCV \
              runs no git in it; check its .git file, and remove it yourself",
@@ -356,6 +362,7 @@ pub async fn remove(root: &Path, path: &Path, force: bool) -> Result<String, Str
     let linked = Linked {
         top,
         git_dir,
+        common,
         source: record.source,
     };
     let never = CancellationToken::new();
@@ -427,6 +434,10 @@ async fn git_in_worktree(
     let mut work_tree = std::ffi::OsString::from("--work-tree=");
     work_tree.push(&linked.top);
     let mut command = git_command();
+    // `commondir` is read again by git. Pin the directory the check accepted
+    // so a rewrite in between cannot point git at another repository's
+    // filters.
+    command.env("GIT_COMMON_DIR", &linked.common);
     command
         .arg("-C")
         .arg(&linked.top)

@@ -80,6 +80,10 @@ pub(crate) struct Ui {
     /// The tab each pane shows: one pane, or two side by side.
     pub(crate) panes: Vec<u64>,
     pub(crate) focus: Focus,
+    /// The pane keys were on before the sidebar took them. A chat approval
+    /// that was covering the dashboard stays that chat's when a dashboard
+    /// key moves focus here, instead of becoming the first pane's.
+    modal_pane: Option<usize>,
     pub(crate) sidebar: bool,
     pub(crate) workbench: Workbench,
     pub(crate) keys: KeyMap,
@@ -117,6 +121,7 @@ impl Ui {
             next_tab: 0,
             panes: Vec::new(),
             focus: Focus::Pane(0),
+            modal_pane: Some(0),
             sidebar: true,
             workbench: Workbench::default(),
             keys: keymap,
@@ -153,6 +158,29 @@ impl Ui {
 
     pub(crate) fn tab_mut(&mut self, id: u64) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|tab| tab.id == id)
+    }
+
+    /// Remember the focused pane, so a later sidebar focus still knows which
+    /// chat's approval was on screen.
+    fn remember_pane(&mut self) {
+        if let Focus::Pane(index) = self.focus {
+            self.modal_pane = Some(index);
+        }
+    }
+
+    /// The chat whose approval prompt is drawn: the focused pane, or the
+    /// pane focus left when a dashboard key opened the sidebar.
+    pub(crate) fn covering_tab(&self) -> Option<u64> {
+        let index = match self.focus {
+            Focus::Pane(index) => index,
+            Focus::Sidebar => self.modal_pane?,
+        };
+        let index = index.min(self.panes.len().saturating_sub(1));
+        let id = *self.panes.get(index)?;
+        self.tab(id).and_then(|tab| match &tab.kind {
+            TabKind::Chat(chat) if chat.app.pending_approval.is_some() => Some(id),
+            _ => None,
+        })
     }
 
     /// The pane keys go to, or the first when the sidebar has focus.
@@ -344,16 +372,29 @@ impl Ui {
             return Ok(());
         }
         self.normalize_focus();
+        self.remember_pane();
         if let Some(action) = self.keys.action(key) {
             self.act(action);
             self.normalize_focus();
+            self.remember_pane();
+            return Ok(());
+        }
+        // Asked to quit while work runs: Ctrl+C confirms, as the notice
+        // says. It must not fall through into the chat, where Ctrl+C
+        // cancels the running turn.
+        if self.quit_confirm_pending()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+        {
+            self.leave(0);
             return Ok(());
         }
         // A chat's approval prompt covers the dashboard: every other key is
         // the prompt's, wherever focus is, and what it does not answer with
-        // does nothing, so nothing behind it moves or opens.
-        if self.active_chat_asks() {
-            return self.pane_key(key).await;
+        // does nothing, so nothing behind it moves or opens. Dashboard keys
+        // above may move focus; the prompt stays the chat that was showing it.
+        if let Some(id) = self.covering_tab() {
+            return self.pane_key_for(Some(id), key).await;
         }
         match self.focus {
             Focus::Sidebar => {
@@ -364,11 +405,11 @@ impl Ui {
         }
     }
 
-    /// Whether the chat whose approval prompt is drawn waits on it.
-    fn active_chat_asks(&self) -> bool {
-        self.active_tab().and_then(|id| self.tab(id)).is_some_and(
-            |tab| matches!(&tab.kind, TabKind::Chat(chat) if chat.app.pending_approval.is_some()),
-        )
+    /// Quit was asked and has not expired: Ctrl+C confirms it.
+    fn quit_confirm_pending(&self) -> bool {
+        self.confirm_leave.is_some_and(|(target, at)| {
+            target == 0 && Instant::now().duration_since(at) < CONFIRM_WINDOW
+        })
     }
 
     /// Keep focus on what the terminal shows: a sidebar or second pane too
@@ -548,7 +589,11 @@ impl Ui {
     }
 
     async fn pane_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(id) = self.active_tab() else {
+        self.pane_key_for(self.active_tab(), key).await
+    }
+
+    async fn pane_key_for(&mut self, id: Option<u64>, key: KeyEvent) -> Result<()> {
+        let Some(id) = id else {
             return Ok(());
         };
         let target = match &self.tab(id).map(|tab| &tab.kind) {
@@ -559,20 +604,29 @@ impl Ui {
             self.agent_key(&target, key);
             return Ok(());
         }
-        // A dashboard command typed into a chat composer.
+        // A dashboard command typed into this chat's composer. The chat is
+        // `id`, which is the covering approval's chat when that prompt has
+        // focus and not necessarily the pane the sidebar would call first.
         if key.code == KeyCode::Enter
             && key.modifiers == KeyModifiers::NONE
-            && let Some(app) = self.focused_chat_app()
-            && app.pending_approval.is_none()
-            && app.queue_editing.is_none()
-        {
-            let line = app.input.trim().to_owned();
-            if self.command(id, &line) {
-                if let Some(app) = self.focused_chat_app() {
-                    crate::input::clear_input(app);
+            && let Some(line) = self.tab(id).and_then(|tab| match &tab.kind {
+                TabKind::Chat(chat)
+                    if chat.app.pending_approval.is_none() && chat.app.queue_editing.is_none() =>
+                {
+                    Some(chat.app.input.trim().to_owned())
                 }
-                return Ok(());
+                _ => None,
+            })
+            && self.command(id, &line)
+        {
+            if let Some(Tab {
+                kind: TabKind::Chat(chat),
+                ..
+            }) = self.tab_mut(id)
+            {
+                crate::input::clear_input(&mut chat.app);
             }
+            return Ok(());
         }
         let Some(Tab {
             kind: TabKind::Chat(chat),
@@ -591,8 +645,17 @@ impl Ui {
         if !chat.app.connected {
             chat.client.shutdown().await;
         }
-        if quit {
-            self.leave(0);
+        if quit && !self.leave(0) {
+            // The notice says to ask again. The `/quit` that asked stays
+            // out of the composer, so the confirming Ctrl+C is not eaten
+            // as clearing that text.
+            if let Some(Tab {
+                kind: TabKind::Chat(chat),
+                ..
+            }) = self.tab_mut(id)
+            {
+                crate::input::clear_input(&mut chat.app);
+            }
         }
         if let Some(error) = failed {
             self.workbench.notify(

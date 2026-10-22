@@ -793,8 +793,100 @@ async fn enter_on_a_tab_the_second_pane_shows_focuses_that_pane() {
 }
 
 #[tokio::test]
+async fn a_sidebar_key_leaves_the_approval_prompt_on_its_chat() {
+    let (mut ui, _requests, mut first_peer, _path) = dashboard().await;
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    let (connection, mut second_peer) = tokio::join!(
+        Client::connect(&path.0, Path::new("/tmp"), &options),
+        accept_session(&listener, "second-session"),
+    );
+    let (client, session) = connection.unwrap();
+    let opening = Opening {
+        cwd: "/tmp".into(),
+        restore: None,
+        tab: None,
+        from: (ui.focus, ui.active_tab()),
+    };
+    assert!(ui.opened(&opening, client, session).is_none());
+    ui.key(key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('v'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(1));
+    if let TabKind::Chat(tab) = &mut ui.tabs[1].kind {
+        tab.app.pending_approval = Some(PendingApproval {
+            id: "pane-1-approval".into(),
+            name: "bash".into(),
+            risk: "process".into(),
+            cwd: "/tmp".into(),
+            summary: "Run make".into(),
+        });
+    }
+    // Ctrl+G is a dashboard key, so it is allowed while the prompt is up.
+    // The prompt stays the second chat's.
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Sidebar);
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut second_peer).await,
+        ClientMessage::ApprovalResolve { approval_id, approved: true, .. }
+            if approval_id == "pane-1-approval"
+    ));
+    if let TabKind::Chat(tab) = &ui.tabs[0].kind {
+        assert!(
+            tab.app.input.is_empty(),
+            "pane 0 took the answer: {}",
+            tab.app.input
+        );
+        assert!(tab.app.pending_approval.is_none());
+    }
+    let pending = tokio::time::timeout(Duration::from_millis(50), receive(&mut first_peer)).await;
+    assert!(pending.is_err(), "the first chat was answered");
+}
+
+#[tokio::test]
+async fn ctrl_c_after_quit_confirms_instead_of_cancelling_the_turn() {
+    let (mut ui, _requests, mut peer, _path) = dashboard().await;
+    if let TabKind::Chat(tab) = &mut ui.tabs[0].kind {
+        tab.app.turn = Some(ActiveTurn {
+            id: Some("turn-1".into()),
+            started_at: Instant::now(),
+        });
+        tab.app.input = "/quit".into();
+        tab.app.cursor = tab.app.input.chars().count();
+    }
+    ui.key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(!ui.quit);
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("Ctrl+C"), "{notice}");
+    if let TabKind::Chat(tab) = &ui.tabs[0].kind {
+        assert!(tab.app.input.is_empty(), "{}", tab.app.input);
+        assert!(tab.app.turn.is_some());
+    }
+    ui.key(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(ui.quit);
+    let pending = tokio::time::timeout(Duration::from_millis(50), receive(&mut peer)).await;
+    assert!(pending.is_err(), "Ctrl+C cancelled the turn");
+}
+
+#[tokio::test]
 async fn sidebar_text_from_the_daemon_is_drawn_without_terminal_controls() {
     let (mut ui, _requests, _peer, _path) = dashboard().await;
+    if let TabKind::Chat(tab) = &mut ui.tabs[0].kind {
+        tab.app.model = "gpt\u{1b}[2J".into();
+    }
     let mut hostile = snapshot();
     hostile.jobs[0].workspace = "/w/\u{1b}]0;owned\u{7}repo".into();
     hostile.jobs[0].worktree = Some(scv_protocol::WorktreeRef {
@@ -809,6 +901,7 @@ async fn sidebar_text_from_the_daemon_is_drawn_without_terminal_controls() {
     let shown = screen(&ui, 160, 36);
     assert!(!controls(&shown), "{shown:?}");
     assert!(shown.contains("\u{fffd}]0;owned"), "{shown}");
+    assert!(shown.contains("gpt\u{fffd}[2J"), "{shown}");
     ui.open_view(Target::Job {
         session: "chat-session".into(),
         job: "job-3".into(),

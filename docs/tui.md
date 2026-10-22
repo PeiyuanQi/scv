@@ -48,9 +48,11 @@ interrupted, and their queued prompts are dropped. When that would stop or
 drop something (a running turn, an unfinished background job, or a queued
 prompt, a restored and paused queue included), closing or quitting
 (`Ctrl+C` on an idle chat, `/quit`) says what and waits for the same request
-again within three seconds. While a chat shows an approval prompt, it takes
+again within three seconds. The confirming `Ctrl+C` quits; it does not
+cancel the running turn. While a chat shows an approval prompt, it takes
 every key but the dashboard keys below wherever focus is, since it covers
-the screen: `y` and `n` or `Esc` answer it, and other keys do nothing, so
+the screen. A dashboard key may move focus, and the prompt stays that
+chat's: `y` and `n` or `Esc` still answer it, and other keys do nothing, so
 nothing behind it opens or moves.
 
 A tab's connection failing in a way other than ending (a server frame too
