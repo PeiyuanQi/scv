@@ -273,3 +273,76 @@ async fn force_removes_a_worktree_a_cut_off_creation_left_locked() {
     remove(&repo.root, Path::new(&path), true).await.unwrap();
     assert!(!Path::new(&path).exists());
 }
+
+#[tokio::test]
+async fn a_worktree_whose_git_link_was_forged_gets_no_git_run_in_it() {
+    if !git_installed() {
+        return;
+    }
+    // The worktree's agent points its `.git` at a git directory of its own
+    // that names the worktree back and defines a filter: git reading it would
+    // run the filter as the user.
+    let repo = repo();
+    let created = create(
+        &repo.root,
+        &repo.repo,
+        &repo.workspace,
+        "codex",
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let path = PathBuf::from(&created.worktree.path);
+    let marker = repo.workspace.join("filter-ran");
+    let fake = path.join("fake");
+    git_in(
+        &path,
+        &["init", "-q", "--bare", &fake.display().to_string()],
+    );
+    std::fs::write(fake.join("gitdir"), "../.git\n").unwrap();
+    std::fs::write(fake.join("commondir"), ".\n").unwrap();
+    let config = std::fs::read_to_string(fake.join("config")).unwrap();
+    std::fs::write(
+        fake.join("config"),
+        format!(
+            "{config}[filter \"x\"]\n\tclean = touch '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(path.join(".gitattributes"), "* filter=x\n").unwrap();
+    std::fs::write(path.join(".git"), "gitdir: fake\n").unwrap();
+
+    assert_eq!(worktree_path(&repo.root, &path), None);
+    assert!(!in_workspace(&repo.root, &path, &repo.workspace));
+    let listed = list(&repo.root).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].dirty, None, "listed without running git");
+    assert_eq!(listed[0].worktree.branch, created.worktree.branch);
+    let refused = remove(&repo.root, &path, true).await.unwrap_err();
+    assert!(refused.contains("runs no git in it"), "{refused}");
+    assert!(path.exists());
+    assert!(!marker.exists(), "the forged filter ran");
+}
+
+#[test]
+fn a_taken_worktree_name_is_not_reserved_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = dir.path();
+    let record = |branch: &str| Record {
+        v: 1,
+        source: PathBuf::from("/repo"),
+        branch: branch.into(),
+        common: None,
+    };
+    reserve(group, "codex-aaaaaa", &record("scv/first")).unwrap();
+    let again = reserve(group, "codex-aaaaaa", &record("scv/second")).unwrap_err();
+    assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+    let kept = read_record(&group.join("codex-aaaaaa.json")).unwrap();
+    assert_eq!(kept.branch, "scv/first", "the first record is kept");
+    // A worktree directory of that name without a record is taken too.
+    std::fs::create_dir(group.join("codex-bbbbbb")).unwrap();
+    let taken = reserve(group, "codex-bbbbbb", &record("scv/third")).unwrap_err();
+    assert_eq!(taken.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(!group.join("codex-bbbbbb.json").exists());
+}

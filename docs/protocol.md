@@ -288,9 +288,12 @@ after every change, until the client closes the connection. `restore` names
 a session whose daemon stopped or died with such a record: when it was in
 the same workspace, its queued prompts join the new session's queue, the
 queue starts paused, the record goes, and `session.started` says so in
-`restored`. A session that cannot be restored (unknown, still running, in
-another workspace, or being restored by another `session.start` at the same
-time) starts normally without `restored`. The TUI sets both;
+`restored`. A client that leaves before sending anything after
+`session.started` gets the record back as it was, to restore again. A
+session that cannot be restored (unknown, still running, in another
+workspace, or being restored by another `session.start` at the same time)
+starts normally without `restored`. Only the daemon restores: `scv server
+--stdio` refuses `restore` with `invalid_request`. The TUI sets both;
 both are additive, and a server that predates them ignores them.
 
 ```json

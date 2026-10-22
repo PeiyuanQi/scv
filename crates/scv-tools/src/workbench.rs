@@ -433,20 +433,22 @@ impl Workbench {
             });
         }
 
-        let mut records = ledger::list(&self.jobs);
+        let all = ledger::list_all(&self.jobs);
+        let mut records: Vec<&JobRecord> = all.iter().filter(|record| !record.dismissed).collect();
         records.sort_by_key(|record| std::cmp::Reverse((record.created_unix, record.job.clone())));
         let mut jobs = Vec::new();
         let mut finished_listed = 0;
         // What each job was resumed as, by the record of the job resuming
-        // it too, which is written first.
-        let successors: HashMap<&str, String> = records
+        // it too, which is written first: a dismissed one's included, or
+        // the job would be resumable again.
+        let successors: HashMap<&str, String> = all
             .iter()
             .filter_map(|record| {
                 let from = record.resumed_from.as_deref()?;
                 Some((from, format!("{}/{}", record.session, record.job)))
             })
             .collect();
-        for record in &records {
+        for &record in &records {
             let key = (record.session.clone(), record.job.clone());
             let resumed_as = record.resumed_as.clone().or_else(|| {
                 successors
@@ -530,7 +532,7 @@ impl Workbench {
             })
             .collect();
         let mut seen: HashSet<String> = sessions.iter().map(|session| session.id.clone()).collect();
-        for record in &records {
+        for &record in &records {
             if seen.insert(record.session.clone()) {
                 let alive = record.owner.is_alive() && record.owner.pid != std::process::id();
                 sessions.push(WorkbenchSession {
@@ -746,8 +748,9 @@ impl Workbench {
             let (session, job, key) = (session.to_owned(), job.to_owned(), key.to_owned());
             tokio::task::spawn_blocking(move || {
                 // A job that names it as what it resumes settles it, should
-                // SCV have stopped before this record said so.
-                let successor = ledger::list(&jobs)
+                // SCV have stopped before this record said so, even once
+                // the owner dismissed that job.
+                let successor = ledger::list_all(&jobs)
                     .into_iter()
                     .find(|record| record.resumed_from.as_deref() == Some(key.as_str()))
                     .map(|record| format!("{}/{}", record.session, record.job));

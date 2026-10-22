@@ -735,6 +735,11 @@ pub fn read_page(
             // End of the log, or a line its writer has not finished.
             break;
         }
+        if read > MAX_PAGE_BYTES {
+            // No page could hold it: skipped, so readers move on.
+            position += read as u64;
+            continue;
+        }
         if events.len() >= limit || bytes + read > MAX_PAGE_BYTES {
             more = true;
             break;
@@ -805,9 +810,21 @@ fn append_existing(
 ) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = std::fs::OpenOptions::new()
+        .read(true)
         .append(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
+    // A line its writer left torn is ended first, or what follows would
+    // join it and be lost with it.
+    if file.metadata()?.len() > 0 {
+        let mut last = [0u8];
+        file.seek(SeekFrom::End(-1))?;
+        file.read_exact(&mut last)?;
+        if last != *b"\n" {
+            file.write_all(b"\n")?;
+            state.bytes += 1;
+        }
+    }
     for (kind, text, status) in events {
         let event = RunEvent {
             seq: state.seq + 1,

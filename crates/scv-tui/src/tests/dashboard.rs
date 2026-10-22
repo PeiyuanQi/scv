@@ -172,8 +172,15 @@ async fn the_sidebar_opens_a_jobs_live_view_whose_keys_answer_and_send() {
     let shown = screen(&ui, 120, 36);
     assert!(shown.contains("asks (process)"), "{shown}");
     assert!(shown.contains("send to codex-2"), "{shown}");
-    // With the composer empty, n denies.
-    ui.key(key(KeyCode::Char('n'), KeyModifiers::NONE))
+    // Plain y and n are text, even in an empty composer; Ctrl+N denies.
+    for character in ['n', 'y'] {
+        ui.key(key(KeyCode::Char(character), KeyModifiers::NONE))
+            .await
+            .unwrap();
+    }
+    assert!(requests.try_recv().is_err(), "typing answered the approval");
+    ui.key(key(KeyCode::Esc, KeyModifiers::NONE)).await.unwrap();
+    ui.key(key(KeyCode::Char('n'), KeyModifiers::CONTROL))
         .await
         .unwrap();
     assert_eq!(
@@ -339,8 +346,7 @@ async fn a_tab_in_the_background_that_asks_for_approval_raises_a_notice() {
             cwd: "/tmp".into(),
             summary: "Run shell command: make".into(),
         })),
-    )
-    .unwrap();
+    );
     assert!(ui.workbench.bell);
     assert!(
         ui.workbench
@@ -431,7 +437,7 @@ async fn a_tab_reconnects_once_however_many_keys_come_while_it_is_down() {
     let opening = ui.openings.pop().unwrap();
     assert_eq!(opening.tab, Some(chat));
     assert_eq!(opening.restore.as_deref(), Some("old-session"));
-    ui.chat_event(chat, Ok(None)).unwrap();
+    ui.chat_event(chat, Ok(None));
     ui.key(key(KeyCode::Char('x'), KeyModifiers::NONE))
         .await
         .unwrap();
@@ -465,6 +471,15 @@ async fn a_chats_approval_prompt_takes_its_answer_keys_wherever_focus_is() {
             summary: "Run make".into(),
         });
     }
+    // Keys the prompt does not answer with reach nothing behind it: the
+    // sidebar neither opens, moves, nor lists anything.
+    let tabs = ui.tabs.len();
+    for code in [KeyCode::Enter, KeyCode::Char('w'), KeyCode::Down] {
+        ui.key(key(code, KeyModifiers::NONE)).await.unwrap();
+    }
+    assert_eq!(ui.tabs.len(), tabs);
+    assert_eq!(ui.overlay, None);
+    assert_eq!(ui.workbench.selection(&ui.sidebar_items()), Some(approval));
     // The prompt on screen is the chat's: y answers it, not the sidebar's
     // selected request.
     ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
@@ -536,6 +551,7 @@ async fn a_chat_drawn_alone_after_a_resize_is_the_one_its_keys_answer() {
         cwd: "/tmp".into(),
         restore: None,
         tab: None,
+        from: (ui.focus, ui.active_tab()),
     };
     assert!(ui.opened(&opening, client, session).is_none());
     // The first chat in the first pane, the second in the focused second.
@@ -577,5 +593,231 @@ async fn a_chat_drawn_alone_after_a_resize_is_the_one_its_keys_answer() {
             .await
             .is_err(),
         "the first chat was answered: {line}"
+    );
+}
+
+#[tokio::test]
+async fn a_key_meant_for_an_entry_that_went_away_only_moves_the_selection() {
+    let (mut ui, mut requests, _peer, _path) = dashboard().await;
+    let mut two = snapshot();
+    let mut second = two.approvals[0].clone();
+    second.id = "ap-2".into();
+    second.job = "job-4".into();
+    two.approvals.push(second);
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(two.clone())));
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let items = ui.sidebar_items();
+    let first = items
+        .iter()
+        .position(|item| matches!(item, Item::Approval(approval) if approval.id == "ap-1"))
+        .unwrap();
+    ui.workbench.select(&items, first);
+    // ap-1 expires; ap-2 moves into its row.
+    two.approvals.remove(0);
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(two)));
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(
+        requests.try_recv().is_err(),
+        "y meant for ap-1 approved ap-2"
+    );
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("press again"), "{notice}");
+    // Pressed again, it acts on what is selected now.
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert_eq!(
+        requests.try_recv().unwrap().command,
+        DaemonCommand::WorkbenchApprove {
+            id: "ap-2".into(),
+            approved: true
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_agent_view_sends_one_prompt_at_a_time() {
+    let (mut ui, mut requests, _peer, _path) = dashboard().await;
+    let target = Target::Job {
+        session: "chat-session".into(),
+        job: "job-3".into(),
+    };
+    ui.open_view(target.clone());
+    let type_and_send = |ui: &mut Ui, text: &str| {
+        let view = ui.workbench.views.get_mut(&target).unwrap();
+        view.input = text.into();
+        view.cursor = text.chars().count();
+    };
+    type_and_send(&mut ui, "first");
+    ui.key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        requests.try_recv().unwrap().command,
+        DaemonCommand::WorkbenchSend { prompt, .. } if prompt == "first"
+    ));
+    // While it is unanswered, a second prompt stays in the composer.
+    type_and_send(&mut ui, "second");
+    ui.key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(requests.try_recv().is_err());
+    assert_eq!(ui.workbench.views[&target].input, "second");
+    assert_eq!(ui.workbench.views[&target].sent.as_deref(), Some("first"));
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("Still sending"), "{notice}");
+    // Once the first is answered, it goes.
+    ui.workbench.answer(Answer::Status(
+        Tag::Send(target.clone()),
+        status(snapshot()),
+    ));
+    ui.key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        requests.try_recv().unwrap().command,
+        DaemonCommand::WorkbenchSend { prompt, .. } if prompt == "second"
+    ));
+}
+
+#[tokio::test]
+async fn a_tabs_unreadable_frame_disconnects_only_that_tab() {
+    let (mut ui, _requests, _peer, _path) = dashboard().await;
+    let chat = ui.tabs[0].id;
+    ui.chat_event(chat, Err(anyhow!("server frame exceeds 65536 bytes")));
+    let TabKind::Chat(tab) = &ui.tabs[0].kind else {
+        unreachable!()
+    };
+    assert!(!tab.app.connected);
+    assert!(tab.app.items.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Error(text) if text.contains("exceeds 65536 bytes")
+    )));
+    assert!(!ui.quit);
+    // It reconnects as a lost connection does.
+    assert_eq!(ui.openings.len(), 1);
+    assert_eq!(ui.openings[0].tab, Some(chat));
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("connection failed"), "{notice}");
+}
+
+#[tokio::test]
+async fn quitting_with_prompts_queued_asks_again() {
+    let (mut ui, _requests, _peer, _path) = dashboard().await;
+    if let TabKind::Chat(tab) = &mut ui.tabs[0].kind {
+        tab.app.queue.push_back(scv_protocol::QueueEntry {
+            queue_id: "q-1".into(),
+            revision: 1,
+            prompt: "Run the release checklist.".into(),
+            submitter: "tui".into(),
+            attachments: Vec::new(),
+        });
+        tab.app.queue_paused = true;
+    }
+    ui.key(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(!ui.quit);
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("tab 1 has 1 queued prompt(s)"), "{notice}");
+    ui.key(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(ui.quit);
+}
+
+#[tokio::test]
+async fn a_slow_new_tab_does_not_take_a_pane_the_owner_moved_away_from() {
+    let (mut ui, _requests, _first_peer, _path) = dashboard().await;
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    let (connection, _second_peer) = tokio::join!(
+        Client::connect(&path.0, Path::new("/tmp"), &options),
+        accept_session(&listener, "second-session"),
+    );
+    let (client, session) = connection.unwrap();
+    // Asked for from the chat, which the owner then left for an agent view.
+    let opening = Opening {
+        cwd: "/w/shop".into(),
+        restore: None,
+        tab: None,
+        from: (ui.focus, ui.active_tab()),
+    };
+    ui.open_view(Target::Job {
+        session: "chat-session".into(),
+        job: "job-3".into(),
+    });
+    let shown = ui.active_tab();
+    assert!(ui.opened(&opening, client, session).is_none());
+    assert_eq!(ui.tabs.len(), 3);
+    assert_eq!(ui.active_tab(), shown, "the new tab took the focused pane");
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("Tab 3 is open"), "{notice}");
+}
+
+#[tokio::test]
+async fn enter_on_a_tab_the_second_pane_shows_focuses_that_pane() {
+    let (mut ui, _requests, _peer, _path) = dashboard().await;
+    ui.open_view(Target::Job {
+        session: "chat-session".into(),
+        job: "job-3".into(),
+    });
+    let chat = ui.tabs[0].id;
+    // The agent view in the first pane, the chat in the second.
+    ui.key(key(KeyCode::Char('v'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.panes[1], chat);
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let items = ui.sidebar_items();
+    let row = items
+        .iter()
+        .position(|item| matches!(item, Item::Tab(id, _) if *id == chat))
+        .unwrap();
+    ui.workbench.select(&items, row);
+    let panes = ui.panes.clone();
+    ui.key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert_eq!(ui.panes, panes);
+    assert_eq!(ui.focus, Focus::Pane(1));
+}
+
+#[tokio::test]
+async fn sidebar_text_from_the_daemon_is_drawn_without_terminal_controls() {
+    let (mut ui, _requests, _peer, _path) = dashboard().await;
+    let mut hostile = snapshot();
+    hostile.jobs[0].workspace = "/w/\u{1b}]0;owned\u{7}repo".into();
+    hostile.jobs[0].worktree = Some(scv_protocol::WorktreeRef {
+        path: "/w/wt".into(),
+        branch: "scv/\u{9b}31mred".into(),
+        repo: "/w/repo".into(),
+    });
+    hostile.approvals[0].job = "job-\u{1b}[2J".into();
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(hostile)));
+    let controls = |shown: &str| shown.chars().any(|c| c != '\n' && c.is_control());
+    let shown = screen(&ui, 160, 36);
+    assert!(!controls(&shown), "{shown:?}");
+    assert!(shown.contains("\u{fffd}]0;owned"), "{shown}");
+    ui.open_view(Target::Job {
+        session: "chat-session".into(),
+        job: "job-3".into(),
+    });
+    let shown = screen(&ui, 160, 36);
+    assert!(!controls(&shown), "{shown:?}");
+    assert!(shown.contains("scv/\u{fffd}31mred"), "{shown}");
+    assert_eq!(
+        crate::render::clean("a\u{1b}b\u{9b}c\u{7f}d"),
+        "a\u{fffd}b\u{fffd}c\u{fffd}d"
     );
 }

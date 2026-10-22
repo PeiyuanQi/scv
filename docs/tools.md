@@ -1468,11 +1468,12 @@ tool lines at 4 MiB, keeping turns, approvals, and the end. A run whose
 process ends mid-turn logs that turn's end, with why, before its own;
 nothing is logged after the end, so a reader that stops there missed
 nothing. Logs are read in pages by byte position, so a reader follows a live
-run without reading it twice. The state file is rewritten without syncing to
-disk, since it only says what is happening now. Ended runs are kept seven
-days from their end (an interrupted one from when it was found so), and at
-most 500. A run of a live conversation serves the turns of several jobs and
-lists them all, so each job finds its log.
+run without reading it twice; a line longer than a page is skipped. The
+state file is rewritten without syncing to disk, since it only says what is
+happening now. Ended runs are kept seven days from their end (an
+interrupted one from when it was found so), and at most 500. A run of a
+live conversation serves the turns of several jobs and lists them all, so
+each job finds its log.
 
 **States.** A run or job is `starting`, `working`, `awaiting_input` (an
 approval request it relayed waits for an answer), `idle` (a live ACP agent
@@ -1496,9 +1497,11 @@ and bounded reply or error. A job whose session closes unfinished is
 recorded `interrupted` then; one whose process died is found by the daemon
 at startup and every 60 seconds. Finished jobs are kept seven days. A
 session that comes back under its ID numbers its jobs, and its
-conversations, after the recorded ones, so a handle a record names never
-comes to mean another conversation; and the workbench shows a job's or run's
-conversation only while the live session that made it still has it.
+conversations, after the ones its records and its runs name (a run's log
+can outlive the records of the jobs it served), so a job ID or handle never
+comes to mean another job or conversation; and the workbench shows a job's
+or run's conversation only while the live session that made it still has
+it.
 
 **Owner actions.** The owner can, from the dashboard or `scv jobs`:
 
@@ -1536,8 +1539,8 @@ conversation only while the live session that made it still has it.
   (`resumed_as`, `resumed_from`).
 - *dismiss* a finished or interrupted job's record (not one whose result its
   session has yet to report): its content goes, and what is left keeps the
-  job's number taken until it is pruned. And *approve* or *deny* an approval
-  request a job waits on.
+  job's number taken, and the job it resumed marked resumed, until it is
+  pruned. And *approve* or *deny* an approval request a job waits on.
 
 **Attended approvals.** A background job's relayed approval request normally
 gets the session's unattended answer at once (above). While the owner

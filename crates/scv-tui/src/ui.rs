@@ -69,6 +69,9 @@ pub(crate) struct Opening {
     pub(crate) restore: Option<String>,
     /// The tab it replaces, when it reconnects one.
     pub(crate) tab: Option<u64>,
+    /// Where keys went when it was asked for (focus, and the focused
+    /// pane's tab): a new tab takes the pane only if they still go there.
+    pub(crate) from: (Focus, Option<u64>),
 }
 
 pub(crate) struct Ui {
@@ -203,8 +206,32 @@ impl Ui {
             app,
             cwd: opening.cwd.clone(),
         })));
-        self.show(id);
+        // A session can take a while to start; keys the owner sent
+        // elsewhere meanwhile stay there.
+        if opening.from == (self.focus, self.active_tab()) {
+            self.show(id);
+        } else {
+            self.workbench.notify(
+                format!(
+                    "Tab {} is open: a session in {}.",
+                    self.tabs.len(),
+                    opening.cwd.display()
+                ),
+                false,
+            );
+        }
         None
+    }
+
+    /// A new chat tab to open in `cwd`, restoring the queue of session
+    /// `restore`, asked for now.
+    fn opening(&self, cwd: PathBuf, restore: Option<String>) -> Opening {
+        Opening {
+            cwd,
+            restore,
+            tab: None,
+            from: (self.focus, self.active_tab()),
+        }
     }
 
     /// A chat tab could not be opened.
@@ -247,12 +274,10 @@ impl Ui {
         }
     }
 
-    /// A chat tab's server sent `event`, or its connection ended.
-    pub(crate) fn chat_event(
-        &mut self,
-        id: u64,
-        result: Result<Option<ServerEvent>>,
-    ) -> Result<()> {
+    /// A chat tab's server sent `event`, or its connection ended or
+    /// failed. A failure is that tab's alone: it disconnects and reconnects
+    /// as when its connection is lost, and the other tabs keep running.
+    pub(crate) fn chat_event(&mut self, id: u64, result: Result<Option<ServerEvent>>) {
         let focused = self.active_tab() == Some(id);
         let index = self.tabs.iter().position(|tab| tab.id == id);
         let Some(Tab {
@@ -260,7 +285,7 @@ impl Ui {
             ..
         }) = index.and_then(|index| self.tabs.get_mut(index))
         else {
-            return Ok(());
+            return;
         };
         let approval = match &result {
             Ok(Some(ServerEvent::ApprovalRequested { summary, .. })) if !focused => {
@@ -268,7 +293,10 @@ impl Ui {
             }
             _ => None,
         };
-        chat.app.handle_server_result(result)?;
+        let failed = chat.app.handle_server_result(result).err();
+        if let Some(error) = &failed {
+            connection_failed(&mut chat.app, error);
+        }
         let reconnect =
             (!chat.app.connected).then(|| (chat.cwd.clone(), chat.app.session_id.clone()));
         let number = index.map_or(0, |index| index + 1);
@@ -276,10 +304,15 @@ impl Ui {
             self.workbench
                 .notify(format!("Tab {number} asks for approval: {summary}"), true);
         }
+        if let Some(error) = failed {
+            self.workbench.notify(
+                format!("Tab {number}'s connection failed ({error:#}); it reconnects."),
+                true,
+            );
+        }
         if let Some((cwd, session)) = reconnect {
             self.reconnect(id, cwd, session);
         }
-        Ok(())
     }
 
     /// Reconnect chat tab `id`, restoring its session's queue, unless it is
@@ -288,9 +321,8 @@ impl Ui {
     fn reconnect(&mut self, id: u64, cwd: PathBuf, session: String) {
         if self.reconnecting.insert(id) {
             self.openings.push(Opening {
-                cwd,
-                restore: Some(session),
                 tab: Some(id),
+                ..self.opening(cwd, Some(session))
             });
         }
     }
@@ -312,23 +344,16 @@ impl Ui {
             return Ok(());
         }
         self.normalize_focus();
-        // A chat's approval prompt covers the dashboard: its answer keys are
-        // the prompt's, wherever focus is.
-        if self.active_chat_asks()
-            && matches!(
-                key.code,
-                KeyCode::Char('y' | 'Y' | 'n' | 'N') | KeyCode::Esc
-            )
-            && !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return self.pane_key(key).await;
-        }
         if let Some(action) = self.keys.action(key) {
             self.act(action);
             self.normalize_focus();
             return Ok(());
+        }
+        // A chat's approval prompt covers the dashboard: every other key is
+        // the prompt's, wherever focus is, and what it does not answer with
+        // does nothing, so nothing behind it moves or opens.
+        if self.active_chat_asks() {
+            return self.pane_key(key).await;
         }
         match self.focus {
             Focus::Sidebar => {
@@ -556,7 +581,10 @@ impl Ui {
         else {
             return Ok(());
         };
-        handle_key(&mut chat.client, &mut chat.app, key).await?;
+        let failed = handle_key(&mut chat.client, &mut chat.app, key).await.err();
+        if let Some(error) = &failed {
+            connection_failed(&mut chat.app, error);
+        }
         let quit = std::mem::take(&mut chat.app.quit);
         let reconnect =
             (!chat.app.connected).then(|| (chat.cwd.clone(), chat.app.session_id.clone()));
@@ -566,6 +594,12 @@ impl Ui {
         if quit {
             self.leave(0);
         }
+        if let Some(error) = failed {
+            self.workbench.notify(
+                format!("This tab's connection failed ({error:#}); it reconnects."),
+                true,
+            );
+        }
         if let Some((cwd, session)) = reconnect {
             self.reconnect(id, cwd, session);
         }
@@ -573,8 +607,8 @@ impl Ui {
     }
 
     /// What quitting (`only` = `None`) or closing chat tab `only` would
-    /// stop: chats running a turn, and their sessions' unfinished
-    /// background jobs.
+    /// stop: chats running a turn, their sessions' unfinished background
+    /// jobs, and the prompts queued in them (a restored, paused queue too).
     fn running_work(&self, only: Option<u64>) -> Vec<String> {
         let mut work = Vec::new();
         for (index, tab) in self.tabs.iter().enumerate() {
@@ -591,14 +625,18 @@ impl Ui {
                 .flat_map(|snapshot| snapshot.jobs.iter())
                 .filter(|job| job.session == chat.app.session_id && !job.state.is_final())
                 .count();
-            let number = index + 1;
-            match (chat.app.turn.is_some(), jobs) {
-                (false, 0) => {}
-                (true, 0) => work.push(format!("tab {number} runs a turn")),
-                (turn, jobs) => work.push(format!(
-                    "tab {number} has {jobs} background job(s){}",
-                    if turn { " and runs a turn" } else { "" }
-                )),
+            let mut what = Vec::new();
+            if chat.app.turn.is_some() {
+                what.push("runs a turn".to_owned());
+            }
+            if jobs > 0 {
+                what.push(format!("has {jobs} background job(s)"));
+            }
+            if !chat.app.queue.is_empty() {
+                what.push(format!("has {} queued prompt(s)", chat.app.queue.len()));
+            }
+            if !what.is_empty() {
+                work.push(format!("tab {} {}", index + 1, what.join(" and ")));
             }
         }
         work
@@ -645,12 +683,8 @@ impl Ui {
                     self.workbench
                         .notify("Usage: /open <workspace directory>".into(), false);
                 } else {
-                    let path = expand(rest, &cwd);
-                    self.openings.push(Opening {
-                        cwd: path,
-                        restore: None,
-                        tab: None,
-                    });
+                    let opening = self.opening(expand(rest, &cwd), None);
+                    self.openings.push(opening);
                 }
             }
             "/close" => self.close_tab(),
@@ -694,11 +728,11 @@ impl Ui {
             .cloned()
             .collect();
         match found.as_slice() {
-            [session] => self.openings.push(Opening {
-                cwd: PathBuf::from(&session.workspace),
-                restore: Some(session.id.clone()),
-                tab: None,
-            }),
+            [session] => {
+                let opening =
+                    self.opening(PathBuf::from(&session.workspace), Some(session.id.clone()));
+                self.openings.push(opening);
+            }
             [] => self.workbench.notify(
                 "No restorable queue has that ID; the sidebar lists them.".into(),
                 false,
@@ -720,9 +754,23 @@ impl Ui {
         let id = existing.unwrap_or_else(|| self.add_tab(TabKind::Agent(target)));
         // Opening from the sidebar keeps the sidebar out of the panes.
         if self.focus == Focus::Sidebar {
-            self.focus = Focus::Pane(0);
+            self.reveal(id);
+        } else {
+            self.show(id);
         }
-        self.show(id);
+    }
+
+    /// Show tab `id` from the sidebar: focus the second pane when it shows
+    /// the tab already and is drawn, else show it in the first.
+    fn reveal(&mut self, id: u64) {
+        if self.panes.get(1) == Some(&id)
+            && crate::render::shown(self, self.size.0, self.size.1).panes > 1
+        {
+            self.focus = Focus::Pane(1);
+        } else {
+            self.focus = Focus::Pane(0);
+            self.show(id);
+        }
     }
 
     fn agent_key(&mut self, target: &Target, key: KeyEvent) {
@@ -734,7 +782,9 @@ impl Ui {
         };
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('y' | 'n') if view.input.is_empty() && !control && approval.is_some() => {
+            // Plain y and n are text: a prompt that starts with "yes" or
+            // "no" never answers an approval its writer did not read.
+            KeyCode::Char('y' | 'n') if control && approval.is_some() => {
                 let approved = key.code == KeyCode::Char('y');
                 if let Some(approval) = approval {
                     self.request(
@@ -784,6 +834,15 @@ impl Ui {
             KeyCode::Enter => {
                 let prompt = view.input.trim().to_owned();
                 if prompt.is_empty() {
+                    return;
+                }
+                // One prompt in flight at a time, so a refusal brings back
+                // the prompt it refused.
+                if view.sent.is_some() {
+                    self.workbench.notify(
+                        "Still sending the last prompt; this one stays in the composer.".into(),
+                        false,
+                    );
                     return;
                 }
                 let Some((session, conversation)) = conversation else {
@@ -874,6 +933,26 @@ impl Ui {
             .iter()
             .position(|index| Some(*index) == current)
             .unwrap_or(0);
+        // The selected entry went away and the selection fell back to
+        // another: a key that acts on it only moves the selection there, so
+        // a press meant for the old entry never acts on the new one.
+        let acts = match key.code {
+            KeyCode::Enter => true,
+            KeyCode::Char(letter) => {
+                letter != 'w' && !key.modifiers.contains(KeyModifiers::CONTROL)
+            }
+            _ => false,
+        };
+        if acts && self.workbench.selection_gone(&items) {
+            self.workbench.select(&items, selectable[position]);
+            self.workbench.notify(
+                "The selected entry is gone and the selection moved; press again to act on \
+                 the one selected now."
+                    .into(),
+                false,
+            );
+            return;
+        }
         let mut moved = |offset: isize| {
             let next = position
                 .saturating_add_signed(offset)
@@ -907,7 +986,7 @@ impl Ui {
     fn open_item(&mut self, item: Item) {
         match item {
             Item::Header(_) => {}
-            Item::Tab(id, _) => self.show(id),
+            Item::Tab(id, _) => self.reveal(id),
             Item::Approval(approval) => self.open_view(Target::Job {
                 session: approval.session,
                 job: approval.job,
@@ -923,11 +1002,10 @@ impl Ui {
                 },
                 None => Target::Run { handle: run.handle },
             }),
-            Item::Restorable(session) => self.openings.push(Opening {
-                cwd: PathBuf::from(session.workspace),
-                restore: Some(session.id),
-                tab: None,
-            }),
+            Item::Restorable(session) => {
+                let opening = self.opening(PathBuf::from(session.workspace), Some(session.id));
+                self.openings.push(opening);
+            }
         }
     }
 
@@ -989,11 +1067,11 @@ impl Ui {
                     job: job.job.clone(),
                 },
             ),
-            ('r', Item::Restorable(session)) => self.openings.push(Opening {
-                cwd: PathBuf::from(&session.workspace),
-                restore: Some(session.id.clone()),
-                tab: None,
-            }),
+            ('r', Item::Restorable(session)) => {
+                let opening =
+                    self.opening(PathBuf::from(&session.workspace), Some(session.id.clone()));
+                self.openings.push(opening);
+            }
             ('d', Item::Job(job)) if job.state.is_final() => {
                 if confirmed(self, &format!("forget {}", job.job)) {
                     self.request(
@@ -1031,6 +1109,15 @@ fn tab_line(number: usize, app: &App) -> String {
         mark(Ui::chat_state(app)),
         short_path(&app.cwd, 24)
     )
+}
+
+/// A chat tab's connection failed in a way other than ending (a frame too
+/// large or unreadable): say so, and disconnect the tab.
+fn connection_failed(app: &mut App, error: &anyhow::Error) {
+    app.push_item(TranscriptItem::Error(format!(
+        "The connection to the server failed: {error:#}"
+    )));
+    app.disconnect();
 }
 
 /// Say what a session restored from one that stopped.

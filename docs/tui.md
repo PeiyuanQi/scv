@@ -30,20 +30,36 @@ stopped. `focus_sidebar` moves keys to it; there `Up`/`Down`,
 chat tab, or an agent view), `y`/`n` answer the selected approval, `x`
 pressed twice stops a running job, `r` resumes an interrupted job or
 restores a kept queue, `d` pressed twice forgets a finished job, `w` lists
-worktrees, and `Esc` returns to the pane. The selection stays on its entry
-as the list changes, and a second `x` or `d` counts only on the entry the
-first was pressed on, within three seconds. The sidebar gives way below 70
-columns, and the second pane below 60 columns beside it. Below 12 rows or 50
+worktrees, and `Esc` returns to the pane. `Enter` on a tab or view the second
+pane already shows focuses that pane. The selection stays on its entry as
+the list changes, and a second `x` or `d` counts only on the entry the first
+was pressed on, within three seconds. When the selected entry goes away (an
+approval answered or expired, a job forgotten), the selection falls to the
+entry now nearest its row, and the next `Enter` or letter only moves the
+selection there and says so: pressed again, it acts. The sidebar gives way
+below 70 columns, and the second pane below 60 columns beside it. Below 12 rows or 50
 columns the focused pane's chat is drawn alone, as it would be without the
 dashboard. Keys go only to what is drawn: a chat drawn alone takes them, and
 with the sidebar or the second pane given way, they go to the first pane.
 
 Closing a chat tab ends its session, and quitting ends every tab's: their
-running turns and background jobs stop, and their jobs are recorded as
-interrupted. When that would stop something, closing or quitting (`Ctrl+C`
-on an idle chat, `/quit`) says what and waits for the same request again
-within three seconds. While a chat shows an approval prompt, `y`, `n`, and
-`Esc` answer that prompt wherever focus is, since it covers the screen.
+running turns and background jobs stop, their jobs are recorded as
+interrupted, and their queued prompts are dropped. When that would stop or
+drop something (a running turn, an unfinished background job, or a queued
+prompt, a restored and paused queue included), closing or quitting
+(`Ctrl+C` on an idle chat, `/quit`) says what and waits for the same request
+again within three seconds. While a chat shows an approval prompt, it takes
+every key but the dashboard keys below wherever focus is, since it covers
+the screen: `y` and `n` or `Esc` answer it, and other keys do nothing, so
+nothing behind it opens or moves.
+
+A tab's connection failing in a way other than ending (a server frame too
+large, or one the TUI cannot read) is that tab's alone: the tab shows the
+error, disconnects, and reconnects as when its connection is lost, and the
+other tabs keep running. A new chat tab (`/open`, `/restore`, or a restored
+queue from the sidebar) takes the focused pane when its session starts only
+if focus is still where it was asked for; otherwise the tab is added and a
+notification names it, so keys typed meanwhile stay where they went.
 
 State marks read without color: `◌` starting, `●` working, `?` waiting for
 input, `○` idle, `…` queued, `✓` completed, `✗` failed or timed out, `⊘`
@@ -63,8 +79,11 @@ It follows new lines while at the bottom; `PageUp`/`PageDown` scroll and
 text to the agent's conversation (into its running turn when the agent can
 take steering, else as the conversation's next turn, queued behind a running
 one), and the text comes back to an empty composer if the daemon refuses it
-or the connection breaks; `Ctrl+J` inserts a newline, and `Esc` clears it. While the job waits
-for an approval, `y`/`n` on an empty composer answer it. `Ctrl+X` twice
+or the connection breaks. One prompt is sent at a time: `Enter` while the
+last is unanswered keeps the text in the composer and says so. `Ctrl+J`
+inserts a newline, and `Esc` clears it. While the job waits for an approval,
+`Ctrl+Y` approves and `Ctrl+N` denies it; `y` and `n` are always text, so a
+prompt starting "yes" or "no" never answers it. `Ctrl+X` twice
 stops the job; `Ctrl+R` resumes an interrupted one. Input is sent only by
 these keys: the view never forwards keystrokes to the agent's process.
 
@@ -104,10 +123,10 @@ Dashboard keys come before a chat's own keys. Defaults:
 `delete`, `backspace`), such as `ctrl+pagedown`. A binding needs `ctrl` or
 `alt` unless it is a function key, since the rest is the composer's and the
 views' own, and may not take a key they use (`ctrl+a`, `ctrl+b`, `ctrl+c`,
-`ctrl+e`, `ctrl+f`, `ctrl+j`, `ctrl+k`, `ctrl+o`, `ctrl+r`, `ctrl+u`,
-`ctrl+w`, `ctrl+x`, `alt+b`, `alt+f`, `alt+p`, `alt+enter`, and `alt` with an
-arrow). `shift` with a character means the character (`ctrl+shift+x` is
-`ctrl+x`), and `shift+tab` is the terminal's back-tab. The server sends the
+`ctrl+e`, `ctrl+f`, `ctrl+j`, `ctrl+k`, `ctrl+n`, `ctrl+o`, `ctrl+r`,
+`ctrl+u`, `ctrl+w`, `ctrl+x`, `ctrl+y`, `alt+b`, `alt+f`, `alt+p`,
+`alt+enter`, and `alt` with an arrow). `shift` with a character means the
+character (`ctrl+shift+x` is `ctrl+x`), and `shift+tab` is the terminal's back-tab. The server sends the
 table with `session.started`. Configured bindings come first, in the order
 of the table above; an action whose configured key the TUI cannot use, or
 that an earlier action's configured key took, keeps its default, and an
@@ -231,8 +250,9 @@ prompt that was running, which is not sent again because its outcome is
 unknown; `Alt+P` resumes the queue once reviewed, starting its first prompt.
 A chat tab reconnects once at a time, however many keys arrive meanwhile, and
 waits up to a minute for its session to start (connecting gets three
-seconds), so the queue it restores stays with it. A queue no TUI
-reconnected for is listed under "Restorable queues" in the sidebar (and by
+seconds), so the queue it restores stays with it; a TUI that leaves before
+its session starts leaves the queue as it was, to restore again. A queue no
+TUI reconnected for is listed under "Restorable queues" in the sidebar (and by
 `scv jobs`) for seven days; `r` there or `/restore <id prefix>` opens a chat
 tab in its workspace that restores it. A queue is restored at most once.
 
@@ -274,7 +294,8 @@ height and preserve the underlying transcript and composer state.
 ## Approval and failure behavior
 
 An approval overlay shows the tool, risk, workspace, full bounded summary, and
-the exact available decisions. `y` or `Enter` allows once; `n` or `Esc` denies.
+the exact available decisions. `y` allows once; `n` or `Esc` denies; other
+keys, `Enter` included, do nothing.
 Input meant for the composer cannot leak into an approval decision. The TUI
 emits a terminal bell when an approval arrives while terminal focus is lost.
 
@@ -336,8 +357,12 @@ server frames, and terminal-content sanitization. Dashboard tests cover key
 specifications and `[tui.keys]` conflicts and reserved keys, tab and pane
 movement, keys reaching only what is drawn, sidebar grouping and actions
 (confirmations bound to their entry), one reconnection per tab, approval
-prompts' keys, quitting with work running, agent-view log paging (no line
-twice), sending and getting a refused prompt back, notifications from
+prompts' keys (nothing behind a chat's prompt acts, and an agent view's
+plain `y`/`n` are text), a stale sidebar selection only moving, quitting
+with work running or prompts queued, a tab's failed connection staying that
+tab's, a slow new tab not taking a pane the owner left, agent-view log
+paging (no line twice), sending one prompt at a time and getting a refused
+prompt back, control characters in workbench text, notifications from
 snapshot changes, an older daemon checked again, restored-queue notes, and
 `/job` parsing; integration tests cover a queue restored across a killed
 daemon and resumed.

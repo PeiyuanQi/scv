@@ -633,7 +633,12 @@ impl ScvAgentTool {
                 } => {
                     let summary = format!("{label} {summary}");
                     if let Some(activity) = activity {
-                        activity.approval_requested(&risk, &summary);
+                        activity.approval_requested(
+                            ToolRisk::parse(&risk)
+                                .unwrap_or(ToolRisk::Delegate)
+                                .as_str(),
+                            &summary,
+                        );
                     }
                     let request = context.approvals.request_until(
                         name,

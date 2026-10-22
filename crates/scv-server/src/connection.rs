@@ -111,6 +111,7 @@ where
         active: None,
         active_prompt: None,
         persist: false,
+        restored: None,
         background_rx: None,
         background_ready: false,
         fatal: false,
@@ -159,14 +160,7 @@ where
     if let Some(active) = connection.active.take() {
         shutdown_active_turn(active, SHUTDOWN_GRACE).await;
     }
-    // A client that went (closing the connection, or losing it) wants
-    // nothing of its session kept; a daemon that stops keeps the queue for
-    // a session started after it.
-    if !cancellation.is_cancelled()
-        && let Some(session) = &connection.session
-    {
-        persist::remove(&connection.instance.layout, &session.id);
-    }
+    connection.leave(cancellation.is_cancelled());
     let fatal = connection.fatal;
     // The session outlives the writer, as it did before the split: only the
     // connection's own senders go now, so the writer can finish.
@@ -234,6 +228,9 @@ struct Connection {
     active_prompt: Option<String>,
     /// The client asked for its queue to be kept on disk.
     persist: bool,
+    /// The saved queue this connection's session restored, until its client
+    /// has the session (sends anything after `session.start`).
+    restored: Option<Restored>,
     /// Woken when a background job finishes; set until its report turn starts.
     background_rx: Option<mpsc::UnboundedReceiver<()>>,
     background_ready: bool,
@@ -241,7 +238,37 @@ struct Connection {
     fatal: bool,
 }
 
+/// A saved queue restored into a session whose client may not have it yet.
+struct Restored {
+    /// The new session, which keeps the restored prompts.
+    session: String,
+    /// The saved queue, as it was before the restore took it.
+    old: persist::SavedQueue,
+}
+
 impl Connection {
+    /// Settle the saved queues of a connection that ends. A client that went
+    /// (closing the connection, or losing it) wants nothing of its session
+    /// kept, though a queue it restored but never saw the session of goes
+    /// back as it was, for it to restore again; a daemon that stops
+    /// (`stopping`) keeps the queue for a session started after it.
+    fn leave(&mut self, stopping: bool) {
+        let restored = self.restored.take();
+        if stopping {
+            return;
+        }
+        let layout = &self.instance.layout;
+        if let Some(restored) = restored {
+            // Put back before the new record goes, so a crash in between
+            // loses neither.
+            persist::save(layout, &restored.old);
+            persist::remove(layout, &restored.session);
+        }
+        if let Some(session) = &self.session {
+            persist::remove(layout, &session.id);
+        }
+    }
+
     fn track_activity(&self) {
         if let Some(activity) = &self.activity {
             activity.set_busy(self.active.is_some() || self.background_ready);
@@ -343,6 +370,9 @@ impl Connection {
     }
 
     async fn handle(&mut self, message: ClientMessage) -> Result<Flow> {
+        // A client that speaks after `session.start` has its answer, and
+        // with it the prompts any restore moved to the new session.
+        self.restored = None;
         match message {
             ClientMessage::Initialize {
                 request_id,
@@ -659,6 +689,17 @@ impl Connection {
                 return Ok(());
             }
         }
+        if request.restore.is_some() && self.hosts.is_none() {
+            // A restore claims a saved queue in this process only, so only
+            // the daemon, which every client shares, may restore one.
+            self.reject(
+                &request_id,
+                ErrorCode::InvalidRequest,
+                "restore needs the daemon; a stdio server does not restore saved queues",
+            )
+            .await?;
+            return Ok(());
+        }
         let label = session_label(request.channel.as_deref(), &self.client_name);
         let client = SessionClient {
             label,
@@ -701,10 +742,15 @@ impl Connection {
         };
         // The restored queue is kept under the new session before the old
         // record goes, so a crash in between loses neither; the claim on
-        // the old record goes with it.
+        // the old record goes with it. Until the client has the new session
+        // the old record can come back ([`Connection::leave`]).
         self.save_queue_of(&session, None).await;
-        let restored = restored.map(|(claim, restored)| {
+        let restored = restored.map(|(claim, old, restored)| {
             claim.remove();
+            self.restored = Some(Restored {
+                session: session.id.clone(),
+                old,
+            });
             restored
         });
         let max_bytes = session.config.protocol.max_server_frame_bytes;
@@ -747,12 +793,17 @@ impl Connection {
     /// stopped with its process and saved them. They join paused, and the
     /// prompt that was running is only named. The old record is claimed
     /// first, so a restore of it already under way leaves it to that one,
-    /// and the claim is returned to be released once the record goes.
+    /// and the claim is returned to be released once the record goes, with
+    /// the record as it was.
     async fn restore_queue(
         &self,
         session: &Session,
         old: &str,
-    ) -> Option<(persist::Claim, scv_protocol::RestoredQueue)> {
+    ) -> Option<(
+        persist::Claim,
+        persist::SavedQueue,
+        scv_protocol::RestoredQueue,
+    )> {
         let layout = &self.instance.layout;
         let claim = persist::claim(layout, old)?;
         let saved = persist::load(layout, old)?;
@@ -760,7 +811,7 @@ impl Connection {
             return None;
         }
         let mut restored = 0u32;
-        for entry in saved.entries {
+        for entry in saved.entries.iter().cloned() {
             if entry.prompt.len() > PROMPT_LIMIT_BYTES
                 || attachments::validate(&entry.attachments).is_err()
             {
@@ -780,9 +831,9 @@ impl Connection {
         let restored = scv_protocol::RestoredQueue {
             from: old.to_owned(),
             queued: restored,
-            interrupted: saved.active,
+            interrupted: saved.active.clone(),
         };
-        Some((claim, restored))
+        Some((claim, saved, restored))
     }
 
     /// Keep the session's queue on disk, when its client asked. A change

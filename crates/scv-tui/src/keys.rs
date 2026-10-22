@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 /// may take: editing (`ctrl+a`/`b`/`e`/`f`/`k`/`u`/`w`, `alt+b`/`f`, word
 /// movement), newlines (`ctrl+j`, `alt+enter`), cancelling and quitting
 /// (`ctrl+c`), tool details (`ctrl+o`), the queue (`alt+p`, `alt+up`,
-/// `alt+down`, `ctrl+x`), and an agent view's stop and resume (`ctrl+x`,
-/// `ctrl+r`).
+/// `alt+down`, `ctrl+x`), and an agent view's approval answers (`ctrl+y`,
+/// `ctrl+n`), stop, and resume (`ctrl+x`, `ctrl+r`).
 pub(crate) const RESERVED: &[&str] = &[
     "ctrl+a",
     "ctrl+b",
@@ -25,11 +25,13 @@ pub(crate) const RESERVED: &[&str] = &[
     "ctrl+f",
     "ctrl+j",
     "ctrl+k",
+    "ctrl+n",
     "ctrl+o",
     "ctrl+r",
     "ctrl+u",
     "ctrl+w",
     "ctrl+x",
+    "ctrl+y",
     "alt+b",
     "alt+f",
     "alt+p",

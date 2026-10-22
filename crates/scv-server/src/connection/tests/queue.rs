@@ -103,6 +103,7 @@ fn fixture(prompts: &[&str]) -> Fixture {
         active: None,
         active_prompt: None,
         persist: true,
+        restored: None,
         background_rx: None,
         background_ready: false,
         fatal: false,
@@ -272,20 +273,15 @@ async fn a_prompt_whose_turn_could_not_start_stays_queued() {
     );
 }
 
-#[tokio::test]
-async fn a_saved_queue_another_restore_holds_is_left_to_it_and_restored_once() {
-    let Fixture {
-        connection,
-        layout,
-        _home,
-        ..
-    } = fixture(&[]);
+/// Save the queue of session `old`, in `/w`, as a process that has exited
+/// left it: one queued prompt and one that was running.
+fn save_stopped(layout: &Layout) {
     // The PID of a process that has exited (this one's child).
     let mut child = std::process::Command::new("true").spawn().unwrap();
     let gone = ProcessIdentity::of(child.id()).unwrap();
     child.wait().unwrap();
     persist::save(
-        &layout,
+        layout,
         &persist::SavedQueue {
             v: 1,
             session: "old".into(),
@@ -298,8 +294,19 @@ async fn a_saved_queue_another_restore_holds_is_left_to_it_and_restored_once() {
             active: Some("running".into()),
         },
     );
+}
+
+#[tokio::test]
+async fn a_saved_queue_another_restore_holds_is_left_to_it_and_restored_once() {
+    let Fixture {
+        connection,
+        layout,
+        _home,
+        ..
+    } = fixture(&[]);
+    save_stopped(&layout);
     let session = connection.session.as_ref().unwrap();
-    let (claim, restored) = connection.restore_queue(session, "old").await.unwrap();
+    let (claim, _, restored) = connection.restore_queue(session, "old").await.unwrap();
     assert_eq!(restored.queued, 1);
     assert_eq!(restored.interrupted.as_deref(), Some("running"));
     // An overlapping restore of the same queue gets none of it.
@@ -309,4 +316,114 @@ async fn a_saved_queue_another_restore_holds_is_left_to_it_and_restored_once() {
     assert!(persist::load(&layout, "old").is_none());
     assert!(connection.restore_queue(session, "old").await.is_none());
     assert_eq!(session.queue.lock().await.len(), 1);
+}
+
+/// Restore session `old`'s saved queue into the fixture's session `s` as
+/// `session.start` does: kept under `s`, the old record gone.
+async fn restore_old(connection: &mut Connection, layout: &Layout) {
+    save_stopped(layout);
+    let session = connection.session.as_ref().unwrap();
+    let (claim, old, _) = connection.restore_queue(session, "old").await.unwrap();
+    connection.save_queue_of(session, None).await;
+    claim.remove();
+    connection.restored = Some(Restored {
+        session: "s".into(),
+        old,
+    });
+    assert!(persist::load(layout, "old").is_none());
+    assert_eq!(prompts(&persist::load(layout, "s").unwrap()), ["queued"]);
+}
+
+#[tokio::test]
+async fn a_restored_queue_goes_back_when_its_client_leaves_before_it_has_the_session() {
+    let Fixture {
+        mut connection,
+        layout,
+        _home,
+        ..
+    } = fixture(&[]);
+    restore_old(&mut connection, &layout).await;
+    // The client went before it saw `session.started`: a retry restoring
+    // `old` finds the prompts again.
+    connection.leave(false);
+    let back = persist::load(&layout, "old").unwrap();
+    assert_eq!(prompts(&back), ["queued"]);
+    assert_eq!(back.active.as_deref(), Some("running"));
+    assert!(persist::stopped(&back));
+    assert!(persist::load(&layout, "s").is_none());
+}
+
+#[tokio::test]
+async fn a_restored_queue_stays_with_a_client_that_spoke_or_a_daemon_that_stops() {
+    let Fixture {
+        mut connection,
+        frames: _frames,
+        layout,
+        _home,
+    } = fixture(&[]);
+    restore_old(&mut connection, &layout).await;
+    // Anything the client sends shows it has the session.
+    connection
+        .handle(ClientMessage::SessionPause {
+            request_id: "p".into(),
+            session_id: "s".into(),
+            paused: true,
+        })
+        .await
+        .unwrap();
+    assert!(connection.restored.is_none());
+    connection.leave(false);
+    assert!(persist::load(&layout, "old").is_none());
+    assert!(persist::load(&layout, "s").is_none());
+
+    let Fixture {
+        mut connection,
+        layout,
+        _home,
+        ..
+    } = fixture(&[]);
+    restore_old(&mut connection, &layout).await;
+    connection.leave(true);
+    assert!(persist::load(&layout, "old").is_none());
+    assert_eq!(prompts(&persist::load(&layout, "s").unwrap()), ["queued"]);
+}
+
+#[tokio::test]
+async fn only_the_daemon_restores_a_saved_queue() {
+    let Fixture {
+        mut connection,
+        mut frames,
+        layout,
+        _home,
+    } = fixture(&[]);
+    save_stopped(&layout);
+    // A stdio connection: no workbench hosts.
+    connection.session = None;
+    let request = SessionStartRequest {
+        cwd: "/w".into(),
+        provider: None,
+        model: None,
+        base_url: None,
+        no_tools: None,
+        delegation_depth: None,
+        channel: None,
+        auto_approve: None,
+        chat: None,
+        system_prompt: None,
+        persist_queue: Some(true),
+        restore: Some("old".into()),
+    };
+    connection.session_start("r".into(), request).await.unwrap();
+    let ServerEvent::Error {
+        request_id,
+        message,
+        ..
+    } = event(frames.recv().await.unwrap())
+    else {
+        panic!("not refused");
+    };
+    assert_eq!(request_id.as_deref(), Some("r"));
+    assert!(message.contains("daemon"), "{message}");
+    assert!(connection.session.is_none());
+    assert_eq!(prompts(&persist::load(&layout, "old").unwrap()), ["queued"]);
 }

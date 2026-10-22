@@ -165,7 +165,8 @@ pub(crate) async fn worktrees(layout: &Layout, remove: Option<&Path>, force: boo
         let note = scv_tools::worktree::remove(&layout.worktrees(), &path, force)
             .await
             .map_err(anyhow::Error::msg)?;
-        println!("{note}");
+        // The note names the worktree's branch, which its agent could set.
+        println!("{}", inert(&note));
         return Ok(());
     }
     let found = scv_tools::worktree::list(&layout.worktrees()).await;
@@ -180,7 +181,7 @@ pub(crate) async fn worktrees(layout: &Layout, remove: Option<&Path>, force: boo
             Some(false) => "clean",
             None => "status unknown",
         };
-        println!("{} ({dirty})", info.worktree.branch);
+        println!("{} ({dirty})", inert(&info.worktree.branch));
         println!("  {:?}", info.worktree.path);
         println!("  from {:?}", info.worktree.repo);
         let jobs: Vec<String> = records
@@ -335,10 +336,11 @@ async fn log(layout: &Layout, target: &str, follow: bool) -> Result<()> {
     Ok(())
 }
 
-/// One log event as a line of text, control characters removed.
+/// One log event as a line of text, control characters removed (from
+/// every field: a nested SCV relays its own approvals' risk as it sent it).
 fn describe(event: &RunEvent) -> String {
-    let text = inert(&event.text);
-    match event.kind {
+    let text = &event.text;
+    inert(&match event.kind {
         RunEventKind::RunStarted => format!("· started: {text}"),
         RunEventKind::TurnStarted => format!(
             "── turn {}{} ── {text}",
@@ -349,7 +351,7 @@ fn describe(event: &RunEvent) -> String {
                 .map(|job| format!(" · {job}"))
                 .unwrap_or_default()
         ),
-        RunEventKind::Text => text,
+        RunEventKind::Text => text.clone(),
         RunEventKind::Tool => format!("  ● {text}"),
         RunEventKind::ToolFailed => format!("  ✗ {text}"),
         RunEventKind::Plan => format!("  plan: {text}"),
@@ -375,7 +377,7 @@ fn describe(event: &RunEvent) -> String {
         }
         RunEventKind::Truncated => "· the log reached its size limit".into(),
         RunEventKind::Note | RunEventKind::Unknown => format!("· {text}"),
-    }
+    })
 }
 
 /// `text` safe to print on one terminal line: every control character
@@ -402,7 +404,7 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
                 approval.id,
                 short(&approval.session),
                 approval.job,
-                approval.risk,
+                inert(&approval.risk),
                 inert(&approval.summary)
             );
         }
@@ -441,7 +443,9 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
             if let Some(worktree) = &job.worktree {
                 println!(
                     "{:<18} worktree {} ({:?})",
-                    "", worktree.branch, worktree.path
+                    "",
+                    inert(&worktree.branch),
+                    worktree.path
                 );
             }
             if job.state == AgentState::Interrupted && job.resumable {
@@ -466,7 +470,7 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
                 "{:<16} {:<9} {:<13} {:<15} {}",
                 run.handle,
                 run.agent,
-                run.conversation.as_deref().unwrap_or("-"),
+                inert(run.conversation.as_deref().unwrap_or("-")),
                 run.state.as_str(),
                 inert(run.detail.as_deref().unwrap_or(""))
             );

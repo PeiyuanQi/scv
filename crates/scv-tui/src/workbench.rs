@@ -388,6 +388,14 @@ impl Workbench {
             .map(|(index, _)| index)
     }
 
+    /// Whether the selected entry is no longer among `items`, so
+    /// [`Self::selection`] fell back to another entry.
+    pub(crate) fn selection_gone(&self, items: &[Item]) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(|(key, _)| !items.iter().any(|item| item.key().as_ref() == Some(key)))
+    }
+
     /// Select row `index` of `items`.
     pub(crate) fn select(&mut self, items: &[Item], index: usize) {
         self.selected = items.get(index).and_then(Item::key).map(|key| (key, index));
@@ -778,10 +786,13 @@ pub(crate) fn mark(state: AgentState) -> &'static str {
     }
 }
 
-/// `value` shortened from the left to `max` characters.
+/// `value` shortened from the left to `max` characters, with control
+/// characters replaced ([`crate::render::clean`]): a directory's name may
+/// hold anything.
 pub(crate) fn short_path(value: &str, max: usize) -> String {
+    let value = crate::render::clean(value);
     if value.chars().count() <= max {
-        return value.to_owned();
+        return value;
     }
     let tail: Vec<char> = value.chars().rev().take(max.saturating_sub(1)).collect();
     let mut short = String::from("…");

@@ -602,6 +602,37 @@ async fn a_job_another_names_as_what_it_resumes_was_resumed() {
     );
 }
 
+#[tokio::test]
+async fn a_dismissed_successor_still_marks_its_job_resumed() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    ledger::save(
+        &jobs,
+        &record("old", "job-1", AgentState::Interrupted, dead()),
+    )
+    .unwrap();
+    // SCV stopped before the old record said it was resumed, and the owner
+    // then dismissed the job that resumed it.
+    let mut successor = record("host-old", "job-3", AgentState::Interrupted, dead());
+    successor.resumed_from = Some("old/job-1".into());
+    ledger::save(&jobs, &successor).unwrap();
+    ledger::dismiss(&jobs, "host-old", "job-3").unwrap();
+    let snapshot = bench.workbench.snapshot();
+    assert!(!snapshot.jobs.iter().any(|job| job.job == "job-3"));
+    let old = snapshot.jobs.iter().find(|job| job.job == "job-1").unwrap();
+    assert!(!old.resumable);
+    let _host = live(&bench, "host");
+    let refused = bench
+        .workbench
+        .resume("host", "old", "job-1")
+        .await
+        .unwrap_err();
+    assert!(
+        refused.contains("already resumed as host-old/job-3"),
+        "{refused}"
+    );
+}
+
 #[test]
 fn a_job_another_live_process_has_yet_to_report_is_not_dismissed() {
     let bench = bench();

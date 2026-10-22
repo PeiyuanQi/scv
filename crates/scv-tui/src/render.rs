@@ -261,6 +261,7 @@ fn tab_bar(ui: &Ui) -> Line<'static> {
                 format!("{} {} {}", index + 1, mark(state), target_title(target))
             }
         };
+        let label = clean(&label);
         let style = if Some(tab.id) == active {
             Style::default()
                 .fg(Color::Black)
@@ -279,11 +280,11 @@ fn tab_bar(ui: &Ui) -> Line<'static> {
 
 /// A short title for an agent view.
 pub(crate) fn target_title(target: &Target) -> String {
-    match target {
-        Target::Job { job, .. } => job.clone(),
-        Target::Conversation { conversation, .. } => conversation.clone(),
-        Target::Run { handle } => handle.clone(),
-    }
+    clean(match target {
+        Target::Job { job, .. } => job,
+        Target::Conversation { conversation, .. } => conversation,
+        Target::Run { handle } => handle,
+    })
 }
 
 fn state_color(state: AgentState) -> Color {
@@ -318,19 +319,19 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, ui: &Ui) {
             ),
             Item::Tab(_, line) => (format!(" {line}"), Style::default()),
             Item::Approval(approval) => (
-                format!(" ? {} {}", approval.job, clean(&approval.summary)),
+                format!(" ? {} {}", clean(&approval.job), clean(&approval.summary)),
                 Style::default().fg(Color::Yellow),
             ),
             Item::Job(job) => {
                 let mut text = format!(
                     " {} {} {} {}",
                     mark(job.state),
-                    job.job,
-                    job.agent,
+                    clean(&job.job),
+                    clean(&job.agent),
                     clean(&job.task)
                 );
                 if let Some(worktree) = &job.worktree {
-                    text.push_str(&format!(" [{}]", worktree.branch));
+                    text.push_str(&format!(" [{}]", clean(&worktree.branch)));
                 }
                 (text, Style::default().fg(state_color(job.state)))
             }
@@ -338,8 +339,8 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, ui: &Ui) {
                 format!(
                     " {} {} {}",
                     mark(run.state),
-                    run.conversation.as_deref().unwrap_or(&run.handle),
-                    run.agent
+                    clean(run.conversation.as_deref().unwrap_or(&run.handle)),
+                    clean(&run.agent)
                 ),
                 Style::default().fg(state_color(run.state)),
             ),
@@ -357,7 +358,9 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, ui: &Ui) {
         } else {
             style
         };
-        lines.push(Line::styled(bounded_text(&text, width), style));
+        // Headers and tab lines carry workspace paths, which may hold
+        // anything a directory name can.
+        lines.push(Line::styled(bounded_text(&clean(&text), width), style));
     }
     if items.is_empty() {
         lines.push(Line::styled(
@@ -502,7 +505,7 @@ fn footer(ui: &Ui, app: Option<&App>) -> Paragraph<'static> {
             .style(Style::default().fg(Color::DarkGray))
         }
         None => Paragraph::new(format!(
-            " Enter send to the conversation  ·  y/n approve  ·  Ctrl+X stop  ·  Ctrl+R resume  ·  {keys}"
+            " Enter send to the conversation  ·  Ctrl+Y/Ctrl+N approve/deny  ·  Ctrl+X stop  ·  Ctrl+R resume  ·  {keys}"
         ))
         .style(Style::default().fg(Color::DarkGray)),
     }
@@ -531,11 +534,15 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
         Style::default().add_modifier(Modifier::BOLD),
     )];
     if let Some(job) = job {
-        title.push(Span::raw(format!("{} · {} ", job.agent, clean(&job.task))));
+        title.push(Span::raw(format!(
+            "{} · {} ",
+            clean(&job.agent),
+            clean(&job.task)
+        )));
     }
     if let Some((_, conversation)) = &conversation {
         title.push(Span::styled(
-            format!("· {conversation} "),
+            format!("· {} ", clean(conversation)),
             Style::default().fg(Color::Cyan),
         ));
     }
@@ -552,7 +559,7 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
         status.push(Span::styled(
             format!(
                 "  [worktree {} · {}]",
-                worktree.branch,
+                clean(&worktree.branch),
                 short_path(&worktree.path, 30)
             ),
             Style::default().fg(Color::DarkGray),
@@ -565,9 +572,9 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
 
     if let Some(approval) = approval {
         let banner = Paragraph::new(format!(
-            "{} asks ({}): {}\ny approve · n deny (with the composer empty)",
-            approval.name,
-            approval.risk,
+            "{} asks ({}): {}\nCtrl+Y approve · Ctrl+N deny",
+            clean(&approval.name),
+            clean(&approval.risk),
             clean(&approval.summary)
         ))
         .wrap(Wrap { trim: false })
@@ -586,9 +593,12 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
 
     let composer_title = match &conversation {
         Some((_, conversation)) if !state.is_final() || state == AgentState::Completed => {
-            format!(" send to {conversation} (joins its running turn when it can) ")
+            format!(
+                " send to {} (joins its running turn when it can) ",
+                clean(conversation)
+            )
         }
-        Some((_, conversation)) => format!(" send to {conversation} "),
+        Some((_, conversation)) => format!(" send to {} ", clean(conversation)),
         None if job.is_some_and(|job| job.resumable) => " interrupted · Ctrl+R resumes it ".into(),
         None => " no conversation yet ".into(),
     };
@@ -655,7 +665,7 @@ fn event_lines(event: &RunEvent) -> Vec<Line<'static>> {
                     event
                         .job
                         .as_deref()
-                        .map(|job| format!(" · {job}"))
+                        .map(|job| format!(" · {}", clean(job)))
                         .unwrap_or_default()
                 ),
                 Style::default()
@@ -686,14 +696,17 @@ fn event_lines(event: &RunEvent) -> Vec<Line<'static>> {
         RunEventKind::ApprovalRequested => vec![Line::styled(
             format!(
                 "? approval ({}): {text}",
-                event.risk.as_deref().unwrap_or("?")
+                clean(event.risk.as_deref().unwrap_or("?"))
             ),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )],
         RunEventKind::ApprovalResolved => vec![Line::styled(
-            format!("  → {}", event.status.as_deref().unwrap_or("answered")),
+            format!(
+                "  → {}",
+                clean(event.status.as_deref().unwrap_or("answered"))
+            ),
             dim,
         )],
         RunEventKind::Steered => vec![Line::styled(
@@ -701,7 +714,7 @@ fn event_lines(event: &RunEvent) -> Vec<Line<'static>> {
             Style::default().fg(Color::Cyan),
         )],
         RunEventKind::TurnEnded => {
-            let status = event.status.as_deref().unwrap_or("ended");
+            let status = clean(event.status.as_deref().unwrap_or("ended"));
             let style = if status == "completed" {
                 Style::default().fg(Color::Green)
             } else {
@@ -714,7 +727,10 @@ fn event_lines(event: &RunEvent) -> Vec<Line<'static>> {
             lines
         }
         RunEventKind::RunEnded => vec![Line::styled(
-            format!("· process {}", event.status.as_deref().unwrap_or("ended")),
+            format!(
+                "· process {}",
+                clean(event.status.as_deref().unwrap_or("ended"))
+            ),
             dim,
         )],
         RunEventKind::Note | RunEventKind::Unknown => vec![Line::styled(format!("· {text}"), dim)],
@@ -765,7 +781,7 @@ fn render_overlay(frame: &mut Frame<'_>, ui: &Ui, overlay: Overlay) {
                         };
                         vec![
                             Line::styled(
-                                format!("{} · {dirty}", info.worktree.branch),
+                                format!("{} · {dirty}", clean(&info.worktree.branch)),
                                 Style::default().add_modifier(Modifier::BOLD),
                             ),
                             Line::raw(format!("  {}", clean(&info.worktree.path))),
@@ -776,7 +792,7 @@ fn render_overlay(frame: &mut Frame<'_>, ui: &Ui, overlay: Overlay) {
                                     if info.jobs.is_empty() {
                                         String::new()
                                     } else {
-                                        format!(" · jobs {}", info.jobs.join(", "))
+                                        format!(" · jobs {}", clean(&info.jobs.join(", ")))
                                     }
                                 ),
                                 Style::default().fg(Color::DarkGray),
@@ -837,7 +853,7 @@ fn help_lines(ui: &Ui) -> Vec<Line<'static>> {
     lines.push(Line::styled("Agent view", bold));
     for line in [
         "  Enter          send the prompt to the conversation: it joins the running turn when the agent can take it, else queues",
-        "  y / n          answer its approval request (composer empty)",
+        "  Ctrl+Y/Ctrl+N  approve or deny its approval request (y and n are text)",
         "  Ctrl+X Ctrl+X  stop its job · Ctrl+R resume an interrupted one",
     ] {
         lines.push(Line::raw(line));

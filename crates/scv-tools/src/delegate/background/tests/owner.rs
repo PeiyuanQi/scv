@@ -354,6 +354,21 @@ async fn a_resumed_jobs_record_keeps_what_it_resumes_after_it_ends() {
 }
 
 #[test]
+fn jobs_are_numbered_after_the_ones_runs_name_without_records() {
+    let root = tempfile::tempdir().unwrap();
+    let ledger =
+        JobLedger::new(root.path(), "session-1", "TUI", std::path::Path::new("/w")).unwrap();
+    // No records are left; a run of the session still names job-4.
+    let jobs = BackgroundJobs::new(1, None).with_ledger(ledger);
+    assert_eq!(jobs.recorded_conversations(), [] as [String; 0]);
+    jobs.continue_after(["job-2", "job-4", "job-x", "other-9"]);
+    assert_eq!(jobs.state().next, 4);
+    // Never lowered.
+    jobs.continue_after(["job-1"]);
+    assert_eq!(jobs.state().next, 4);
+}
+
+#[test]
 fn a_session_back_under_its_id_numbers_conversations_after_its_records() {
     let root = tempfile::tempdir().unwrap();
     let ledger =
@@ -396,7 +411,6 @@ fn a_session_back_under_its_id_numbers_conversations_after_its_records() {
     tool.conversations.continue_after(
         tool.jobs
             .recorded_conversations()
-            .unwrap()
             .iter()
             .map(String::as_str),
     );

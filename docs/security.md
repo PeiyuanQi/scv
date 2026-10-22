@@ -297,16 +297,26 @@ text is untrusted, so the TUI and `scv jobs` render it inert. Scrubbing is a
 heuristic, and logs can still contain whatever the agent wrote, so they are
 pruned seven days after their run ends. A kept queue holds the owner's
 queued prompts and is removed when the TUI leaves, by closing the connection
-or losing it; only a daemon that stops keeps it. Worktrees are created only
-on an explicit `worktree: true` (approved like the call) or the owner's
+or losing it; only a daemon that stops keeps it, and a queue restored into a
+session the TUI left before hearing of goes back as it was. Worktrees are
+created only on an explicit `worktree: true` (approved like the call) or the owner's
 `--worktree`, from a checkout inside the workspace, with fixed `git worktree
 add` arguments, the repository's hooks and file-system monitor off on
 every `git` call, no `*_API_KEY` variables,
 `GIT_TERMINAL_PROMPT=0`, and a time limit; SCV removes one only on the
 owner's request and while nothing works in it, refusing uncommitted changes
-without `--force`, and never deletes branches. Removal accepts only a
-worktree under SCV's own `worktrees/` with SCV's record beside it, whose
-`.git` link and repository record point at each other.
+without `--force`, and never deletes branches. SCV runs `git` in a worktree
+(to list or remove it) only when it is under SCV's own `worktrees/` with
+SCV's record beside it and its link checks out: its git directory is exactly
+`worktrees/<name>` of the common git directory of the repository it was made
+from, and that directory and the worktree's `.git` file name each other.
+Those calls name the verified git directory and worktree outright, so an
+agent that rewrites its `.git` cannot make git read a configuration it
+wrote (a filter driver runs as the user); a worktree whose link does not
+check out is listed from SCV's record alone and not removed. Filter drivers
+and other commands the source repository's own configuration names still
+run, as they would for the owner's `git` (`git worktree add` runs its smudge
+filters, for one); only hooks and the file-system monitor are off.
 
 SCV never auto-invokes another agent after a refusal. A run whose model
 refused (`declined`) gets no availability `fallback` field. When the session

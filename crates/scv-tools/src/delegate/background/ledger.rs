@@ -14,7 +14,7 @@ use std::{
     collections::HashMap,
     io::Read as _,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,6 +30,16 @@ const MAX_PROMPT_BYTES: usize = 16 * 1024;
 const MAX_REPLY_BYTES: usize = 8 * 1024;
 /// Largest record file read.
 const MAX_RECORD_BYTES: u64 = 128 * 1024;
+
+/// Held around every write of a record, and around every change that reads
+/// one first, so a change never puts back a copy older than another write
+/// (a settled job over its dismissal, or over what it was resumed as).
+/// Nothing that holds it takes it again.
+static WRITES: Mutex<()> = Mutex::new(());
+
+fn writing() -> MutexGuard<'static, ()> {
+    crate::sync::lock(&WRITES)
+}
 
 /// One background job, as the ledger keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,6 +256,12 @@ impl JobLedger {
 
 /// Write `record` in its session's directory under `root`.
 pub fn save(root: &Path, record: &JobRecord) -> std::io::Result<()> {
+    let _writing = writing();
+    write(root, record)
+}
+
+/// [`save`], for a caller that holds [`WRITES`].
+fn write(root: &Path, record: &JobRecord) -> std::io::Result<()> {
     if !valid_name(&record.session) || !valid_name(&record.job) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -271,6 +287,7 @@ pub fn load(root: &Path, session: &str, job: &str) -> Option<JobRecord> {
 /// name, so the job's number is not given to another job before the
 /// record is pruned.
 pub fn dismiss(root: &Path, session: &str, job: &str) -> std::io::Result<()> {
+    let _writing = writing();
     let mut record = load(root, session, job)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such job record"))?;
     record.dismissed = true;
@@ -286,7 +303,7 @@ pub fn dismiss(root: &Path, session: &str, job: &str) -> std::io::Result<()> {
     record.error = None;
     record.interrupted = None;
     record.updated_unix = unix_now();
-    save(root, &record)
+    write(root, &record)
 }
 
 /// Remove `job`'s record of `session` from disk.
@@ -310,10 +327,27 @@ pub fn update(
     job: &str,
     change: impl FnOnce(&mut JobRecord),
 ) -> Option<JobRecord> {
+    update_if(root, session, job, |record| {
+        change(record);
+        true
+    })
+}
+
+/// Change `job`'s record with `change` and save it, when it exists and
+/// `change` says it changed it.
+fn update_if(
+    root: &Path,
+    session: &str,
+    job: &str,
+    change: impl FnOnce(&mut JobRecord) -> bool,
+) -> Option<JobRecord> {
+    let _writing = writing();
     let mut record = load(root, session, job)?;
-    change(&mut record);
+    if !change(&mut record) {
+        return None;
+    }
     record.updated_unix = unix_now();
-    save(root, &record).ok()?;
+    write(root, &record).ok()?;
     Some(record)
 }
 
@@ -325,7 +359,7 @@ pub fn list(root: &Path) -> Vec<JobRecord> {
 }
 
 /// Every record under `root`, dismissed ones too.
-fn list_all(root: &Path) -> Vec<JobRecord> {
+pub fn list_all(root: &Path) -> Vec<JobRecord> {
     let Ok(sessions) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -376,8 +410,14 @@ pub fn settle_orphans(root: &Path) -> Vec<JobRecord> {
         if record.state.is_final() || record.owner.is_alive() {
             continue;
         }
-        if let Some(record) = update(root, &record.session, &record.job, |record| {
-            interrupt(record, "the SCV process that ran it stopped");
+        // Checked again on the record as it is now: it may have finished,
+        // been dismissed, or been resumed since it was listed.
+        if let Some(record) = update_if(root, &record.session, &record.job, |record| {
+            let orphaned = !record.state.is_final() && !record.owner.is_alive();
+            if orphaned {
+                interrupt(record, "the SCV process that ran it stopped");
+            }
+            orphaned
         }) {
             settled.push(record);
         }
@@ -399,9 +439,20 @@ pub(crate) fn interrupt(record: &mut JobRecord, reason: &str) {
 pub fn prune(root: &Path, keep: Duration) -> usize {
     let now = unix_now();
     let mut removed = 0;
+    let old = |record: &JobRecord| {
+        record.state.is_final() && now.saturating_sub(record.updated_unix) > keep.as_secs()
+    };
     for record in list_all(root) {
-        if record.state.is_final()
-            && now.saturating_sub(record.updated_unix) > keep.as_secs()
+        if !old(&record) {
+            continue;
+        }
+        // Checked again on the record as it is now, which a change since
+        // it was listed keeps.
+        let _writing = writing();
+        let path = root
+            .join(&record.session)
+            .join(format!("{}.json", record.job));
+        if read_record(&path).is_some_and(|record| old(&record))
             && remove(root, &record.session, &record.job).is_ok()
         {
             removed += 1;

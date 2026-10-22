@@ -288,8 +288,17 @@ impl DelegationRegistry {
         cwd: &Path,
         conversation: Option<(&str, u32)>,
     ) -> PendingDelegation {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let handle = format!("{agent}-{}", &suffix[..6]);
+        let draw = || {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            format!("{agent}-{}", &suffix[..6])
+        };
+        // Never a handle a retained run log has: its run would get no log.
+        let handle = std::iter::repeat_with(draw)
+            .take(16)
+            .find(|handle| {
+                std::fs::symlink_metadata(self.runs_dir.join(format!("{handle}.jsonl"))).is_err()
+            })
+            .unwrap_or_else(draw);
         let entry = format!("{}/{session}/{handle}", self.instance);
         let chain = match &self.chain {
             Some(chain) => format!("{chain};{entry}"),

@@ -149,6 +149,38 @@ fn pages_follow_byte_positions_and_resynchronize_mid_line() {
 }
 
 #[test]
+fn a_line_no_page_could_hold_is_skipped() {
+    use std::io::Write as _;
+    let dir = runs();
+    let activity = open(&dir.path(), "codex-000007");
+    activity.tool("$ before");
+    let mut log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("codex-000007.jsonl"))
+        .unwrap();
+    let mut huge = vec![b'x'; MAX_PAGE_BYTES + 1];
+    huge.push(b'\n');
+    log.write_all(&huge).unwrap();
+    activity.tool("$ after");
+    let page = read_page(&dir.path(), "codex-000007", 0, 100).unwrap();
+    let texts: Vec<&str> = page
+        .events
+        .iter()
+        .map(|event| event.text.as_str())
+        .collect();
+    assert_eq!(texts[texts.len() - 2..], ["$ before", "$ after"]);
+    assert!(!page.more);
+    // Even a page that starts at it moves past it.
+    let first = read_page(&dir.path(), "codex-000007", 0, 1).unwrap();
+    let mut next = first.next;
+    for _ in 0..4 {
+        let page = read_page(&dir.path(), "codex-000007", next, 1).unwrap();
+        assert!(page.next > next || !page.more);
+        next = page.next;
+    }
+}
+
+#[test]
 fn a_full_log_keeps_only_turns_approvals_and_the_end() {
     let dir = runs();
     let activity = open(&dir.path(), "codex-000003");
@@ -194,8 +226,18 @@ fn a_run_whose_process_died_is_settled_as_interrupted() {
     };
     let activity = RunActivity::open(&dir.path(), dead, header("codex-000004")).unwrap();
     activity.turn_started(None, 1, "work", Some("job-1"));
-    // The owner crashed: nothing ran its drop.
+    // The owner crashed mid-write: nothing ran its drop, and its last line
+    // is torn.
     std::mem::forget(activity);
+    {
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("codex-000004.jsonl"))
+            .unwrap()
+            .write_all(br#"{"v":1,"event":{"seq":"#)
+            .unwrap();
+    }
     let (state, _) = current(
         &load_state(&dir.path(), "codex-000004").unwrap(),
         unix_now(),

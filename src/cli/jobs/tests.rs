@@ -94,4 +94,9 @@ fn log_lines_are_one_line_each_and_say_what_happened() {
         describe(&event(RunEventKind::TurnEnded, "")),
         "── turn completed ──"
     );
+    let relayed = RunEvent {
+        risk: Some("x\u{9b}2Jy".into()),
+        ..event(RunEventKind::ApprovalRequested, "Run make")
+    };
+    assert_eq!(describe(&relayed), "? approval (x 2Jy): Run make");
 }

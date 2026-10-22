@@ -9,8 +9,11 @@
 //! from. SCV runs `git` only to create, list, and remove these worktrees,
 //! with fixed arguments, the repository's hooks and file-system monitor
 //! off, no `*_API_KEY` variables, and a time limit; it never commits, merges, or deletes a
-//! branch. A worktree counts as part of the workspace its checkout is in, so
-//! an agent call may name it as `cwd`.
+//! branch. It runs `git` in a worktree only once its link checks out: its
+//! git directory must be the one the repository it was made from keeps for
+//! it, so a worktree's agent cannot point git at configuration it wrote. A
+//! worktree counts as part of the workspace its checkout is in, so an agent
+//! call may name it as `cwd`.
 
 use std::{
     path::{Component, Path, PathBuf},
@@ -31,6 +34,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_GIT_OUTPUT: usize = 64 * 1024;
 /// Largest worktree record read.
 const MAX_RECORD_BYTES: u64 = 16 * 1024;
+/// Names drawn for a new worktree before giving up on a free one.
+const NAME_DRAWS: usize = 8;
 
 /// A worktree SCV just created, and where the agent runs in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +53,19 @@ struct Record {
     /// (or linked worktree) holding the call's `cwd`.
     source: PathBuf,
     branch: String,
+    /// The common git directory of `source`'s repository (canonical),
+    /// whose `worktrees/` holds the worktree's git directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    common: Option<PathBuf>,
+}
+
+/// An SCV worktree whose git link checked out.
+struct Linked {
+    top: PathBuf,
+    /// Its git directory, which the repository it was made from keeps.
+    git_dir: PathBuf,
+    /// The checkout it was made from.
+    source: PathBuf,
 }
 
 /// Create a worktree under `root` for an `agent` call that would run in
@@ -81,24 +99,40 @@ pub(crate) async fn create(
         .strip_prefix(&source)
         .unwrap_or(Path::new(""))
         .to_owned();
-    let suffix = &uuid::Uuid::new_v4().simple().to_string()[..6];
-    let name = format!("{}-{suffix}", slug(agent));
-    let branch = format!("scv/{name}");
+    let common = common_dir(&source)
+        .and_then(|common| std::fs::canonicalize(common).ok())
+        .ok_or_else(|| ToolError::failed("resolve the repository's git directory"))?;
     let group = root.join(group_name(&source));
     private_dir(root)
         .and_then(|()| private_dir(&group))
         .map_err(|error| ToolError::failed(format!("create the worktrees directory: {error}")))?;
-    let path = group.join(&name);
-    let record = group.join(format!("{name}.json"));
-    write_record(
-        &record,
-        &Record {
+    // A name already taken (by a worktree or its record) is drawn again, so
+    // this call never touches a worktree it did not create.
+    let mut reserved = None;
+    for _ in 0..NAME_DRAWS {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..6];
+        let name = format!("{}-{suffix}", slug(agent));
+        let record = Record {
             v: 1,
             source: source.clone(),
-            branch: branch.clone(),
-        },
-    )
-    .map_err(|error| ToolError::failed(format!("record the worktree: {error}")))?;
+            branch: format!("scv/{name}"),
+            common: Some(common.clone()),
+        };
+        match reserve(&group, &name, &record) {
+            Ok(()) => {
+                reserved = Some((name, record.branch));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(ToolError::failed(format!("record the worktree: {error}")));
+            }
+        }
+    }
+    let (name, branch) =
+        reserved.ok_or_else(|| ToolError::failed("no free worktree name; try again"))?;
+    let path = group.join(&name);
+    let record = group.join(format!("{name}.json"));
     let target = path.display().to_string();
     let added = git(
         &source,
@@ -149,20 +183,31 @@ async fn discard(source: &Path, path: &Path, record: &Path) {
 /// The top of the SCV worktree under `root` holding `path`, when `path` is
 /// in one.
 pub(crate) fn worktree_path(root: &Path, path: &Path) -> Option<PathBuf> {
-    worktree_top(root, path).map(|(top, _)| top)
+    worktree_top(root, path).map(|linked| linked.top)
 }
 
 /// The checkout the SCV worktree under `root` holding `path` was made from,
 /// when `path` is in one.
 pub fn worktree_repo(root: &Path, path: &Path) -> Option<PathBuf> {
-    worktree_top(root, path).map(|(_, source)| source)
+    worktree_top(root, path).map(|linked| linked.source)
 }
 
-/// The top of the SCV worktree under `root` that holds `path`, and the
-/// checkout it was made from. It must be a linked worktree whose `.git`
-/// file and its repository's record of it point at each other, with SCV's
-/// record beside it.
-fn worktree_top(root: &Path, path: &Path) -> Option<(PathBuf, PathBuf)> {
+/// The SCV worktree under `root` that holds `path`, when its link checks
+/// out ([`verified_git_dir`]).
+fn worktree_top(root: &Path, path: &Path) -> Option<Linked> {
+    let (top, record) = recorded(root, path)?;
+    let git_dir = verified_git_dir(&top, &record)?;
+    Some(Linked {
+        top,
+        git_dir,
+        source: record.source,
+    })
+}
+
+/// The top of the directory under `root` that holds `path`, where SCV puts
+/// a worktree, and SCV's record beside it; nothing about its git link is
+/// checked yet.
+fn recorded(root: &Path, path: &Path) -> Option<(PathBuf, Record)> {
     let root = std::fs::canonicalize(root).ok()?;
     let path = std::fs::canonicalize(path).ok()?;
     let relative = path.strip_prefix(&root).ok()?;
@@ -173,18 +218,57 @@ fn worktree_top(root: &Path, path: &Path) -> Option<(PathBuf, PathBuf)> {
         return None;
     };
     let top = root.join(group).join(name);
-    let pointer = std::fs::read_to_string(top.join(".git")).ok()?;
-    // Git may write either link relative to the file holding it.
-    let gitdir = top.join(pointer.trim().strip_prefix("gitdir:")?.trim());
-    let back = std::fs::read_to_string(gitdir.join("gitdir")).ok()?;
-    let back = std::fs::canonicalize(gitdir.join(back.trim())).ok()?;
-    if back.parent()? != top {
-        return None;
-    }
     let mut record_name = name.to_os_string();
     record_name.push(".json");
     let record = read_record(&root.join(group).join(record_name))?;
-    Some((top, record.source))
+    Some((top, record))
+}
+
+/// The git directory of the SCV worktree at `top` (canonical) that
+/// `record` describes, when its link checks out: it must be exactly
+/// `<common>/worktrees/<name>` of the repository the worktree was made
+/// from, and it and the worktree's `.git` file must name each other. An
+/// agent can rewrite its worktree's `.git`, but not make git read another
+/// git directory's configuration (filters, for one) through it.
+fn verified_git_dir(top: &Path, record: &Record) -> Option<PathBuf> {
+    let common = record
+        .common
+        .clone()
+        .or_else(|| common_dir(&record.source))?;
+    let common = std::fs::canonicalize(common).ok()?;
+    let git_dir = common.join("worktrees").join(top.file_name()?);
+    // Git may write each link relative to the file holding it.
+    let canonical = |base: &Path, link: &str| std::fs::canonicalize(base.join(link.trim())).ok();
+    let pointer = read_small(&top.join(".git"))?;
+    let named = canonical(top, pointer.trim().strip_prefix("gitdir:")?)?;
+    let back = canonical(&git_dir, &read_small(&git_dir.join("gitdir"))?)?;
+    let shared = canonical(&git_dir, &read_small(&git_dir.join("commondir"))?)?;
+    (named == git_dir && back == top.join(".git") && shared == common).then_some(git_dir)
+}
+
+/// The common git directory of the repository `checkout` (the top of a
+/// checkout) belongs to: its `.git` directory or, for a linked worktree,
+/// the one its git directory's `commondir` names.
+fn common_dir(checkout: &Path) -> Option<PathBuf> {
+    let dot_git = checkout.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let pointer = read_small(&dot_git)?;
+    let git_dir = checkout.join(pointer.trim().strip_prefix("gitdir:")?.trim());
+    Some(match read_small(&git_dir.join("commondir")) {
+        Some(common) => git_dir.join(common.trim()),
+        None => git_dir,
+    })
+}
+
+/// A short text file's contents.
+fn read_small(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    let mut text = String::new();
+    file.take(MAX_RECORD_BYTES).read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// Whether `path` is inside an SCV worktree under `root` made from a
@@ -215,22 +299,36 @@ pub async fn list(root: &Path) -> Vec<WorktreeInfo> {
             if !name.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            let Some(repo) = worktree_repo(root, &path) else {
+            let Some((top, record)) = recorded(root, &path) else {
                 continue;
             };
-            let branch = git(&path, &["rev-parse", "--abbrev-ref", "HEAD"], &never)
-                .await
-                .map(|branch| branch.trim().to_owned())
-                .unwrap_or_default();
-            let dirty = git(&path, &["status", "--porcelain"], &never)
-                .await
-                .ok()
-                .map(|status| !status.trim().is_empty());
+            // One whose link does not check out is listed from SCV's record
+            // alone, with no git run in it: its state is unknown.
+            let (branch, dirty) = match verified_git_dir(&top, &record) {
+                Some(git_dir) => {
+                    let linked = Linked {
+                        top,
+                        git_dir,
+                        source: record.source.clone(),
+                    };
+                    let branch =
+                        git_in_worktree(&linked, &["rev-parse", "--abbrev-ref", "HEAD"], &never)
+                            .await
+                            .map(|branch| branch.trim().to_owned())
+                            .unwrap_or_default();
+                    let dirty = git_in_worktree(&linked, &["status", "--porcelain"], &never)
+                        .await
+                        .ok()
+                        .map(|status| !status.trim().is_empty());
+                    (branch, dirty)
+                }
+                None => (record.branch, None),
+            };
             found.push(WorktreeInfo {
                 worktree: WorktreeRef {
                     path: path.display().to_string(),
                     branch,
-                    repo: repo.display().to_string(),
+                    repo: record.source.display().to_string(),
                 },
                 dirty,
                 jobs: Vec::new(),
@@ -245,13 +343,28 @@ pub async fn list(root: &Path) -> Vec<WorktreeInfo> {
 /// refusing one with uncommitted changes unless `force`, which also removes
 /// one a cut-off creation left locked. Its branch stays.
 pub async fn remove(root: &Path, path: &Path, force: bool) -> Result<String, String> {
-    let (path, source) = worktree_top(root, path)
+    let (top, record) = recorded(root, path)
         .ok_or_else(|| format!("{} is not a worktree SCV created", path.display()))?;
+    let git_dir = verified_git_dir(&top, &record).ok_or_else(|| {
+        format!(
+            "{} is not linked to the repository it was made from ({}) as SCV made it, so SCV \
+             runs no git in it; check its .git file, and remove it yourself",
+            top.display(),
+            record.source.display()
+        )
+    })?;
+    let linked = Linked {
+        top,
+        git_dir,
+        source: record.source,
+    };
     let never = CancellationToken::new();
-    let branch = git(&path, &["rev-parse", "--abbrev-ref", "HEAD"], &never)
+    let branch = git_in_worktree(&linked, &["rev-parse", "--abbrev-ref", "HEAD"], &never)
         .await
         .map(|branch| branch.trim().to_owned())
         .unwrap_or_default();
+    let path = linked.top.clone();
+    let source = linked.source.clone();
     let target = path.display().to_string();
     let mut args = vec!["worktree", "remove"];
     if force {
@@ -260,16 +373,18 @@ pub async fn remove(root: &Path, path: &Path, force: bool) -> Result<String, Str
     args.push(&target);
     // Git removes a worktree from inside it too, which works whether or not
     // the checkout it came from is still there.
-    git(&path, &args, &never).await.map_err(|error| {
-        if force {
-            format!("git worktree remove failed: {error}")
-        } else {
-            format!(
-                "git worktree remove failed: {error}. A worktree with uncommitted changes is \
-                 removed only with force"
-            )
-        }
-    })?;
+    git_in_worktree(&linked, &args, &never)
+        .await
+        .map_err(|error| {
+            if force {
+                format!("git worktree remove failed: {error}")
+            } else {
+                format!(
+                    "git worktree remove failed: {error}. A worktree with uncommitted changes is \
+                     removed only with force"
+                )
+            }
+        })?;
     if let (Some(group), Some(name)) = (path.parent(), path.file_name()) {
         let mut record = name.to_os_string();
         record.push(".json");
@@ -294,6 +409,35 @@ async fn git(
     args: &[&str],
     cancellation: &CancellationToken,
 ) -> Result<String, String> {
+    let mut command = git_command();
+    command.arg("-C").arg(dir).args(args);
+    run(command, cancellation).await
+}
+
+/// Run `git <args>` in the verified worktree `linked`, naming its git
+/// directory and top outright rather than finding them again through its
+/// `.git` file, which its agent may change after the check.
+async fn git_in_worktree(
+    linked: &Linked,
+    args: &[&str],
+    cancellation: &CancellationToken,
+) -> Result<String, String> {
+    let mut git_dir = std::ffi::OsString::from("--git-dir=");
+    git_dir.push(&linked.git_dir);
+    let mut work_tree = std::ffi::OsString::from("--work-tree=");
+    work_tree.push(&linked.top);
+    let mut command = git_command();
+    command
+        .arg("-C")
+        .arg(&linked.top)
+        .arg(git_dir)
+        .arg(work_tree)
+        .args(args);
+    run(command, cancellation).await
+}
+
+/// `git`, with what SCV never lets it use.
+fn git_command() -> Command {
     let mut command = Command::new("git");
     // Hooks and a file-system monitor are commands the repository's (or an
     // agent's) configuration names, which no one asked SCV to run.
@@ -310,14 +454,16 @@ async fn git(
         }
     }
     command
-        .arg("-C")
-        .arg(dir)
-        .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    command
+}
+
+/// Run `command`, a [`git_command`], and return its standard output.
+async fn run(mut command: Command, cancellation: &CancellationToken) -> Result<String, String> {
     let child = command
         .spawn()
         .map_err(|error| format!("cannot run git: {error}"))?;
@@ -366,9 +512,27 @@ fn slug(text: &str) -> String {
         .collect()
 }
 
-fn write_record(path: &Path, record: &Record) -> std::io::Result<()> {
+/// Take the name `name` in `group` for a new worktree: write its record,
+/// which must not exist yet, unless a worktree of that name does
+/// (`AlreadyExists` either way).
+fn reserve(group: &Path, name: &str, record: &Record) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    if std::fs::symlink_metadata(group.join(name)).is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
     let bytes = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
-    scv_client::fs::replace_private(path, &bytes)
+    let path = group.join(format!("{name}.json"));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    let written = file.write_all(&bytes).and_then(|()| file.sync_all());
+    if written.is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+    written
 }
 
 fn read_record(path: &Path) -> Option<Record> {

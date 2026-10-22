@@ -333,6 +333,20 @@ impl BackgroundJobs {
         self
     }
 
+    /// Number new jobs after the `job-<n>` IDs `jobs` names too: the
+    /// session's runs name jobs whose records may be gone.
+    pub(crate) fn continue_after<'a>(&self, jobs: impl IntoIterator<Item = &'a str>) {
+        let mut state = self.state();
+        for job in jobs {
+            if let Some(number) = job
+                .strip_prefix("job-")
+                .and_then(|number| number.parse::<u64>().ok())
+            {
+                state.next = state.next.max(number);
+            }
+        }
+    }
+
     /// Decide running jobs' nested approval requests with `gate`, which must
     /// never grant more than the session's foreground would.
     #[must_use]
@@ -558,10 +572,12 @@ impl BackgroundJobs {
         self.persist(write);
     }
 
-    /// The conversation handles the session's job records name; `None`
-    /// when it has none, so the session was not here before.
-    pub(crate) fn recorded_conversations(&self) -> Option<Vec<String>> {
-        self.ledger.as_ref().and_then(JobLedger::conversations)
+    /// The conversation handles the session's job records name.
+    pub(crate) fn recorded_conversations(&self) -> Vec<String> {
+        self.ledger
+            .as_ref()
+            .and_then(JobLedger::conversations)
+            .unwrap_or_default()
     }
 
     /// Whether the session still owes its client `job`'s result: dropping

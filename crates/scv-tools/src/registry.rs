@@ -121,20 +121,23 @@ pub fn builtin_registry(
         }
         Arc::new(jobs)
     });
-    // A session back under its ID (one with job records) never reuses a
+    // A session back under its ID never reuses a job ID or conversation
     // handle its records name, or its runs': a run names its conversation
-    // from the start, a job only once it succeeds.
-    if let Some(mut used) = jobs.recorded_conversations() {
-        if let (Some(context), Some(session)) = (&config.delegation, &session) {
-            used.extend(
-                crate::delegate::activity::list_states(context.registry.runs_dir())
-                    .into_iter()
-                    .filter(|state| &state.session == session)
-                    .filter_map(|state| state.conversation),
-            );
+    // from the start, a job only once it succeeds, and a run's state (and
+    // log) can outlive the records of the jobs it served.
+    let mut used = jobs.recorded_conversations();
+    if let (Some(context), Some(session)) = (&config.delegation, &session) {
+        let mut served = Vec::new();
+        for state in crate::delegate::activity::list_states(context.registry.runs_dir())
+            .into_iter()
+            .filter(|state| &state.session == session)
+        {
+            used.extend(state.conversation);
+            served.extend(state.job.into_iter().chain(state.jobs));
         }
-        conversations.continue_after(used.iter().map(String::as_str));
+        jobs.continue_after(served.iter().map(String::as_str));
     }
+    conversations.continue_after(used.iter().map(String::as_str));
     let capable = Arc::new(background::BackgroundCapable {
         inner: agent,
         jobs: Arc::clone(&jobs),

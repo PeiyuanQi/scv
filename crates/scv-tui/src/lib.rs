@@ -135,7 +135,8 @@ async fn run_event_loop(
                 }
             }
             (id, event) = next_chat_event(ui) => {
-                ui.chat_event(id, event)?;
+                // A tab's failed connection is that tab's: it reconnects.
+                ui.chat_event(id, event);
                 if let Some(tab) = ui.tab_mut(id)
                     && let TabKind::Chat(chat) = &mut tab.kind
                     && !chat.app.connected
