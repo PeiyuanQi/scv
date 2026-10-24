@@ -386,6 +386,8 @@ clears its transcript only after that event.
 the TUI to apply. `restored` answers `restore`: the session the queue came
 from, how many prompts joined, and the first line (at most 200 characters)
 of the prompt that was running when it stopped, which is not sent again.
+`dropped`, omitted when zero, counts queued prompts that were not restored
+because an attachment was gone or the prompt was too long.
 
 ### `daemon.status`
 

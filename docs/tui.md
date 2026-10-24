@@ -55,8 +55,10 @@ again within three seconds. The confirming `Ctrl+C` quits; it does not
 cancel the running turn. While a chat shows an approval prompt, it takes
 every key but the dashboard keys below wherever focus is, since it covers
 the screen. A dashboard key may move focus, and the prompt stays that
-chat's: `y` and `n` or `Esc` still answer it, and other keys do nothing, so
-nothing behind it opens or moves.
+chat's until it is answered: `y` and `n` or `Esc` still answer it, and
+other keys do nothing, so nothing behind it opens or moves. A request
+from another chat while one is drawn is announced and does not replace
+it.
 
 A tab's connection failing in a way other than ending (a server frame too
 large, or one the TUI cannot read) is that tab's alone: the tab shows the
@@ -83,12 +85,16 @@ It follows new lines while at the bottom; `PageUp`/`PageDown` scroll and
 `End` returns. The view has its own one-line composer: `Enter` sends the
 text to the agent's conversation (into its running turn when the agent can
 take steering, else as the conversation's next turn, queued behind a running
-one). If the daemon refuses it or the connection breaks, the text comes
-back; text typed while it was in flight stays after it, on the next line.
+one). If the daemon refuses it, the connection breaks, or the send is not
+answered in time, the text comes back; a send that timed out may still have
+reached the daemon, so check the conversation before sending it again. Text
+typed while it was in flight stays after it, on the next line.
 One prompt is sent at a time: `Enter` while the
 last is unanswered keeps the text in the composer and says so. `Ctrl+J`
 inserts a newline, and `Esc` clears it. While the job waits for an approval,
-`Ctrl+Y` approves and `Ctrl+N` denies it; `y` and `n` are always text, so a
+`Ctrl+Y` approves and `Ctrl+N` denies the request the view is showing. When
+a later request replaces that one, the first of those chords names the new
+request and the next one answers it. `y` and `n` are always text, so a
 prompt starting "yes" or "no" never answers it. `Ctrl+X` twice
 stops the job; `Ctrl+R` resumes an interrupted one. Input is sent only by
 these keys: the view never forwards keystrokes to the agent's process.
@@ -251,9 +257,10 @@ announces the change, the daemon records the queued prompts and the running
 one. When the TUI leaves (closing the connection or losing it), the record
 goes. When the daemon stops or dies instead, it stays: a TUI that
 reconnects asks for it (`restore`), and its new session starts with the old
-queue **paused**, with a note naming how many prompts came back and the
-prompt that was running, which is not sent again because its outcome is
-unknown; `Alt+P` resumes the queue once reviewed, starting its first prompt.
+queue **paused**, with a note naming how many prompts came back, how many
+were left out because an attachment was missing or a prompt was too long,
+and the prompt that was running, which is not sent again because its outcome
+is unknown; `Alt+P` resumes the queue once reviewed, starting its first prompt.
 A chat tab reconnects once at a time, however many keys arrive meanwhile, and
 waits up to a minute for its session to start (connecting gets three
 seconds), so the queue it restores stays with it; a TUI that leaves before

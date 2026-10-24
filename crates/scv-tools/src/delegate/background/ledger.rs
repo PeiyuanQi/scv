@@ -307,7 +307,9 @@ fn fit_record(record: &mut JobRecord) {
     let Some(limit) = usize::try_from(MAX_RECORD_BYTES).ok() else {
         return;
     };
-    for _ in 0..24 {
+    // A full prompt, reply, and error can each need many halvings before
+    // the JSON fits. Stop only after more halvings than that worst case.
+    for _ in 0..64 {
         let Ok(bytes) = serde_json::to_vec(record) else {
             return;
         };
@@ -315,8 +317,8 @@ fn fit_record(record: &mut JobRecord) {
             return;
         }
         let prompt = record.prompt.len();
-        let reply = record.reply.as_ref().map(String::len).unwrap_or(0);
-        let error = record.error.as_ref().map(String::len).unwrap_or(0);
+        let reply = record.reply.as_ref().map_or(0, String::len);
+        let error = record.error.as_ref().map_or(0, String::len);
         let longest = prompt.max(reply).max(error);
         if longest == 0 {
             record.arguments = Value::Null;

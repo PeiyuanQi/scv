@@ -160,6 +160,10 @@ fn removal_covers_every_adapter_and_generic_api_keys() {
         "AMP_URL",
         "KIMI_BASE_URL",
         "MOONSHOT_API_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
     ] {
         assert!(is_removed_agent_variable(OsStr::new(removed)), "{removed}");
     }

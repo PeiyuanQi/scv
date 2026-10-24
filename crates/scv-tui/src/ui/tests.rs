@@ -47,6 +47,7 @@ fn a_restored_queue_is_noted_once_with_the_prompt_that_was_running() {
             from: "9a0e1f2d-session".into(),
             queued: 2,
             interrupted: Some("Run the release checklist.".into()),
+            dropped: 0,
         }),
         cwd: "/w".into(),
         model: "m".into(),
@@ -72,4 +73,33 @@ fn a_restored_queue_is_noted_once_with_the_prompt_that_was_running() {
     assert!(notes[0].contains("paused"));
     assert!(notes[0].contains("not sent again"));
     assert!(notes[0].contains("Run the release checklist."));
+    assert!(!notes[0].contains("were not restored"));
+
+    let mut app = App::new(crate::client::SessionInfo {
+        id: "new".into(),
+        keys: BTreeMap::new(),
+        restored: Some(scv_protocol::RestoredQueue {
+            from: "9a0e1f2d-session".into(),
+            queued: 1,
+            interrupted: None,
+            dropped: 2,
+        }),
+        cwd: "/w".into(),
+        model: "m".into(),
+        context_max_tokens: 100,
+        max_server_frame_bytes: 65536,
+        max_transcript_bytes: 16384,
+        max_transcript_items: 100,
+        max_prompt_history_bytes: 1024,
+        max_prompt_history_items: 10,
+    });
+    note_restored(&mut app);
+    let note = app.items.iter().find_map(|item| match item {
+        TranscriptItem::System(text) => Some(text.as_str()),
+        _ => None,
+    });
+    assert!(
+        note.is_some_and(|text| text.contains("2 queued prompt(s) were not restored")),
+        "{note:?}"
+    );
 }

@@ -26,4 +26,18 @@ fn a_command_that_can_stop_an_account_outlasts_a_mail_actions_grace() {
         control_timeout(&DaemonCommand::Status),
         Duration::from_secs(20)
     );
+    // Steering waits up to 30 seconds, so a send needs the longer budget.
+    assert_eq!(
+        control_timeout(&DaemonCommand::WorkbenchSend {
+            session: "s".into(),
+            conversation: "codex-1".into(),
+            prompt: "hi".into(),
+            mode: scv_protocol::SendMode::Auto,
+        }),
+        Duration::from_secs(90)
+    );
+    assert_eq!(
+        control_timeout(&DaemonCommand::Workbench { watch: true }),
+        Duration::from_secs(20)
+    );
 }

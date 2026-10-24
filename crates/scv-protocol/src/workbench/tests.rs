@@ -223,9 +223,23 @@ fn session_started_carries_keys_and_a_restored_queue_only_when_set() {
         from: "old".into(),
         queued: 2,
         interrupted: Some("the long build".into()),
+        dropped: 0,
     };
     let event = started(keys, Some(restored));
     let wire = serde_json::to_string(&event).unwrap();
     assert!(wire.contains(r#""keys":{"next_tab":"alt+."}"#), "{wire}");
+    assert!(!wire.contains("dropped"), "{wire}");
+    assert_eq!(serde_json::from_str::<ServerEvent>(&wire).unwrap(), event);
+    let mut event = event;
+    let ServerEvent::SessionStarted {
+        restored: Some(restored),
+        ..
+    } = &mut event
+    else {
+        panic!("session.started");
+    };
+    restored.dropped = 1;
+    let wire = serde_json::to_string(&event).unwrap();
+    assert!(wire.contains(r#""dropped":1"#), "{wire}");
     assert_eq!(serde_json::from_str::<ServerEvent>(&wire).unwrap(), event);
 }

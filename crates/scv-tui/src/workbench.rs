@@ -93,6 +93,9 @@ pub(crate) struct AgentView {
     /// The prompt sent last and not answered yet, which comes back to the
     /// composer if it is refused or lost.
     pub(crate) sent: Option<String>,
+    /// The approval request last shown for this view. A later request on
+    /// the same job does not take the first Ctrl+Y or Ctrl+N.
+    pub(crate) shown_approval: Option<String>,
 }
 
 impl AgentView {
@@ -108,6 +111,7 @@ impl AgentView {
             last_run: None,
             confirm_cancel: None,
             sent: None,
+            shown_approval: None,
         }
     }
 
@@ -363,6 +367,34 @@ impl Workbench {
                     Tag::Snapshot | Tag::Log(..) => None,
                 }
             }
+            Answer::TimedOut(tag) => {
+                match &tag {
+                    Tag::Snapshot => {
+                        self.snapshot_pending = false;
+                        // A snapshot that does not return is the daemon not
+                        // answering. A slow action is not.
+                        self.availability = Availability::Disconnected;
+                    }
+                    Tag::Log(handle, after) => self.log_answered(handle, *after),
+                    Tag::Send(target) => {
+                        if let Some(view) = self.views.get_mut(target) {
+                            view.unsend();
+                        }
+                    }
+                    Tag::Action | Tag::Worktrees => {}
+                }
+                match tag {
+                    Tag::Send(_) => Some(
+                        "Sending the prompt timed out. It may have reached the daemon; it is \
+                         back in the composer, so check the conversation before sending it again."
+                            .into(),
+                    ),
+                    Tag::Action | Tag::Worktrees => Some(
+                        "The daemon did not answer in time; check whether that took effect.".into(),
+                    ),
+                    Tag::Snapshot | Tag::Log(..) => None,
+                }
+            }
         }
     }
 
@@ -430,6 +462,34 @@ impl Workbench {
             }
         }
         self.snapshot = Some(snapshot);
+        self.note_shown_approvals();
+    }
+
+    /// Remember the approval each open view is showing, without replacing
+    /// one the owner has not answered yet. The next Ctrl+Y or Ctrl+N then
+    /// names the new request instead of approving it.
+    fn note_shown_approvals(&mut self) {
+        let noted: Vec<(Target, Option<String>)> = self
+            .views
+            .keys()
+            .cloned()
+            .map(|target| {
+                let id = self.approval(&target).map(|approval| approval.id.clone());
+                (target, id)
+            })
+            .collect();
+        for (target, id) in noted {
+            let Some(view) = self.views.get_mut(&target) else {
+                continue;
+            };
+            match (&view.shown_approval, id) {
+                (None, Some(id)) => view.shown_approval = Some(id),
+                (Some(_), None) => view.shown_approval = None,
+                // A different request stays unnoted until the owner presses
+                // Ctrl+Y or Ctrl+N, which then names it.
+                _ => {}
+            }
+        }
     }
 
     /// Take in a page of a run's log read from position `after`: each view

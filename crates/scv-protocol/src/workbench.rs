@@ -422,6 +422,19 @@ pub struct RestoredQueue {
     /// stopped. It is not sent again: its outcome is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupted: Option<String>,
+    /// Queued prompts that could not be restored, because an attachment
+    /// was gone or the prompt was too long. Older servers omit it, and it
+    /// is left off the wire when none were.
+    #[serde(default, skip_serializing_if = "zero")]
+    pub dropped: u32,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if passes the field by reference"
+)]
+fn zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

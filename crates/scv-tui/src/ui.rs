@@ -102,6 +102,10 @@ pub(crate) struct Ui {
     /// Quitting (`0`) or closing chat tab `id` while chats have work
     /// running, waiting to be asked again.
     confirm_leave: Option<(u64, Instant)>,
+    /// The chat whose approval prompt is drawn. It stays that chat's until
+    /// the request is answered, including when a dashboard key moves focus
+    /// or another chat asks.
+    covering: Option<u64>,
     /// The terminal's size at the last draw, which decides what is shown
     /// and so where keys can go.
     pub(crate) size: (u16, u16),
@@ -133,6 +137,7 @@ impl Ui {
             confirm: None,
             reconnecting: HashSet::new(),
             confirm_leave: None,
+            covering: None,
             size: (u16::MAX, u16::MAX),
             options,
         };
@@ -199,18 +204,41 @@ impl Ui {
         )
     }
 
-    /// The chat whose approval prompt is drawn.
-    pub(crate) fn covering_tab(&self) -> Option<u64> {
+    /// The chat that would take the prompt if none is drawn yet.
+    fn fresh_cover(&self) -> Option<u64> {
         self.approval_panes().into_iter().find_map(|index| {
             let id = self.pane_tab(index)?;
             self.chat_is_asking(id).then_some(id)
         })
     }
 
+    /// Keep a drawn prompt on its chat. A new one is pinned only when
+    /// nothing is already covering the screen.
+    fn pin_cover(&mut self) {
+        if self.covering.is_some_and(|id| self.chat_is_asking(id)) {
+            return;
+        }
+        self.covering = self.fresh_cover();
+    }
+
+    /// The chat whose approval prompt is drawn.
+    pub(crate) fn covering_tab(&self) -> Option<u64> {
+        if let Some(id) = self.covering.filter(|id| self.chat_is_asking(*id)) {
+            return Some(id);
+        }
+        self.fresh_cover()
+    }
+
     /// Whether an approval request arriving for `id` will be the prompt on
-    /// screen. An earlier pane that is already asking keeps the prompt, so
-    /// this chat is told with a notice instead.
+    /// screen. One already drawn stays up, and this request is announced
+    /// instead.
     fn approval_would_cover(&self, id: u64) -> bool {
+        if let Some(current) = self
+            .covering
+            .filter(|current| self.chat_is_asking(*current))
+        {
+            return current == id;
+        }
         for index in self.approval_panes() {
             let Some(pane) = self.pane_tab(index) else {
                 continue;
@@ -399,6 +427,7 @@ impl Ui {
         if let Some((cwd, session)) = reconnect {
             self.reconnect(id, cwd, session);
         }
+        self.pin_cover();
     }
 
     /// Reconnect chat tab `id`, restoring its session's queue, unless it is
@@ -431,6 +460,9 @@ impl Ui {
         }
         self.normalize_focus();
         self.remember_pane();
+        // Pin the prompt that is on screen before a dashboard key moves
+        // focus, so that key does not hide it.
+        self.pin_cover();
         if let Some(action) = self.keys.action(key) {
             self.act(action);
             self.normalize_focus();
@@ -538,11 +570,25 @@ impl Ui {
                 }
             }
             Action::NewTab => {
-                let pane = self.active_pane();
+                // From the sidebar, the composer is the pane focus left,
+                // not pane 0.
+                let pane = match self.focus {
+                    Focus::Sidebar => self.modal_pane.unwrap_or(0),
+                    Focus::Pane(index) => index,
+                }
+                .min(self.panes.len().saturating_sub(1));
+                let Some(id) = self.pane_tab(pane) else {
+                    return;
+                };
                 let opened = {
-                    let Some(app) = self.focused_chat_app() else {
+                    let Some(Tab {
+                        kind: TabKind::Chat(chat),
+                        ..
+                    }) = self.tab_mut(id)
+                    else {
                         return;
                     };
+                    let app = &mut chat.app;
                     if app.input.is_empty() {
                         app.input = "/open ".into();
                         app.cursor = app.input.chars().count();
@@ -649,14 +695,6 @@ impl Ui {
         self.panes.dedup();
         if self.panes.len() < 2 {
             self.focus = Focus::Pane(0);
-        }
-    }
-
-    fn focused_chat_app(&mut self) -> Option<&mut App> {
-        let id = self.active_tab()?;
-        match &mut self.tab_mut(id)?.kind {
-            TabKind::Chat(chat) => Some(&mut chat.app),
-            TabKind::Agent(_) => None,
         }
     }
 
@@ -921,15 +959,36 @@ impl Ui {
             // "no" never answers an approval its writer did not read.
             KeyCode::Char('y' | 'n') if control && approval.is_some() => {
                 let approved = key.code == KeyCode::Char('y');
-                if let Some(approval) = approval {
-                    self.request(
-                        Tag::Action,
-                        DaemonCommand::WorkbenchApprove {
-                            id: approval.id,
-                            approved,
-                        },
-                    );
+                let Some(approval) = approval else {
+                    return;
+                };
+                let shown = view.shown_approval.clone();
+                if shown.as_deref() != Some(approval.id.as_str()) {
+                    view.shown_approval = Some(approval.id.clone());
+                    // The view had not noted a request, so this chord answers
+                    // the one on screen. A request that replaced a noted one
+                    // waits for the next chord.
+                    if shown.is_some() {
+                        let verb = if approved { "approve" } else { "deny" };
+                        let chord = if approved { "Ctrl+Y" } else { "Ctrl+N" };
+                        let summary = bounded_text(&approval.summary, 80);
+                        let id = approval.id.clone();
+                        self.workbench.notify(
+                            format!(
+                                "This job's approval is now {id} ({summary}); press {chord} again to {verb} it."
+                            ),
+                            false,
+                        );
+                        return;
+                    }
                 }
+                self.request(
+                    Tag::Action,
+                    DaemonCommand::WorkbenchApprove {
+                        id: approval.id,
+                        approved,
+                    },
+                );
             }
             KeyCode::Char('x') if control => {
                 let Some(job) = job.filter(|job| !job.state.is_final()) else {
@@ -1299,6 +1358,12 @@ fn note_restored(app: &mut App) {
         restored.queued,
         restored.from.chars().take(8).collect::<String>()
     );
+    if restored.dropped > 0 {
+        text.push_str(&format!(
+            " {} queued prompt(s) were not restored: an attachment was missing or the prompt was too long.",
+            restored.dropped
+        ));
+    }
     if let Some(interrupted) = restored.interrupted {
         text.push_str(&format!(
             " The prompt that was running was not sent again (its outcome is unknown): {}",

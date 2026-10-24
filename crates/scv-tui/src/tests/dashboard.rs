@@ -798,6 +798,117 @@ async fn sidebar_focus_returns_to_the_pane_it_left_and_shows_pane_0s_approval() 
 }
 
 #[tokio::test]
+async fn a_drawn_prompt_is_not_replaced_by_another_chats_request() {
+    let (mut ui, _requests, mut first_peer, _path) = dashboard().await;
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    let (connection, mut second_peer) = tokio::join!(
+        Client::connect(&path.0, Path::new("/tmp"), &options),
+        accept_session(&listener, "second-session"),
+    );
+    let (client, session) = connection.unwrap();
+    let opening = Opening {
+        cwd: "/tmp".into(),
+        restore: None,
+        tab: None,
+        from: (ui.focus, ui.active_tab()),
+    };
+    assert!(ui.opened(&opening, client, session).is_none());
+    ui.key(key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('v'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let first = ui.tabs[0].id;
+    let second = ui.tabs[1].id;
+    let ask = |id: &str, session_id: &str, summary: &str| ServerEvent::ApprovalRequested {
+        request_id: "r".into(),
+        session_id: session_id.into(),
+        turn_id: "t".into(),
+        seq: 1,
+        approval_id: id.into(),
+        call_id: "c".into(),
+        name: "bash".into(),
+        risk: "process".into(),
+        cwd: "/tmp".into(),
+        summary: summary.into(),
+    };
+    ui.chat_event(first, Ok(Some(ask("a-1", "old-session", "Run make for A"))));
+    ui.workbench.notices.clear();
+    ui.workbench.bell = false;
+    ui.chat_event(
+        second,
+        Ok(Some(ask("b-1", "second-session", "rm -rf ~ for B"))),
+    );
+    assert!(ui.workbench.bell);
+    assert!(
+        ui.workbench
+            .notices
+            .back()
+            .unwrap()
+            .text
+            .contains("asks for approval")
+    );
+    let shown = screen(&ui, 160, 40);
+    assert!(shown.contains("Run make for A"), "{shown}");
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut first_peer).await,
+        ClientMessage::ApprovalResolve { approval_id, approved: true, .. } if approval_id == "a-1"
+    ));
+    let pending = tokio::time::timeout(Duration::from_millis(50), receive(&mut second_peer)).await;
+    assert!(pending.is_err(), "the second chat was approved");
+}
+
+#[tokio::test]
+async fn a_replaced_job_approval_is_not_answered_by_the_first_chord() {
+    let (mut ui, mut requests, _peer, _path) = dashboard().await;
+    let target = Target::Job {
+        session: "chat-session".into(),
+        job: "job-3".into(),
+    };
+    ui.open_view(target);
+    // The open view notes ap-1. A later request on the same job does not
+    // take the chord that was for ap-1.
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(snapshot())));
+    let mut next = snapshot();
+    next.approvals[0].id = "ap-2".into();
+    next.approvals[0].summary = "rm -rf /".into();
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(next)));
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(
+        requests.try_recv().is_err(),
+        "the first chord approved the new request"
+    );
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(
+        notice.contains("ap-2") && notice.contains("Ctrl+Y"),
+        "{notice}"
+    );
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert_eq!(
+        requests.try_recv().unwrap().command,
+        DaemonCommand::WorkbenchApprove {
+            id: "ap-2".into(),
+            approved: true
+        }
+    );
+}
+
+#[tokio::test]
 async fn an_agent_view_sends_one_prompt_at_a_time() {
     let (mut ui, mut requests, _peer, _path) = dashboard().await;
     let target = Target::Job {

@@ -196,6 +196,18 @@ pub fn worktree_repo(root: &Path, path: &Path) -> Option<PathBuf> {
     worktree_top(root, path).map(|linked| linked.source)
 }
 
+/// The SCV worktree under `root` that holds `path`, when its git link
+/// checks out. The branch is the one SCV recorded beside the worktree.
+pub(crate) fn worktree_ref(root: &Path, path: &Path) -> Option<WorktreeRef> {
+    let (top, record) = recorded(root, path)?;
+    verified_git_dir(&top, &record)?;
+    Some(WorktreeRef {
+        path: top.display().to_string(),
+        branch: record.branch,
+        repo: record.source.display().to_string(),
+    })
+}
+
 /// The SCV worktree under `root` that holds `path`, when its link checks
 /// out ([`verified_git_dir`]).
 fn worktree_top(root: &Path, path: &Path) -> Option<Linked> {

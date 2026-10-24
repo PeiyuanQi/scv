@@ -495,7 +495,9 @@ it: `CODEX_HOME`, `GROK_HOME` (`.grok`), `DSH_HOME` (`.dsh`), or
 Copilot, Cursor, Amp, and Kimi have no such variable and keep their state
 wherever they put it under the private `HOME` and XDG directories. Grok also gets
 `GROK_DISABLE_AUTOUPDATER=1`. Before those are set, SCV removes every inherited
-variable ending in `_API_KEY`, SCV's selector variables, and each adapter's
+variable ending in `_API_KEY`, SCV's selector variables, the AWS credential
+chain (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+`AWS_BEARER_TOKEN_BEDROCK`), and each adapter's
 credential, endpoint, and state variables (`ANTHROPIC_*` keys and tokens,
 `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `OPENAI_BASE_URL`,
 `CODEX_BASE_URL`, `GROK_*`, `DSH_*`, `DEEPSEEK_BASE_URL`, `PI_*`, `GEMINI_*`,
@@ -1519,7 +1521,9 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   when the agent can take steering, else as its next turn, queued behind a
   running one (`--queue` always queues; `--steer` fails when a turn is
   running and cannot take it, and starts a turn when none is). The turn runs as a job of the owner's in the conversation's
-  session.
+  session. A handle this session does not have is refused. A prompt sent
+  into a conversation that runs in an SCV worktree is recorded on that
+  worktree and runs in the conversation's directory.
 - *cancel* a running or queued job. A model's job the owner cancels is
   reported to the model as `cancelled`, with a note that the user stopped
   it, so it does not start it again unasked. A model can see the owner's
@@ -1535,7 +1539,10 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   beginning `[SCV] SCV stopped before your last turn on this task finished`
   with the task. Otherwise it runs the task again, beginning `[SCV] An
   earlier attempt at this task was cut off`, in the job's worktree when it
-  is still there, else in a new worktree of the same checkout. A model or
+  is still there, else in a new worktree of the same checkout. A queued
+  follow-up has no run of its own; resume uses the directory, and the SCV
+  worktree, of the conversation it continues when that run is still recorded.
+  A model or
   effort the agent does not take is left out, and the job's timeout carries
   over. The new job is the owner's; the records link each other
   (`resumed_as`, `resumed_from`).

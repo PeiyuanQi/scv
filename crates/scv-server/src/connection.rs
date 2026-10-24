@@ -811,10 +811,12 @@ impl Connection {
             return None;
         }
         let mut restored = 0u32;
+        let mut dropped = 0u32;
         for entry in saved.entries.iter().cloned() {
             if entry.prompt.len() > PROMPT_LIMIT_BYTES
                 || attachments::validate(&entry.attachments).is_err()
             {
+                dropped += 1;
                 continue;
             }
             if session
@@ -832,6 +834,7 @@ impl Connection {
             from: old.to_owned(),
             queued: restored,
             interrupted: saved.active.clone(),
+            dropped,
         };
         Some((claim, saved, restored))
     }

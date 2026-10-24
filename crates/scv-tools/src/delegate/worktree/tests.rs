@@ -86,6 +86,10 @@ async fn a_worktree_gets_its_own_branch_and_the_same_directory_inside_it() {
         worktree_repo(&repo.root, &created.cwd),
         Some(repo.repo.clone())
     );
+    assert_eq!(
+        worktree_ref(&repo.root, &created.cwd).as_ref(),
+        Some(&created.worktree)
+    );
     // A directory inside it names the whole worktree.
     assert_eq!(worktree_path(&repo.root, &created.cwd), Some(path.clone()));
     assert_eq!(worktree_path(&repo.root, &repo.repo), None);

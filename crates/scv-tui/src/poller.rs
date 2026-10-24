@@ -63,6 +63,10 @@ pub(crate) enum Answer {
     /// The request got no answer: the connection broke or could not be
     /// made. The poller connects again for the next request.
     Disconnected(Tag),
+    /// The request was not answered before its limit. The connection is
+    /// dropped, because a late reply would be read as the next request's;
+    /// the daemon may still be up, and the action may have taken effect.
+    TimedOut(Tag),
 }
 
 /// Start the poller for the daemon at `socket`: requests go in, answers
@@ -110,9 +114,14 @@ pub(crate) fn spawn(
                 Ok(Ok(Reply::Status(status))) => Answer::Status(request.tag, status),
                 Ok(Ok(Reply::Error(ErrorCode::InvalidJson, _))) => Answer::Unsupported,
                 Ok(Ok(Reply::Error(_, message))) => Answer::Refused(request.tag, message),
-                Ok(Err(())) | Err(_) => {
+                Ok(Err(())) => {
                     connection = None;
                     Answer::Disconnected(request.tag)
+                }
+                Err(_elapsed) => {
+                    // A late reply would be read as the next request's.
+                    connection = None;
+                    Answer::TimedOut(request.tag)
                 }
             };
             if answers.send(answer).is_err() {

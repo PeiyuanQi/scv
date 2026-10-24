@@ -256,7 +256,7 @@ fn a_control_heavy_prompt_still_loads() {
     record.error = Some("\u{1}".repeat(8 * 1024));
     ledger.save(&record);
     let loaded = load(root.path(), "session-1", "job-1").expect("record over the old cap vanished");
-    assert!(!loaded.prompt.is_empty());
+    assert_ne!(loaded.prompt, "");
 }
 
 #[test]

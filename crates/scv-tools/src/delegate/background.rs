@@ -1921,8 +1921,25 @@ impl BackgroundCapable {
                 .start_as(agent, arguments, &context, Turn::New, meta)
                 .map(OwnerCall::Job);
         };
+        let mut meta = meta;
+        if let Some(cwd) = self.conversations.cwd(&handle) {
+            if arguments.get("cwd").and_then(Value::as_str).is_none()
+                && let Some(object) = arguments.as_object_mut()
+            {
+                object.insert("cwd".into(), cwd.display().to_string().into());
+            }
+            if meta.worktree.is_none() {
+                meta.worktree = self.inner.worktree_at(&cwd);
+            }
+        }
         let place = self.jobs.lanes.join(&handle);
-        if place.ahead == 0 && !agent.backend.busy(&routed)? {
+        let busy = agent.backend.busy(&routed)?;
+        if !busy && !self.conversations.knows(&handle) {
+            return Err(ToolError::invalid_arguments(format!(
+                "no conversation {handle} in this session; it ended, or it was forgotten after it sat idle"
+            )));
+        }
+        if place.ahead == 0 && !busy {
             return self
                 .start_as(agent, arguments, &context, Turn::Next(place), meta)
                 .map(OwnerCall::Job);

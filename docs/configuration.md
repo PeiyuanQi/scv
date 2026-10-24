@@ -874,7 +874,9 @@ Native agent adapters run with an instance-private `HOME`, `SCV_HOME`, XDG
 configuration/data/state directories, and the agent's own state variable
 pointing inside it (`CODEX_HOME`, `GROK_HOME`, `DSH_HOME`, or
 `PI_CODING_AGENT_DIR`). They do not inherit `SCV_CONFIG`, `SCV_MODEL`,
-`SCV_PROVIDER`, `SCV_BASE_URL`, `SCV_API_KEY_ENV`, any `*_API_KEY` variable, or
+`SCV_PROVIDER`, `SCV_BASE_URL`, `SCV_API_KEY_ENV`, any `*_API_KEY` variable,
+the AWS credential chain (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`AWS_SESSION_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`), or
 any adapter's credential, endpoint, or state variables (such as
 `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `GROK_*`, `DSH_*`, or `PI_*`),
 and therefore cannot silently reuse or alter the user's normal agent

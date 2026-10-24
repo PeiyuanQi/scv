@@ -16,7 +16,7 @@ use crate::delegate::{
 };
 
 struct Bench {
-    _dir: tempfile::TempDir,
+    root: tempfile::TempDir,
     layout: Layout,
     workbench: Arc<Workbench>,
 }
@@ -28,7 +28,7 @@ fn bench() -> Bench {
     Bench {
         workbench: Workbench::new(&layout, registry),
         layout,
-        _dir: dir,
+        root: dir,
     }
 }
 
@@ -454,6 +454,131 @@ async fn an_interrupted_job_resumes_its_agents_own_conversation_once() {
         .await
         .unwrap_err();
     assert!(again.contains("already resumed"), "{again}");
+    host.release.notify_waiters();
+}
+
+#[tokio::test]
+async fn a_queued_follow_up_resumes_in_its_conversations_directory() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let mut follow = record("old-session", "job-9", AgentState::Interrupted, dead());
+    follow.arguments = json!({"session": "codex-1"});
+    follow.prompt = "also run clippy".into();
+    follow.worktree = None;
+    follow.interrupted = Some("its session ended before it finished".into());
+    ledger::save(&jobs, &follow).unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+    let activity = RunActivity::open(
+        &bench.layout.runs(),
+        dead(),
+        RunHeader {
+            handle: "codex-00abcd".into(),
+            agent: "codex".into(),
+            session: "old-session".into(),
+            transport: RunTransport::Cli,
+            cwd: workdir.path().to_owned(),
+            conversation: Some(("codex-1".into(), 1)),
+            streams: true,
+        },
+    )
+    .unwrap();
+    activity.turn_started(Some("codex-1"), 1, "Fix it", Some("job-1"));
+    std::mem::forget(activity);
+    let _host = live(&bench, "workbench-host");
+    let resumed = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-9")
+        .await
+        .unwrap();
+    let new = ledger::load(&jobs, "workbench-host", resumed.split('/').nth(1).unwrap()).unwrap();
+    assert_eq!(
+        new.arguments["cwd"],
+        workdir.path().display().to_string(),
+        "the follow-up resumed in the workspace root"
+    );
+    assert!(new.arguments.get("session").is_none());
+}
+
+#[tokio::test]
+async fn a_queued_follow_up_resumes_in_its_conversations_worktree() {
+    if which::which("git").is_err() {
+        return;
+    }
+    let bench = bench();
+    let home = std::fs::canonicalize(bench.root.path()).unwrap();
+    let workspace = home.join("workspace");
+    let repo = workspace.join("project");
+    std::fs::create_dir_all(repo.join("shop")).unwrap();
+    std::fs::write(repo.join("shop/cart.rs"), "fn main() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "."]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "first",
+    ]);
+    let created = crate::delegate::worktree::create(
+        &bench.layout.worktrees(),
+        &repo.join("shop"),
+        &workspace,
+        "codex",
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let jobs = bench.layout.jobs();
+    let mut follow = record("old-session", "job-9", AgentState::Interrupted, dead());
+    follow.arguments = json!({"session": "codex-1"});
+    follow.prompt = "also run clippy".into();
+    follow.worktree = None;
+    follow.interrupted = Some("its session ended before it finished".into());
+    ledger::save(&jobs, &follow).unwrap();
+    let activity = RunActivity::open(
+        &bench.layout.runs(),
+        dead(),
+        RunHeader {
+            handle: "codex-00abcd".into(),
+            agent: "codex".into(),
+            session: "old-session".into(),
+            transport: RunTransport::Cli,
+            cwd: created.cwd.clone(),
+            conversation: Some(("codex-1".into(), 1)),
+            streams: true,
+        },
+    )
+    .unwrap();
+    activity.turn_started(Some("codex-1"), 1, "Fix it", Some("job-1"));
+    std::mem::forget(activity);
+    let host = live(&bench, "workbench-host");
+    let resumed = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-9")
+        .await
+        .unwrap();
+    let new = ledger::load(&jobs, "workbench-host", resumed.split('/').nth(1).unwrap()).unwrap();
+    assert_eq!(
+        new.arguments["cwd"],
+        created.cwd.display().to_string(),
+        "the follow-up resumed in the conversation's worktree"
+    );
+    assert_eq!(new.worktree.as_ref(), Some(&created.worktree));
+    assert!(new.arguments.get("session").is_none());
     host.release.notify_waiters();
 }
 

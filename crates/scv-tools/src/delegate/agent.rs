@@ -206,6 +206,12 @@ impl AgentTool {
         }
     }
 
+    /// The SCV worktree holding `cwd`, when this tool creates worktrees
+    /// and `cwd` is inside one of them.
+    pub(crate) fn worktree_at(&self, cwd: &std::path::Path) -> Option<scv_protocol::WorktreeRef> {
+        crate::delegate::worktree::worktree_ref(self.worktrees.as_deref()?, cwd)
+    }
+
     /// Offer `worktree`, creating worktrees under `root`.
     pub(crate) fn with_worktrees(mut self, root: Option<std::path::PathBuf>) -> Self {
         self.worktrees = root;

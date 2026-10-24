@@ -214,8 +214,8 @@ async fn the_owners_prompt_to_a_busy_conversation_queues_or_refuses_to_steer() {
     session.release.add_permits(1);
     let result = session.result(queued["job"].as_str().unwrap()).await;
     assert_eq!(result["result"]["reply"], "owner");
-    // An idle conversation runs it at once.
-    let now = session
+    // A handle this session does not have is refused before a job starts.
+    let unknown = session
         .tool
         .owner_call(
             json!({"prompt":"again","session":"codex-2"}),
@@ -224,11 +224,11 @@ async fn the_owners_prompt_to_a_busy_conversation_queues_or_refuses_to_steer() {
             JobMeta::default(),
         )
         .await
-        .unwrap();
-    let OwnerCall::Job(now) = now else {
-        panic!("{now:?}");
-    };
-    assert_eq!(now.get("queued"), None);
+        .unwrap_err();
+    assert!(
+        unknown.message.contains("no conversation codex-2"),
+        "{unknown}"
+    );
 }
 
 /// An agent that continues a conversation from its own session ID.

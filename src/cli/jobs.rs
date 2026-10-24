@@ -230,7 +230,9 @@ async fn snapshot(layout: &Layout) -> Result<WorkbenchSnapshot> {
             let registry =
                 std::sync::Arc::new(scv_tools::delegation::DelegationRegistry::new(layout));
             let workbench = scv_tools::workbench::Workbench::new(layout, registry);
-            Ok(workbench.snapshot())
+            let mut snapshot = workbench.snapshot();
+            snapshot.restorable = scv_server::restorable_queues(layout);
+            Ok(snapshot)
         }
         Err(error) => Err(error),
     }
@@ -292,7 +294,8 @@ fn find_job(snapshot: &WorkbenchSnapshot, reference: &str) -> Result<WorkbenchJo
 async fn log(layout: &Layout, target: &str, follow: bool) -> Result<()> {
     let snapshot = snapshot(layout).await?;
     let handles: Vec<String> = if scv_tools::activity::valid_handle(target)
-        && snapshot.runs.iter().any(|run| run.handle == target)
+        && (snapshot.runs.iter().any(|run| run.handle == target)
+            || layout.runs().join(format!("{target}.jsonl")).is_file())
     {
         vec![target.to_owned()]
     } else {

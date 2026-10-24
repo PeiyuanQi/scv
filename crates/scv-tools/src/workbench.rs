@@ -287,14 +287,24 @@ impl Workbench {
                 answer: Some(sender),
             },
         );
-        // `biased` so an answer that arrives as the deadline fires is the
-        // one reported. Without it, `select` can take the sleep while
-        // `approve` already sent `true` and told the owner it was approved.
+        // An answer that lands as the deadline fires is still the answer.
+        // Closing the receiver and taking anything already sent stops the
+        // waiter from reporting a denial after `approve` has sent `true`.
+        let mut receiver = receiver;
         let answer = tokio::select! {
             biased;
-            answer = receiver => Ok(answer.unwrap_or(false)),
-            () = tokio::time::sleep(ATTENDED_WAIT) => Ok(false),
-            () = cancellation.cancelled() => Err(AgentError::Cancelled),
+            answer = &mut receiver => Ok(answer.unwrap_or(false)),
+            () = tokio::time::sleep(ATTENDED_WAIT) => {
+                receiver.close();
+                Ok(receiver.try_recv().unwrap_or(false))
+            }
+            () = cancellation.cancelled() => {
+                receiver.close();
+                match receiver.try_recv() {
+                    Ok(approved) => Ok(approved),
+                    Err(_) => Err(AgentError::Cancelled),
+                }
+            }
         };
         lock(&self.inner).approvals.remove(&id);
         answer
@@ -754,6 +764,11 @@ impl Workbench {
         let (successor, run, live) = {
             let (jobs, runs) = (self.jobs.clone(), self.runs.clone());
             let delegations = Arc::clone(&self.delegations);
+            let continued = record
+                .arguments
+                .get("session")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let (session, job, key) = (session.to_owned(), job.to_owned(), key.to_owned());
             tokio::task::spawn_blocking(move || {
                 // A job that names it as what it resumes settles it, should
@@ -763,14 +778,30 @@ impl Workbench {
                     .into_iter()
                     .find(|record| record.resumed_from.as_deref() == Some(key.as_str()))
                     .map(|record| format!("{}/{}", record.session, record.job));
-                let run = activity::list_states(&runs)
-                    .into_iter()
-                    .filter(|state| {
-                        state.session == session
-                            && (state.job.as_deref() == Some(job.as_str())
-                                || state.jobs.contains(&job))
-                    })
-                    .max_by_key(|state| state.started_unix);
+                let states = activity::list_states(&runs);
+                let served = |state: &activity::RunState| {
+                    state.session == session
+                        && (state.job.as_deref() == Some(job.as_str()) || state.jobs.contains(&job))
+                };
+                let run = states
+                    .iter()
+                    .filter(|state| served(state))
+                    .max_by_key(|state| state.started_unix)
+                    .cloned()
+                    .or_else(|| {
+                        // A queued follow-up has no run of its own. The
+                        // conversation it continues does, and that run has
+                        // the directory and the agent's session.
+                        let handle = continued.as_deref()?;
+                        states
+                            .iter()
+                            .filter(|state| {
+                                state.session == session
+                                    && state.conversation.as_deref() == Some(handle)
+                            })
+                            .max_by_key(|state| state.started_unix)
+                            .cloned()
+                    });
                 let live = run.as_ref().is_some_and(|run| {
                     delegations
                         .list(true)
@@ -791,6 +822,25 @@ impl Workbench {
                  within a minute (or `scv agents kill` it now). Resume it after that",
                 run.as_ref().map_or("", |run| run.handle.as_str())
             ));
+        }
+        let mut record = record;
+        if let Some(found) = &run
+            && found.cwd.is_dir()
+        {
+            let has_cwd = record
+                .arguments
+                .get("cwd")
+                .and_then(Value::as_str)
+                .is_some_and(|cwd| !cwd.is_empty());
+            if !has_cwd && let Some(object) = record.arguments.as_object_mut() {
+                object.insert("cwd".into(), found.cwd.display().to_string().into());
+            }
+            if record.worktree.is_none()
+                && let Some(worktree) =
+                    crate::delegate::worktree::worktree_ref(&self.worktrees, &found.cwd)
+            {
+                record.worktree = Some(worktree);
+            }
         }
         let cwd = run
             .as_ref()

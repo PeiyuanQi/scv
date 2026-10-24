@@ -77,7 +77,9 @@ widens what the agent could already reach with the user's permissions. SCV suppl
 directories, and the agent's own state variable (`CODEX_HOME`, `GROK_HOME`,
 `DSH_HOME`, or `PI_CODING_AGENT_DIR`) inside that home. It first removes from
 the child environment SCV's selector variables, every variable ending in
-`_API_KEY`, and the credential, endpoint, and state variables that any adapter
+`_API_KEY`, the AWS credential chain (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`),
+and the credential, endpoint, and state variables that any adapter
 declares (such as `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
 `OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, and `PI_*`), so no agent inherits the
 user's or another agent's model credentials. `GH_TOKEN` and `GITHUB_TOKEN`
@@ -320,7 +322,12 @@ whose link does not check out is listed from SCV's record alone and not
 removed. The record beside the worktree is trusted: it lives under
 `$SCV_HOME/worktrees`, which an unsandboxed agent can edit, and such an
 agent can already edit the source repository's git configuration. The checks
-defend an agent that can write only inside its worktree. Filter drivers
+defend an agent that can write only inside its worktree. They do not
+cover a `rust-toolchain.toml` in that worktree: the next launch there
+resolves its toolchain, so a `path` override runs as the owner.
+Toolchain files in a worktree must be trusted the same way
+[project Rust environment](tools.md#project-rust-environment) already
+requires. Filter drivers
 and other commands the source repository's own configuration names still
 run, as they would for the owner's `git` (`git worktree add` runs its smudge
 filters, for one); only hooks and the file-system monitor are off.

@@ -379,6 +379,17 @@ fn a_sent_prompt_comes_back_when_it_is_refused_or_lost() {
     view.sent = Some("again".into());
     workbench.answer(Answer::Disconnected(Tag::Send(target.clone())));
     assert_eq!(workbench.views[&target].input, "again");
+    let view = workbench.views.get_mut(&target).unwrap();
+    view.input.clear();
+    view.sent = Some("late".into());
+    // A slow send is not the daemon going away.
+    workbench.availability = Availability::Ready;
+    let note = workbench
+        .answer(Answer::TimedOut(Tag::Send(target.clone())))
+        .unwrap();
+    assert!(note.contains("timed out"), "{note}");
+    assert_eq!(workbench.views[&target].input, "late");
+    assert_eq!(workbench.availability, Availability::Ready);
     // Typed while the send was in flight: both lines come back, the refused
     // one first.
     let view = workbench.views.get_mut(&target).unwrap();
