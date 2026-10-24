@@ -578,6 +578,56 @@ impl BackgroundJobs {
         }
     }
 
+    /// For tests of what waits for a session's jobs, with the
+    /// `test-support` feature: start a job on `agent` that runs until the
+    /// returned sender is used or dropped.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_for_tests(self: &Arc<Self>, agent: &str) -> tokio::sync::oneshot::Sender<()> {
+        struct Waits(Mutex<Option<tokio::sync::oneshot::Receiver<()>>>);
+        #[async_trait]
+        impl Tool for Waits {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: AGENT_TOOL.into(),
+                    description: String::new(),
+                    parameters: json!({"type":"object"}),
+                }
+            }
+            fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
+                Ok(ToolRisk::Delegate)
+            }
+            fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
+                Ok(String::new())
+            }
+            async fn execute(
+                &self,
+                _arguments: Value,
+                _context: ToolContext,
+            ) -> Result<ToolOutput, ToolError> {
+                let release = lock(&self.0).take();
+                if let Some(release) = release {
+                    let _ = release.await;
+                }
+                Ok(ToolOutput::success(
+                    r#"{"status":"completed","reply":"done"}"#,
+                ))
+            }
+        }
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        let context = ToolContext::new(std::env::temp_dir(), CancellationToken::new());
+        self.start(
+            Arc::new(Waits(Mutex::new(Some(waiting)))),
+            AGENT_TOOL,
+            agent,
+            json!({"prompt": "wait"}),
+            &context,
+            Turn::New,
+            None,
+        )
+        .expect("a test job starts");
+        release
+    }
+
     /// Wake the session, as when a job finishes, for what is now due.
     fn wake(&self) {
         if let Some(finished) = &self.finished {

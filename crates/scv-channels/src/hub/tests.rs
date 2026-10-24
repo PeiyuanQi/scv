@@ -23,9 +23,15 @@ async fn bridges_and_chats_are_visible_while_registered() {
         })
     );
     assert_eq!(hub.session_work("session-1"), 3);
+    // Every chat's work counts for a planned restart, whichever asked.
+    let thread = registration.conversation("owner");
+    thread.update(Some("session-2"), 1);
+    assert_eq!(hub.background_work(), 4);
+    drop(thread);
     drop(chat);
     assert_eq!(hub.origin("session-1"), None);
     assert_eq!(hub.session_work("session-1"), 0);
+    assert_eq!(hub.background_work(), 0);
 
     let notify = hub.notify("wechat:default", "owner", "hello");
     let store = async {

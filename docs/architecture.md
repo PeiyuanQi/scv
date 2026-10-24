@@ -103,7 +103,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.4.1` and exact workspace dependency pins.
+`0.4.2` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -276,9 +276,13 @@ an owner's chat request to change, publish, and deploy SCV itself.
    at work, its daemon session has no running turn, running or unreported
    background job (one whose report turn failed and waits to be tried again
    included, and a cancelled reviewed job whose final outcome has not been
-   sent), and (through the channel hub) no unstored report; and no
-   chat bridge holds an owner message it has not answered durably, and no
-   email account is carrying out a mail action. A
+   sent), and (through the channel hub) no unstored report; no other
+   session of the daemon has such a background job either, since the
+   restart would stop it, and no chat has a background report not yet
+   stored in its outbox; and no chat bridge holds an owner message it has
+   not answered durably, and no email account is carrying out a mail
+   action. While jobs hold it, `daemon.status` says how many and in how many
+   sessions (`restart.waiting_for`: `2 background jobs in 1 session`). A
    per-turn CLI run is at work while it has live processes. A live child (a
    nested SCV or an ACP agent) keeps its process for its whole conversation,
    so it is at work only while a turn runs on it (`idle_since_unix` is absent

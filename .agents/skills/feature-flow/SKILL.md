@@ -196,7 +196,8 @@ scripts/deploy.sh <version>
   flow runs as its delegated agent, once your job has finished (as a nested
   SCV or ACP agent: once your turn has ended and, as a nested SCV, any
   background jobs you started have been reported to you) and its report is
-  stored, or after `SCV_RESTART_MAX_WAIT` seconds (600) at the latest. A
+  stored, once no session's background job still runs or waits to be
+  reported, or after `SCV_RESTART_MAX_WAIT` seconds (600) at the latest. A
   watchdog outside the daemon then checks that the new version comes up with
   its channel accounts connected, and puts `scv.prev` back if it does not
   (only between releases with the same config layout). Never pass

@@ -639,6 +639,7 @@ impl Connection {
         };
         send_event(&self.output, snapshot, max_bytes).await?;
         self.activity = Some(restart::SessionTracker::new(
+            self.instance.layout.home(),
             &session.id,
             session.background.as_ref(),
         ));

@@ -65,7 +65,8 @@ pub(crate) struct State {
     /// The agent of the latest reviewer attempt.
     pub(crate) reviewer: String,
     pub(crate) fallback: Option<String>,
-    /// Shown once the job holds the builder conversation's lane.
+    /// The latest round's builder conversation, shown once the job holds
+    /// it.
     pub(crate) builder_session: Option<String>,
     /// The outcome the loop fixed, with its reason.
     fixed: Option<(ReviewOutcome, Option<String>)>,

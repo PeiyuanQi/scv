@@ -475,7 +475,7 @@ async fn an_approval_in_round_one_takes_one_builder_and_one_reviewer_turn() {
 }
 
 #[tokio::test]
-async fn changes_then_approve_continues_the_builder_with_a_fresh_reviewer_each_round() {
+async fn changes_then_approve_starts_a_fresh_builder_and_reviewer_each_round() {
     let mut session = fixture(&["codex", "claude", "grok"]);
     session.script("codex", [says("First try."), says("Used a lock.")]);
     session.script("claude", [verdict(CHANGES), verdict(RESOLVED)]);
@@ -489,27 +489,163 @@ async fn changes_then_approve_continues_the_builder_with_a_fresh_reviewer_each_r
     assert_eq!(outcome.review.round, 2);
     let calls = session.calls();
     assert_eq!(session.order(), ["codex", "claude", "codex", "claude"]);
-    // Round 2 continues the builder's conversation...
-    assert_eq!(calls[2].session.as_deref(), Some("codex-1"));
+    // Round 2's builder is a new conversation, briefed with the task, the
+    // last report, and the findings...
+    assert_eq!(calls[2].session, None);
     assert!(calls[2].prompt.starts_with("[SCV review, round 2 of 3]"));
+    assert!(
+        calls[2]
+            .prompt
+            .contains("The task, as it was first given:\nFix it.")
+    );
+    assert!(calls[2].prompt.contains("First try."));
     assert!(
         calls[2]
             .prompt
             .contains("- 1.1 [blocking] \"Sleep instead of a lock\"")
     );
     assert!(calls[2].prompt.contains("- 1.2 [minor] \"Typo\""));
-    // ...and each round's reviewer is a new conversation.
+    // ...and so is each round's reviewer.
     assert_eq!(calls[3].session, None);
-    let handles: Vec<String> = lock(&session.script.handles)
-        .iter()
-        .filter(|(agent, _)| agent == "claude")
-        .map(|(_, handle)| handle.clone())
-        .collect();
-    assert_eq!(handles, ["claude-1", "claude-2"]);
+    let handles = |name: &str| -> Vec<String> {
+        lock(&session.script.handles)
+            .iter()
+            .filter(|(agent, _)| agent == name)
+            .map(|(_, handle)| handle.clone())
+            .collect()
+    };
+    assert_eq!(handles("codex"), ["codex-1", "codex-2"]);
+    assert_eq!(handles("claude"), ["claude-1", "claude-2"]);
     assert!(calls[3].prompt.contains("1.1 [blocking]"));
     assert!(calls[3].prompt.contains("Focus from the user: no sleeps"));
     assert_eq!(result["review"]["findings"], json!([]));
-    assert_eq!(session.conversations.handles(), ["codex-1"]);
+    // The result names the last round's builder conversation, the only one
+    // left: round 1's ended when round 2 began.
+    assert_eq!(report.session.as_deref(), Some("codex-2"));
+    assert_eq!(result["review"]["builder_session"], "codex-2");
+    assert_eq!(session.conversations.handles(), ["codex-2"]);
+}
+
+#[tokio::test]
+async fn a_reviewed_call_that_continues_a_conversation_leaves_it_to_the_caller_after_round_one() {
+    // Claude is preferred, and the call names its Codex builder only
+    // through the conversation.
+    let mut session = fixture(&["claude", "codex", "grok"]);
+    session.script("codex", [says("Ready.")]);
+    session
+        .start(json!({"agent":"codex","prompt":"Start.","background":true}))
+        .await
+        .unwrap();
+    session.finished.recv().await.unwrap();
+    let _ = session.jobs.take_unreported();
+    session.script("codex", [says("First try."), says("Used a lock.")]);
+    session.script("claude", [verdict(CHANGES), verdict(RESOLVED)]);
+    session
+        .start(json!({"prompt":"Fix it.","session":"codex-1","review":{}}))
+        .await
+        .unwrap();
+    let (report, _) = session.finished().await;
+    assert_eq!(outcome(&report).review.outcome, ReviewOutcome::Approved);
+    let calls = session.calls();
+    // Round 1 continues the call's conversation; round 2 starts one with
+    // the same builder agent.
+    assert_eq!(
+        session.order(),
+        ["codex", "codex", "claude", "codex", "claude"]
+    );
+    assert_eq!(calls[1].session.as_deref(), Some("codex-1"));
+    assert_eq!(calls[3].session, None);
+    assert_eq!(report.session.as_deref(), Some("codex-2"));
+    // The call's conversation stays the caller's, for a later call.
+    assert_eq!(session.conversations.handles(), ["codex-1", "codex-2"]);
+}
+
+#[tokio::test]
+async fn a_continued_conversation_lost_in_round_one_is_still_reviewed() {
+    let mut session = fixture(&["claude", "codex"]);
+    session.script("claude", [says("Ready.")]);
+    session
+        .start(json!({"prompt":"Start.","background":true}))
+        .await
+        .unwrap();
+    session.finished.recv().await.unwrap();
+    let _ = session.jobs.take_unreported();
+    session.script(
+        "claude",
+        [Step::Reply {
+            status: "completed",
+            reply: "Done.".into(),
+            error: None,
+            lost: true,
+        }],
+    );
+    session.script("codex", [verdict(APPROVE)]);
+    session
+        .start(json!({"prompt":"Fix it.","session":"claude-1","review":{}}))
+        .await
+        .unwrap();
+    let (report, _) = session.finished().await;
+    // No later round needs the call's conversation, so its loss stops
+    // nothing.
+    assert_eq!(session.order(), ["claude", "claude", "codex"]);
+    assert_eq!(outcome(&report).review.outcome, ReviewOutcome::Approved);
+}
+
+#[tokio::test]
+async fn a_reviewer_whose_reply_is_only_a_provider_error_is_unavailable() {
+    for (status, reply) in [
+        (
+            "completed",
+            "I'll check the diff, then run the tests.Selected model is at capacity. Please try \
+             a different model.",
+        ),
+        (
+            "failed",
+            "exceeded retry limit, last status: 429 Too Many Requests, request id: a4a1",
+        ),
+    ] {
+        let mut session = fixture(&["claude", "codex", "grok"]);
+        session.script("claude", [says("Done.")]);
+        session.script("codex", [ends(status, reply, None)]);
+        session.script("grok", [verdict(APPROVE)]);
+        session
+            .start(json!({"prompt":"Fix it.","review":{}}))
+            .await
+            .unwrap();
+        let (report, _) = session.finished().await;
+        // No repair turn: the next reviewer takes the round.
+        assert_eq!(session.order(), ["claude", "codex", "grok"], "{status}");
+        let outcome = outcome(&report);
+        assert_eq!(outcome.review.outcome, ReviewOutcome::Approved);
+        assert_eq!(outcome.review.reviewer, "grok");
+        assert_eq!(
+            outcome.review.fallback.as_deref(),
+            Some("codex unavailable")
+        );
+        assert_eq!(outcome.review.tried[0].result, ReviewerResult::Unavailable);
+        let finished = session
+            .journal()
+            .into_iter()
+            .find(|event| event["event"] == "reviewer.finished")
+            .unwrap();
+        assert_eq!(finished["unavailable"], true);
+    }
+    // A named reviewer is never swapped: the round has no verdict.
+    let mut session = fixture(&["claude", "codex", "grok"]);
+    session.script("claude", [says("Done.")]);
+    session.script("codex", [says("503 NO_AVAILABLE_CHANNEL")]);
+    session
+        .start(json!({"prompt":"Fix it.","review":{"agent":"codex"}}))
+        .await
+        .unwrap();
+    let (report, _) = session.finished().await;
+    assert_eq!(session.order(), ["claude", "codex"]);
+    let outcome = outcome(&report);
+    assert_eq!(outcome.review.outcome, ReviewOutcome::NoVerdict);
+    assert_eq!(
+        outcome.review.reason.as_deref(),
+        Some("reviewer_unavailable")
+    );
 }
 
 #[tokio::test]
@@ -607,8 +743,9 @@ async fn an_unavailable_reviewer_hands_over_in_the_same_round_and_stays_skipped(
             .unwrap(),
         "job-1 · Review: approved · round 2 of 3 · reviewer grok (codex unavailable)"
     );
-    // Every attempt's conversation is released.
-    assert_eq!(session.conversations.handles(), ["claude-1"]);
+    // Every attempt's conversation is released, and so is round 1's
+    // builder conversation.
+    assert_eq!(session.conversations.handles(), ["claude-2"]);
 }
 
 #[tokio::test]
@@ -1545,15 +1682,44 @@ async fn the_pinned_builder_survives_idle_expiry_during_a_long_review() {
             idle: Duration::from_millis(1),
         },
     );
-    session.script("claude", [says("One."), says("Two.")]);
-    session.script("codex", [verdict(CHANGES), verdict(RESOLVED)]);
+    session.script(
+        "claude",
+        [
+            says("One."),
+            says("Two."),
+            says(block("scv-landing", LANDED)),
+        ],
+    );
+    session.script(
+        "codex",
+        [
+            verdict(CHANGES),
+            verdict(
+                r#"{"verdict":"approve","summary":"Fixed.","evidence":["ran it 20x"],"prior":[{"id":"1.1","status":"resolved"}],"approved":{"base":"1b2c3d4","head":"7e8f9a0"}}"#,
+            ),
+            says(block(
+                "scv-landing-check",
+                r#"{"status":"confirmed","ref":"origin/main","commits":["4f2a9c1"],"evidence":["diff equals 1b2c3d4..7e8f9a0"]}"#,
+            )),
+        ],
+    );
     session
-        .start(json!({"prompt":"Fix it.","review":{}}))
+        .start(json!({"prompt":"Fix it.","review":{"land":"after_approval"}}))
         .await
         .unwrap();
     let (report, _) = session.finished().await;
-    assert_eq!(outcome(&report).review.outcome, ReviewOutcome::Approved);
-    assert_eq!(session.calls()[2].session.as_deref(), Some("claude-1"));
+    let outcome = outcome(&report);
+    assert_eq!(outcome.review.outcome, ReviewOutcome::Approved);
+    assert_eq!(outcome.landing.status, LandingStatus::Landed);
+    // Round 2's conversation outlived the review that followed it, so the
+    // landing turn continues it.
+    let calls = session.calls();
+    assert_eq!(
+        session.order(),
+        ["claude", "codex", "claude", "codex", "claude", "codex"]
+    );
+    assert_eq!(calls[2].session, None);
+    assert_eq!(calls[4].session.as_deref(), Some("claude-2"));
 }
 
 #[tokio::test]

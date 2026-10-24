@@ -68,7 +68,8 @@ owns in a separate home. SCV pins the selected billing identity on every launch.
 ### Updates without dropping work
 
 `scv restart --when-idle` waits until the work that asked for it has reported
-back, then restarts into the new release. A watchdog checks that the new
+back and no background job is still running, then restarts into the new
+release. A watchdog checks that the new
 version comes up with its chat accounts connected and, where the config layout
 allows, rolls back if it does not. That is how SCV ships its own releases from
 chat, asking you before it publishes.

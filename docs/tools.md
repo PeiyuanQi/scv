@@ -705,8 +705,9 @@ before the CLI reports a session is forgotten.
 Each session remembers at most `agent.max_conversations` conversations
 (default 8; starting another forgets the least recently used idle one) and
 forgets one left unused for `agent.conversation_idle_seconds` (default 86400).
-A [reviewed job](#reviewed-jobs) holds its builder's conversation, and its
-approving reviewer's until the landing is confirmed, out of both. When every
+A [reviewed job](#reviewed-jobs) holds its current round's builder
+conversation, and its approving reviewer's until the landing is confirmed,
+out of both. When every
 conversation is running a turn or held so, starting another fails with `all N
 conversations of this session are running a turn` (`or held by a reviewed
 job` when some are held).
@@ -917,10 +918,19 @@ A Claude sibling is never in that order. Agents the session does not offer
 are dropped before approval. A fresh conversation of the builder's own agent
 shares the builder agent's private home and memory, so SCV labels it
 `same agent as builder`. SCV moves to the
-next agent, in the same round, only when the attempt is classed unavailable,
+next agent, in the same round, only when the attempt is classed unavailable:
 exactly as an ordinary call's `fallback` is decided (see
-[Choosing an agent](#choosing-an-agent)): from its status and structured
-error, never its reply. Such an agent is skipped for the rest of the job.
+[Choosing an agent](#choosing-an-agent)), from its status and structured
+error, or when the reviewer's whole reply is a provider error that its
+harness passed off as a reply, as Codex's ACP server does with `Selected
+model is at capacity…`, `exceeded retry limit, last status: 429…`, or
+`unexpected status 503 …`, and Claude Code with `API Error: 529 …`. Such a
+reply ends with the error, on one line that starts the reply or a sentence,
+after at most a short opening; one longer than 2 KiB or with a fenced block
+is read as a review, and one that only mentions such an error is not
+unavailable. A reviewer's words can therefore at most hand the round to the
+next reviewer, never approve. Such an agent is skipped for the rest of the
+job.
 A refusal (`declined`) hands the review to `grok` for the rest of the job
 when `grok` is offered and is neither the agent that refused nor the
 builder's agent; otherwise, or when `grok` then declines or is unavailable,
@@ -936,15 +946,20 @@ or a verdict of any kind.
 A round is one builder turn, then one verdict on it from a reviewer
 conversation started for that round:
 
-1. The builder works in one conversation for the whole job: a new one, or
-   the call's `session`. Round 1 gets the prompt plus SCV's notice of the
-   review, the round limit, the landing mode, and the `scv-landing` block.
-   Later rounds get a fix prompt, `[SCV review, round k of R]`, listing the
-   open blocking findings by number and the last verdict's minor ones, and,
-   when commits already landed, that fixes go on top. The builder may answer
-   a finding with reasons instead of a change. A turn that does not
-   complete stops the job (`stopped`, `builder_<status>`); a first turn
-   without a conversation to continue stops it with `builder_no_session`.
+1. Each round's builder turn runs in a conversation of its own, so no
+   conversation carries every round's transcript: round 1 in a new one or
+   the call's `session`, every later round in a new one. Round 1 gets the
+   prompt plus SCV's notice of the review, the round limit, the landing
+   mode, and the `scv-landing` block. Later rounds get a fix prompt,
+   `[SCV review, round k of R]`, which says that the earlier rounds' work
+   is already in the directory and gives what a new conversation needs: the
+   prompt as first given with the same notice, the previous round's report
+   (8 KiB, marked untrusted), the open blocking findings by number and the
+   last verdict's minor ones, and, when commits already landed, that fixes
+   go on top. The builder may answer a finding with reasons instead of a
+   change. A turn that does not complete stops the job (`stopped`,
+   `builder_<status>`); one that starts a conversation SCV cannot continue
+   stops it with `builder_no_session`.
 2. A new reviewer conversation, in the builder's `cwd`, gets SCV's rules,
    the builder's prompt (8 KiB), `focus`, the landing mode, the builder's
    latest reply (8 KiB, marked untrusted), and from round 2 the open findings
@@ -961,13 +976,19 @@ conversation started for that round:
    (`round_limit`), so the last builder turn always gets a verdict;
    otherwise the next round begins.
 
-The job holds the builder conversation's place in its lane for every round,
-so other calls to it queue behind the whole job, and pins it against
-eviction and idle expiry. A reviewer conversation is released after its
-round on every path and its handle is never returned; the approving
-reviewer of an `after_approval` job is kept, pinned, until its confirmation
-ends. The builder's handle comes back in the result (`session` and
-`review.builder_session`). Each turn has its own timeout: builder and
+The job holds the latest round's builder conversation: its place in its
+lane, so other calls to it queue behind the whole job, and a pin against
+eviction and idle expiry. A builder conversation the job started ends when
+the next round starts its own, and a call queued for it then fails as for
+any ended conversation. One the call named stays the caller's: it is
+unpinned after round 1, so like any idle conversation it may be forgotten
+when the session needs its slot, and its lane place is held until the job
+ends. A reviewer conversation is released after its round on every path and
+its handle is never returned; the approving reviewer of an `after_approval`
+job is kept, pinned, until its confirmation ends. The landing turn continues
+the approved round's builder conversation, and the last round's builder
+handle comes back in the result (`session` and `review.builder_session`).
+Each turn has its own timeout: builder and
 landing turns the call's `timeout_seconds`, reviewer and confirmation turns
 `review.timeout_seconds`, repair turns the lower of 300 seconds and that.
 A `no_timeout` call's builder, landing, reviewer, and confirmation turns

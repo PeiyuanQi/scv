@@ -740,9 +740,64 @@ async fn a_live_agents_own_jobs_hold_a_restart_no_longer_than_its_deadline() {
     agent.wait().unwrap();
 }
 
+#[tokio::test]
+async fn a_restart_waits_for_every_sessions_jobs_not_only_the_requesters() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = Arc::new(DelegationRegistry::new(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let hub = Hub::new(None);
+    let (restarter, launched, _components) = recording(home.path(), &hub, &registry);
+    // The session that asked has nothing left to do...
+    let asking = Arc::new(BackgroundJobs::new(2, None));
+    let _asking = SessionTracker::new(home.path(), "asking", Some(&asking));
+    // ...but another session of this daemon still runs a job.
+    let other = Arc::new(BackgroundJobs::new(2, None));
+    let _other = SessionTracker::new(home.path(), "other", Some(&other));
+    let release = other.start_for_tests("codex");
+    // A session of another instance is not this restart's business.
+    let elsewhere = Arc::new(BackgroundJobs::new(2, None));
+    let _elsewhere = SessionTracker::new(Path::new("/elsewhere"), "elsewhere", Some(&elsewhere));
+    let _held = elsewhere.start_for_tests("claude");
+
+    let mut waiting = plan(PlanState::Waiting);
+    waiting.requester = Some(Requester {
+        handle: "codex-a1b2c3".into(),
+        session: "asking".into(),
+    });
+    waiting.requested_unix = unix_now();
+    waiting.deadline_unix = unix_now() + 600;
+    let info = restarter.arm(waiting).unwrap();
+    assert_eq!(
+        info.waiting_for.as_deref(),
+        Some("1 background job in 1 session")
+    );
+    // More checks than a restart needs clear pass while the job runs.
+    tokio::time::sleep(Duration::from_millis(u64::from(CLEAR_CHECKS + 1) * 1000)).await;
+    assert!(launched.lock().unwrap().is_empty());
+    // It finishes, and still holds the restart until it is reported.
+    release.send(()).unwrap();
+    eventually(|| other.running() == 0).await;
+    assert_eq!(
+        restarter
+            .info()
+            .and_then(|info| info.waiting_for)
+            .as_deref(),
+        Some("1 background job in 1 session")
+    );
+    let reported: Vec<String> = other
+        .take_unreported()
+        .into_iter()
+        .map(|report| report.job)
+        .collect();
+    other.report_settled(&reported);
+    eventually(|| launched.lock().unwrap().len() == 1).await;
+    assert!(!launched.lock().unwrap()[0].waited_out);
+}
+
 #[test]
 fn session_activity_counts_turns_until_the_session_ends() {
-    let tracker = SessionTracker::new("session-activity-test", None);
+    let tracker = SessionTracker::new(Path::new("/activity-test"), "session-activity-test", None);
     assert!(!session_busy("session-activity-test"));
     tracker.set_busy(true);
     assert!(session_busy("session-activity-test"));
@@ -916,7 +971,7 @@ fn owed_outcome() -> (scv_protocol::JobChange, scv_protocol::JobOutcome) {
 #[test]
 fn a_final_outcome_still_owed_keeps_the_session_busy_until_it_is_sent() {
     let jobs = Arc::new(BackgroundJobs::new(2, None));
-    let _tracker = SessionTracker::new("owed-session", Some(&jobs));
+    let _tracker = SessionTracker::new(Path::new("/owed-test"), "owed-session", Some(&jobs));
     assert!(!session_busy("owed-session"));
     // Through an update: the pending change, then the final outcome.
     let (change, last) = owed_outcome();
@@ -950,7 +1005,7 @@ async fn a_restart_waits_until_a_cancels_final_outcome_is_queued_to_the_client()
     use scv_core::{CoreEvent, EventSink, ToolOutput};
 
     let jobs = Arc::new(BackgroundJobs::new(2, None));
-    let _tracker = SessionTracker::new("owed-backpressure", Some(&jobs));
+    let _tracker = SessionTracker::new(Path::new("/owed-test"), "owed-backpressure", Some(&jobs));
     let (output, mut frames) = outbound_channel(64 * 1024);
     // The client reads nothing for now: the queue is full.
     let held = Arc::clone(&output.budget)

@@ -2,23 +2,26 @@
 //! in which a builder does the work and a fresh reviewer on another agent
 //! checks it, round by round, on a structured verdict.
 //!
-//! A round is one builder turn, in one conversation the job holds for its
-//! whole life, then one verdict on it from a reviewer conversation started
-//! for that round. SCV code alone decides from the parsed verdict, the round
-//! counter, turn statuses, and cancellation whether to go on: only `approve`
-//! approves, the loop never runs past the call's round limit, and the last
-//! round's builder turn always gets a verdict. With `land: after_approval`
-//! the builder lands in one more turn after approval, and the approving
-//! reviewer then checks the landed commits in one confirmation turn, which
-//! is not a round. The job records every step in its journal and ends with
-//! the builder's last result plus SCV's own `review` and `landing` fields.
+//! A round is one builder turn, in a conversation of its own (round 1's may
+//! be the call's), then one verdict on it from a reviewer conversation
+//! started for that round. SCV code alone decides from the parsed verdict,
+//! the round counter, turn statuses, and cancellation whether to go on: only
+//! `approve` approves, the loop never runs past the call's round limit, and
+//! the last round's builder turn always gets a verdict. With
+//! `land: after_approval` the builder lands in one more turn after approval,
+//! in the approved round's conversation, and the approving reviewer then
+//! checks the landed commits in one confirmation turn, which is not a round.
+//! The job records every step in its journal and ends with the builder's
+//! last result plus SCV's own `review` and `landing` fields.
 //!
 //! The reviewer is routed by family: Claude-family work goes to Codex then
 //! Grok, Codex work goes to claude-ai then claude then Grok, and other work
 //! goes to claude-ai, claude, Codex, then Grok; a fresh conversation of the
-//! builder's own agent is the last resort. Only the availability classification of the result moves
-//! to the next agent. A refusal hands the review to Grok for the rest of the
-//! job, never to the builder's own agent. A named reviewer is never swapped.
+//! builder's own agent is the last resort. Only an unavailable reviewer
+//! moves to the next agent: the availability classification of the result,
+//! or a reply that is nothing but a provider error. A refusal hands the
+//! review to Grok for the rest of the job, never to the builder's own agent.
+//! A named reviewer is never swapped.
 
 mod blocks;
 mod journal;
@@ -52,6 +55,7 @@ use crate::{
     delegate::{
         agent::{AgentTool, Offered},
         background::lane::{Lanes, Place},
+        choice,
         conversation::{ALL_IN_USE, ConversationStore, PinGuard},
         request::{AgentArgs, blank_as_none},
     },
@@ -811,6 +815,21 @@ impl Turn {
         self.status == JobStatus::Completed
     }
 
+    /// Read a reviewer's turn: one whose reply is nothing but a provider
+    /// error, which its harness passed off as a reply, counts as the
+    /// reviewer being unavailable, like a failure with an availability
+    /// error.
+    fn read_reviewer(agent: &str, result: Result<ToolOutput, ToolError>) -> Self {
+        let mut turn = Self::read(agent, result);
+        if !turn.unavailable
+            && matches!(turn.status, JobStatus::Completed | JobStatus::Failed)
+            && choice::provider_error_only(&turn.reply)
+        {
+            turn.unavailable = true;
+        }
+        turn
+    }
+
     /// `timed out`, `failed`, and so on, for SCV's words.
     fn ended(&self) -> Option<&'static str> {
         match self.status {
@@ -846,11 +865,17 @@ struct Run<'a> {
     tool: &'a ReviewedTool,
     context: ToolContext,
     token: CancellationToken,
-    /// The builder's conversation, once known.
+    /// The latest round's builder conversation, once known: the call's own
+    /// `session` in round 1, then each later round's new one.
     handle: Option<String>,
+    /// The loop started `handle`, so it ends it when a later round replaces
+    /// it.
+    own: bool,
     /// The lane place the loop took for a conversation it started.
     place: Option<Place>,
     pin: Option<PinGuard>,
+    /// The conversation the call continued, held through round 1.
+    call_pin: Option<PinGuard>,
     round: u32,
     /// Blocking findings still open.
     open: Vec<Finding>,
@@ -878,8 +903,10 @@ impl<'a> Run<'a> {
             token: context.cancellation.clone(),
             context,
             handle,
+            own: false,
             place: None,
             pin: None,
+            call_pin: None,
             round: 0,
             open: Vec::new(),
             findings: Vec::new(),
@@ -935,7 +962,7 @@ impl<'a> Run<'a> {
         if let Some(handle) = self.handle.clone() {
             // The job's lane place for a conversation it continues was
             // taken when the call arrived and is held to the end.
-            self.pin = self.tool.conversations.pin(&handle);
+            self.call_pin = self.tool.conversations.pin(&handle);
             self.update(|state| state.builder_session = Some(handle));
         }
         let mut prompt = format!(
@@ -946,30 +973,36 @@ impl<'a> Run<'a> {
         for round in 1..=rounds {
             self.round = round;
             self.update(|state| state.round = round);
-            self.builder_turn(TurnKind::Round, prompt).await?;
+            // Round 1 continues the call's conversation, if it named one;
+            // every later round starts a new conversation, seeded with what
+            // it needs, so no conversation carries every round's transcript.
+            let session = if round == 1 {
+                self.handle.clone()
+            } else {
+                self.end_own();
+                self.call_pin = None;
+                None
+            };
+            self.builder_turn(TurnKind::Round, prompt, session).await?;
             let (status, session, reply) = self
                 .builder
                 .as_ref()
                 .map_or((JobStatus::Failed, None, String::new()), |turn| {
                     (turn.status, turn.session.clone(), turn.reply.clone())
                 });
+            // The turn's conversation is the builder's now (`builder_turn`
+            // adopted it), or round 1 continued the call's, which no later
+            // round needs.
+            let adopted = match session {
+                Some(session) => self.handle.as_deref() == Some(session.as_str()),
+                None => round == 1 && self.handle.is_some(),
+            };
             if status != JobStatus::Completed {
                 let reason = status_reason("builder", status);
                 return Err(self.stop(ReviewOutcome::Stopped, Some(&reason)));
             }
-            if round == 1 && self.handle.is_none() {
-                let Some(handle) = session else {
-                    return Err(self.stop(ReviewOutcome::Stopped, Some("builder_no_session")));
-                };
-                // Held before the handle is shown anywhere, so a later call
-                // to the conversation queues behind the whole job.
-                self.place = Some(self.tool.lanes.join(&handle));
-                self.pin = self.tool.conversations.pin(&handle);
-                if self.pin.is_none() {
-                    return Err(self.stop(ReviewOutcome::Stopped, Some("builder_no_session")));
-                }
-                self.handle = Some(handle.clone());
-                self.update(|state| state.builder_session = Some(handle));
+            if !adopted {
+                return Err(self.stop(ReviewOutcome::Stopped, Some("builder_no_session")));
             }
             let (verdict, reviewer, held) = self.review(round, &reply).await?;
             self.settle(round, &verdict);
@@ -994,19 +1027,56 @@ impl<'a> Run<'a> {
                             .cloned(),
                     );
                     let landed = self.live().read(|state| state.landing.landed_so_far());
-                    prompt = prompts::fix_prompt(
-                        round + 1,
+                    prompt = prompts::fix_prompt(&prompts::FixBrief {
+                        round: round + 1,
                         rounds,
-                        self.plan().land,
-                        &findings,
-                        landed
+                        land: self.plan().land,
+                        prompt: &self.tool.prompt,
+                        report: &reply,
+                        findings: &findings,
+                        landed: landed
                             .as_ref()
                             .map(|(reference, commits)| (reference.as_str(), commits.as_slice())),
-                    );
+                    });
                 }
             }
         }
         Ok(())
+    }
+
+    /// Make `handle`, the conversation the latest round's builder turn
+    /// started, the builder's: its lane place is taken and it is pinned
+    /// before the handle is shown anywhere, so a later call to it queues
+    /// behind the whole job. Nothing changes when the session no longer
+    /// has it.
+    fn adopt(&mut self, handle: String) {
+        let place = self.tool.lanes.join(&handle);
+        let Some(pin) = self.tool.conversations.pin(&handle) else {
+            return;
+        };
+        self.end_own();
+        self.place = Some(place);
+        self.pin = Some(pin);
+        self.handle = Some(handle.clone());
+        self.own = true;
+        self.update(|state| state.builder_session = Some(handle));
+    }
+
+    /// End the builder conversation an earlier round started, which no
+    /// later turn continues. One the call named stays the caller's.
+    fn end_own(&mut self) {
+        if std::mem::take(&mut self.own)
+            && let Some(handle) = self.handle.take()
+        {
+            // Gone before its lane place is, so a call that queued behind
+            // the job finds it ended instead of running beside the next
+            // round.
+            self.tool.conversations.release(&handle);
+            // Never shown once it is gone.
+            self.update(|state| state.builder_session = None);
+        }
+        self.pin = None;
+        self.place = None;
     }
 
     /// Number the verdict's findings and work out which blocking ones stay
@@ -1057,11 +1127,16 @@ impl<'a> Run<'a> {
         });
     }
 
-    /// Run one builder turn of `kind` with `prompt` and record it, its
-    /// landing report included. The turn is kept as the builder's latest
-    /// (`self.builder`) before anything that can fail, so the result never
-    /// shows an older one.
-    async fn builder_turn(&mut self, kind: TurnKind, prompt: String) -> Result<(), Halt> {
+    /// Run one builder turn of `kind` with `prompt`, in conversation
+    /// `session` or a new one, and record it, its landing report included.
+    /// The turn is kept as the builder's latest (`self.builder`) before
+    /// anything that can fail, so the result never shows an older one.
+    async fn builder_turn(
+        &mut self,
+        kind: TurnKind,
+        prompt: String,
+        session: Option<String>,
+    ) -> Result<(), Halt> {
         let round = self.round;
         let (phase, line) = match kind {
             TurnKind::Round => (
@@ -1083,7 +1158,8 @@ impl<'a> Run<'a> {
             "builder.started",
             json!({"round": round, "kind": kind.as_str()}),
         )?;
-        if let Some(place) = &self.place
+        if session.is_some()
+            && let Some(place) = &self.place
             && place.wait_first(&self.token).await.is_err()
         {
             return Err(Halt::Done);
@@ -1091,8 +1167,13 @@ impl<'a> Run<'a> {
         let mut call = self.tool.call.clone();
         if let Some(object) = call.as_object_mut() {
             object.insert("prompt".into(), prompt.into());
-            if let Some(handle) = &self.handle {
-                object.insert("session".into(), handle.clone().into());
+            if let Some(handle) = session {
+                object.insert("session".into(), handle.into());
+            } else {
+                // A new conversation of the builder's agent, which the
+                // call may have named only through its `session`.
+                object.remove("session");
+                object.insert("agent".into(), self.plan().builder.clone().into());
             }
         }
         let result = self
@@ -1110,6 +1191,14 @@ impl<'a> Run<'a> {
         self.update(|state| {
             state.landing.record(kind, round, ended, &report);
         });
+        // A conversation the turn started is the builder's at once, even
+        // when the turn failed or the job stops next, so the result names
+        // the conversation the work is in.
+        if let Some(session) = turn.session.clone()
+            && self.handle.as_deref() != Some(session.as_str())
+        {
+            self.adopt(session);
+        }
         let finished = json!({
             "round": round,
             "kind": kind.as_str(),
@@ -1212,7 +1301,7 @@ impl<'a> Run<'a> {
                 .agents
                 .execute_when_idle(call, self.context.clone())
                 .await;
-            let turn = Turn::read(agent, result);
+            let turn = Turn::read_reviewer(agent, result);
             let mut held = turn.session.clone().map(|handle| Held {
                 conversations: Arc::clone(&self.tool.conversations),
                 handle,
@@ -1398,7 +1487,7 @@ impl<'a> Run<'a> {
             .execute_when_idle(call, self.context.clone())
             .await;
         drop(place);
-        Ok(Turn::read(agent, result))
+        Ok(Turn::read_reviewer(agent, result))
     }
 
     /// After an approving verdict in `round` with `land: after_approval`:
@@ -1415,7 +1504,8 @@ impl<'a> Run<'a> {
             held.pin = self.tool.conversations.pin(&held.handle);
             held
         });
-        self.builder_turn(TurnKind::Landing, prompts::landing_prompt(round))
+        let session = self.handle.clone();
+        self.builder_turn(TurnKind::Landing, prompts::landing_prompt(round), session)
             .await?;
         let (reported, status) = self.live().read(|state| {
             (
@@ -1693,6 +1783,7 @@ impl<'a> Run<'a> {
         // Released before the job's result is visible.
         self.kept = None;
         self.pin = None;
+        self.call_pin = None;
         self.place = None;
         let findings = std::mem::take(&mut self.findings);
         self.tool.conclude(

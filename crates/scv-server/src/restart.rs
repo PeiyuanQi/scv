@@ -238,10 +238,13 @@ async fn probe(binary: &Path) -> Result<BuildInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Sessions' own activity, which a restart waits out for the session that
-// asked (its report turn, or a turn the TUI started).
+// Sessions' own activity, which a restart waits out: the session that asked
+// (its report turn, or a turn the TUI started), and every session's
+// background jobs.
 
 struct SessionActivity {
+    /// The instance the session belongs to.
+    home: PathBuf,
     busy: AtomicBool,
     background: Option<Weak<BackgroundJobs>>,
 }
@@ -256,8 +259,10 @@ pub(crate) struct SessionTracker {
 }
 
 impl SessionTracker {
-    pub(crate) fn new(id: &str, background: Option<&Arc<BackgroundJobs>>) -> Self {
+    /// Track session `id` of the instance at `home`.
+    pub(crate) fn new(home: &Path, id: &str, background: Option<&Arc<BackgroundJobs>>) -> Self {
         let activity = Arc::new(SessionActivity {
+            home: home.to_owned(),
             busy: AtomicBool::new(false),
             background: background.map(Arc::downgrade),
         });
@@ -305,6 +310,27 @@ fn session_busy(id: &str) -> bool {
                 .and_then(Weak::upgrade)
                 .is_some_and(|jobs| jobs.pending() > 0)
     })
+}
+
+/// The sessions of the instance at `home` that have background jobs still
+/// running, queued, or not yet reported (cancelled reviewed jobs whose final
+/// outcome is owed included), and how many such jobs they have in all.
+fn sessions_with_jobs(home: &Path) -> (usize, usize) {
+    let sessions: Vec<Arc<SessionActivity>> = SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .values()
+        .filter(|activity| activity.home == home)
+        .cloned()
+        .collect();
+    sessions
+        .iter()
+        .filter_map(|activity| activity.background.as_ref().and_then(Weak::upgrade))
+        .map(|jobs| jobs.pending())
+        .filter(|&pending| pending > 0)
+        .fold((0, 0), |(sessions, jobs), pending| {
+            (sessions + 1, jobs + pending)
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +812,19 @@ impl Restarter {
             if session_busy(&requester.session) || self.hub.session_work(&requester.session) > 0 {
                 return Some(format!("{}'s report", requester.handle));
             }
+        }
+        // Every session's background jobs, not only the requester's: the
+        // restart would stop them.
+        let (sessions, jobs) = sessions_with_jobs(self.instance.layout.home());
+        if jobs > 0 {
+            return Some(format!(
+                "{jobs} background job{} in {sessions} session{}",
+                if jobs == 1 { "" } else { "s" },
+                if sessions == 1 { "" } else { "s" }
+            ));
+        }
+        if self.hub.background_work() > 0 {
+            return Some("a background report to be stored".into());
         }
         if self.hub.owner_claims() > 0 {
             return Some("an owner message to be answered".into());

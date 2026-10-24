@@ -97,6 +97,24 @@ fn quoted_text_is_bounded() {
     assert_eq!(prompt.matches("[cut at 8 KiB]").count(), 2);
 }
 
+/// Round 2's brief for `findings`, after a round-1 `report`.
+fn fix<'a>(
+    land: LandMode,
+    report: &'a str,
+    findings: &'a [Finding],
+    landed: Option<(&'a str, &'a [String])>,
+) -> FixBrief<'a> {
+    FixBrief {
+        round: 2,
+        rounds: 3,
+        land,
+        prompt: "Fix the flaky checkout test.",
+        report,
+        findings,
+        landed,
+    }
+}
+
 #[test]
 fn the_fix_prompt_lists_findings_and_what_already_landed() {
     let findings = [
@@ -104,26 +122,39 @@ fn the_fix_prompt_lists_findings_and_what_already_landed() {
         finding("1.2", Severity::Minor),
     ];
     let commits = ["4f2a9c1".to_owned()];
-    let prompt = fix_prompt(
-        2,
-        3,
+    let prompt = fix_prompt(&fix(
         LandMode::BeforeReview,
+        "Committed on fix/race.",
         &findings,
         Some(("origin/main", &commits)),
-    );
+    ));
     assert!(prompt.starts_with("[SCV review, round 2 of 3]"), "{prompt}");
+    assert!(prompt.contains("in a new conversation"));
     assert!(prompt.contains("already landed on origin/main (4f2a9c1)"));
     assert!(prompt.contains("Land the fix as before"));
     assert!(prompt.contains("- 1.1 [blocking]"));
     assert!(prompt.contains("- 1.2 [minor]"));
-    let held = fix_prompt(
-        2,
-        3,
+    // A new conversation gets the task and where the work stands.
+    assert!(prompt.contains("The task, as it was first given:\nFix the flaky checkout test."));
+    assert!(prompt.contains("up to 3 rounds"));
+    assert!(prompt.contains("Committed on fix/race."));
+    let held = fix_prompt(&fix(
         LandMode::NoLanding,
+        "",
         &findings,
         Some(("origin/main", &commits)),
-    );
+    ));
     assert!(held.contains("Do not land the fix now."), "{held}");
+}
+
+#[test]
+fn the_fix_prompt_quotes_only_a_bounded_last_report() {
+    let findings = [finding("1.1", Severity::Blocking)];
+    let report = format!("{}LAST LINE", "x".repeat(100 * 1024));
+    let prompt = fix_prompt(&fix(LandMode::NoLanding, &report, &findings, None));
+    assert!(prompt.len() < 16 * 1024, "{}", prompt.len());
+    assert!(prompt.contains("[cut at 8 KiB]"));
+    assert!(!prompt.contains("LAST LINE"));
 }
 
 #[test]
@@ -183,7 +214,15 @@ fn every_open_finding_reaches_the_next_reviewer_and_the_builder() {
         "{:?}",
         listed(&prompt, &open)
     );
-    let fix = fix_prompt(3, 5, LandMode::NoLanding, &open, None);
+    let fix = fix_prompt(&FixBrief {
+        round: 3,
+        rounds: 5,
+        land: LandMode::NoLanding,
+        prompt: "Fix the project.",
+        report: "I fixed the findings.",
+        findings: &open,
+        landed: None,
+    });
     assert_eq!(listed(&fix, &open), [] as [String; 0]);
     // Far more than fits: details shortened, every line kept.
     let open: Vec<Finding> = (1..=6)
