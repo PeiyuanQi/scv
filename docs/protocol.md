@@ -114,9 +114,11 @@ not answer `scv build-info`, or when that reports a version other than
 `parent` (the caller's `SCV_PARENT` chain) names until it has finished (a
 nested SCV or ACP agent, which lives for its whole conversation, until its
 turn has ended and, for a nested SCV, the background jobs of its own session
-have been reported to it) and its report is stored, then any owner message a
-chat bridge has claimed but not answered, and any mail action an email
-account is carrying out. At `max_wait_seconds` (default 600, at most 3600) it
+have been reported to it) and its report is stored, then every session's
+background jobs that still run, wait in a queue, or wait to be reported, any
+background report a chat has not stored yet, any owner message a chat bridge
+has claimed but not answered, and any mail action an email account is
+carrying out. At `max_wait_seconds` (default 600, at most 3600) it
 restarts anyway. Before it hands over, email accounts start no new mail
 action, and one under way gets up to a minute more to finish. A second request for the same version
 returns the scheduled restart. The restart itself runs in a watchdog unit

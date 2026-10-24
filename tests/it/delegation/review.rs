@@ -180,10 +180,17 @@ async fn a_reviewed_job_loops_until_approval_and_reports_scvs_outcome() {
         scv_protocol::outcome_notice(outcome),
         "job-1 · Review: approved · round 2 of 3 · reviewer codex\njob-1 · Landing: not requested"
     );
-    // The builder's second turn continued its conversation.
+    // The builder's second turn started a new conversation, briefed with
+    // the task, the first round's report, and the finding.
     let second = std::fs::read_to_string(home.join("claude-2.args")).unwrap();
-    assert!(second.contains("--resume"), "{second}");
+    assert!(!second.contains("--resume"), "{second}");
+    assert!(second.contains("--session-id"), "{second}");
     assert!(second.contains("[SCV review, round 2 of 3]"), "{second}");
+    assert!(second.contains("Fix the flaky checkout test."), "{second}");
+    assert!(
+        second.contains("Replaced the sleep with a lock on branch fix/race."),
+        "{second}"
+    );
     assert!(second.contains("Retry masks the race"), "{second}");
     // The reviewer never learned the round limit.
     let review = std::fs::read_to_string(home.join("codex-1.args")).unwrap();

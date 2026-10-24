@@ -413,6 +413,16 @@ impl Hub {
             .sum()
     }
 
+    /// Background work every running bridge's conversations have not handed
+    /// over yet, such as a report not stored in an outbox.
+    pub fn background_work(&self) -> usize {
+        self.inner()
+            .conversations
+            .values()
+            .map(|conversation| conversation.work)
+            .sum()
+    }
+
     /// `None` while no bridge of `component` runs; otherwise its owner.
     pub fn owner(&self, component: &str) -> Option<Option<String>> {
         self.inner()

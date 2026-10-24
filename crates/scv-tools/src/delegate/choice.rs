@@ -14,6 +14,10 @@
 //! agents, the result's `note` tells the calling model to call it; otherwise
 //! the calling model tells the user, and only the user may then name another
 //! agent.
+//!
+//! Only a reviewed job also reads a reviewer's reply, for one thing: whether
+//! its whole substance is a provider error ([`provider_error_only`]), which
+//! makes that reviewer unavailable.
 
 use scv_core::{ToolError, ToolFailure, ToolOutput};
 use scv_protocol::JobStatus;
@@ -71,6 +75,125 @@ const UNAVAILABLE: &[&str] = &[
 pub(crate) fn reports_unavailable(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     UNAVAILABLE.iter().any(|needle| lower.contains(needle))
+}
+
+/// Longest reply that can be nothing but a provider error: an agent's
+/// opening line about what it will do, then the error its harness printed.
+const PROVIDER_ERROR_REPLY_BYTES: usize = 2048;
+/// Longest provider error at the end of such a reply.
+const PROVIDER_ERROR_BYTES: usize = 1000;
+
+/// Lowercase beginnings of the errors agent harnesses print in place of a
+/// reply when their provider has no capacity or the connection to it fails,
+/// as Codex's ACP server does (`Selected model is at capacity…`, `exceeded
+/// retry limit, last status: 429…`, `unexpected status 503 Service
+/// Unavailable: …NO_AVAILABLE_CHANNEL…`) and Claude Code does (`API Error:
+/// 529 …`). `unexpected status ` and `api error: ` count only before a
+/// status code.
+const PROVIDER_ERRORS: &[&str] = &[
+    "selected model is at capacity",
+    "model is at capacity",
+    "exceeded retry limit",
+    "retry limit exceeded",
+    "stream disconnected before completion",
+    "stream error:",
+    "error sending request for url",
+    "no_available_channel",
+    "api error: request timed out",
+    "api error: connection error",
+];
+
+/// What, followed by a status code, begins a provider error.
+const STATUS_PREFIXES: &[&str] = &["unexpected status ", "api error: "];
+
+/// HTTP reasons that, right after a 429 or 5xx status, make a status line.
+const STATUS_REASONS: &[&str] = &[
+    "too many requests",
+    "service unavailable",
+    "internal server error",
+    "bad gateway",
+    "gateway timeout",
+    "no_available_channel",
+    "overloaded",
+    "{",
+];
+
+/// Whether a reply's whole substance is a provider's capacity, rate, or
+/// transport error, as when an agent's harness turns a failed request into
+/// a completed turn whose text is the error. The reply must end with the
+/// error, on one line that starts the reply or a sentence; anything before
+/// it is at most a short opening, with no fenced block. A reply that only
+/// mentions such an error, or reports on work, does not count.
+pub(crate) fn provider_error_only(reply: &str) -> bool {
+    let reply = reply.trim();
+    if reply.is_empty() || reply.len() > PROVIDER_ERROR_REPLY_BYTES || reply.contains("```") {
+        return false;
+    }
+    let lower = reply.to_ascii_lowercase();
+    let from = lower.len().saturating_sub(PROVIDER_ERROR_BYTES);
+    (from..lower.len())
+        .filter(|&start| lower.is_char_boundary(start) && starts_sentence(&lower[..start]))
+        .any(|start| {
+            let error = &lower[start..];
+            !error.contains('\n') && provider_error_start(error)
+        })
+}
+
+/// Whether `text` begins with a provider error.
+fn provider_error_start(text: &str) -> bool {
+    if PROVIDER_ERRORS.iter().any(|error| {
+        text.strip_prefix(error)
+            .is_some_and(|rest| error.ends_with(':') || error_tail(rest))
+    }) {
+        return true;
+    }
+    if STATUS_PREFIXES
+        .iter()
+        .filter_map(|prefix| text.strip_prefix(prefix))
+        .any(|rest| status_code(rest).is_some())
+    {
+        return true;
+    }
+    // A bare status line, such as `503 NO_AVAILABLE_CHANNEL` or `Error: 429
+    // Too Many Requests`.
+    let line = ["error: ", "http ", "status: "]
+        .iter()
+        .find_map(|prefix| text.strip_prefix(prefix))
+        .unwrap_or(text);
+    status_code(line).is_some_and(|(code, rest)| {
+        (code == "429" || code.starts_with('5'))
+            && STATUS_REASONS.iter().any(|reason| {
+                rest.strip_prefix(reason)
+                    .is_some_and(|tail| *reason == "{" || error_tail(tail))
+            })
+    })
+}
+
+/// Whether `rest`, what follows an error's opening words, ends the line or
+/// goes on as an error message does, with punctuation or a bracket, rather
+/// than as a sentence about the error (`… at capacity checks are right`).
+fn error_tail(rest: &str) -> bool {
+    let rest = rest.trim_start_matches(' ');
+    rest.is_empty() || rest.starts_with(['.', ',', ':', ';', '!', '(', '[', '{', '-'])
+}
+
+/// The three-digit status `text` begins with, and what follows it after
+/// spaces or a colon.
+fn status_code(text: &str) -> Option<(&str, &str)> {
+    let code = text.get(..3)?;
+    let rest = &text[3..];
+    (code.bytes().all(|byte| byte.is_ascii_digit())
+        && !rest.starts_with(|c: char| c.is_ascii_digit()))
+    .then(|| (code, rest.trim_start_matches([' ', ':'])))
+}
+
+/// Whether text after `before` starts the reply, a line, or a sentence:
+/// `before` is empty or ends with a line break or `.`, `!`, `?`, or `:`,
+/// spaces aside, since a harness may append its error to the agent's
+/// opening line without one.
+fn starts_sentence(before: &str) -> bool {
+    let before = before.trim_end_matches(' ');
+    before.is_empty() || before.ends_with(['.', '!', '?', ':', '\n'])
 }
 
 /// `model opus[1m] and effort xhigh`: the model and effort a call to the

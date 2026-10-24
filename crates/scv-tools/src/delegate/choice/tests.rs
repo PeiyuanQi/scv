@@ -289,3 +289,62 @@ fn only_the_reported_error_decides_a_fallback() {
     );
     unchanged(ToolOutput::success("404 pages fixed"), &["claude"]);
 }
+
+#[test]
+fn a_reply_that_is_only_a_provider_error_is_recognized() {
+    // What codex-acp returned as completed reviewer turns, as SCV's review
+    // journals recorded them, and the relay error codex reported on
+    // 2026-10-03.
+    for reply in [
+        "Selected model is at capacity. Please try a different model.",
+        "I’ll verify the reported branch and commits, read the repository guidance, inspect \
+         the full diff and targeted Chanlun/chart/provider paths, then run the relevant checks. \
+         I won’t modify or land anything.Selected model is at capacity. Please try a different \
+         model.",
+        "exceeded retry limit, last status: 429 Too Many Requests, request id: \
+         a4a1ae6fdc07935a-DUB",
+        "I’ll inspect the task branch against `edc8567`, then check each prior finding against \
+         the current tests and production paths.exceeded retry limit, last status: 429 Too \
+         Many Requests, request id: a4a1a996eca0bf61-DUB",
+        "unexpected status 503 Service Unavailable: sub2api: NO_AVAILABLE_CHANNEL () (request \
+         id: 202610031549281216518398268d9d6jnCMgGGL), url: https://allrouter.club/v1/responses",
+        "503 NO_AVAILABLE_CHANNEL",
+        "Error: 429 Too Many Requests",
+        "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+        "stream error: stream disconnected before completion: error sending request",
+        "  Selected model is at capacity. Please try a different model.\n",
+    ] {
+        assert!(provider_error_only(reply), "{reply}");
+    }
+}
+
+#[test]
+fn a_real_review_that_mentions_a_provider_error_is_not_one() {
+    for reply in [
+        // A review of a builder that hit the error itself.
+        "I couldn't review anything, because the builder never produced any work. Its only \
+         reply was \"Selected model is at capacity. Please try a different model,\" so the \
+         implementation step never ran.\n\nWhat I checked:\n- git status is clean",
+        // Findings about errors in the code under review.
+        "The handler now returns HTTP 503 Service Unavailable when the database is down, and \
+         the retry on 429 is still missing.",
+        "Stream errors are swallowed by the reader, so a 503 never surfaces.",
+        "The change looks fine, but exceeded retry limits are not logged anywhere.",
+        // A verdict block always counts as a review.
+        "Selected model is at capacity.\n\n```scv-verdict\n{\"verdict\":\"approve\"}\n```",
+        // A long review whose last line happens to be an error is a review
+        // cut short, which its repair turn settles.
+        &format!(
+            "{}\nexceeded retry limit, last status: 429 Too Many Requests",
+            "- finding: the lock is held across an await\n".repeat(60)
+        ),
+        "",
+        "503 is what the endpoint returns now.",
+        // A sentence about such an error, not the error itself.
+        "Looks fine. Error: 500 Internal Server Error handling in foo() is missing",
+        "Overall good. Model is at capacity checks in pool.rs are right.",
+        "429 too many requests are handled by the retry loop.",
+    ] {
+        assert!(!provider_error_only(reply), "{reply}");
+    }
+}

@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.1`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.1` pins.
+The current workspace release is `0.4.2`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.2` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -51,6 +51,38 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.2
+
+`0.4.2` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.4.1` checks the new release and can roll it back.
+It adds no configuration.
+
+- **Reviewer capacity errors.** A reviewer whose whole reply is a provider
+  error its harness passed off as a reply, such as Codex's `Selected model is
+  at capacity` or `exceeded retry limit, last status: 429`, counts as
+  unavailable, so the review moves to the next reviewer instead of ending
+  the round with a malformed verdict. See
+  [Choosing the reviewer](tools.md#choosing-the-reviewer).
+- **A new builder conversation each round.** From round 2 a reviewed job's
+  builder starts a new conversation, briefed with the task, the previous
+  round's report, and the findings, so a long review no longer outgrows the
+  builder's context. The landing turn continues the approved round's
+  conversation, and the result names the last round's. See
+  [The loop](tools.md#the-loop).
+- **Planned restarts wait for every session's background jobs.**
+  `scv restart --when-idle` also waits, up to its deadline, for background
+  jobs that any session of the daemon still runs, queues, or has not
+  reported, not only those of the session that asked. The running daemon
+  does the waiting, so this holds for restarts out of `0.4.2` and later. See
+  [architecture](architecture.md#planned-restarts).
+- **Dependency advisories.** The lockfile moves to tokio 1.53.3,
+  rustls-webpki 0.103.16, and webpki-roots 1.0.11, for RUSTSEC-2026-0386,
+  RUSTSEC-2026-0382, and RUSTSEC-2026-0381.
+
+What changes for code that embeds SCV's crates: `scv-channels`'s `Hub` adds
+`background_work`, and `scv-tools`'s `test-support` feature adds
+`BackgroundJobs::start_for_tests`.
 
 ## Upgrading to 0.4.1
 
