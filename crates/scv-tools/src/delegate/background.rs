@@ -1983,7 +1983,8 @@ impl BackgroundCapable {
 
     /// Take in conversation `vendor` that `agent` saved, so a call can
     /// continue it in `cwd`, when that agent can continue a conversation
-    /// from its own session ID alone. Returns the new handle.
+    /// from its own session ID alone. Returns the handle, which is the one
+    /// this session already holds for that agent, session, and directory.
     pub(crate) fn adopt(&self, agent: &str, cwd: &std::path::Path, vendor: &str) -> Option<String> {
         let offered = self.inner.find(agent)?;
         if !offered.accepts.session || !offered.backend.adoptable() {

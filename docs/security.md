@@ -77,8 +77,8 @@ widens what the agent could already reach with the user's permissions. SCV suppl
 directories, and the agent's own state variable (`CODEX_HOME`, `GROK_HOME`,
 `DSH_HOME`, or `PI_CODING_AGENT_DIR`) inside that home. It first removes from
 the child environment SCV's selector variables, every variable ending in
-`_API_KEY`, the AWS credential chain (`AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`),
+`_API_KEY`, the AWS variables `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_BEARER_TOKEN_BEDROCK`,
 and the credential, endpoint, and state variables that any adapter
 declares (such as `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
 `OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, and `PI_*`), so no agent inherits the

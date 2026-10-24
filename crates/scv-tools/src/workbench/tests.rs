@@ -1,5 +1,6 @@
 //! Unit tests for `src/workbench.rs`.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -218,29 +219,33 @@ struct Live {
 }
 
 fn live(bench: &Bench, session: &str) -> Live {
-    let handle = bench
-        .workbench
-        .register_session(session, "TUI", Path::new("/w"));
+    live_for(bench, session, Path::new("/w"), None)
+}
+
+fn live_for(bench: &Bench, session: &str, workspace: &Path, worktrees: Option<PathBuf>) -> Live {
+    let handle = bench.workbench.register_session(session, "TUI", workspace);
     let release = Arc::new(Notify::new());
-    let jobs = Arc::new(BackgroundJobs::new(4, None).with_ledger(
-        JobLedger::new(&bench.layout.jobs(), session, "TUI", Path::new("/w")).unwrap(),
-    ));
+    let jobs = Arc::new(
+        BackgroundJobs::new(4, None)
+            .with_ledger(JobLedger::new(&bench.layout.jobs(), session, "TUI", workspace).unwrap()),
+    );
     let accepts = Accepts {
         session: true,
         ..Accepts::default()
     };
-    let tool = Arc::new(BackgroundCapable::plain(
-        Arc::new(AgentTool::beside(
-            "codex",
-            Arc::new(Waiting {
-                release: Arc::clone(&release),
-                ran: Arc::default(),
-            }),
-            accepts,
-            &[],
-        )),
-        Arc::clone(&jobs),
-    ));
+    let mut agent = AgentTool::beside(
+        "codex",
+        Arc::new(Waiting {
+            release: Arc::clone(&release),
+            ran: Arc::default(),
+        }),
+        accepts,
+        &[],
+    );
+    if let Some(root) = worktrees {
+        agent = agent.with_worktrees(Some(root));
+    }
+    let tool = Arc::new(BackgroundCapable::plain(Arc::new(agent), Arc::clone(&jobs)));
     bench
         .workbench
         .attach(session, Arc::downgrade(&tool), Arc::downgrade(&jobs));
@@ -583,6 +588,119 @@ async fn a_queued_follow_up_resumes_in_its_conversations_worktree() {
 }
 
 #[tokio::test]
+async fn a_queued_follow_up_waits_behind_the_resumed_head_instead_of_adopting_twice() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let workdir = tempfile::tempdir().unwrap();
+    let mut head = record("old-session", "job-1", AgentState::Interrupted, dead());
+    head.arguments = json!({
+        "agent": "codex",
+        "cwd": workdir.path().display().to_string(),
+    });
+    head.interrupted = Some("the SCV process that ran it stopped".into());
+    ledger::save(&jobs, &head).unwrap();
+    let mut follow = record("old-session", "job-2", AgentState::Interrupted, dead());
+    follow.arguments = json!({"session": "codex-1"});
+    follow.prompt = "also run clippy".into();
+    follow.worktree = None;
+    follow.interrupted = Some("its session ended before it finished".into());
+    ledger::save(&jobs, &follow).unwrap();
+    let activity = RunActivity::open(
+        &bench.layout.runs(),
+        dead(),
+        RunHeader {
+            handle: "codex-00f00d".into(),
+            agent: "codex".into(),
+            session: "old-session".into(),
+            transport: RunTransport::Cli,
+            cwd: workdir.path().to_owned(),
+            conversation: Some(("codex-1".into(), 1)),
+            streams: true,
+        },
+    )
+    .unwrap();
+    activity.turn_started(Some("codex-1"), 1, "Fix it", Some("job-1"));
+    activity.set_vendor("019a-thread-id");
+    std::mem::forget(activity);
+    let host = live(&bench, "workbench-host");
+    let early = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-2")
+        .await
+        .unwrap_err();
+    assert!(
+        early.contains("old-session/job-1") && early.contains("resume"),
+        "{early}"
+    );
+    let resumed_head = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-1")
+        .await
+        .unwrap();
+    let head_job = ledger::load(&jobs, "workbench-host", job_id(&resumed_head)).unwrap();
+    assert_eq!(head_job.arguments["session"], "codex-1");
+    assert_eq!(head_job.state, AgentState::Working);
+    let resumed_follow = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-2")
+        .await
+        .unwrap();
+    let follow_job = ledger::load(&jobs, "workbench-host", job_id(&resumed_follow)).unwrap();
+    assert_eq!(
+        follow_job.arguments["session"], head_job.arguments["session"],
+        "the follow-up adopted the agent session a second time"
+    );
+    assert_eq!(follow_job.state, AgentState::Queued);
+    host.release.notify_waiters();
+}
+
+#[tokio::test]
+async fn a_queued_follow_up_adopts_once_its_head_job_has_finished() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let workdir = tempfile::tempdir().unwrap();
+    let mut head = record("old-session", "job-1", AgentState::Completed, dead());
+    head.arguments = json!({"agent": "codex"});
+    ledger::save(&jobs, &head).unwrap();
+    let mut follow = record("old-session", "job-2", AgentState::Interrupted, dead());
+    follow.arguments = json!({"session": "codex-1"});
+    follow.prompt = "also run clippy".into();
+    follow.interrupted = Some("its session ended before it finished".into());
+    ledger::save(&jobs, &follow).unwrap();
+    let activity = RunActivity::open(
+        &bench.layout.runs(),
+        dead(),
+        RunHeader {
+            handle: "codex-00abcd".into(),
+            agent: "codex".into(),
+            session: "old-session".into(),
+            transport: RunTransport::Cli,
+            cwd: workdir.path().to_owned(),
+            conversation: Some(("codex-1".into(), 1)),
+            streams: true,
+        },
+    )
+    .unwrap();
+    activity.turn_started(Some("codex-1"), 1, "Fix it", Some("job-1"));
+    activity.set_vendor("019a-thread-id");
+    std::mem::forget(activity);
+    let host = live(&bench, "workbench-host");
+    let resumed = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-2")
+        .await
+        .unwrap();
+    let new = ledger::load(&jobs, "workbench-host", job_id(&resumed)).unwrap();
+    assert_eq!(new.arguments["session"], "codex-1");
+    assert_eq!(new.state, AgentState::Working);
+    host.release.notify_waiters();
+}
+
+fn job_id(resumed: &str) -> &str {
+    resumed.split('/').nth(1).unwrap()
+}
+
+#[tokio::test]
 async fn a_job_without_a_saved_conversation_starts_over_and_a_running_one_is_refused() {
     let bench = bench();
     let jobs = bench.layout.jobs();
@@ -875,4 +993,114 @@ fn a_rerun_stays_in_its_worktree_or_gets_a_new_one_once_it_was_removed() {
     let fresh = rerun_arguments(&job, |_| true);
     assert_eq!(fresh["cwd"], repo.join("api").display().to_string());
     assert_eq!(fresh["worktree"], true);
+}
+
+#[tokio::test]
+async fn a_follow_up_whose_worktree_was_removed_resumes_in_a_new_one() {
+    if which::which("git").is_err() {
+        return;
+    }
+    let bench = bench();
+    let home = std::fs::canonicalize(bench.root.path()).unwrap();
+    let workspace = home.join("workspace");
+    let repo = workspace.join("project");
+    std::fs::create_dir_all(repo.join("shop")).unwrap();
+    std::fs::write(repo.join("shop/cart.rs"), "fn main() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "."]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "first",
+    ]);
+    let created = crate::delegate::worktree::create(
+        &bench.layout.worktrees(),
+        &repo.join("shop"),
+        &workspace,
+        "codex",
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let jobs = bench.layout.jobs();
+    let mut head = record("old-session", "job-1", AgentState::Interrupted, dead());
+    head.arguments = json!({
+        "agent": "codex",
+        "cwd": created.cwd.display().to_string(),
+    });
+    head.worktree = Some(created.worktree.clone());
+    head.interrupted = Some("the SCV process that ran it stopped".into());
+    ledger::save(&jobs, &head).unwrap();
+    let mut follow = record("old-session", "job-2", AgentState::Interrupted, dead());
+    follow.arguments = json!({"agent": "codex", "session": "codex-1"});
+    follow.prompt = "also run clippy".into();
+    follow.worktree = None;
+    follow.interrupted = Some("its session ended before it finished".into());
+    ledger::save(&jobs, &follow).unwrap();
+    let activity = RunActivity::open(
+        &bench.layout.runs(),
+        dead(),
+        RunHeader {
+            handle: "codex-00beef".into(),
+            agent: "codex".into(),
+            session: "old-session".into(),
+            transport: RunTransport::Cli,
+            cwd: created.cwd.clone(),
+            conversation: Some(("codex-1".into(), 1)),
+            streams: true,
+        },
+    )
+    .unwrap();
+    activity.turn_started(Some("codex-1"), 1, "Fix it", Some("job-1"));
+    std::mem::forget(activity);
+    crate::delegate::worktree::remove(
+        &bench.layout.worktrees(),
+        Path::new(&created.worktree.path),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(!created.cwd.is_dir(), "the worktree is still there");
+    let host = live_for(
+        &bench,
+        "workbench-host",
+        &workspace,
+        Some(bench.layout.worktrees()),
+    );
+    let resumed = bench
+        .workbench
+        .resume("workbench-host", "old-session", "job-2")
+        .await
+        .unwrap();
+    let new = ledger::load(&jobs, "workbench-host", job_id(&resumed)).unwrap();
+    let worktree = new
+        .worktree
+        .as_ref()
+        .expect("the follow-up resumed in the workspace root");
+    assert_ne!(worktree.path, workspace.display().to_string());
+    assert_ne!(worktree.path, created.worktree.path);
+    let cwd = new.arguments["cwd"].as_str().unwrap();
+    assert!(
+        Path::new(cwd).starts_with(&worktree.path),
+        "cwd {cwd} is not inside {}",
+        worktree.path
+    );
+    assert_ne!(cwd, workspace.display().to_string());
+    host.release.notify_waiters();
 }

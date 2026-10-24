@@ -56,9 +56,11 @@ cancel the running turn. While a chat shows an approval prompt, it takes
 every key but the dashboard keys below wherever focus is, since it covers
 the screen. A dashboard key may move focus, and the prompt stays that
 chat's until it is answered: `y` and `n` or `Esc` still answer it, and
-other keys do nothing, so nothing behind it opens or moves. A request
+other keys do nothing, so nothing behind it opens or moves. On a terminal
+too small for the dashboard, that prompt is drawn over the chat shown
+alone, so it is still what those keys answer. A request
 from another chat while one is drawn is announced and does not replace
-it.
+it, including a request from the chat focus just moved to.
 
 A tab's connection failing in a way other than ending (a server frame too
 large, or one the TUI cannot read) is that tab's alone: the tab shows the

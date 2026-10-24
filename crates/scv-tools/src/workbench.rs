@@ -712,8 +712,13 @@ impl Workbench {
     /// live session `host`, which serves the job's workspace. It continues
     /// the agent's own conversation when the agent saved one and can resume
     /// it; otherwise it starts over, told that an earlier attempt may have
-    /// left changes. Each job is resumed once, and not while an agent
-    /// process of its run still goes. Returns `<host>/<new job>`.
+    /// left changes. A queued follow-up has no run of its own: it uses the
+    /// conversation's directory and worktree, continues that agent session
+    /// only after the interrupted job the run served has been resumed (and
+    /// then behind that conversation), and otherwise starts in a new
+    /// worktree of the checkout that job recorded. Each job is resumed
+    /// once, and not while an agent process of its run still goes. Returns
+    /// `<host>/<new job>`.
     pub async fn resume(&self, host: &str, session: &str, job: &str) -> Result<String, String> {
         let key = format!("{session}/{job}");
         if !lock(&self.resuming).insert(key.clone()) {
@@ -761,7 +766,7 @@ impl Workbench {
         let (agent, _) = self.agent(host)?;
         // Reading every record, run state, and the process table takes a
         // while.
-        let (successor, run, live) = {
+        let (successor, run, live, blocking) = {
             let (jobs, runs) = (self.jobs.clone(), self.runs.clone());
             let delegations = Arc::clone(&self.delegations);
             let continued = record
@@ -783,16 +788,16 @@ impl Workbench {
                     state.session == session
                         && (state.job.as_deref() == Some(job.as_str()) || state.jobs.contains(&job))
                 };
-                let run = states
+                let own = states
                     .iter()
                     .filter(|state| served(state))
                     .max_by_key(|state| state.started_unix)
-                    .cloned()
-                    .or_else(|| {
-                        // A queued follow-up has no run of its own. The
-                        // conversation it continues does, and that run has
-                        // the directory and the agent's session.
-                        let handle = continued.as_deref()?;
+                    .cloned();
+                // A queued follow-up has no run of its own. The conversation
+                // it continues does, and that run has the directory and the
+                // agent's session.
+                let fallback = if own.is_none() {
+                    continued.as_deref().and_then(|handle| {
                         states
                             .iter()
                             .filter(|state| {
@@ -801,14 +806,28 @@ impl Workbench {
                             })
                             .max_by_key(|state| state.started_unix)
                             .cloned()
-                    });
+                    })
+                } else {
+                    None
+                };
+                let run = own.or_else(|| fallback.clone());
+                // Adopting while the job that run served is still interrupted
+                // would start a second process in its agent session. The
+                // follow-up waits until that job is resumed, then queues
+                // behind the conversation that resume adopted.
+                let blocking = match &fallback {
+                    Some(found) if found.vendor.is_some() && found.cwd.is_dir() => {
+                        unresumed_served(&jobs, found, &job)
+                    }
+                    _ => Vec::new(),
+                };
                 let live = run.as_ref().is_some_and(|run| {
                     delegations
                         .list(true)
                         .iter()
                         .any(|entry| entry.record.handle == run.handle && entry.processes > 0)
                 });
-                (successor, run, live)
+                (successor, run, live, blocking)
             })
             .await
             .map_err(|error| error.to_string())?
@@ -821,6 +840,14 @@ impl Workbench {
                 "{job}'s agent ({}) still runs; SCV stops what a stopped SCV process left \
                  within a minute (or `scv agents kill` it now). Resume it after that",
                 run.as_ref().map_or("", |run| run.handle.as_str())
+            ));
+        }
+        if !blocking.is_empty() {
+            let ahead = if blocking.len() == 1 { "it" } else { "them" };
+            return Err(format!(
+                "{job} was queued behind {}; resume {ahead} first. This follow-up then waits \
+                 behind the same conversation, so one agent session is not continued twice",
+                blocking.join(", ")
             ));
         }
         let mut record = record;
@@ -841,6 +868,15 @@ impl Workbench {
             {
                 record.worktree = Some(worktree);
             }
+        }
+        // The directory is gone (the owner removed the worktree; an
+        // interrupted job does not hold it). The job that run served still
+        // records the checkout, which is what a new worktree is made from.
+        if record.worktree.is_none()
+            && let Some(found) = &run
+            && let Some(worktree) = served_worktree(&self.jobs, found)
+        {
+            record.worktree = Some(worktree);
         }
         let cwd = run
             .as_ref()
@@ -1124,6 +1160,43 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Jobs whose turns `run` served, the latest one first.
+fn served_job_names(run: &RunState) -> Vec<&str> {
+    let mut names = Vec::new();
+    if let Some(job) = run.job.as_deref() {
+        names.push(job);
+    }
+    for job in &run.jobs {
+        if !names.contains(&job.as_str()) {
+            names.push(job.as_str());
+        }
+    }
+    names
+}
+
+/// Interrupted jobs `run` served that the owner has not resumed, as
+/// `session/job`. `skip` is the follow-up being resumed.
+fn unresumed_served(root: &Path, run: &RunState, skip: &str) -> Vec<String> {
+    served_job_names(run)
+        .into_iter()
+        .filter(|name| *name != skip)
+        .filter_map(|name| {
+            let record = ledger::load(root, &run.session, name)?;
+            record
+                .resumable()
+                .then(|| format!("{}/{}", run.session, name))
+        })
+        .collect()
+}
+
+/// The worktree recorded on a job `run` served. A follow-up has none of
+/// its own, and the run's directory may already have been removed.
+fn served_worktree(root: &Path, run: &RunState) -> Option<scv_protocol::WorktreeRef> {
+    served_job_names(run)
+        .into_iter()
+        .find_map(|name| ledger::load(root, &run.session, name).and_then(|record| record.worktree))
 }
 
 /// The `agent` call that runs interrupted job `record` again from its

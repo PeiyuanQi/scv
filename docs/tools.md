@@ -495,9 +495,9 @@ it: `CODEX_HOME`, `GROK_HOME` (`.grok`), `DSH_HOME` (`.dsh`), or
 Copilot, Cursor, Amp, and Kimi have no such variable and keep their state
 wherever they put it under the private `HOME` and XDG directories. Grok also gets
 `GROK_DISABLE_AUTOUPDATER=1`. Before those are set, SCV removes every inherited
-variable ending in `_API_KEY`, SCV's selector variables, the AWS credential
-chain (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
-`AWS_BEARER_TOKEN_BEDROCK`), and each adapter's
+variable ending in `_API_KEY`, SCV's selector variables, the AWS variables
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and
+`AWS_BEARER_TOKEN_BEDROCK`, and each adapter's
 credential, endpoint, and state variables (`ANTHROPIC_*` keys and tokens,
 `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `OPENAI_BASE_URL`,
 `CODEX_BASE_URL`, `GROK_*`, `DSH_*`, `DEEPSEEK_BASE_URL`, `PI_*`, `GEMINI_*`,
@@ -1540,9 +1540,16 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   with the task. Otherwise it runs the task again, beginning `[SCV] An
   earlier attempt at this task was cut off`, in the job's worktree when it
   is still there, else in a new worktree of the same checkout. A queued
-  follow-up has no run of its own; resume uses the directory, and the SCV
+  follow-up has no run of its own. Resume uses the directory, and the SCV
   worktree, of the conversation it continues when that run is still recorded.
-  A model or
+  When that run saved an agent session and its directory is still there, the
+  follow-up continues it only after the interrupted job that run served has
+  been resumed: resuming the follow-up first is refused, and once that
+  resume holds the session the follow-up is queued behind it, so two jobs
+  never continue one agent session at once. When the worktree was removed,
+  the follow-up takes the worktree recorded on a job that run served and
+  runs in a new worktree of that checkout, as a job whose own worktree is
+  gone does. A model or
   effort the agent does not take is left out, and the job's timeout carries
   over. The new job is the owner's; the records link each other
   (`resumed_as`, `resumed_from`).

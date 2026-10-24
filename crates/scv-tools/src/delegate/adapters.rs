@@ -327,8 +327,10 @@ const COMMON_REMOVED_ENVIRONMENT: &[&str] = &[
     "GOOGLE_API_KEY",
     "AZURE_OPENAI_API_KEY",
     "AZURE_OPENAI_ENDPOINT",
-    // Bedrock and the AWS credential chain. OpenCode and Amp can use them
-    // as model credentials, which no delegated agent may inherit.
+    // Static AWS keys and the Bedrock bearer token. OpenCode and Amp can
+    // use them as model credentials, which no delegated agent may inherit.
+    // Profile, web-identity, and container credential variables are not
+    // keys and stay.
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",

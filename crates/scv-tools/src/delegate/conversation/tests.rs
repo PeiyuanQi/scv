@@ -113,6 +113,22 @@ async fn waiting_for_a_busy_conversation_ends_with_its_turn_or_cancellation() {
 }
 
 #[test]
+fn adopting_the_same_agent_session_returns_the_handle_already_held() {
+    let store = store(8, DAY, None);
+    let cwd = Path::new("/w/shop");
+    let first = store.adopt("codex", cwd, "019a-thread-id").unwrap();
+    let again = store.adopt("codex", cwd, "019a-thread-id").unwrap();
+    assert_eq!(again, first);
+    assert_eq!(store.handles(), vec![first.clone()]);
+    let elsewhere = store
+        .adopt("codex", Path::new("/w/other"), "019a-thread-id")
+        .unwrap();
+    assert_ne!(elsewhere, first);
+    let other_agent = store.adopt("claude", cwd, "019a-thread-id").unwrap();
+    assert_ne!(other_agent, first);
+}
+
+#[test]
 fn vendor_ids_and_unknown_handles_are_rejected() {
     let store = store(8, DAY, None);
     let cwd = Path::new("/w");

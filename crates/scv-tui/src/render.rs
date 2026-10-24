@@ -96,6 +96,15 @@ pub(crate) fn render_ui(frame: &mut Frame<'_>, ui: &Ui) {
             .map(|tab| &tab.kind)
     {
         render(frame, &chat.app);
+        // Focus may have moved, but the pinned prompt is still the one
+        // keys answer. Draw it over this chat: the alone layout otherwise
+        // shows only the focused chat's own prompt.
+        if let Some(id) = ui.covering_tab().filter(|id| Some(*id) != ui.active_tab())
+            && let Some(TabKind::Chat(covering)) = ui.tab(id).map(|tab| &tab.kind)
+            && let Some(approval) = &covering.app.pending_approval
+        {
+            render_approval(frame, approval);
+        }
         return;
     }
     let layout = Layout::default()

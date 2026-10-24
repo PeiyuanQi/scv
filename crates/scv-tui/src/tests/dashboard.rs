@@ -1181,3 +1181,159 @@ async fn sidebar_text_from_the_daemon_is_drawn_without_terminal_controls() {
         "a\u{fffd}b\u{fffd}c\u{fffd}d"
     );
 }
+
+async fn second_chat(ui: &mut Ui) -> BufReader<UnixStream> {
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    let (connection, peer) = tokio::join!(
+        Client::connect(&path.0, Path::new("/tmp"), &options),
+        accept_session(&listener, "second-session"),
+    );
+    let (client, session) = connection.unwrap();
+    let opening = Opening {
+        cwd: "/tmp".into(),
+        restore: None,
+        tab: None,
+        from: (ui.focus, ui.active_tab()),
+    };
+    assert!(ui.opened(&opening, client, session).is_none());
+    peer
+}
+
+fn ask(id: &str, session_id: &str, summary: &str) -> ServerEvent {
+    ServerEvent::ApprovalRequested {
+        request_id: "r".into(),
+        session_id: session_id.into(),
+        turn_id: "t".into(),
+        seq: 1,
+        approval_id: id.into(),
+        call_id: "c".into(),
+        name: "bash".into(),
+        risk: "process".into(),
+        cwd: "/tmp".into(),
+        summary: summary.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_pinned_prompt_is_drawn_and_answered_in_a_small_terminal() {
+    let (mut ui, _requests, mut first_peer, _path) = dashboard().await;
+    let mut second_peer = second_chat(&mut ui).await;
+    let first = ui.tabs[0].id;
+    ui.size = (48, 10);
+    ui.key(key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.chat_event(first, Ok(Some(ask("a-1", "old-session", "Run make for A"))));
+    // Alt+2 shows the other chat. The prompt stays A's, and the small
+    // terminal still draws it.
+    ui.key(key(KeyCode::Char('2'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.active_tab(), Some(ui.tabs[1].id));
+    let shown = screen(&ui, 48, 10);
+    // Ten rows clip the summary; the prompt itself is what must be on screen.
+    assert!(shown.contains("approval required"), "{shown}");
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut first_peer).await,
+        ClientMessage::ApprovalResolve { approval_id, approved: true, .. } if approval_id == "a-1"
+    ));
+    if let TabKind::Chat(tab) = &ui.tabs[1].kind {
+        assert!(
+            tab.app.input.is_empty(),
+            "the drawn chat took y: {}",
+            tab.app.input
+        );
+    }
+    let pending = tokio::time::timeout(Duration::from_millis(50), receive(&mut second_peer)).await;
+    assert!(pending.is_err(), "the second chat was approved");
+}
+
+#[tokio::test]
+async fn a_pinned_prompt_stays_drawn_after_focus_moves_and_the_terminal_shrinks() {
+    let (mut ui, _requests, mut first_peer, _path) = dashboard().await;
+    let mut second_peer = second_chat(&mut ui).await;
+    let first = ui.tabs[0].id;
+    ui.size = (160, 40);
+    ui.key(key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('v'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(0));
+    ui.chat_event(first, Ok(Some(ask("a-1", "old-session", "Run make for A"))));
+    // Wide: focus moves to the other pane while the prompt stays pinned.
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.focus, Focus::Pane(1));
+    ui.size = (48, 10);
+    let shown = screen(&ui, 48, 10);
+    assert!(shown.contains("approval required"), "{shown}");
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut first_peer).await,
+        ClientMessage::ApprovalResolve { approval_id, approved: true, .. } if approval_id == "a-1"
+    ));
+    let pending = tokio::time::timeout(Duration::from_millis(50), receive(&mut second_peer)).await;
+    assert!(pending.is_err(), "the second chat was approved");
+}
+
+#[tokio::test]
+async fn a_request_from_the_focused_chat_under_a_pinned_prompt_is_announced() {
+    let (mut ui, _requests, mut first_peer, _path) = dashboard().await;
+    let mut second_peer = second_chat(&mut ui).await;
+    let first = ui.tabs[0].id;
+    let second = ui.tabs[1].id;
+    ui.size = (160, 40);
+    ui.key(key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('v'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    ui.chat_event(first, Ok(Some(ask("a-1", "old-session", "Run make for A"))));
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::ALT))
+        .await
+        .unwrap();
+    assert_eq!(ui.active_tab(), Some(second));
+    ui.workbench.notices.clear();
+    ui.workbench.bell = false;
+    ui.chat_event(
+        second,
+        Ok(Some(ask("b-1", "second-session", "rm -rf ~ for B"))),
+    );
+    assert!(ui.workbench.bell);
+    assert!(
+        ui.workbench
+            .notices
+            .back()
+            .unwrap()
+            .text
+            .contains("asks for approval")
+    );
+    let shown = screen(&ui, 160, 40);
+    assert!(shown.contains("Run make for A"), "{shown}");
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive(&mut first_peer).await,
+        ClientMessage::ApprovalResolve { approval_id, approved: true, .. } if approval_id == "a-1"
+    ));
+    let pending = tokio::time::timeout(Duration::from_millis(50), receive(&mut second_peer)).await;
+    assert!(pending.is_err(), "the second chat was approved");
+}

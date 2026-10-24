@@ -385,14 +385,13 @@ impl Ui {
     /// failed. A failure is that tab's alone: it disconnects and reconnects
     /// as when its connection is lost, and the other tabs keep running.
     pub(crate) fn chat_event(&mut self, id: u64, result: Result<Option<ServerEvent>>) {
-        // While the sidebar is open, only the chat whose prompt will be
-        // drawn counts as focused. `active_tab` is pane 0 then, which hid
-        // that pane's approval and raised no notice when another pane held
-        // the prompt.
-        let focused = match self.focus {
-            Focus::Sidebar => self.approval_would_cover(id),
-            Focus::Pane(_) => self.active_tab() == Some(id),
-        };
+        // Only the chat whose prompt will be drawn counts as focused. A
+        // prompt already pinned stays that chat's when focus moves, so a
+        // request from the pane now focused is announced instead of
+        // looking like the one on screen. With nothing pinned, the
+        // sidebar's `active_tab` is pane 0, which hid the pane focus left
+        // when another pane held the prompt.
+        let focused = self.approval_would_cover(id);
         let index = self.tabs.iter().position(|tab| tab.id == id);
         let Some(Tab {
             kind: TabKind::Chat(chat),

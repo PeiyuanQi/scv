@@ -414,7 +414,10 @@ impl ConversationStore {
 
     /// Take in a conversation the agent saved under its own session ID
     /// `vendor`, with no process kept from before, so a call can continue it
-    /// (resuming an interrupted job). Returns its new handle.
+    /// (resuming an interrupted job). Returns its handle. The same agent,
+    /// vendor session, and directory already held here is that handle
+    /// again, so a second resume queues behind it instead of starting
+    /// another process in the one agent session.
     pub(crate) fn adopt(&self, agent: &str, cwd: &Path, vendor: &str) -> Result<String, ToolError> {
         if !valid_session_id(vendor) {
             return Err(ToolError::invalid_arguments(
@@ -423,6 +426,21 @@ impl ConversationStore {
         }
         let mut inner = lock(&self.inner);
         let now = Instant::now();
+        if let Some(handle) = inner
+            .conversations
+            .iter()
+            .find_map(|(handle, conversation)| {
+                (conversation.agent == agent
+                    && conversation.vendor.as_deref() == Some(vendor)
+                    && conversation.cwd == cwd)
+                    .then(|| handle.clone())
+            })
+        {
+            if let Some(conversation) = inner.conversations.get_mut(&handle) {
+                conversation.last_used = now;
+            }
+            return Ok(handle);
+        }
         while inner.conversations.len() >= self.limits.max.max(1) {
             let Some(oldest) = inner
                 .conversations
