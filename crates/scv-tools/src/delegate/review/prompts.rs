@@ -195,7 +195,13 @@ pub(crate) fn reviewer_prompt(brief: &ReviewerBrief<'_>) -> String {
          - Approve only what you would approve with unlimited review rounds. How far the \
          review has gone never changes the verdict.\n",
     );
-    if !brief.open.is_empty() {
+    if brief.open.is_empty() {
+        text.push_str(
+            "- There are no open findings, so omit \"prior\" or set it to []. Do not invent \
+             finding ids such as \"1\" or \"1.1\". A \"prior\" entry is valid only for an id \
+             listed under open findings.\n",
+        );
+    } else {
         text.push_str(
             "- First settle every open finding below by its ID in \"prior\": resolved, still \
              open, or withdrawn when you accept the builder's reasons (say why in its note). \
@@ -229,7 +235,7 @@ pub(crate) fn reviewer_prompt(brief: &ReviewerBrief<'_>) -> String {
         "End your reply with exactly one fenced {VERDICT_BLOCK} block holding one JSON object:\n\
          ```{VERDICT_BLOCK}\n\
          {{\"verdict\":\"approve|changes|escalate\",\"summary\":\"<one or two sentences>\",\n \
-         \"prior\":[{{\"id\":\"<open finding ID>\",\"status\":\"resolved|open|withdrawn\",\"note\":\"<why>\"}}],\n \
+         \"prior\":[],\n \
          \"findings\":[{{\"severity\":\"blocking|minor\",\"title\":\"<short>\",\"detail\":\"<what and why>\",\"location\":\"<path:line>\"}}],\n \
          \"evidence\":[\"<what you ran or read, and what it showed>\"],\n \
          \"landing_check\":{{\"status\":\"confirmed|not_found|mismatch|unverifiable\",\"ref\":\"<ref>\",\"commits\":[\"<sha>\"],\"evidence\":[\"<how you checked>\"],\"note\":\"<why, if unverifiable>\"}},\n \
@@ -239,7 +245,9 @@ pub(crate) fn reviewer_prompt(brief: &ReviewerBrief<'_>) -> String {
          - changes: at least one blocking finding is open, earlier or new.\n\
          - escalate: the user must decide (a scope conflict, missing access, a risky step, an \
          unauthorized landing), or the change can't be identified or reviewed.\n\
-         - findings lists new findings only; prior settles open ones by ID.\n\
+         - findings lists new findings only. \"prior\" is required only when open findings were \
+         listed, one entry per listed id ({{\"id\":\"<that id>\",\"status\":\"resolved|open|withdrawn\",\"note\":\"<why>\"}}); \
+         otherwise omit \"prior\" or set it to []. Never invent an id.\n\
          - landing_check is required only when the builder reports landing this round, and \
          approved only when you approve a job that lands after approval; omit them otherwise.\n"
     ));
@@ -250,7 +258,9 @@ pub(crate) fn reviewer_prompt(brief: &ReviewerBrief<'_>) -> String {
 pub(crate) fn repair_prompt(error: &str) -> String {
     format!(
         "Your reply had no valid {VERDICT_BLOCK} block ({}). Reply with only that block, \
-         deciding from the review you just did.",
+         deciding from the review you just did. If the error is that \"prior\" names an id that \
+         is not an open finding, omit \"prior\" or send [] unless the review listed open \
+         findings, and never invent an id.",
         bounded(error, 300)
     )
 }

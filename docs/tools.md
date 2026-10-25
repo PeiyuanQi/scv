@@ -1054,8 +1054,10 @@ conversation started for that round:
    to settle. Every open finding is listed with its ID, severity, and title,
    since the verdict must settle each by ID; when the list would pass
    48 KiB, details are shortened first and then titles, never a finding
-   dropped (the builder's fix prompt lists them the same way). It is never
-   told the round limit. It finds the change itself:
+   dropped (the builder's fix prompt lists them the same way). A round with
+   no open findings says so and tells the reviewer to omit `prior` or send
+   `[]` and not to invent an id. It is never told the round limit. It finds
+   the change itself:
    the uncommitted changes, or with a clean tree the commits the builder
    names or the landed commits; it reviews the whole change every round,
    never approves an empty diff, and escalates when it cannot identify it.
@@ -1098,12 +1100,17 @@ the last, at most 16 KiB; it never reads prose such as "LGTM":
 ```
 ````
 
+That sample settles one open finding. With none open, `prior` is omitted
+or `[]`.
+
 - `verdict` is `approve`, `changes`, or `escalate`; `summary` is required.
 - `findings` are new findings only, at most 20, each `blocking` or `minor`
   with a `title`; SCV numbers them `<round>.<n>`. Only blocking findings
   start another round.
-- From round 2, `prior` settles every open finding by its ID exactly once:
-  `resolved`, still `open`, or `withdrawn` with a `note`.
+- `prior` is required only when open findings were listed (from round 2),
+  one entry per listed id: `resolved`, still `open`, or `withdrawn` with a
+  `note`. Otherwise omit `prior` or send `[]`. An entry whose id is not an
+  open finding is rejected.
 - `approve` needs `evidence`, no prior finding left open, and no new
   blocking finding; with `land: "after_approval"` it also names the commits
   it approved, `"approved":{"base":"<sha>","head":"<sha>"}`. `changes` needs
@@ -1114,9 +1121,12 @@ the last, at most 16 KiB; it never reads prose such as "LGTM":
 Unknown fields are ignored, long strings are cut, and control characters
 are removed; anything else that breaks these rules, a missing block, or one
 a cut reply may have lost, is malformed. A reviewer whose turn completed and
-whose conversation can be continued gets one repair turn ("Reply with only
-that block"); still malformed, or one that cannot be continued, ends the
-round `no_verdict` (`malformed_verdict`). A repair turn that declines,
+whose conversation can be continued gets one repair turn. It says to reply
+with only that block, and, when the error is that `prior` names an id that
+is not an open finding, to omit `prior` or send `[]` unless the review
+listed open findings and never to invent an id. Still malformed, or a
+reviewer that cannot be continued, ends the round `no_verdict`
+(`malformed_verdict`). A repair turn that declines,
 times out, fails, or is unavailable ends the round `no_verdict` with that
 cause instead (`reviewer_declined` keeps its words in `review.refusals`),
 and no other reviewer is asked. A `changes` or `escalate` verdict counts
