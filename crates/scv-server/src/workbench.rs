@@ -55,6 +55,9 @@ struct Host {
     /// Keeps the session's `agent` tool, conversations, and job store alive.
     _tools: Arc<ToolRegistry>,
     _registration: SessionHandle,
+    /// In the restart activity table while this session lives, so
+    /// `scv restart --when-idle` waits for its jobs as for any other session.
+    _activity: crate::restart::SessionTracker,
     last_used: Instant,
 }
 
@@ -136,6 +139,7 @@ impl Hosts {
             jobs = jobs.with_ledger(ledger);
         }
         let jobs = Arc::new(jobs);
+        let activity = crate::restart::SessionTracker::new(layout.home(), &session, Some(&jobs));
         let mut tools = config.tools();
         tools.delegation = Some(DelegationContext {
             registry: Arc::clone(&self.registry),
@@ -164,6 +168,7 @@ impl Hosts {
             jobs,
             _tools: Arc::new(registry),
             _registration: registration,
+            _activity: activity,
             last_used: Instant::now(),
         })
     }

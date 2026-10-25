@@ -1149,8 +1149,9 @@ installed at its own path once the delegated agent running the command (if
 any) has finished (a nested SCV or ACP agent, which lives for its whole
 conversation, once its turn has ended and, for a nested SCV, the background
 jobs of its own session have been reported to it) and its report is stored,
-no session's background job is running or waiting to be reported, and no
-owner message is being answered; after `--max-wait` (default 600 seconds) it
+no session's background job is running or waiting to be reported (a
+workbench session's included), and no owner message is being answered;
+after `--max-wait` (default 600 seconds) it
 restarts anyway. A watchdog outside the daemon checks the new
 release and rolls back to the previous binary (kept as `<binary>.prev`) when
 it fails to start or reconnect its accounts, unless the releases differ in

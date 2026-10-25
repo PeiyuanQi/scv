@@ -1547,9 +1547,10 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   been resumed: resuming the follow-up first is refused, and once that
   resume holds the session the follow-up is queued behind it, so two jobs
   never continue one agent session at once. When the worktree was removed,
-  the follow-up takes the worktree recorded on a job that run served and
-  runs in a new worktree of that checkout, as a job whose own worktree is
-  gone does. A model or
+  the follow-up takes the worktree recorded on a job that run served, a
+  dismissed record included, and runs in a new worktree of that checkout,
+  in the conversation's subdirectory. A follow-up queued while that
+  worktree existed records the worktree on its own job. A model or
   effort the agent does not take is left out, and the job's timeout carries
   over. The new job is the owner's; the records link each other
   (`resumed_as`, `resumed_from`).

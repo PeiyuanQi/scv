@@ -1077,6 +1077,12 @@ async fn a_follow_up_whose_worktree_was_removed_resumes_in_a_new_one() {
     .await
     .unwrap();
     assert!(!created.cwd.is_dir(), "the worktree is still there");
+    // Dismissing the head keeps its worktree on the record. The follow-up
+    // has none of its own.
+    bench
+        .workbench
+        .dismiss("old-session", "job-1")
+        .expect("the interrupted head can be dismissed");
     let host = live_for(
         &bench,
         "workbench-host",
@@ -1100,6 +1106,10 @@ async fn a_follow_up_whose_worktree_was_removed_resumes_in_a_new_one() {
         Path::new(cwd).starts_with(&worktree.path),
         "cwd {cwd} is not inside {}",
         worktree.path
+    );
+    assert!(
+        Path::new(cwd).ends_with("shop"),
+        "cwd {cwd} lost the conversation's subdirectory"
     );
     assert_ne!(cwd, workspace.display().to_string());
     host.release.notify_waiters();

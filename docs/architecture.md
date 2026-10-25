@@ -305,12 +305,13 @@ an owner's chat request to change, publish, and deploy SCV itself.
    background job (one whose report turn failed and waits to be tried again
    included, and a cancelled reviewed job whose final outcome has not been
    sent), and (through the channel hub) no unstored report; no other
-   session of the daemon has such a background job either, since the
-   restart would stop it, and no chat has a background report not yet
-   stored in its outbox; and no chat bridge holds an owner message it has
-   not answered durably, and no email account is carrying out a mail
-   action. While jobs hold it, `daemon.status` says how many and in how many
-   sessions (`restart.waiting_for`: `2 background jobs in 1 session`). A
+   session of the daemon has such a background job either, a workbench
+   session's owner jobs included, since the restart would stop it, and no
+   chat has a background report not yet stored in its outbox; and no chat
+   bridge holds an owner message it has not answered durably, and no email
+   account is carrying out a mail action. While jobs hold it, `daemon.status`
+   says how many and in how many sessions (`restart.waiting_for`: `2 background
+   jobs in 1 session`). A
    per-turn CLI run is at work while it has live processes. A live child (a
    nested SCV or an ACP agent) keeps its process for its whole conversation,
    so it is at work only while a turn runs on it (`idle_since_unix` is absent

@@ -347,10 +347,17 @@ fn fit_record(record: &mut JobRecord) {
 
 /// The record of `job` in `session`, unless the owner dismissed it.
 pub fn load(root: &Path, session: &str, job: &str) -> Option<JobRecord> {
+    load_including_dismissed(root, session, job).filter(|record| !record.dismissed)
+}
+
+/// The record of `job` in `session`, a dismissed one included. Dismissing
+/// keeps the worktree the job ran in, which a queued follow-up still needs
+/// after that job is forgotten.
+pub fn load_including_dismissed(root: &Path, session: &str, job: &str) -> Option<JobRecord> {
     if !valid_name(session) || !valid_name(job) {
         return None;
     }
-    read_record(&root.join(session).join(format!("{job}.json"))).filter(|record| !record.dismissed)
+    read_record(&root.join(session).join(format!("{job}.json")))
 }
 
 /// Forget `job` of `session` for the owner: its record keeps only its

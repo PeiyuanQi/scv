@@ -851,17 +851,11 @@ impl Workbench {
             ));
         }
         let mut record = record;
+        let cwd_live = run.as_ref().is_some_and(|found| found.cwd.is_dir());
         if let Some(found) = &run
-            && found.cwd.is_dir()
+            && cwd_live
         {
-            let has_cwd = record
-                .arguments
-                .get("cwd")
-                .and_then(Value::as_str)
-                .is_some_and(|cwd| !cwd.is_empty());
-            if !has_cwd && let Some(object) = record.arguments.as_object_mut() {
-                object.insert("cwd".into(), found.cwd.display().to_string().into());
-            }
+            remember_cwd(&mut record, &found.cwd);
             if record.worktree.is_none()
                 && let Some(worktree) =
                     crate::delegate::worktree::worktree_ref(&self.worktrees, &found.cwd)
@@ -871,12 +865,21 @@ impl Workbench {
         }
         // The directory is gone (the owner removed the worktree; an
         // interrupted job does not hold it). The job that run served still
-        // records the checkout, which is what a new worktree is made from.
+        // records the checkout, dismissed records included, which is what a
+        // new worktree is made from. The run's path still names the
+        // subdirectory inside it.
         if record.worktree.is_none()
             && let Some(found) = &run
             && let Some(worktree) = served_worktree(&self.jobs, found)
         {
             record.worktree = Some(worktree);
+        }
+        if !cwd_live
+            && let Some(found) = &run
+            && let Some(worktree) = &record.worktree
+            && found.cwd.starts_with(Path::new(&worktree.path))
+        {
+            remember_cwd(&mut record, &found.cwd);
         }
         let cwd = run
             .as_ref()
@@ -1192,11 +1195,25 @@ fn unresumed_served(root: &Path, run: &RunState, skip: &str) -> Vec<String> {
 }
 
 /// The worktree recorded on a job `run` served. A follow-up has none of
-/// its own, and the run's directory may already have been removed.
+/// its own, and the run's directory may already have been removed. A
+/// dismissed record still carries the worktree.
 fn served_worktree(root: &Path, run: &RunState) -> Option<scv_protocol::WorktreeRef> {
-    served_job_names(run)
-        .into_iter()
-        .find_map(|name| ledger::load(root, &run.session, name).and_then(|record| record.worktree))
+    served_job_names(run).into_iter().find_map(|name| {
+        ledger::load_including_dismissed(root, &run.session, name)
+            .and_then(|record| record.worktree)
+    })
+}
+
+/// Record `cwd` on `record` when the call did not name one.
+fn remember_cwd(record: &mut ledger::JobRecord, cwd: &Path) {
+    let has_cwd = record
+        .arguments
+        .get("cwd")
+        .and_then(Value::as_str)
+        .is_some_and(|cwd| !cwd.is_empty());
+    if !has_cwd && let Some(object) = record.arguments.as_object_mut() {
+        object.insert("cwd".into(), cwd.display().to_string().into());
+    }
 }
 
 /// The `agent` call that runs interrupted job `record` again from its

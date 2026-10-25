@@ -1847,12 +1847,45 @@ impl BackgroundCapable {
     fn start(
         &self,
         agent: &Offered,
-        arguments: Value,
+        mut arguments: Value,
         context: &ToolContext,
         turn: Turn,
     ) -> Result<ToolOutput, ToolError> {
-        let started = self.start_as(agent, arguments, context, turn, JobMeta::default())?;
+        let meta = self.queued_meta(&mut arguments, &turn);
+        let started = self.start_as(agent, arguments, context, turn, meta)?;
         Ok(ToolOutput::success(started.to_string()))
+    }
+
+    /// A queued follow-up has no run of its own. Remember the conversation's
+    /// directory and SCV worktree on the job, so a later resume still has
+    /// them after the job that run served was dismissed and the worktree
+    /// removed.
+    fn queued_meta(&self, arguments: &mut Value, turn: &Turn) -> JobMeta {
+        if !matches!(turn, Turn::Queued(_)) {
+            return JobMeta::default();
+        }
+        let Some(handle) = parse_args::<AgentArgs>(arguments)
+            .ok()
+            .and_then(|args| args.session)
+            .filter(|session| conversation::is_handle(session))
+        else {
+            return JobMeta::default();
+        };
+        let Some(cwd) = self.conversations.cwd(&handle) else {
+            return JobMeta::default();
+        };
+        if arguments
+            .get("cwd")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            && let Some(object) = arguments.as_object_mut()
+        {
+            object.insert("cwd".into(), cwd.display().to_string().into());
+        }
+        JobMeta {
+            worktree: self.inner.worktree_at(&cwd),
+            ..JobMeta::default()
+        }
     }
 
     /// Start the call on `agent` as a background job `meta` describes.
