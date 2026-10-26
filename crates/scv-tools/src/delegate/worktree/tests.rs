@@ -51,7 +51,9 @@ fn repo() -> Repo {
     ] {
         git_in(&repo, args);
     }
-    let root = dir.path().join("home/worktrees");
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .join("home/worktrees");
     Repo {
         _dir: dir,
         workspace,
