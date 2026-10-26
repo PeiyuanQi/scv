@@ -127,6 +127,15 @@ Daemon and component changes require focused coverage for:
   channel login options refused on the other channel and IDs checked before
   any request; and a Feishu account supervised beside WeChat, surviving
   WeChat's discovery failure;
+- the working reaction: added only once a message's claim is durable and
+  never for an ignored, unanswered, or fixed-reply message; saved with the
+  claim and carried into its reply; removed with the same reaction ID or
+  emoji once the reply is sent, also for a failed turn and a claim recovered
+  after an interruption; failures to add or remove only logged, never
+  holding up the turn or its reply; and state without a reaction removing
+  nothing. Feishu reacts with `Typing` and removes by `reaction_id`, naming
+  `im:message.reactions:write` on code 99991672; Slack reacts with `eyes`,
+  `already_reacted` and `no_reaction` counting as success;
 - polling and other senders continuing during a long owner turn, a
   conversation's messages running in order with their own context tokens, at
   most four turns at once, busy notices beyond the queue limits without a

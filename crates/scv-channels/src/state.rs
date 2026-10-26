@@ -121,6 +121,10 @@ pub(crate) struct PendingDelivery {
     /// delivery is recorded under the key in `recent_keys`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) notice_key: Option<String>,
+    /// The working reaction on `message_id`, from its claim, taken off once
+    /// this reply is delivered or refused; see [`InFlight::reaction`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reaction: Option<String>,
 }
 
 #[allow(
@@ -152,6 +156,12 @@ pub(crate) struct InFlight {
     /// The sender's conversation; empty in older state (direct chat).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) key: String,
+    /// What the transport needs to take its working reaction off the
+    /// message again (Feishu's reaction ID, Slack's emoji name); `None` when
+    /// it added none, and in state from releases before the reaction, which
+    /// also ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reaction: Option<String>,
 }
 
 /// A reply the transport refused. It is delivered with the conversation's

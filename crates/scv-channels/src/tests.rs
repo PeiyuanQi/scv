@@ -41,6 +41,7 @@ fn interrupted_recovery_is_durable_and_preserves_retry_identity() {
             to_user_id: "sender".into(),
             context_token: "context".into(),
             key: String::new(),
+            reaction: Some("reaction".into()),
         }],
         ..Default::default()
     };
@@ -56,6 +57,8 @@ fn interrupted_recovery_is_durable_and_preserves_retry_identity() {
     assert_eq!(pending.context_token, "context");
     assert_eq!(pending.reply, FAILURE_REPLY);
     assert_eq!(pending.client_ids.len(), 1);
+    // Its delivery takes the claim's working reaction off.
+    assert_eq!(pending.reaction.as_deref(), Some("reaction"));
     recover_interrupted(&store, "default", &mut restarted).unwrap();
     assert_eq!(restarted.pending.len(), 1);
     assert_eq!(restarted.pending[0].client_ids, pending.client_ids);
@@ -148,6 +151,7 @@ fn only_held_replies_that_fit_ride_along_and_refusal_restores_them() {
         to_user_id: "u".into(),
         context_token: "c".into(),
         key: String::new(),
+        reaction: None,
     };
     let held = |key: &str, reply: &str, held_at: u64| state::HeldReply {
         key: key.into(),
@@ -231,6 +235,7 @@ fn recovery_tells_each_chat_which_background_jobs_stopped() {
             to_user_id: "alice".into(),
             context_token: "context".into(),
             key: "alice".into(),
+            reaction: None,
         }],
         jobs: vec![
             job("alice", "job-1", "codex", "Fix the build"),
@@ -336,6 +341,7 @@ fn a_recovered_thread_claim_is_answered_inside_its_thread() {
             to_user_id: "owner".into(),
             context_token: "thread:t1".into(),
             key: thread.into(),
+            reaction: None,
         }],
         ..Default::default()
     };
@@ -365,6 +371,7 @@ fn after_a_planned_restart_claims_are_told_why() {
             to_user_id: "alice".into(),
             context_token: "context".into(),
             key: String::new(),
+            reaction: None,
         }],
         ..Default::default()
     };
@@ -389,6 +396,7 @@ fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_label()
             to_user_id: "alice".into(),
             context_token: "context".into(),
             key: "alice".into(),
+            reaction: None,
         }],
         // The model's answer that was refused earlier, still waiting.
         held: vec![state::HeldReply {

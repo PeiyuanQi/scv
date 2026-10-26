@@ -194,6 +194,7 @@ fn legacy_binding_requires_original_credentials_and_refuses_login_upgrade() {
             to_user_id: "sender".into(),
             context_token: "ctx".into(),
             key: String::new(),
+            reaction: None,
         }],
         ..Default::default()
     };

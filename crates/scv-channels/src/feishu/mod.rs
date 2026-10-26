@@ -18,8 +18,8 @@ use tokio::{sync::Mutex, time::Instant};
 
 use crate::retry::{SendLabels, retry_send};
 use crate::{
-    AccountRun, Batch, Channel, ChannelKind, Downloaded, Inbound, Media, MediaKind, Outbound,
-    OutboundFile, Resolved, SendOutcome, Transport,
+    AccountRun, Batch, Channel, ChannelKind, Downloaded, Inbound, Media, MediaKind, Message,
+    Outbound, OutboundFile, Resolved, SendOutcome, Transport,
 };
 
 mod api;
@@ -127,6 +127,9 @@ const MAX_FORWARDED: usize = 50;
 const MAX_CONTEXT_BYTES: usize = 16 * 1024;
 /// Largest image Feishu accepts for sending; bigger ones go as files.
 const MAX_SEND_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+/// The reaction on a message SCV is working on: the catalog's "typing",
+/// which reads as working on it.
+const WORKING_EMOJI: &str = "Typing";
 
 /// The Feishu transport of one account.
 pub(crate) struct OpenPlatform {
@@ -533,6 +536,19 @@ impl Transport for OpenPlatform {
         })
         .await?;
         Ok(outcome(sent))
+    }
+
+    /// React with [`WORKING_EMOJI`], keeping the reaction's ID, so only this
+    /// reaction is removed later.
+    async fn react(&self, message: &Message) -> Result<Option<String>> {
+        self.api
+            .add_reaction(&message.id, WORKING_EMOJI)
+            .await
+            .map(Some)
+    }
+
+    async fn unreact(&self, message_id: &str, reaction: &str) -> Result<()> {
+        self.api.remove_reaction(message_id, reaction).await
     }
 }
 

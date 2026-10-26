@@ -230,6 +230,7 @@ async fn recovered_delivery_deduplicates_first_poll_without_reexecuting() {
                     to_user_id: "sender".into(),
                     context_token: "context".into(),
                     key: String::new(),
+                    reaction: None,
                 }],
                 ..Default::default()
             },
@@ -1217,6 +1218,7 @@ async fn recovery_answers_every_claim_once_and_never_replays_it() {
         to_user_id: "sender".into(),
         context_token: format!("ctx-{id}"),
         key: key.into(),
+        reaction: None,
     };
     let answered = new_pending("done", "sender", "ctx-done", "answer", MAX_REPLY_BYTES);
     store
@@ -1907,6 +1909,7 @@ async fn after_a_planned_restart_interrupted_work_is_described_as_such() {
                     to_user_id: "sender".into(),
                     context_token: "ctx-m1".into(),
                     key: "sender".into(),
+                    reaction: None,
                 }],
                 // As 0.3.0 saved it, with the agent in the tool's name.
                 jobs: vec![crate::state::RunningJob {

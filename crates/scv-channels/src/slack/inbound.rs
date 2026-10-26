@@ -84,6 +84,17 @@ pub(super) fn target<'a>(handle: &'a str, user: &'a str) -> Result<(&'a str, Opt
     bail!("invalid Slack reply handle")
 }
 
+/// The conversation and `ts` of the message a bridge message ID
+/// (`<conversation>:<ts>`) names.
+pub(super) fn message_ts(id: &str) -> Result<(&str, &str)> {
+    match id.split_once(':') {
+        Some((channel, ts)) if valid_id(channel, "DCG") && micros(ts).is_some() => {
+            Ok((channel, ts))
+        }
+        _ => bail!("invalid Slack message ID"),
+    }
+}
+
 /// A received message and where it belongs in the checkpoint.
 pub(super) struct Received {
     pub(super) inbound: Inbound,

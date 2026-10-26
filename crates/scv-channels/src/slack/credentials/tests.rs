@@ -140,7 +140,8 @@ fn missing_scopes_are_named() {
             "channels:history",
             "files:read",
             "files:write",
-            "groups:history"
+            "groups:history",
+            "reactions:write"
         ]
     );
 }

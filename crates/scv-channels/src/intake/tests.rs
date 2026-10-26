@@ -24,6 +24,7 @@ fn claim(id: &str, key: &str) -> state::InFlight {
         to_user_id: key.into(),
         context_token: "context".into(),
         key: key.into(),
+        reaction: None,
     }
 }
 

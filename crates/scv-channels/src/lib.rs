@@ -6,7 +6,8 @@
 //! The bridge claims inbound messages durably, runs each conversation's
 //! turns in order on its own SCV daemon session, and delivers replies with
 //! stable retry identities. A channel supplies only its `Transport`:
-//! receiving messages and sending them. The daemon runs an account with
+//! receiving messages and sending them, and optionally a reaction that shows
+//! a claimed message is being worked on. The daemon runs an account with
 //! [`run`] and manages saved accounts through [`ChannelKind::accounts`].
 
 // Without a chat channel the bridge has no transport to run, and without
@@ -215,6 +216,8 @@ const MAX_HELD_REPLY_BYTES: usize = MAX_REPLY_BYTES / 2;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long downloading one file may take.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long adding or removing a working reaction may take.
+const REACTION_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often old media files are removed.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
@@ -497,6 +500,23 @@ pub(crate) trait Transport: Send + Sync {
     ) -> Result<SendOutcome> {
         let _ = (file, report);
         bail!("{} cannot send files", self.label())
+    }
+
+    /// Show on `message`, just claimed, that SCV is working on it, such as
+    /// with a reaction. Returns what [`Transport::unreact`] needs to take
+    /// it off again, which the bridge saves with the claim; `None`, the
+    /// default, when the transport adds nothing. Errors must not carry
+    /// keys or tokens.
+    async fn react(&self, message: &Message) -> Result<Option<String>> {
+        let _ = message;
+        Ok(None)
+    }
+
+    /// Take the reaction [`Transport::react`] returned as `reaction` off
+    /// the message `message_id`.
+    async fn unreact(&self, message_id: &str, reaction: &str) -> Result<()> {
+        let _ = (message_id, reaction);
+        Ok(())
     }
 }
 
@@ -1025,9 +1045,13 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             to_user_id: message.sender.clone(),
             context_token: message.reply_to.clone(),
             key: key.clone(),
+            reaction: None,
         });
         self.save(&state).await?;
         drop(state);
+        // Before the turn is queued, so it cannot end before the reaction
+        // is saved with its claim.
+        self.react(message).await?;
         if let Some(evict) = evict {
             // Dropping its queue ends that conversation after its current turn.
             conversations.remove(&evict);
@@ -1208,6 +1232,53 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         answer.give(yes);
         self.replies.notify_one();
         Ok(())
+    }
+
+    /// Put the transport's working reaction on `message`, whose claim is
+    /// durable, and save what takes it off again with the claim. A reaction
+    /// that fails or times out is only logged: it never holds up receiving,
+    /// the turn, or the reply.
+    async fn react(&self, message: &Message) -> Result<()> {
+        let reaction =
+            match tokio::time::timeout(REACTION_TIMEOUT, self.transport.react(message)).await {
+                Ok(Ok(Some(reaction))) => reaction,
+                Ok(Ok(None)) => return Ok(()),
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "could not add the working reaction");
+                    return Ok(());
+                }
+                Err(_) => {
+                    tracing::warn!("timed out adding the working reaction");
+                    return Ok(());
+                }
+            };
+        let mut state = self.state.lock().await;
+        let Some(claim) = state
+            .in_flight
+            .iter_mut()
+            .find(|claim| claim.message_id == message.id)
+        else {
+            return Ok(());
+        };
+        claim.reaction = Some(reaction);
+        self.save(&state).await
+    }
+
+    /// Take the working reaction `reaction` off the message `message_id`.
+    /// A failure is only logged.
+    async fn unreact(&self, message_id: &str, reaction: &str) {
+        match tokio::time::timeout(
+            REACTION_TIMEOUT,
+            self.transport.unreact(message_id, reaction),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "could not remove the working reaction");
+            }
+            Err(_) => tracing::warn!("timed out removing the working reaction"),
+        }
     }
 
     /// Run one conversation's turns in order on its own SCV session. A turn
@@ -1949,10 +2020,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         }
     }
 
-    /// Send the oldest pending reply: its text parts, then its files. Only
-    /// this path edits or removes pending replies, so the first entry stays
-    /// the same one between state locks. A question's text opens the
-    /// question once it is delivered and fails it when refused.
+    /// Send the oldest pending reply: its text parts, then its files, then
+    /// take its message's working reaction off. Only this path edits or
+    /// removes pending replies, so the first entry stays the same one
+    /// between state locks. A question's text opens the question once it is
+    /// delivered and fails it when refused.
     async fn deliver_next(&self) -> Result<Step> {
         let mut pending = {
             let mut state = self.state.lock().await;
@@ -2056,6 +2128,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             let mut state = self.state.lock().await;
             state.pending[0].next_file = pending.next_file;
             self.save(&state).await?;
+        }
+        // The work is over, delivered or refused. Taken off before the reply
+        // leaves the state, so a restart in between takes it off again.
+        if let Some(reaction) = &pending.reaction {
+            self.unreact(&pending.message_id, reaction).await;
         }
         let mut state = self.state.lock().await;
         state.pending.remove(0);
@@ -2167,8 +2244,9 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Build the reply to a claimed message. Earlier refused replies to the same
-/// conversation ride ahead of it, oldest first, as far as one message allows.
+/// Build the reply to a claimed message, which takes over the claim's
+/// working reaction. Earlier refused replies to the same conversation ride
+/// ahead of it, oldest first, as far as one message allows.
 fn compose_pending(
     state: &mut state::BridgeState,
     claim: &state::InFlight,
@@ -2211,6 +2289,7 @@ fn compose_pending(
         MAX_REPLY_BYTES,
     );
     pending.key = claim.key.clone();
+    pending.reaction.clone_from(&claim.reaction);
     if !carried.is_empty() {
         pending.own = Some(own.to_owned());
         pending.carried = carried;
@@ -2303,7 +2382,8 @@ pub(crate) fn recover_interrupted<C: state::Credentials>(
 
 /// Turn every claim an interrupted run left into a failure reply, durably;
 /// interrupted work is never resubmitted. After a planned `restart`, claims
-/// get [`restarted_reply`] instead of [`FAILURE_REPLY`].
+/// get [`restarted_reply`] instead of [`FAILURE_REPLY`]; either reply takes
+/// over the claim's working reaction, which its delivery takes off.
 /// Each direct chat, or thread in one, whose background jobs the previous
 /// run left running is told which stopped, in that thread. Both are SCV's
 /// own words, marked with the transport's `system_label` by

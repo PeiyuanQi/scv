@@ -19,6 +19,15 @@ struct Sent {
     text: String,
 }
 
+/// A working reaction the bridge asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Reacted {
+    /// Added to this message, as `reaction-<message ID>`.
+    Add(String),
+    /// Taken off this message: the message and the reaction.
+    Remove(String, String),
+}
+
 /// A transport that receives the batches a test pushes and records every
 /// part the bridge sends. Checkpoints count batches: `c1`, `c2`, ...
 struct FakeTransport {
@@ -31,6 +40,18 @@ struct FakeTransport {
     refuse: StdMutex<Vec<String>>,
     /// A recipient the platform cannot reach for now: sends to it fail.
     unreachable: StdMutex<Option<String>>,
+    /// Every working reaction asked for, in order, failed ones included.
+    reactions: StdMutex<Vec<Reacted>>,
+    /// Adding a reaction fails, as without the platform's permission.
+    react_fails: StdMutex<bool>,
+    /// Removing one fails.
+    unreact_fails: StdMutex<bool>,
+}
+
+impl FakeTransport {
+    fn reactions(&self) -> Vec<Reacted> {
+        self.reactions.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -95,6 +116,28 @@ impl Transport for FakeTransport {
             media: Vec::new(),
         })
     }
+
+    async fn react(&self, message: &Message) -> Result<Option<String>> {
+        self.reactions
+            .lock()
+            .unwrap()
+            .push(Reacted::Add(message.id.clone()));
+        if *self.react_fails.lock().unwrap() {
+            bail!("the fake platform lacks the reaction permission");
+        }
+        Ok(Some(format!("reaction-{}", message.id)))
+    }
+
+    async fn unreact(&self, message_id: &str, reaction: &str) -> Result<()> {
+        self.reactions
+            .lock()
+            .unwrap()
+            .push(Reacted::Remove(message_id.into(), reaction.into()));
+        if *self.unreact_fails.lock().unwrap() {
+            bail!("the fake platform lacks the reaction permission");
+        }
+        Ok(())
+    }
 }
 
 /// One account's bridge under test: its store and the transport it runs.
@@ -136,6 +179,9 @@ impl Bench {
             downloads: StdMutex::new(0),
             refuse: StdMutex::new(Vec::new()),
             unreachable: StdMutex::new(None),
+            reactions: StdMutex::new(Vec::new()),
+            react_fails: StdMutex::new(false),
+            unreact_fails: StdMutex::new(false),
         };
         let bench = Self {
             directory,
@@ -493,6 +539,178 @@ async fn a_voice_message_without_a_transcript_gets_the_voice_reply_and_nothing_e
         })
         .await;
     assert_eq!(*bench.transport.downloads.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_claimed_message_wears_the_working_reaction_until_its_reply_is_sent() {
+    let (bench, mut peer) = Bench::new();
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            // Added once the claim was durable, and saved with it.
+            assert_eq!(bench.transport.reactions(), [Reacted::Add("m1".into())]);
+            assert_eq!(
+                bench.state().in_flight[0].reaction.as_deref(),
+                Some("reaction-m1")
+            );
+            finish_turn(&mut side, "hi alice").await;
+            assert_eq!(peer.sent().await.text, "hi alice");
+            eventually(|| bench.transport.reactions().len() == 2).await;
+            assert_eq!(
+                bench.transport.reactions(),
+                [
+                    Reacted::Add("m1".into()),
+                    Reacted::Remove("m1".into(), "reaction-m1".into()),
+                ]
+            );
+            eventually(|| bench.state().pending.is_empty()).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_failed_turn_takes_the_working_reaction_off_with_its_failure_reply() {
+    let (bench, mut peer) = Bench::new();
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            // The daemon goes away mid-turn.
+            drop(side);
+            assert_eq!(peer.sent().await.text, FAILURE_REPLY);
+            eventually(|| bench.transport.reactions().len() == 2).await;
+            assert_eq!(
+                bench.transport.reactions(),
+                [
+                    Reacted::Add("m1".into()),
+                    Reacted::Remove("m1".into(), "reaction-m1".into()),
+                ]
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_interrupted_claim_takes_its_reaction_off_and_older_state_takes_none_off() {
+    let (bench, mut peer) = Bench::new();
+    // A claim saved with its reaction, and a claim and a reply saved by a
+    // release before the reaction, which carry none.
+    let mut saved: state::BridgeState = serde_json::from_str(
+        r#"{"cursor":"c","seen":[],
+            "pending":{"message_id":"done","to_user_id":"carol","context_token":"re-done","reply":"answer"},
+            "in_flight":[{"message_id":"older","to_user_id":"bob","context_token":"re-older"}]}"#,
+    )
+    .unwrap();
+    saved.in_flight.push(state::InFlight {
+        message_id: "lost".into(),
+        to_user_id: "alice".into(),
+        context_token: "re-lost".into(),
+        key: String::new(),
+        reaction: Some("reaction-lost".into()),
+    });
+    bench.store.save_state("default", &saved).unwrap();
+    bench
+        .run(async {
+            let replies = [peer.sent().await, peer.sent().await, peer.sent().await];
+            assert_eq!(
+                replies.map(|sent| (sent.reply_to, sent.text)),
+                [
+                    ("re-done".to_owned(), "answer".to_owned()),
+                    ("re-older".to_owned(), FAILURE_REPLY.to_owned()),
+                    ("re-lost".to_owned(), FAILURE_REPLY.to_owned()),
+                ]
+            );
+            eventually(|| bench.state().pending.is_empty()).await;
+        })
+        .await;
+    assert_eq!(
+        bench.transport.reactions(),
+        [Reacted::Remove("lost".into(), "reaction-lost".into())]
+    );
+}
+
+#[tokio::test]
+async fn reaction_failures_are_only_logged_and_never_hold_up_the_turn_or_its_reply() {
+    let (bench, mut peer) = Bench::new();
+    *bench.transport.react_fails.lock().unwrap() = true;
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            // Nothing to take off later.
+            assert_eq!(bench.state().in_flight[0].reaction, None);
+            finish_turn(&mut side, "hi").await;
+            assert_eq!(peer.sent().await.text, "hi");
+            eventually(|| {
+                let saved = bench.state();
+                saved.pending.is_empty() && saved.seen == ["m1"]
+            })
+            .await;
+            // Removing fails: the reply is still done with.
+            *bench.transport.react_fails.lock().unwrap() = false;
+            *bench.transport.unreact_fails.lock().unwrap() = true;
+            peer.push(vec![message("m2", "alice", "next")]);
+            assert_eq!(next_turn(&mut side).await, "next");
+            finish_turn(&mut side, "ok").await;
+            assert_eq!(peer.sent().await.text, "ok");
+            eventually(|| {
+                let saved = bench.state();
+                saved.pending.is_empty() && saved.seen == ["m1", "m2"]
+            })
+            .await;
+        })
+        .await;
+    assert_eq!(
+        bench.transport.reactions(),
+        [
+            Reacted::Add("m1".into()),
+            Reacted::Add("m2".into()),
+            Reacted::Remove("m2".into(), "reaction-m2".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn only_claimed_messages_get_the_working_reaction() {
+    let (bench, mut peer) = Bench::owned_by("alice");
+    let Inbound::Text(mut voice) = message("v1", "alice", "") else {
+        unreachable!()
+    };
+    voice.media.push(Media {
+        kind: MediaKind::Audio,
+        name: String::new(),
+        size: Some(1024),
+        mime: Some("audio/opus".into()),
+        transcript: None,
+        source: "file_v3_voice".into(),
+    });
+    peer.push(vec![
+        Inbound::Ignored { id: "s1".into() },
+        message("x1", "mallory", "hello"),
+        Inbound::Text(voice),
+        message("m1", "alice", "hello"),
+    ]);
+    bench
+        .run(async {
+            assert_eq!(peer.sent().await.text, VOICE_REPLY);
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            finish_turn(&mut side, "hi").await;
+            assert_eq!(peer.sent().await.reply_to, "re-m1");
+            eventually(|| bench.transport.reactions().len() == 2).await;
+        })
+        .await;
+    assert_eq!(
+        bench.transport.reactions(),
+        [
+            Reacted::Add("m1".into()),
+            Reacted::Remove("m1".into(), "reaction-m1".into()),
+        ]
+    );
 }
 
 /// An account that answers anyone and is owned by `owner`, linked to a hub,
@@ -1247,6 +1465,7 @@ async fn replies_written_while_recovering_from_a_crash_are_logged() {
                     to_user_id: "owner".into(),
                     context_token: "re-lost".into(),
                     key: String::new(),
+                    reaction: None,
                 }],
                 ..Default::default()
             },
@@ -1528,6 +1747,7 @@ async fn an_account_that_ran_as_an_ordinary_chat_cannot_become_a_mail_chat() {
                 to_user_id: "owner".into(),
                 context_token: String::new(),
                 key: "owner".into(),
+                reaction: None,
             });
         },
         |state| {
