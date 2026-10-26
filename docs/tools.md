@@ -248,7 +248,9 @@ so they are offered whenever installed and their sign-in is reported as
 unchecked; a call that fails signed out gets the sign-in hint. Claude identities are checked from
 their private files and left out while that check says they are signed out,
 blocked, or ambiguous. SCV never runs Claude auth status as a billing gate.
-Every launch pins the billing identity and the Anthropic route; see
+Every launch pins the billing identity and its API route
+(`https://allrouter.cc` for `claude`, `https://api.anthropic.com` for
+`claude-ai`); see
 [Pinned Claude Code credentials](security.md#pinned-claude-code-credentials).
 A session that offers no agent has no `agent` tool.
 
@@ -1006,7 +1008,7 @@ A Claude sibling is never in that order. Agents the session does not offer
 are dropped before approval. A fresh conversation of the builder's own agent
 shares the builder agent's private home and memory, so SCV labels it
 `same agent as builder`. SCV moves to the
-next agent, in the same round, only when the attempt is classed unavailable:
+next agent, in the same round, when the attempt is classed unavailable:
 exactly as an ordinary call's `fallback` is decided (see
 [Choosing an agent](#choosing-an-agent)), from its status and structured
 error, or when the reviewer's whole reply is a provider error that its
@@ -1017,17 +1019,23 @@ reply ends with the error, on one line that starts the reply or a sentence,
 after at most a short opening; one longer than 2 KiB or with a fenced block
 is read as a review, and one that only mentions such an error is not
 unavailable. A reviewer's words can therefore at most hand the round to the
-next reviewer, never approve. Such an agent is skipped for the rest of the
-job.
+next reviewer, never approve. An unavailable agent is skipped for the rest
+of the job.
 A refusal (`declined`) hands the review to `grok` for the rest of the job
 when `grok` is offered and is neither the agent that refused nor the
 builder's agent; otherwise, or when `grok` then declines or is unavailable,
 the round ends `no_verdict` (`reviewer_declined`). After a refusal the
 builder's own agent never reviews. What a reviewer that declined said goes
-into the result's `review.refusals`. A named reviewer is never swapped: its
-unavailability or refusal ends the round `no_verdict`. Nothing else moves to
-another agent: a timeout, a kill, a failure without an availability error,
-or a verdict of any kind.
+into the result's `review.refusals`. A named reviewer is never swapped for
+unavailability or a refusal: either ends the round `no_verdict`.
+A completed reviewer whose verdict stays malformed after its one repair
+turn also hands that round to the next reviewer in the plan that was not
+skipped. That reviewer is not skipped for later rounds. A named reviewer
+is the only one listed, so a verdict that stays malformed ends the round
+`no_verdict` (`malformed_verdict`). A timeout, a kill, a failure without an
+availability error, or a parsed verdict does not move to another agent, and
+neither does a repair turn that declines, times out, fails, or is
+unavailable: each ends the round `no_verdict` with that cause.
 
 #### The loop
 
@@ -1109,8 +1117,9 @@ or `[]`.
   start another round.
 - `prior` is required only when open findings were listed (from round 2),
   one entry per listed id: `resolved`, still `open`, or `withdrawn` with a
-  `note`. Otherwise omit `prior` or send `[]`. An entry whose id is not an
-  open finding is rejected.
+  `note`. Otherwise omit `prior` or send `[]`. When no finding is open, an
+  entry whose id is not open is ignored. Once a finding is open, a stray
+  id, a real open id settled twice, or a missing open id is an error.
 - `approve` needs `evidence`, no prior finding left open, and no new
   blocking finding; with `land: "after_approval"` it also names the commits
   it approved, `"approved":{"base":"<sha>","head":"<sha>"}`. `changes` needs
@@ -1124,12 +1133,15 @@ a cut reply may have lost, is malformed. A reviewer whose turn completed and
 whose conversation can be continued gets one repair turn. It says to reply
 with only that block, and, when the error is that `prior` names an id that
 is not an open finding, to omit `prior` or send `[]` unless the review
-listed open findings and never to invent an id. Still malformed, or a
-reviewer that cannot be continued, ends the round `no_verdict`
-(`malformed_verdict`). A repair turn that declines,
-times out, fails, or is unavailable ends the round `no_verdict` with that
-cause instead (`reviewer_declined` keeps its words in `review.refusals`),
-and no other reviewer is asked. A `changes` or `escalate` verdict counts
+listed open findings and never to invent an id. If it stays malformed, SCV
+asks the next reviewer in the plan that was not skipped, in the same round;
+the round ends `no_verdict` (`malformed_verdict`) only when no such
+reviewer is left. A completed reviewer that cannot be continued gets no
+repair and ends the round `no_verdict` (`malformed_verdict`). A repair turn
+that declines, times out, fails, or is unavailable ends the round
+`no_verdict` with that cause instead (`reviewer_declined` keeps its words
+in `review.refusals`), and no other reviewer is asked. A `changes` or
+`escalate` verdict counts
 however the run ended, so no fallback gets around it; an `approve` counts
 only from a run that completed.
 
@@ -1205,7 +1217,7 @@ when the job was cancelled), apart from the review outcome:
 | `approved` | A reviewer approved round *k*: the only approval |
 | `unresolved` | The last round still had open blocking findings |
 | `escalated` | The reviewer said the user must decide |
-| `no_verdict` | No reviewer was available or had room, or it declined, timed out, was stopped, failed, or stayed malformed |
+| `no_verdict` | No reviewer was available or had room, or a reviewer declined, timed out, was stopped, or failed, or every reviewer asked stayed malformed |
 | `stopped` | A builder turn did not complete, the job was cancelled, or the journal could not be written before the outcome was decided (`journal_error`) |
 
 While it runs, `agent_status` adds
@@ -1835,10 +1847,12 @@ scv agents logout claude                 # removes only the API key file
 scv agents logout claude-ai              # claude auth logout
 ```
 
-They work from any directory. `scv agents login claude` reads an Anthropic API
-key without echo, or from stdin when stdin is not a terminal, and writes
-`agents/claude/.anthropic-api-key` with mode 0600. `scv agents logout claude`
-removes that file and nothing else. A Claude subscription login in that home
+They work from any directory. `scv agents login claude` reads an API key
+without echo, or from stdin when stdin is not a terminal, and writes
+`agents/claude/.anthropic-api-key` with mode 0600. Status treats that file as
+signed in when the mode holds and the line, after a trailing newline is
+trimmed, is 1 to 512 bytes with no whitespace or control character.
+`scv agents logout claude` removes that file and nothing else. A Claude subscription login in that home
 is not cleared by that logout; it blocks `claude` until the home is moved to
 `agents/claude-ai`, or signed out with
 `HOME=$SCV_HOME/agents/claude claude auth logout`. A plain `claude auth logout`

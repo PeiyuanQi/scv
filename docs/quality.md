@@ -213,9 +213,11 @@ Daemon and component changes require focused coverage for:
   data (last block wins, bounded, schema and consistency rules, cut replies
   malformed), the round limit never passed and never told to the reviewer,
   the last builder turn always reviewed, reviewer routing per builder with
-  fallback only on an availability failure, a refusal handing the review to
-  Grok and never to the builder's own agent, a named reviewer never swapped,
-  one repair turn for a malformed verdict, a negative verdict counting
+  fallback on an availability failure and, after one repair turn, on a
+  verdict that stays malformed, a refusal handing the review to Grok and
+  never to the builder's own agent, a named reviewer never swapped for
+  unavailability or a refusal, one repair turn for a malformed verdict, a
+  negative verdict counting
   however its run ended, landing authorization and evidence labels, the
   approving reviewer's one confirmation, every reviewer conversation
   released and the builder's pinned, a cancel's outcome matching the

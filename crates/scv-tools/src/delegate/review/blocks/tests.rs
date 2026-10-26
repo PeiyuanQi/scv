@@ -168,12 +168,79 @@ fn prior_settles_each_open_finding_exactly_once() {
     )
     .unwrap();
     assert_eq!(changes.decision, Decision::Changes);
-    // Without open findings, any prior entry names an unknown one.
+}
+
+#[test]
+fn a_stray_prior_is_ignored_when_nothing_is_open() {
+    // Round 1 has no open findings. Reviewers still name ids in prior.
+    let accepted = verdict(
+        r#"{"verdict":"approve","summary":"Looks right.","evidence":["ran cargo test"],
+            "prior":[{"id":"1","status":"resolved"},{"id":"1.1","status":"open"},
+                     {"id":"1","status":"withdrawn"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(accepted.decision, Decision::Approve);
+    assert_eq!(accepted.prior, Vec::new());
+    let changes = verdict(
+        r#"{"verdict":"changes","summary":"A race.","findings":[{"severity":"blocking","title":"Sleep"}],
+            "prior":[{"id":"1.1","status":"open","note":"still"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(changes.prior, Vec::new());
+    assert_eq!(changes.findings[0].severity, Severity::Blocking);
+    // A stray prior is not itself a blocking finding.
+    let error =
+        verdict(r#"{"verdict":"changes","summary":"x","prior":[{"id":"1","status":"open"}]}"#)
+            .unwrap_err();
+    assert!(error.contains("changes needs"), "{error}");
+    // An entry with no id is still malformed: it is not a stray id.
+    let error = verdict(
+        r#"{"verdict":"approve","summary":"x","evidence":["e"],"prior":[{"status":"open"}]}"#,
+    )
+    .unwrap_err();
+    assert!(error.contains("id is required"), "{error}");
+}
+
+#[test]
+fn an_open_finding_must_still_be_settled() {
+    let open = ["1.1".to_owned()];
+    let expect = Expect {
+        open: &open,
+        ..Expect::default()
+    };
+    let parse = |body: &str| parse_verdict(&reply(VERDICT_BLOCK, body), false, &expect);
+    let error = parse(r#"{"verdict":"changes","summary":"x"}"#).unwrap_err();
     assert!(
-        verdict(r#"{"verdict":"approve","summary":"x","evidence":["e"],"prior":[{"id":"1.1","status":"resolved"}]}"#)
-            .unwrap_err()
-            .contains("not an open finding")
+        error.contains("prior must settle open finding 1.1"),
+        "{error}"
     );
+    // A stray id does not relax the rules for an id that is open.
+    for (body, error) in [
+        (
+            r#"{"verdict":"changes","summary":"x","prior":[{"id":"1","status":"resolved"},{"id":"1.1","status":"open"}]}"#,
+            "not an open finding",
+        ),
+        (
+            r#"{"verdict":"changes","summary":"x","prior":[{"id":"1.1","status":"open"},{"id":"1.1","status":"resolved"}]}"#,
+            "prior settles 1.1 twice",
+        ),
+        (
+            r#"{"verdict":"changes","summary":"x","prior":[{"id":"1.1","status":"withdrawn"}]}"#,
+            "withdrawn without a note",
+        ),
+        (
+            r#"{"verdict":"approve","summary":"x","evidence":["e"],"prior":[{"id":"1.1","status":"open"}]}"#,
+            "approve leaves a prior finding open",
+        ),
+    ] {
+        let found = parse(body).unwrap_err();
+        assert!(found.contains(error), "{body}: {found}");
+    }
+    let settled = parse(
+        r#"{"verdict":"approve","summary":"Fixed.","evidence":["ran it"],"prior":[{"id":"1.1","status":"resolved"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(settled.prior[0].status, Settlement::Resolved);
 }
 
 #[test]

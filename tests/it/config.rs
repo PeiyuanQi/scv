@@ -102,6 +102,9 @@ fn agent_sign_in_ignores_project_configuration() {
         .arg(home.path())
         .args(["agents", "status", "claude"])
         .env("OPENAI_API_KEY", "test-only")
+        // Keep the installation part of this status assertion independent of
+        // whichever native agents happen to be installed on the host.
+        .env("PATH", home.path().join("empty-bin"))
         .current_dir(workspace.path())
         .output()
         .unwrap();

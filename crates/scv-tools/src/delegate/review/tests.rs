@@ -946,12 +946,13 @@ async fn a_malformed_verdict_gets_one_repair_turn_in_the_same_conversation() {
             .contains(&"reviewer.started:repair".to_owned())
     );
 
-    // Malformed twice.
-    let mut session = fixture(&["claude", "codex"]);
+    // Malformed twice, and the call named its reviewer: the plan lists no
+    // one else, so the round ends.
+    let mut session = fixture(&["claude", "codex", "grok"]);
     session.script("claude", [says("Done.")]);
     session.script("codex", [says("LGTM!"), says("Still LGTM!")]);
     session
-        .start(json!({"prompt":"Fix it.","review":{}}))
+        .start(json!({"prompt":"Fix it.","review":{"agent":"codex"}}))
         .await
         .unwrap();
     let (report, _) = session.finished().await;
@@ -960,6 +961,67 @@ async fn a_malformed_verdict_gets_one_repair_turn_in_the_same_conversation() {
         Some("malformed_verdict")
     );
     assert_eq!(session.order(), ["claude", "codex", "codex"]);
+}
+
+#[tokio::test]
+async fn a_verdict_that_stays_malformed_asks_the_next_reviewer_and_round_two_runs() {
+    let mut session = fixture(&["claude", "codex", "grok"]);
+    session.script("claude", [says("Done."), says("Used a lock.")]);
+    session.script(
+        "codex",
+        [says("LGTM!"), says("Still LGTM!"), verdict(RESOLVED)],
+    );
+    session.script("grok", [verdict(CHANGES)]);
+    session
+        .start(json!({"prompt":"Fix it.","review":{"rounds":20}}))
+        .await
+        .unwrap();
+    let (report, _) = session.finished().await;
+    // Codex's repair stays malformed, grok's changes verdict starts round 2,
+    // and round 2 asks codex again: a bad verdict is not a skip.
+    assert_eq!(
+        session.order(),
+        ["claude", "codex", "codex", "grok", "claude", "codex"]
+    );
+    let calls = session.calls();
+    assert!(
+        calls[2]
+            .prompt
+            .starts_with("Your reply had no valid scv-verdict block")
+    );
+    assert_eq!(calls[3].session, None);
+    assert!(calls[4].prompt.starts_with("[SCV review, round 2 of 20]"));
+    let approved = outcome(&report);
+    assert_eq!(approved.review.outcome, ReviewOutcome::Approved);
+    assert_eq!(approved.review.round, 2);
+    assert_eq!(approved.review.reviewer, "codex");
+    assert_eq!(approved.review.fallback, None);
+
+    // Every listed reviewer stays malformed: the round ends, and the reason
+    // is the malformed verdict, not that no reviewer was available.
+    let mut session = fixture(&["claude", "codex", "grok"]);
+    session.script(
+        "claude",
+        [says("Done."), says("no block"), says("still none")],
+    );
+    session.script("codex", [says("LGTM"), says("still")]);
+    session.script("grok", [says("nope"), says("nope")]);
+    session
+        .start(json!({"prompt":"Fix it.","review":{"rounds":20}}))
+        .await
+        .unwrap();
+    let (report, _) = session.finished().await;
+    assert_eq!(
+        session.order(),
+        [
+            "claude", "codex", "codex", "grok", "grok", "claude", "claude"
+        ]
+    );
+    let failed = outcome(&report);
+    assert_eq!(failed.review.outcome, ReviewOutcome::NoVerdict);
+    assert_eq!(failed.review.reason.as_deref(), Some("malformed_verdict"));
+    assert_eq!(failed.review.round, 1);
+    assert_eq!(failed.review.reviewer, "claude");
 }
 
 #[tokio::test]
@@ -1291,8 +1353,9 @@ async fn an_approval_that_lands_after_review_must_name_the_approved_commits() {
     let mut session = fixture(&["claude", "codex"]);
     session.script("claude", [says("Committed.")]);
     session.script("codex", [verdict(APPROVE), verdict(APPROVE)]);
+    // Named, so a verdict that stays malformed has no next reviewer.
     session
-        .start(json!({"prompt":"Fix it.","review":{"land":"after_approval"}}))
+        .start(json!({"prompt":"Fix it.","review":{"agent":"codex","land":"after_approval"}}))
         .await
         .unwrap();
     let (report, _) = session.finished().await;

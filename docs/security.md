@@ -347,9 +347,14 @@ structured `error` only, so text in an agent's reply cannot trigger one.
 
 SCV keeps `claude` and `claude-ai` in separate private homes and separate
 configuration tables. Every launch, on both the per-turn CLI and ACP, passes
-the same programmatic settings object. It pins the Anthropic API route,
-clears alternate credential and cloud-provider variables, and selects the
-intended billing identity. SCV never uses Claude's auth-status command as a
+the same programmatic settings object for that agent. `claude` pins
+`ANTHROPIC_BASE_URL` to `https://allrouter.cc`. Claude Code joins that origin
+with `/v1/messages`. `claude-ai` pins `ANTHROPIC_BASE_URL` to
+`https://api.anthropic.com` and uses its subscription login. Both objects
+clear alternate credential and cloud-provider variables, including `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN`. The parent environment's `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_API_KEY`, and `ANTHROPIC_AUTH_TOKEN` are removed before launch and
+cannot replace the pin. SCV never uses Claude's auth-status command as a
 billing gate, and fails closed when either identity is missing, malformed,
 conflicting, or ambiguous.
 

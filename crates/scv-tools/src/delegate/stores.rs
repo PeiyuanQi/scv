@@ -454,9 +454,12 @@ fn claude_api_status(key: &Path, credentials: &Path, home: &Path) -> Result<Stor
     }
     let text =
         std::fs::read_to_string(key).with_context(|| format!("read {}", display(key, home)))?;
-    let key_value = text.trim();
+    // A gateway key does not use Anthropic's `sk-ant-` prefix. One trailing
+    // newline is the line ending; the key itself is 1..=512 bytes and
+    // contains no whitespace or control character.
+    let key_value = text.strip_suffix('\n').unwrap_or(text.as_str());
+    let key_value = key_value.strip_suffix('\r').unwrap_or(key_value);
     if !(1..=512).contains(&key_value.len())
-        || !key_value.starts_with("sk-ant-")
         || key_value
             .chars()
             .any(|character| character.is_whitespace() || character.is_control())

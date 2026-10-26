@@ -490,6 +490,79 @@ fn a_broken_nested_scv_config_is_not_overwritten() {
 }
 
 #[test]
+fn claude_api_key_status_accepts_a_gateway_key_shape() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let key = home.path().join(".anthropic-api-key");
+    let write = |contents: &str, permissions: u32| {
+        std::fs::write(&key, contents).unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(permissions)).unwrap();
+    };
+
+    write("sk-gateway-key-not-anthropic\n", 0o600);
+    let ready = claude_status(AgentAuth::ClaudeApiKey, home.path()).unwrap();
+    assert!(ready.ready, "{ready:?}");
+    assert_eq!(ready.lines, ["signed in (API key)"]);
+
+    write("", 0o600);
+    let empty = claude_status(AgentAuth::ClaudeApiKey, home.path()).unwrap();
+    assert!(!empty.ready, "{empty:?}");
+    assert!(
+        empty
+            .lines
+            .iter()
+            .any(|line| line.contains("invalid shape"))
+    );
+
+    write("   \n", 0o600);
+    assert!(
+        !claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+
+    write("sk-gateway key", 0o600);
+    let spaced = claude_status(AgentAuth::ClaudeApiKey, home.path()).unwrap();
+    assert!(!spaced.ready, "{spaced:?}");
+    assert!(
+        spaced
+            .lines
+            .iter()
+            .any(|line| line.contains("invalid shape"))
+    );
+
+    write("sk-gate\u{0007}way", 0o600);
+    assert!(
+        !claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+
+    write(&"k".repeat(513), 0o600);
+    assert!(
+        !claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+
+    write(&"k".repeat(512), 0o600);
+    assert!(
+        claude_status(AgentAuth::ClaudeApiKey, home.path())
+            .unwrap()
+            .ready
+    );
+
+    write("sk-gateway-key\n", 0o644);
+    let open = claude_status(AgentAuth::ClaudeApiKey, home.path()).unwrap();
+    assert!(!open.ready, "{open:?}");
+    assert!(
+        open.lines.iter().any(|line| line.contains("chmod 600")),
+        "{open:?}"
+    );
+}
+
+#[test]
 fn claude_stores_fail_closed_for_api_and_subscription_identities() {
     let home = tempfile::tempdir().unwrap();
     let key = home.path().join(".anthropic-api-key");

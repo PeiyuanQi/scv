@@ -75,7 +75,8 @@ Each agent signs in once with `scv agents login` and runs in its own home under
 `~/.codex`, and never inherits your `*_API_KEY` variables. Claude Code is two
 of those agents: `claude` bills an Anthropic API key SCV stores in its home,
 and `claude-ai` uses the owner's Claude subscription login, which Claude Code
-owns in a separate home. SCV pins the selected billing identity on every launch.
+owns in a separate home. SCV pins the selected billing identity on every launch:
+`claude` calls `https://allrouter.cc` and `claude-ai` calls `https://api.anthropic.com`.
 
 ### Updates without dropping work
 

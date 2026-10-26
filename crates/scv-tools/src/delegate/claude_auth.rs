@@ -1,4 +1,7 @@
 //! Programmatic Claude Code settings that pin SCV's billing identity and route.
+//!
+//! The API-key agent is pinned to `https://allrouter.cc`. The subscription
+//! agent is pinned to `https://api.anthropic.com`.
 
 use std::path::Path;
 
@@ -7,8 +10,16 @@ use serde_json::{Map, Value};
 
 use super::adapters::AgentAuth;
 
-const PINNED_ENVIRONMENT: &[(&str, &str)] = &[
-    ("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+/// `ANTHROPIC_BASE_URL` for the API-key agent. Claude Code's client joins this
+/// origin with `/v1/messages` (the same shape as `https://api.anthropic.com`).
+const CLAUDE_API_GATEWAY: &str = "https://allrouter.cc";
+
+/// `ANTHROPIC_BASE_URL` for the subscription agent.
+const ANTHROPIC_API_ORIGIN: &str = "https://api.anthropic.com";
+
+/// Variables cleared in both Claude settings objects so a parent environment
+/// cannot replace the pin or select another credential.
+const CLEARED_ENVIRONMENT: &[(&str, &str)] = &[
     ("ANTHROPIC_API_KEY", ""),
     ("ANTHROPIC_AUTH_TOKEN", ""),
     ("ANTHROPIC_CUSTOM_HEADERS", ""),
@@ -28,32 +39,29 @@ const PINNED_ENVIRONMENT: &[(&str, &str)] = &[
 
 /// Build the settings object passed at the programmatic settings tier.
 pub fn claude_settings(auth: AgentAuth, home: &Path) -> Result<Option<Value>> {
-    let (AgentAuth::ClaudeApiKey | AgentAuth::ClaudeSubscription) = auth else {
-        return Ok(None);
-    };
-    let mut env = Map::new();
-    for (name, value) in PINNED_ENVIRONMENT {
-        env.insert((*name).into(), (*value).into());
-    }
-    let mut settings = Map::new();
-    match auth {
-        AgentAuth::ClaudeSubscription => {
-            settings.insert("forceLoginMethod".into(), "claudeai".into());
-            settings.insert("apiKeyHelper".into(), "".into());
-        }
+    let (base_url, login, helper) = match auth {
+        AgentAuth::ClaudeSubscription => (ANTHROPIC_API_ORIGIN, "claudeai", String::new()),
         AgentAuth::ClaudeApiKey => {
-            settings.insert("forceLoginMethod".into(), "console".into());
             let path = home.join(".anthropic-api-key");
             let path = path
                 .to_str()
                 .ok_or_else(|| anyhow!("Claude agent home is not valid UTF-8"))?;
-            settings.insert(
-                "apiKeyHelper".into(),
-                format!("cat -- {}", shell_quote(path)).into(),
-            );
+            (
+                CLAUDE_API_GATEWAY,
+                "console",
+                format!("cat -- {}", shell_quote(path)),
+            )
         }
-        AgentAuth::None => unreachable!(),
+        AgentAuth::None => return Ok(None),
+    };
+    let mut env = Map::new();
+    env.insert("ANTHROPIC_BASE_URL".into(), base_url.into());
+    for (name, value) in CLEARED_ENVIRONMENT {
+        env.insert((*name).into(), (*value).into());
     }
+    let mut settings = Map::new();
+    settings.insert("forceLoginMethod".into(), login.into());
+    settings.insert("apiKeyHelper".into(), helper.into());
     settings.insert("env".into(), Value::Object(env));
     Ok(Some(Value::Object(settings)))
 }

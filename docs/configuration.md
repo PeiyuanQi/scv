@@ -389,12 +389,23 @@ available; attempting to call a missing adapter returns a clear tool error.
 
 ### Claude Code billing
 
-`claude` bills an Anthropic API key that `scv agents login claude` stores at
-`agents/claude/.anthropic-api-key`. `claude-ai` uses the owner's Claude
-subscription, which Claude Code owns under `agents/claude-ai`. The two homes
-and the `[agents.claude]` and `[agents.claude-ai]` tables stay separate, and
-neither agent falls back to the other's credentials. Both launches pin
-credentials and the Anthropic route. For either agent, `args`, `prompt_args`,
+`claude` bills an API key that `scv agents login claude` stores at
+`agents/claude/.anthropic-api-key` (mode 0600). Status accepts that file when
+the mode holds and the line, after a trailing newline is trimmed, is 1 to 512
+bytes with no whitespace or control character. A gateway key is accepted on
+those terms. Every `claude` launch pins `ANTHROPIC_BASE_URL` to
+`https://allrouter.cc`. Claude Code joins that origin with `/v1/messages`,
+the same shape as its default `https://api.anthropic.com`. The key stays in
+the file and is read through the pinned `apiKeyHelper`. The settings JSON
+does not contain it, and `ANTHROPIC_API_KEY` stays empty in that object.
+`claude-ai` uses the owner's Claude subscription, which Claude Code owns
+under `agents/claude-ai`, and pins `ANTHROPIC_BASE_URL` to
+`https://api.anthropic.com` with that subscription login as its credential.
+The two homes and the `[agents.claude]` and `[agents.claude-ai]`
+tables stay separate, and neither agent falls back to the other's
+credentials. A parent `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or
+`ANTHROPIC_AUTH_TOKEN` is removed before launch, so it cannot replace the
+pin. For either agent, `args`, `prompt_args`,
 `model_args`, and `effort_args` must not contain `--settings`,
 `--setting-sources`, `--managed-settings`, `--bare`, or `--hide-claude-auth`,
 including the `--flag=value` form. Startup fails with:

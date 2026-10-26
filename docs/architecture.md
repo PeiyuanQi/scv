@@ -524,7 +524,8 @@ and names the other offered agents on availability failures. Claude Code is
 two descriptors in one family: `claude` for API-key billing and `claude-ai`
 for the Claude subscription. Their homes, settings tables, conversation
 handles, and credential checks stay separate, and the adapter layer passes the
-same pinned settings to the native CLI and to ACP. A
+same pinned settings to the native CLI and to ACP. Those settings pin `claude`
+to `https://allrouter.cc` and `claude-ai` to `https://api.anthropic.com`. A
 finished job wakes the connection loop, which, once the session is idle and
 its queue empty, starts a turn of its own (`TurnStarter::report_background`)
 whose prompt reports the jobs the model has not seen yet; its events carry a
