@@ -63,6 +63,14 @@ pub enum ServerEvent {
         max_prompt_history_bytes: usize,
         /// Prompt-history entries a client should keep.
         max_prompt_history_items: usize,
+        /// The user's key bindings for the terminal UI (`[tui.keys]`): action
+        /// names to key specifications such as `alt+]`. Absent when none are
+        /// configured, and from older servers.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        keys: std::collections::BTreeMap<String, String>,
+        /// What the session restored from one that stopped (`restore`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restored: Option<crate::RestoredQueue>,
     },
     /// The whole queue, sent when a session starts or on request.
     #[serde(rename = "queue.snapshot")]

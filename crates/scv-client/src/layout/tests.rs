@@ -14,6 +14,10 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
         layout.socket(),
         layout.delegations(),
         layout.conversations(),
+        layout.runs(),
+        layout.jobs(),
+        layout.session_queues(),
+        layout.worktrees(),
         layout.reviews(),
         layout.imports(),
         layout.channel_state("feishu"),
@@ -35,6 +39,10 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
     }
     assert_eq!(layout.socket(), Path::new("/h/state/server.sock"));
     assert_eq!(layout.reviews(), Path::new("/h/state/reviews"));
+    assert_eq!(layout.runs(), Path::new("/h/state/runs"));
+    assert_eq!(layout.jobs(), Path::new("/h/state/jobs"));
+    assert_eq!(layout.session_queues(), Path::new("/h/state/sessions"));
+    assert_eq!(layout.worktrees(), Path::new("/h/worktrees"));
 }
 
 /// Files an earlier release wrote, which a planned restart and its rollback

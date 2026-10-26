@@ -70,6 +70,9 @@ pub struct ToolContext {
     /// Whether this call runs as a detached background job, the only kind
     /// of `agent` call that may run without a main deadline (`no_timeout`).
     pub background_job: bool,
+    /// The background job this call runs as, such as `job-3`, so the runs
+    /// it starts can say which job they serve; `None` for any other call.
+    pub job: Option<String>,
     /// Where the tool may report short status lines while it runs.
     pub progress: ProgressSink,
     /// The session's approval gate, for a tool relaying a nested agent's own
@@ -86,6 +89,7 @@ impl ToolContext {
             workspace,
             cancellation,
             background_job: false,
+            job: None,
             progress: ProgressSink::default(),
             approvals: ToolApprovals::default(),
         }

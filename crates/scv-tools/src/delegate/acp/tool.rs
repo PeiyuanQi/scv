@@ -23,7 +23,7 @@ use crate::{
         progress::redact,
         records,
         request::{
-            AgentArgs, resolve_agent_cwd, valid_effort, valid_model_name, validate_agent_cwd,
+            AgentArgs, resolve_call_cwd, valid_effort, valid_model_name, validate_agent_cwd,
         },
     },
     process::{APPROVAL_TIMEOUT, startup_deadline},
@@ -61,6 +61,8 @@ pub(crate) struct AcpAgentTool {
     precheck: bool,
     /// `[agents.<name>] model`, named when that is the model refused.
     default_model: Option<String>,
+    /// Where worktrees SCV created live, which a call may name as `cwd`.
+    pub(super) worktrees: Option<PathBuf>,
 }
 
 impl AcpAgentTool {
@@ -103,7 +105,14 @@ impl AcpAgentTool {
             offered: StdMutex::new(offered),
             precheck: true,
             default_model: adapter.defaults.model.clone(),
+            worktrees: None,
         }
+    }
+
+    /// Let calls name directories in the worktrees SCV created under `root`.
+    pub(crate) fn with_worktrees(mut self, root: Option<PathBuf>) -> Self {
+        self.worktrees = root;
+        self
     }
 
     /// Whether a model the saved values do not list is refused before the
@@ -280,6 +289,12 @@ impl Backend for AcpAgentTool {
             .is_some_and(|h| self.conversations.is_busy(h)))
     }
 
+    /// An ACP server that advertises `loadSession` loads a saved session;
+    /// one that does not fails the turn saying so.
+    fn adoptable(&self) -> bool {
+        true
+    }
+
     async fn wait_idle(
         &self,
         arguments: &Value,
@@ -332,16 +347,21 @@ impl Backend for AcpAgentTool {
             .answer(STEER_ANSWER_WAIT, &context.cancellation)
             .await
         {
-            Steered::Accepted => Ok(Some(ToolOutput::success(
-                serde_json::json!({
-                    "agent": self.name,
-                    "status": "steered",
-                    "session": handle,
-                    "note": "The agent took the prompt into its running turn; the result \
-                             comes with that turn's."
-                })
-                .to_string(),
-            ))),
+            Steered::Accepted => {
+                if let Some(activity) = child.rpc.live.activity() {
+                    activity.steered(&args.prompt);
+                }
+                Ok(Some(ToolOutput::success(
+                    serde_json::json!({
+                        "agent": self.name,
+                        "status": "steered",
+                        "session": handle,
+                        "note": "The agent took the prompt into its running turn; the result \
+                                 comes with that turn's."
+                    })
+                    .to_string(),
+                )))
+            }
             Steered::Refused => Ok(None),
             // Queueing it now could deliver the prompt twice.
             Steered::Unanswered => Err(ToolError::failed(format!(
@@ -362,7 +382,14 @@ impl Backend for AcpAgentTool {
     ) -> Result<ToolOutput, ToolError> {
         let args: AgentArgs = parse_args(&arguments)?;
         self.validate(&args)?;
-        let cwd = resolve_agent_cwd(&context.workspace, args.cwd.as_deref())?;
+        let cwd = resolve_call_cwd(
+            &context.workspace,
+            self.worktrees.as_deref(),
+            args.cwd.as_deref(),
+            args.session
+                .as_deref()
+                .and_then(|handle| self.conversations.cwd(handle)),
+        )?;
         let limit = self.timeouts.resolve(args.timeout_seconds)?;
         let deadline = self.timeouts.deadline(
             args.timeout_seconds,
@@ -391,7 +418,15 @@ impl Backend for AcpAgentTool {
                 child
             }
             None => match self
-                .start(&turn, &cwd, startup, &context.cancellation)
+                .start(
+                    &turn,
+                    &cwd,
+                    // A conversation adopted to resume an interrupted job has
+                    // the agent's session ID but no server yet.
+                    turn.vendor.as_deref().filter(|_| args.session.is_some()),
+                    startup,
+                    &context.cancellation,
+                )
                 .await
             {
                 Ok(child) => {
@@ -421,10 +456,25 @@ impl Backend for AcpAgentTool {
         };
         // Recorded at work until this call returns, however it ends.
         let _serving = child.rpc.live.begin_turn(turn.turn);
+        let activity = child.rpc.live.activity().cloned();
+        let ended = |status: RunStatus, error: Option<&str>| {
+            if let Some(activity) = &activity {
+                activity.turn_ended(status.as_str(), error);
+            }
+        };
+        if let Some(activity) = &activity {
+            activity.turn_started(
+                Some(&turn.handle),
+                turn.turn,
+                &args.prompt,
+                context.job.as_deref(),
+            );
+        }
         if let Err(error) = self
             .configure(&child, &args, startup, &context.cancellation)
             .await
         {
+            ended(RunStatus::Failed, Some(&error));
             let handle = turn.handle.clone();
             let number = turn.turn;
             // The session is intact: a bad model or effort does not end it.
@@ -450,6 +500,7 @@ impl Backend for AcpAgentTool {
             } => match stop_reason.as_str() {
                 "end_turn" => (RunStatus::Completed, reply, usage, None),
                 "cancelled" => {
+                    ended(RunStatus::Cancelled, None);
                     drop(turn.finish(Some(child.session_id.clone()), false));
                     return Err(ToolError::cancelled(format!(
                         "{} turn cancelled",
@@ -479,6 +530,7 @@ impl Backend for AcpAgentTool {
                     format!("timed out after {} seconds", limit.as_secs())
                 };
                 if !settled {
+                    ended(RunStatus::Timeout, Some(&detail));
                     child.rpc.live.close().await;
                     turn.forget();
                     return Ok(self.result(
@@ -494,6 +546,7 @@ impl Backend for AcpAgentTool {
                 (RunStatus::Timeout, reply, None, Some(detail))
             }
             TurnEnd::Cancelled { settled } => {
+                ended(RunStatus::Cancelled, None);
                 if settled {
                     drop(turn.finish(Some(child.session_id.clone()), false));
                 } else {
@@ -507,13 +560,16 @@ impl Backend for AcpAgentTool {
             }
             TurnEnd::Lost(reason) => {
                 let tail = child.rpc.live.stderr_tail().await;
-                child.rpc.live.close().await;
-                turn.forget();
                 let detail = if tail.is_empty() {
                     reason
                 } else {
                     format!("{reason}: {}", bounded(&redact(&tail), 1000))
                 };
+                // Logged before the shutdown, so the reason comes before
+                // the run's end.
+                ended(RunStatus::Failed, Some(&detail));
+                child.rpc.live.close().await;
+                turn.forget();
                 return Ok(self.result(
                     RunStatus::Failed,
                     (String::new(), false),
@@ -523,6 +579,7 @@ impl Backend for AcpAgentTool {
                 ));
             }
         };
+        ended(status, error.as_deref());
         let conversation = turn
             .finish(
                 Some(child.session_id.clone()),

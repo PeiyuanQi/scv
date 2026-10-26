@@ -357,3 +357,156 @@ fn stderr_tail_keeps_the_end() {
     tail.push(b"gh");
     assert_eq!(tail.text(), "efgh");
 }
+
+#[test]
+fn gemini_stream_json_assembles_deltas_and_reads_its_result() {
+    let stdout = concat!(
+        r#"{"type":"init","timestamp":"t","session_id":"9c1e0f2a-0000-4000-8000-000000000001","model":"gemini-2.5-pro"}"#,
+        "\n",
+        r#"{"type":"message","role":"user","content":"fix it"}"#,
+        "\n",
+        r#"{"type":"message","role":"assistant","content":"Looking","delta":true}"#,
+        "\n",
+        r#"{"type":"tool_use","tool_name":"run_shell_command","tool_id":"t1","parameters":{"command":"cargo test"}}"#,
+        "\n",
+        r#"{"type":"tool_result","tool_id":"t1","status":"success","output":"ok"}"#,
+        "\n",
+        r#"{"type":"message","role":"assistant","content":" done.","delta":true}"#,
+        "\n",
+        r#"{"type":"result","status":"success","stats":{"total_tokens":30,"input_tokens":20,"output_tokens":10}}"#,
+        "\n"
+    );
+    let result = run(OutputFormat::GeminiStreamJson, stdout, OK);
+    assert_eq!(result.status, RunStatus::Completed);
+    assert_eq!(result.reply, "Looking done.");
+    assert_eq!(
+        result.session.as_deref(),
+        Some("9c1e0f2a-0000-4000-8000-000000000001")
+    );
+    assert_eq!(
+        result.usage,
+        Some(AgentUsage {
+            input_tokens: 20,
+            output_tokens: 10
+        })
+    );
+}
+
+#[test]
+fn a_gemini_error_result_fails_with_its_message_and_its_json_output_reads_too() {
+    let failed = concat!(
+        r#"{"type":"message","role":"assistant","content":"Trying","delta":true}"#,
+        "\n",
+        r#"{"type":"result","status":"error","error":{"type":"auth","message":"Please set an Auth method"}}"#,
+        "\n"
+    );
+    let result = run(
+        OutputFormat::GeminiStreamJson,
+        failed,
+        RunExit::Exited { success: false },
+    );
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(result.error.as_deref(), Some("Please set an Auth method"));
+    let whole = "{\"response\":\"All set.\",\"stats\":{}}\n";
+    let result = run(OutputFormat::GeminiStreamJson, whole, OK);
+    assert_eq!(
+        (result.status, result.reply.as_str()),
+        (RunStatus::Completed, "All set.")
+    );
+}
+
+#[test]
+fn cursor_and_amp_read_like_claude_code_without_its_billing_pin() {
+    let stdout = concat!(
+        r#"{"type":"system","subtype":"init","session_id":"c0ffee00-0000-4000-8000-000000000002","model":"sonnet-4.5"}"#,
+        "\n",
+        r#"{"type":"tool_call","subtype":"started","call_id":"1","tool_call":{"shellToolCall":{"args":{"command":"ls"}}}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Listed."}]}}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"Listed.","session_id":"c0ffee00-0000-4000-8000-000000000002"}"#,
+        "\n"
+    );
+    for format in [OutputFormat::CursorStreamJson, OutputFormat::AmpStreamJson] {
+        let result = run(format, stdout, OK);
+        assert_eq!(result.status, RunStatus::Completed, "{format:?}");
+        assert_eq!(result.reply, "Listed.");
+        assert_eq!(
+            result.session.as_deref(),
+            Some("c0ffee00-0000-4000-8000-000000000002")
+        );
+    }
+}
+
+#[test]
+fn a_streams_message_text_and_tool_lines_reach_its_activity_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let runs = dir.path().join("runs");
+    let activity = crate::delegate::activity::RunActivity::open(
+        &runs,
+        crate::delegate::records::ProcessIdentity::current().unwrap(),
+        crate::delegate::activity::RunHeader {
+            handle: "codex-00c0de".into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            transport: crate::delegate::activity::RunTransport::Cli,
+            cwd: "/w".into(),
+            conversation: None,
+            streams: true,
+        },
+    );
+    let mut stream =
+        AgentStream::new(OutputFormat::ClaudeStreamJson, 64 * 1024).with_activity(activity);
+    stream.push(
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I'll look.\nFirst the tests."},{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            "\n"
+        )
+        .as_bytes(),
+    );
+    let page = crate::delegate::activity::read_page(&runs, "codex-00c0de", 0, 100).unwrap();
+    let lines: Vec<(scv_protocol::RunEventKind, &str)> = page
+        .events
+        .iter()
+        .map(|event| (event.kind, event.text.as_str()))
+        .collect();
+    use scv_protocol::RunEventKind::{RunStarted, Text, Tool};
+    assert_eq!(
+        lines,
+        [
+            (RunStarted, "codex over cli in /w"),
+            (Tool, "$ cargo test"),
+            (Text, "I'll look."),
+            (Text, "First the tests."),
+        ]
+    );
+    // Plain text is logged as it prints, whole characters only.
+    let dir = tempfile::tempdir().unwrap();
+    let runs = dir.path().join("runs");
+    let activity = crate::delegate::activity::RunActivity::open(
+        &runs,
+        crate::delegate::records::ProcessIdentity::current().unwrap(),
+        crate::delegate::activity::RunHeader {
+            handle: "grok-00c0de".into(),
+            agent: "grok".into(),
+            session: "s".into(),
+            transport: crate::delegate::activity::RunTransport::Cli,
+            cwd: "/w".into(),
+            conversation: None,
+            streams: false,
+        },
+    );
+    let mut stream = AgentStream::new(OutputFormat::Text, 1024).with_activity(activity);
+    let text = "héllo\nwörld\n".as_bytes();
+    for byte in text {
+        stream.push(std::slice::from_ref(byte));
+    }
+    let page = crate::delegate::activity::read_page(&runs, "grok-00c0de", 0, 100).unwrap();
+    let texts: Vec<&str> = page
+        .events
+        .iter()
+        .skip(1)
+        .map(|event| event.text.as_str())
+        .collect();
+    assert_eq!(texts, ["héllo", "wörld"]);
+}

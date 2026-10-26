@@ -77,10 +77,20 @@ widens what the agent could already reach with the user's permissions. SCV suppl
 directories, and the agent's own state variable (`CODEX_HOME`, `GROK_HOME`,
 `DSH_HOME`, or `PI_CODING_AGENT_DIR`) inside that home. It first removes from
 the child environment SCV's selector variables, every variable ending in
-`_API_KEY`, and the credential, endpoint, and state variables that any adapter
+`_API_KEY`, the AWS variables `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_BEARER_TOKEN_BEDROCK`,
+and the credential, endpoint, and state variables that any adapter
 declares (such as `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
 `OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, and `PI_*`), so no agent inherits the
-user's or another agent's credentials. For Rust projects, launch preflight
+user's or another agent's model credentials. `GH_TOKEN` and `GITHUB_TOKEN`
+are kept for every agent, since they are how `gh` and git hosting tools sign
+in; Copilot reads them too, so with one set a delegated `copilot` runs on that
+GitHub identity. What an agent reads from files on its own is beyond that:
+Gemini CLI and Qwen Code load the first `.env` they find walking up from
+their working directory, so a `~/.gemini/.env` or `~/.env` above a workspace
+in the home directory reaches them, and reaches their sign-in too, which runs
+in the agent's home under `$SCV_HOME` (inside the user's home by default)
+(see [Delegated agents](tools.md#delegated-agents-agent)). For Rust projects, launch preflight
 shares the original `RUSTUP_HOME` installation and prepends verified tool
 directories to `PATH`, but places `CARGO_HOME` inside the private agent home
 so it does not reuse the user's Cargo config or registry credential files.
@@ -117,8 +127,10 @@ owner tools, it lets the owner's WeChat or Feishu account run unattended
 development work, equivalent to the owner running those agents unprompted in a terminal.
 
 A session offers only agents whose executable resolves. SCV looks in the
-user's per-user install directories (`~/.local/bin`, and `~/.grok/bin` for
-Grok) before `PATH`, as a login shell does; anything able to write those
+user's per-user install directories (`~/.local/bin`; `~/.grok/bin` for
+Grok, `~/.opencode/bin` for OpenCode, `~/.amp/bin` for Amp, and
+`~/.npm-global/bin` for the agents npm installs) before `PATH`, as a login
+shell does; anything able to write those
 directories can already run code as the user.
 
 Project skill discovery reads only `SKILL.md` files that resolve inside the
@@ -237,9 +249,15 @@ requests are denied and it acts within the agent's own permissions (a step
 that needs approval fails), while an owner chat session, whose bridge already
 approves every request, grants its jobs the same. `auto_approve` is the
 client's own statement about how it answers, so it grants nothing that client
-could not already grant. `agent_cancel` stops a job at the model's request and
+could not already grant. While the owner watches the workbench (a TUI
+dashboard is open), a request the approval policy would put to a person, and
+that answer would deny, waits up to two minutes for the owner instead; the
+owner is the person the TUI would have asked in the foreground, so this too
+grants nothing more. What the policy decides on its own is never put to the
+owner (`never` still denies side effects outright), and an unanswered
+request is denied as before. `agent_cancel` stops a job at the model's request and
 has process risk. Jobs belong to their session and are cancelled, with their
-processes, when it closes. The turn the server starts to report a finished job has the session's
+processes, when it closes; the job ledger then records them as interrupted. The turn the server starts to report a finished job has the session's
 own tools and approval policy, like any turn; its prompt quotes the job's
 bounded reply, which is untrusted delegated-agent output. Over WeChat or Feishu
 the report goes only to the owner's direct chat, as an unprompted message.
@@ -251,6 +269,68 @@ under a line saying that is the agent's reply, unedited: the block vouches
 for SCV's line, not for the quoted reply. The history note that tells the
 model about it is a user message, quoting the same untrusted reply, as the
 report turn's prompt would have.
+
+The [workbench](tools.md#the-workbench) acts for the owner, through the
+daemon's socket, which only the user can reach. Its actions (starting a job,
+sending a conversation a prompt, cancelling, resuming, approving, removing a
+worktree) are the owner's own, so a job the owner starts asks no approval
+for its launch; the requests its agent relays still go through the session's
+policy, attended or not, as above. The owner's jobs are never reported to a
+model, and a prompt the owner sends a conversation is the owner's text, so
+nothing a model wrote is executed as an owner action; a model cannot stop
+the owner's jobs either (`agent_cancel` refuses). The `scv jobs` command
+refuses every action inside a delegated run, so an agent cannot start,
+steer, resume, or approve work through it, and in particular cannot approve
+its own relayed request. Like the other delegated-run rules this is
+cooperative: an agent running as the user that speaks the socket protocol
+itself can do what the owner can, as it could already run anything the user
+can. Resuming an interrupted job re-sends its recorded prompt (bounded,
+private, and the owner's or the model's own text) in the agent's own
+conversation or as a new run; a reviewed job is never resumed, since its
+journal, not a replay, is its record.
+
+Activity logs, the job ledger, and kept queues are private files (0700
+directories, 0600 files) under `state/`, written atomically or appended by
+the SCV process that owns them. Activity logs hold the agent's message text
+and the same one-line tool summaries as progress, never tool output; every
+line is scrubbed as it is written, whoever produced it (credential-looking
+values hidden, URL queries dropped, control characters removed), and agent
+text is untrusted, so the TUI and `scv jobs` render it inert. Scrubbing is a
+heuristic, and logs can still contain whatever the agent wrote, so they are
+pruned seven days after their run ends. A kept queue holds the owner's
+queued prompts and is removed when the TUI leaves, by closing the connection
+or losing it; only a daemon that stops keeps it, and a queue restored into a
+session the TUI left before hearing of goes back as it was. Worktrees are
+created only on an explicit `worktree: true` (approved like the call) or the owner's
+`--worktree`, from a checkout inside the workspace, with fixed `git worktree
+add` arguments, the repository's hooks and file-system monitor off on
+every `git` call, no `*_API_KEY` variables,
+`GIT_TERMINAL_PROMPT=0`, and a time limit; SCV removes one only on the
+owner's request and while nothing works in it, refusing uncommitted changes
+without `--force`, and never deletes branches. SCV runs `git` in a worktree
+(to list or remove it) only when it is under SCV's own `worktrees/` with
+SCV's record beside it and its link checks out: its git directory is exactly
+`worktrees/<name>` of the common git directory of the repository it was made
+from, and that directory and the worktree's `.git` file name each other.
+Those calls name the verified git directory, worktree, and common directory
+outright (`GIT_COMMON_DIR` is the one the check accepted), so an agent that
+rewrites its `.git` or `commondir` cannot make git read a configuration it
+wrote (a filter driver runs as the user). `git status` passes
+`--ignore-submodules=all`, so a repository the agent creates at a submodule
+path in its worktree is not entered and its filters do not run. A worktree
+whose link does not check out is listed from SCV's record alone and not
+removed. The record beside the worktree is trusted: it lives under
+`$SCV_HOME/worktrees`, which an unsandboxed agent can edit, and such an
+agent can already edit the source repository's git configuration. The checks
+defend an agent that can write only inside its worktree. They do not
+cover a `rust-toolchain.toml` in that worktree: the next launch there
+resolves its toolchain, so a `path` override runs as the owner.
+Toolchain files in a worktree must be trusted the same way
+[project Rust environment](tools.md#project-rust-environment) already
+requires. Filter drivers
+and other commands the source repository's own configuration names still
+run, as they would for the owner's `git` (`git worktree add` runs its smudge
+filters, for one); only hooks and the file-system monitor are off.
 
 SCV never auto-invokes another agent after a refusal. A run whose model
 refused (`declined`) gets no availability `fallback` field. When the session
@@ -267,9 +347,14 @@ structured `error` only, so text in an agent's reply cannot trigger one.
 
 SCV keeps `claude` and `claude-ai` in separate private homes and separate
 configuration tables. Every launch, on both the per-turn CLI and ACP, passes
-the same programmatic settings object. It pins the Anthropic API route,
-clears alternate credential and cloud-provider variables, and selects the
-intended billing identity. SCV never uses Claude's auth-status command as a
+the same programmatic settings object for that agent. `claude` pins
+`ANTHROPIC_BASE_URL` to `https://allrouter.cc`. Claude Code joins that origin
+with `/v1/messages`. `claude-ai` pins `ANTHROPIC_BASE_URL` to
+`https://api.anthropic.com` and uses its subscription login. Both objects
+clear alternate credential and cloud-provider variables, including `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN`. The parent environment's `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_API_KEY`, and `ANTHROPIC_AUTH_TOKEN` are removed before launch and
+cannot replace the pin. SCV never uses Claude's auth-status command as a
 billing gate, and fails closed when either identity is missing, malformed,
 conflicting, or ambiguous.
 

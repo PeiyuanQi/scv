@@ -286,6 +286,11 @@ pub(crate) struct TuiConfig {
     pub(crate) max_transcript_items: usize,
     pub(crate) max_prompt_history_bytes: usize,
     pub(crate) max_prompt_history_items: usize,
+    /// The terminal UI's key bindings: action names to key specifications
+    /// such as `alt+]` or `ctrl+t`, sent to the TUI with `session.started`,
+    /// which checks the actions and keys and keeps its default for any it
+    /// cannot use.
+    pub(crate) keys: BTreeMap<String, String>,
 }
 
 impl Default for TuiConfig {
@@ -295,6 +300,7 @@ impl Default for TuiConfig {
             max_transcript_items: 10_000,
             max_prompt_history_bytes: 1024 * 1024,
             max_prompt_history_items: 200,
+            keys: BTreeMap::new(),
         }
     }
 }
@@ -457,7 +463,8 @@ impl AdapterConfig {
         descriptor.acp.filter(|_| match self.transport {
             AgentTransport::Acp => true,
             AgentTransport::Resume => false,
-            AgentTransport::Auto => self.command == descriptor.command,
+            // An agent with no one-prompt mode has nothing else to run.
+            AgentTransport::Auto => self.command == descriptor.command || !descriptor.cli_turns,
         })
     }
 }

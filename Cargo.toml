@@ -64,7 +64,7 @@ dbg_macro = "deny"
 todo = "deny"
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -87,7 +87,8 @@ libc = "0.2.175"
 md-5 = "0.10.6"
 prost = "0.14.4"
 qrcode = { version = "0.14.1", default-features = false }
-ratatui = "0.29.0"
+# `Paragraph::line_count`, so views that follow their end scroll by wrapped rows.
+ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1.0.219", features = ["derive"] }
@@ -107,14 +108,14 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 webpki-roots = "1.0.2"
 which = "8.0.0"
 
-scv-core = { version = "=0.4.2", path = "crates/scv-core" }
-scv-client = { version = "=0.4.2", path = "crates/scv-client" }
-scv-channels = { version = "=0.4.2", path = "crates/scv-channels" }
-scv-protocol = { version = "=0.4.2", path = "crates/scv-protocol" }
-scv-provider-openai = { version = "=0.4.2", path = "crates/scv-provider-openai" }
-scv-server = { version = "=0.4.2", path = "crates/scv-server" }
-scv-tools = { version = "=0.4.2", path = "crates/scv-tools" }
-scv-tui = { version = "=0.4.2", path = "crates/scv-tui" }
+scv-core = { version = "=0.4.3", path = "crates/scv-core" }
+scv-client = { version = "=0.4.3", path = "crates/scv-client" }
+scv-channels = { version = "=0.4.3", path = "crates/scv-channels" }
+scv-protocol = { version = "=0.4.3", path = "crates/scv-protocol" }
+scv-provider-openai = { version = "=0.4.3", path = "crates/scv-provider-openai" }
+scv-server = { version = "=0.4.3", path = "crates/scv-server" }
+scv-tools = { version = "=0.4.3", path = "crates/scv-tools" }
+scv-tui = { version = "=0.4.3", path = "crates/scv-tui" }
 
 [dependencies]
 anyhow.workspace = true

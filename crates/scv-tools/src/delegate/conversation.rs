@@ -204,6 +204,34 @@ impl ConversationStore {
         );
     }
 
+    /// Number new conversations after `handles` this session's ID already
+    /// used, so a session that comes back under its ID (a daemon's
+    /// workbench session) never reuses a handle an earlier record names.
+    pub(crate) fn continue_after<'a>(&self, handles: impl IntoIterator<Item = &'a str>) {
+        let mut inner = lock(&self.inner);
+        for handle in handles {
+            if let Some((agent, number)) = handle.rsplit_once('-')
+                && let Ok(number) = number.parse::<u32>()
+            {
+                let next = inner.next.entry(agent.to_owned()).or_insert(0);
+                *next = (*next).max(number);
+            }
+        }
+    }
+
+    /// Whether the session has conversation `handle`.
+    pub(crate) fn knows(&self, handle: &str) -> bool {
+        lock(&self.inner).conversations.contains_key(handle)
+    }
+
+    /// Where conversation `handle` runs.
+    pub(crate) fn cwd(&self, handle: &str) -> Option<PathBuf> {
+        lock(&self.inner)
+            .conversations
+            .get(handle)
+            .map(|conversation| conversation.cwd.clone())
+    }
+
     /// Whether conversation `handle` is running a turn.
     pub(crate) fn is_busy(&self, handle: &str) -> bool {
         lock(&self.inner)
@@ -382,6 +410,74 @@ impl ConversationStore {
             attachment: None,
             finished: false,
         })
+    }
+
+    /// Take in a conversation the agent saved under its own session ID
+    /// `vendor`, with no process kept from before, so a call can continue it
+    /// (resuming an interrupted job). Returns its handle. The same agent,
+    /// vendor session, and directory already held here is that handle
+    /// again, so a second resume queues behind it instead of starting
+    /// another process in the one agent session.
+    pub(crate) fn adopt(&self, agent: &str, cwd: &Path, vendor: &str) -> Result<String, ToolError> {
+        if !valid_session_id(vendor) {
+            return Err(ToolError::invalid_arguments(
+                "that is not an agent session ID SCV can pass on",
+            ));
+        }
+        let mut inner = lock(&self.inner);
+        let now = Instant::now();
+        if let Some(handle) = inner
+            .conversations
+            .iter()
+            .find_map(|(handle, conversation)| {
+                (conversation.agent == agent
+                    && conversation.vendor.as_deref() == Some(vendor)
+                    && conversation.cwd == cwd)
+                    .then(|| handle.clone())
+            })
+        {
+            if let Some(conversation) = inner.conversations.get_mut(&handle) {
+                conversation.last_used = now;
+            }
+            return Ok(handle);
+        }
+        while inner.conversations.len() >= self.limits.max.max(1) {
+            let Some(oldest) = inner
+                .conversations
+                .iter()
+                .filter(|(_, conversation)| !conversation.busy && conversation.pins == 0)
+                .min_by_key(|(_, conversation)| conversation.last_used)
+                .map(|(handle, _)| handle.clone())
+            else {
+                return Err(ToolError::limit(format!(
+                    "all {} {ALL_IN_USE}",
+                    inner.conversations.len()
+                )));
+            };
+            if let Some(conversation) = inner.conversations.remove(&oldest) {
+                self.remove_marker(conversation.vendor.as_deref());
+            }
+        }
+        let number = inner.next.entry(agent.to_owned()).or_insert(0);
+        *number += 1;
+        let handle = format!("{agent}-{number}");
+        inner.conversations.insert(
+            handle.clone(),
+            Conversation {
+                agent: agent.to_owned(),
+                cwd: cwd.to_owned(),
+                vendor: Some(vendor.to_owned()),
+                turns: 1,
+                busy: false,
+                last_used: now,
+                attachment: None,
+                pins: 0,
+                released: false,
+            },
+        );
+        drop(inner);
+        self.write_marker(vendor, agent, &handle);
+        Ok(handle)
     }
 
     fn write_marker(&self, vendor: &str, agent: &str, handle: &str) {

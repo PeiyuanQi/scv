@@ -170,6 +170,8 @@ impl Server {
                 auto_approve: channel.map(|_| true),
                 chat: None,
                 system_prompt: None,
+                persist_queue: None,
+                restore: None,
             })
             .await;
         loop {

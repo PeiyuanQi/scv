@@ -795,6 +795,63 @@ async fn a_restart_waits_for_every_sessions_jobs_not_only_the_requesters() {
     assert!(!launched.lock().unwrap()[0].waited_out);
 }
 
+#[tokio::test]
+async fn a_restart_waits_for_a_workbench_sessions_jobs() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(home.path()).unwrap();
+    let agent = path.join("fake-codex");
+    std::fs::write(&agent, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        path.join("config.toml"),
+        format!(
+            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\n",
+            agent.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        path.join("config.toml"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let instance = crate::test_support::test_instance(&path);
+    let registry = Arc::new(DelegationRegistry::new(&instance.layout));
+    let hosts = crate::workbench::Hosts::new(instance, Arc::clone(&registry));
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_path = std::fs::canonicalize(workspace.path()).unwrap();
+    crate::workbench::control(
+        &hosts,
+        DaemonCommand::WorkbenchStart {
+            workspace: workspace_path.display().to_string(),
+            agent: "codex".into(),
+            prompt: "Land the fix".into(),
+            cwd: None,
+            model: None,
+            effort: None,
+            worktree: false,
+        },
+    )
+    .await
+    .expect("the owner's job starts");
+    eventually(|| sessions_with_jobs(&path).1 == 1).await;
+    assert_eq!(sessions_with_jobs(&path), (1, 1));
+    let hub = Hub::new(None);
+    let (restarter, _launched, _components) = recording(&path, &hub, &registry);
+    let mut waiting = plan(PlanState::Waiting);
+    waiting.requested_unix = unix_now();
+    waiting.deadline_unix = unix_now() + 600;
+    let info = restarter.arm(waiting).unwrap();
+    assert_eq!(
+        info.waiting_for.as_deref(),
+        Some("1 background job in 1 session")
+    );
+    restarter.cancel.cancel();
+    hosts.shutdown().await;
+    assert_eq!(sessions_with_jobs(&path), (0, 0));
+}
+
 #[test]
 fn session_activity_counts_turns_until_the_session_ends() {
     let tracker = SessionTracker::new(Path::new("/activity-test"), "session-activity-test", None);

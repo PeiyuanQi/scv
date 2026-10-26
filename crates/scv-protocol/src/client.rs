@@ -97,6 +97,16 @@ pub enum ClientMessage {
         /// reaches a model reading untrusted mail.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
+        /// Keep the session's queued prompts on disk while it runs, so a
+        /// session started after a daemon restart can restore them
+        /// (`restore`). The TUI sets it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persist_queue: Option<bool>,
+        /// The ID of a session that stopped with a daemon restart or crash
+        /// and kept its queue (`persist_queue`): its queued prompts join this
+        /// session's queue, paused, when the workspace is the same.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restore: Option<String>,
     },
     /// Attach to an existing session. Not supported: sessions belong to the
     /// connection that started them.

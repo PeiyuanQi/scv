@@ -23,6 +23,7 @@
 //! whose changes and report carry SCV's outcome.
 
 pub(in crate::delegate) mod lane;
+pub mod ledger;
 mod owed;
 
 use std::{
@@ -37,13 +38,18 @@ use scv_core::{
     ApprovalGate, ProgressSink, Tool, ToolApprovals, ToolContext, ToolError, ToolOutput, ToolRisk,
     ToolSpec,
 };
-use scv_protocol::{JobChange, JobOutcome, JobReport, JobStatus, describe_reports};
+use scv_protocol::{
+    AgentState, JobChange, JobOrigin, JobOutcome, JobReport, JobStatus, describe_reports,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use self::lane::{Lanes, Place};
+use self::{
+    lane::{Lanes, Place},
+    ledger::{JobLedger, JobRecord, NewJob},
+};
 use crate::{
     BusyBehavior,
     args::{Timeouts, bounded, parse_args, timeout_schema},
@@ -88,6 +94,8 @@ pub struct BackgroundJobs {
     approvals: Option<Arc<dyn ApprovalGate>>,
     /// The `agent` calls continuing each conversation, in arrival order.
     lanes: Arc<Lanes>,
+    /// Where the session's jobs are recorded durably, when it keeps them.
+    ledger: Option<JobLedger>,
 }
 
 impl std::fmt::Debug for BackgroundJobs {
@@ -173,6 +181,30 @@ struct Job {
     /// `agent_cancel` waits for it, and describes it after: never pruned
     /// meanwhile.
     cancelling: bool,
+    /// Who started it. The owner's own jobs are never reported to the
+    /// model: the owner watches them in the workbench.
+    origin: JobOrigin,
+    /// A queued prompt whose turn has not come yet.
+    queued_waiting: bool,
+    /// The owner stopped it from the workbench, so the model was not told.
+    owner_cancelled: bool,
+    /// Its durable record, when the session keeps a ledger, and that
+    /// record's revision: each change bumps it, and it is written after the
+    /// job table's lock is let go ([`BackgroundJobs::persist`]).
+    record: Option<JobRecord>,
+    record_revision: u64,
+}
+
+/// A revision of a job's record to write once the job table is let go.
+type RecordWrite = (JobRecord, u64);
+
+impl Job {
+    /// The record as it is now, under a new revision, to write.
+    fn record_changed(&mut self) -> Option<RecordWrite> {
+        let record = self.record.as_ref()?;
+        self.record_revision += 1;
+        Some((record.clone(), self.record_revision))
+    }
 }
 
 /// `agent_cancel` waiting for a job to stop. Settled after the wait, or,
@@ -261,6 +293,20 @@ pub enum ReportFailure {
 impl Drop for BackgroundJobs {
     fn drop(&mut self) {
         self.cancellation.cancel();
+        // Jobs still going stop with their session: say so durably, since
+        // their own end is never recorded once the store is gone.
+        if let Some(ledger) = &self.ledger {
+            let state = self
+                .state
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for job in state.jobs.iter_mut().filter(|job| job.outcome.is_none()) {
+                if let Some(record) = job.record.as_mut() {
+                    ledger::interrupt(record, "its session ended before it finished");
+                    ledger.save(record);
+                }
+            }
+        }
     }
 }
 
@@ -274,6 +320,30 @@ impl BackgroundJobs {
             finished,
             approvals: None,
             lanes: Arc::default(),
+            ledger: None,
+        }
+    }
+
+    /// Record the session's jobs durably in `ledger`. Job IDs continue
+    /// after the ones it already holds.
+    #[must_use]
+    pub fn with_ledger(mut self, ledger: JobLedger) -> Self {
+        self.state().next = ledger.last_number();
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// Number new jobs after the `job-<n>` IDs `jobs` names too: the
+    /// session's runs name jobs whose records may be gone.
+    pub(crate) fn continue_after<'a>(&self, jobs: impl IntoIterator<Item = &'a str>) {
+        let mut state = self.state();
+        for job in jobs {
+            if let Some(number) = job
+                .strip_prefix("job-")
+                .and_then(|number| number.parse::<u64>().ok())
+            {
+                state.next = state.next.max(number);
+            }
         }
     }
 
@@ -315,7 +385,13 @@ impl BackgroundJobs {
         context: &ToolContext,
         turn: Turn,
         review: Option<&Arc<ReviewedTool>>,
+        meta: JobMeta,
     ) -> Result<Value, ToolError> {
+        let JobMeta {
+            origin,
+            worktree,
+            resumed_from,
+        } = meta;
         let task = task_line(
             arguments
                 .get("prompt")
@@ -336,7 +412,7 @@ impl BackgroundJobs {
             }
             None => None,
         };
-        let (id, progress, done_tx, cancellation) = {
+        let (id, progress, done_tx, cancellation, first) = {
             let mut state = self.state();
             // Checked again: another call may have started a job meanwhile.
             self.room(&state, queued)?;
@@ -347,6 +423,21 @@ impl BackgroundJobs {
             let progress = ProgressSink::buffered();
             let (done_tx, done) = watch::channel(false);
             let cancel = self.cancellation.child_token();
+            let record = self.ledger.as_ref().and_then(|ledger| {
+                let mut record = ledger.record(&NewJob {
+                    job: &id,
+                    agent,
+                    task: &task,
+                    arguments: &arguments,
+                    started_by: origin,
+                    reviewed: review.is_some(),
+                    queued,
+                })?;
+                record.worktree.clone_from(&worktree);
+                record.resumed_from = resumed_from;
+                Some(record)
+            });
+            let first = record.clone().map(|record| (record, 1));
             state.record(
                 &context.call_id,
                 JobChange {
@@ -378,9 +469,15 @@ impl BackgroundJobs {
                 done,
                 review: review.map(|review| Arc::clone(review.record())),
                 cancelling: false,
+                origin,
+                queued_waiting: queued,
+                owner_cancelled: false,
+                record,
+                record_revision: 1,
             });
-            (id, progress, done_tx, cancel)
+            (id, progress, done_tx, cancel, first)
         };
+        self.persist(first);
         let jobs = Arc::downgrade(self);
         let job = id.clone();
         let approvals = self.approvals.clone();
@@ -390,6 +487,7 @@ impl BackgroundJobs {
             let started = Instant::now();
             let mut context = ToolContext::new(workspace, cancellation);
             context.background_job = true;
+            context.job = Some(job.clone());
             // No turn is left to ask a person, so nested approval requests
             // get the session's unattended answer, or are denied.
             if let Some(gate) = &approvals {
@@ -405,6 +503,9 @@ impl BackgroundJobs {
                     ));
                     match place.wait_first(&context.cancellation).await {
                         Ok(()) => {
+                            if let Some(jobs) = jobs.upgrade() {
+                                jobs.began(&job);
+                            }
                             context.progress.take();
                             context.progress.report(&format!(
                                 "started its turn in conversation {}",
@@ -438,6 +539,9 @@ impl BackgroundJobs {
                      turn when it finishes. agent_status shows its progress and agent_cancel \
                      stops it."
         });
+        if let Some(worktree) = &worktree {
+            started["worktree"] = serde_json::to_value(worktree).unwrap_or(Value::Null);
+        }
         if queued {
             started["queued"] = true.into();
             started["note"] = "The conversation is busy, so this prompt is queued: it runs in \
@@ -447,6 +551,122 @@ impl BackgroundJobs {
                 .into();
         }
         Ok(started)
+    }
+
+    /// A queued job's turn has come: it runs now.
+    fn began(&self, id: &str) {
+        let write = {
+            let mut state = self.state();
+            state
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .and_then(|job| {
+                    job.queued_waiting = false;
+                    let record = job.record.as_mut()?;
+                    record.state = AgentState::Working;
+                    record.updated_unix = ledger::now();
+                    job.record_changed()
+                })
+        };
+        self.persist(write);
+    }
+
+    /// The conversation handles the session's job records name.
+    pub(crate) fn recorded_conversations(&self) -> Vec<String> {
+        self.ledger
+            .as_ref()
+            .and_then(JobLedger::conversations)
+            .unwrap_or_default()
+    }
+
+    /// Whether the session still owes its client `job`'s result: dropping
+    /// its record now would lose it.
+    pub(crate) fn unreported(&self, job: &str) -> bool {
+        self.state()
+            .jobs
+            .iter()
+            .any(|entry| entry.id == job && !entry.reported)
+    }
+
+    /// Mark `job`'s result reported in its durable record; the change to
+    /// write, when there is one.
+    fn mark_reported(job: &mut Job) -> Option<RecordWrite> {
+        let record = job.record.as_mut().filter(|record| !record.reported)?;
+        record.reported = true;
+        record.updated_unix = ledger::now();
+        job.record_changed()
+    }
+
+    /// Write the record changes `writes`, outside the job table's lock, so
+    /// a slow disk never holds up the session's job calls. The write syncs
+    /// to disk, so on a runtime's worker thread the runtime is told it
+    /// blocks, and moves its other tasks elsewhere meanwhile.
+    fn persist(&self, writes: impl IntoIterator<Item = RecordWrite>) {
+        let Some(ledger) = &self.ledger else {
+            return;
+        };
+        let write = || {
+            for (record, revision) in writes {
+                ledger.save_revision(&record, revision);
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime)
+                if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                tokio::task::block_in_place(write);
+            }
+            _ => write(),
+        }
+    }
+
+    /// The session's jobs as they stand, for the workbench.
+    pub(crate) fn live(&self) -> Vec<LiveJob> {
+        let mut state = self.state();
+        state
+            .jobs
+            .iter_mut()
+            .map(|job| {
+                if let Some(line) = job.progress.take() {
+                    job.last_progress = Some(line);
+                }
+                LiveJob {
+                    id: job.id.clone(),
+                    waiting: job.queued_waiting,
+                    running: job.outcome.is_none(),
+                    progress: job.last_progress.clone(),
+                    elapsed: job.started.elapsed(),
+                }
+            })
+            .collect()
+    }
+
+    /// Stop `job` for the owner, from the workbench: as `agent_cancel` does,
+    /// but the model did not ask, so its report turn tells it the owner
+    /// stopped the job. A reviewed job's report carries its outcome as the
+    /// cancel left it.
+    pub(crate) fn cancel_for_owner(&self, job: &str) -> Result<(), String> {
+        let mut state = self.state();
+        let entry = state
+            .jobs
+            .iter_mut()
+            .find(|candidate| candidate.id == job)
+            .ok_or_else(|| format!("this session has no job {job:?}"))?;
+        if entry.outcome.is_some() {
+            return Err(format!("{job} has already finished"));
+        }
+        entry.cancelled = true;
+        entry.owner_cancelled = true;
+        entry.cancel.cancel();
+        Ok(())
+    }
+
+    /// Refuse a new running job beyond `agent.max_background`, before
+    /// anything is prepared for it.
+    fn has_room(&self) -> Result<(), ToolError> {
+        let state = self.state();
+        self.room(&state, false)
     }
 
     /// Refuse a job beyond `agent.max_background`; a queued prompt counts
@@ -478,7 +698,7 @@ impl BackgroundJobs {
     /// `background.updated` follows ([`Self::take_updates`]). The wait
     /// reads only the job's live state, never its journal.
     async fn cancel(&self, job: &str, call_id: &str) -> Result<Value, ToolError> {
-        let (mut done, owed) = {
+        let (mut done, owed, write) = {
             let mut state = self.state();
             let index = state
                 .jobs
@@ -486,12 +706,25 @@ impl BackgroundJobs {
                 .position(|candidate| candidate.id == job)
                 .ok_or_else(|| unknown_job(job))?;
             let entry = &mut state.jobs[index];
+            if entry.origin == JobOrigin::Owner && entry.outcome.is_none() {
+                return Err(ToolError::invalid_arguments(format!(
+                    "{job} is the user's own job, started from the SCV workbench; only the \
+                     user stops it"
+                )));
+            }
             if entry.outcome.is_some() {
                 let (mut value, change) = entry.describe();
                 value["note"] = "The job had already finished.".into();
+                // The model has its result now, as `agent_status` gives it.
+                let write = change
+                    .is_some()
+                    .then(|| Self::mark_reported(entry))
+                    .flatten();
                 if let Some(change) = change {
                     state.record(call_id, change);
                 }
+                drop(state);
+                self.persist(write);
                 return Ok(value);
             }
             entry.cancelled = true;
@@ -499,8 +732,10 @@ impl BackgroundJobs {
             entry.cancelling = true;
             let done = entry.done.clone();
             let mut owed = false;
+            let mut write = None;
             if !entry.reported {
                 entry.reported = true;
+                write = Self::mark_reported(entry);
                 let change = entry.change(JobStatus::Cancelled);
                 owed = entry.review.is_some();
                 state.record(call_id, change);
@@ -508,8 +743,9 @@ impl BackgroundJobs {
                     state.owed.cancelling(job, call_id);
                 }
             }
-            (done, owed)
+            (done, owed, write)
         };
+        self.persist(write);
         let waiting = Waiting {
             jobs: self,
             job: job.to_owned(),
@@ -623,6 +859,7 @@ impl BackgroundJobs {
             &context,
             Turn::New,
             None,
+            JobMeta::default(),
         )
         .expect("a test job starts");
         release
@@ -663,6 +900,7 @@ impl BackgroundJobs {
     fn describe(&self, job: Option<&str>, call_id: &str) -> Result<Value, ToolError> {
         let mut state = self.state();
         let mut changes = Vec::new();
+        let mut writes = Vec::new();
         let value = if let Some(job) = job {
             let entry = state
                 .jobs
@@ -670,6 +908,9 @@ impl BackgroundJobs {
                 .find(|candidate| candidate.id == job)
                 .ok_or_else(|| unknown_job(job))?;
             let (value, change) = entry.describe();
+            if change.is_some() {
+                writes.extend(Self::mark_reported(entry));
+            }
             changes.extend(change);
             value
         } else {
@@ -678,6 +919,9 @@ impl BackgroundJobs {
                 .iter_mut()
                 .map(|entry| {
                     let (value, change) = entry.describe();
+                    if change.is_some() {
+                        writes.extend(Self::mark_reported(entry));
+                    }
                     changes.extend(change);
                     value
                 })
@@ -687,6 +931,8 @@ impl BackgroundJobs {
         for change in changes {
             state.record(call_id, change);
         }
+        drop(state);
+        self.persist(writes);
         Ok(value)
     }
 
@@ -734,12 +980,17 @@ impl BackgroundJobs {
     /// The report turn about `jobs` ended without failing: it completed, so
     /// the model has seen them, or the user cancelled it. Either settles them.
     pub fn report_settled(&self, jobs: &[String]) {
-        let mut state = self.state();
-        for job in state.jobs.iter_mut().filter(|job| jobs.contains(&job.id)) {
-            job.reporting = false;
-            job.reported = true;
-            job.report_due = None;
+        let mut writes = Vec::new();
+        {
+            let mut state = self.state();
+            for job in state.jobs.iter_mut().filter(|job| jobs.contains(&job.id)) {
+                job.reporting = false;
+                job.reported = true;
+                job.report_due = None;
+                writes.extend(Self::mark_reported(job));
+            }
         }
+        self.persist(writes);
     }
 
     /// The report turn about `jobs` failed, so the model has not seen them
@@ -749,6 +1000,20 @@ impl BackgroundJobs {
     /// directly. A turn that reported several jobs decides for all of them,
     /// by the one that failed most.
     pub fn report_failed(&self, jobs: &[String], retry: bool) -> ReportFailure {
+        let mut writes = Vec::new();
+        let failure = self.report_failed_locked(jobs, retry, &mut writes);
+        self.persist(writes);
+        failure
+    }
+
+    /// [`Self::report_failed`] under the job table's lock, gathering the
+    /// record changes to write in `writes`.
+    fn report_failed_locked(
+        &self,
+        jobs: &[String],
+        retry: bool,
+        writes: &mut Vec<RecordWrite>,
+    ) -> ReportFailure {
         let mut state = self.state();
         let mut failed: Vec<&mut Job> = state
             .jobs
@@ -779,6 +1044,7 @@ impl BackgroundJobs {
             .filter_map(|job| {
                 job.reported = true;
                 job.report_due = None;
+                writes.extend(Self::mark_reported(job));
                 job.report()
             })
             .collect();
@@ -834,6 +1100,48 @@ impl BackgroundJobs {
     }
 }
 
+/// Who started a job, the worktree it runs in, and the interrupted job it
+/// resumes: what its record holds from the start.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct JobMeta {
+    pub(crate) origin: JobOrigin,
+    pub(crate) worktree: Option<scv_protocol::WorktreeRef>,
+    /// `<session>/<job>` of the interrupted job it runs again.
+    pub(crate) resumed_from: Option<String>,
+}
+
+/// What an owner's prompt to the workbench became.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OwnerCall {
+    /// A background job: its start, as an `agent` call returns it.
+    Job(Value),
+    /// The prompt went into the conversation's running turn.
+    Steered,
+}
+
+/// A job as the workbench sees it while its session lives.
+#[derive(Debug, Clone)]
+pub(crate) struct LiveJob {
+    pub(crate) id: String,
+    /// A queued prompt whose turn has not come yet.
+    pub(crate) waiting: bool,
+    pub(crate) running: bool,
+    pub(crate) progress: Option<String>,
+    pub(crate) elapsed: Duration,
+}
+
+/// The workbench state of a job that ended with `status`.
+pub(crate) fn agent_state(status: JobStatus) -> AgentState {
+    match status {
+        JobStatus::Completed => AgentState::Completed,
+        JobStatus::Declined => AgentState::Declined,
+        JobStatus::Timeout => AgentState::Timeout,
+        JobStatus::Cancelled => AgentState::Cancelled,
+        JobStatus::Running => AgentState::Working,
+        _ => AgentState::Failed,
+    }
+}
+
 /// How a job's call takes its conversation's turn.
 pub(in crate::delegate) enum Turn {
     /// A new conversation, which nothing else can reach yet.
@@ -858,14 +1166,28 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
     let Some(jobs) = jobs.upgrade() else {
         return;
     };
+    let mut write = None;
     {
         let mut state = jobs.state();
         let mut last = None;
         if let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) {
             job.last_progress = job.progress.take().or(job.last_progress.take());
+            job.queued_waiting = false;
+            // Stopped on the model's request: the model already knows. The
+            // owner's own jobs are the owner's to watch, never the model's.
+            job.reported |=
+                (job.cancelled && !job.owner_cancelled) || job.origin == JobOrigin::Owner;
+            let result = result_value(&output);
+            let status = if job.cancelled {
+                JobStatus::Cancelled
+            } else {
+                job_status(&output, &AgentReply::read(&result).unwrap_or_default())
+            };
             job.outcome = Some(Outcome { output, elapsed });
-            // Stopped on request: the model already knows.
-            job.reported |= job.cancelled;
+            if let Some(record) = job.record.as_mut() {
+                ledger::finish(record, agent_state(status), &result, job.reported);
+                write = job.record_changed();
+            }
             last = job.outcome();
         }
         // What a cancel owed of it is now final.
@@ -888,6 +1210,8 @@ fn finish(jobs: &Weak<BackgroundJobs>, id: &str, output: ToolOutput, elapsed: Du
             }
         });
     }
+    // Recorded before anyone hears the job finished.
+    jobs.persist(write);
     if let Some(finished) = &jobs.finished {
         let _ = finished.send(());
     }
@@ -907,7 +1231,12 @@ impl Job {
             job: self.id.clone(),
             agent: self.agent.clone(),
             task: self.task.clone(),
-            status: job_status(&outcome.output, &reply),
+            // Stopped by the owner: the model asked for no stop of its own.
+            status: if self.cancelled {
+                JobStatus::Cancelled
+            } else {
+                job_status(&outcome.output, &reply)
+            },
             session: reply.session,
             reply: bounded(
                 reply
@@ -963,6 +1292,9 @@ impl Job {
         let mut value = Map::new();
         value.insert("job".into(), self.id.clone().into());
         value.insert("agent".into(), self.agent.clone().into());
+        if self.origin == JobOrigin::Owner {
+            value.insert("started_by".into(), "owner".into());
+        }
         match &self.outcome {
             None => {
                 value.insert("status".into(), "running".into());
@@ -1065,10 +1397,25 @@ pub fn report_prompt(reports: &[JobReport]) -> String {
     format!(
         "[SCV background report] Delegated work you started in the background has \
          finished. The user did not send this message: tell them briefly what \
-         happened and the key result.{}\n\n{}",
+         happened and the key result.{}{}\n\n{}",
+        cancelled_note(reports),
         reviewed_note(reports),
         describe_reports(reports)
     )
+}
+
+/// What the model is told when a report includes a job someone else
+/// stopped: a job the model stops itself is never reported.
+fn cancelled_note(reports: &[JobReport]) -> &'static str {
+    if reports
+        .iter()
+        .any(|report| report.status == JobStatus::Cancelled)
+    {
+        " A job reported as cancelled was stopped by the user (from the SCV workbench or \
+         `scv agents kill`), not by you; don't restart it unless they ask."
+    } else {
+        ""
+    }
 }
 
 /// What the model is told of jobs the server reported directly, because
@@ -1238,21 +1585,44 @@ impl Tool for BackgroundCapable {
     ) -> Result<ToolOutput, ToolError> {
         let split = Split::new(&arguments);
         if let Some(review) = &split.review {
-            return self.start_reviewed(&split, review, &context);
+            return self.start_reviewed(&split, review, &context).await;
         }
         let background = split.background();
-        let arguments = split.arguments;
-        let (agent, routed) = self.inner.route(&arguments)?;
+        let mut arguments = split.arguments;
+        self.inner.route(&arguments)?;
         // Validate before returning a job handle, so a bad call fails now,
         // and as the call was made: a foreground call queued behind a busy
         // conversation runs as a job but may not set `no_timeout`.
         self.inner.risk_for(&arguments, background)?;
+        // A background call's worktree is created before its job starts,
+        // so the job's record and start name it. A foreground call's is
+        // the agent tool's.
+        let worktree = if background && parse_args::<AgentArgs>(&arguments)?.worktree {
+            self.jobs.has_room()?;
+            self.inner
+                .prepare_worktree(&mut arguments, &context)
+                .await?
+        } else {
+            None
+        };
+        let (agent, routed) = self.inner.route(&arguments)?;
         let Some(handle) = parse_args::<AgentArgs>(&routed)?
             .session
             .filter(|session| conversation::is_handle(session))
         else {
             return if background {
-                self.start(agent, arguments, &context, Turn::New)
+                let started = self.start_as(
+                    agent,
+                    arguments,
+                    &context,
+                    Turn::New,
+                    JobMeta {
+                        origin: JobOrigin::Model,
+                        worktree,
+                        resumed_from: None,
+                    },
+                )?;
+                Ok(ToolOutput::success(started.to_string()))
             } else {
                 self.inner.execute(arguments, context).await
             };
@@ -1378,15 +1748,27 @@ impl BackgroundCapable {
     /// conversation queues it, or fails it with `on_busy: fail`; it never
     /// waits, since it is a background job, and never steers, since its
     /// prompt opens a review of its own.
-    fn start_reviewed(
+    async fn start_reviewed(
         &self,
         split: &Split,
         review: &Value,
         context: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let plan = self.plan(split, review)?;
-        let arguments = split.arguments.clone();
+        let mut plan = self.plan(split, review)?;
+        let mut arguments = split.arguments.clone();
         self.inner.risk_for(&arguments, true)?;
+        // The builder and every reviewer work in the same worktree.
+        let worktree = if parse_args::<AgentArgs>(&arguments)?.worktree {
+            self.jobs.has_room()?;
+            let worktree = self.inner.prepare_worktree(&mut arguments, context).await?;
+            plan.cwd = arguments
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            worktree
+        } else {
+            None
+        };
         let (agent, routed) = self.inner.route(&arguments)?;
         let turn = match parse_args::<AgentArgs>(&routed)?
             .session
@@ -1432,6 +1814,11 @@ impl BackgroundCapable {
             context,
             turn,
             Some(&tool),
+            JobMeta {
+                origin: JobOrigin::Model,
+                worktree,
+                resumed_from: None,
+            },
         )?;
         let first = reviewers.first().cloned().unwrap_or_default();
         started["review"] = json!({
@@ -1460,16 +1847,62 @@ impl BackgroundCapable {
     fn start(
         &self,
         agent: &Offered,
-        arguments: Value,
+        mut arguments: Value,
         context: &ToolContext,
         turn: Turn,
     ) -> Result<ToolOutput, ToolError> {
+        let meta = self.queued_meta(&mut arguments, &turn);
+        let started = self.start_as(agent, arguments, context, turn, meta)?;
+        Ok(ToolOutput::success(started.to_string()))
+    }
+
+    /// A queued follow-up has no run of its own. Remember the conversation's
+    /// directory and SCV worktree on the job, so a later resume still has
+    /// them after the job that run served was dismissed and the worktree
+    /// removed.
+    fn queued_meta(&self, arguments: &mut Value, turn: &Turn) -> JobMeta {
+        if !matches!(turn, Turn::Queued(_)) {
+            return JobMeta::default();
+        }
+        let Some(handle) = parse_args::<AgentArgs>(arguments)
+            .ok()
+            .and_then(|args| args.session)
+            .filter(|session| conversation::is_handle(session))
+        else {
+            return JobMeta::default();
+        };
+        let Some(cwd) = self.conversations.cwd(&handle) else {
+            return JobMeta::default();
+        };
+        if arguments
+            .get("cwd")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            && let Some(object) = arguments.as_object_mut()
+        {
+            object.insert("cwd".into(), cwd.display().to_string().into());
+        }
+        JobMeta {
+            worktree: self.inner.worktree_at(&cwd),
+            ..JobMeta::default()
+        }
+    }
+
+    /// Start the call on `agent` as a background job `meta` describes.
+    fn start_as(
+        &self,
+        agent: &Offered,
+        arguments: Value,
+        context: &ToolContext,
+        turn: Turn,
+        meta: JobMeta,
+    ) -> Result<Value, ToolError> {
         let tool: Arc<dyn Tool> = if matches!(turn, Turn::Queued(_)) {
             Arc::new(QueuedTool(Arc::clone(&self.inner)))
         } else {
             Arc::clone(&self.inner) as Arc<dyn Tool>
         };
-        let started = self.jobs.start(
+        self.jobs.start(
             tool,
             AGENT_TOOL,
             &agent.name,
@@ -1477,8 +1910,120 @@ impl BackgroundCapable {
             context,
             turn,
             None,
-        )?;
-        Ok(ToolOutput::success(started.to_string()))
+            meta,
+        )
+    }
+
+    /// Run the owner's call from the workbench as a background job of this
+    /// session: no approval request, since it is the owner's own action,
+    /// and no report turn, since the owner watches it. A call continuing a
+    /// conversation that runs a turn steers it when `mode` allows and the
+    /// agent can take the prompt, and otherwise queues behind it. `meta`'s
+    /// worktree is recorded when the call makes none of its own, and its
+    /// `resumed_from` as given; it is always the owner's.
+    pub(crate) async fn owner_call(
+        &self,
+        mut arguments: Value,
+        workspace: std::path::PathBuf,
+        mode: scv_protocol::SendMode,
+        meta: JobMeta,
+    ) -> Result<OwnerCall, ToolError> {
+        use scv_protocol::SendMode;
+        let context = ToolContext::new(workspace, CancellationToken::new());
+        self.inner.route(&arguments)?;
+        self.inner.risk_for(&arguments, true)?;
+        let worktree = if parse_args::<AgentArgs>(&arguments)?.worktree {
+            self.jobs.has_room()?;
+            self.inner
+                .prepare_worktree(&mut arguments, &context)
+                .await?
+        } else {
+            None
+        };
+        let (agent, routed) = self.inner.route(&arguments)?;
+        let meta = JobMeta {
+            origin: JobOrigin::Owner,
+            worktree: worktree.or(meta.worktree),
+            resumed_from: meta.resumed_from,
+        };
+        let Some(handle) = parse_args::<AgentArgs>(&routed)?
+            .session
+            .filter(|session| conversation::is_handle(session))
+        else {
+            return self
+                .start_as(agent, arguments, &context, Turn::New, meta)
+                .map(OwnerCall::Job);
+        };
+        let mut meta = meta;
+        if let Some(cwd) = self.conversations.cwd(&handle) {
+            if arguments.get("cwd").and_then(Value::as_str).is_none()
+                && let Some(object) = arguments.as_object_mut()
+            {
+                object.insert("cwd".into(), cwd.display().to_string().into());
+            }
+            if meta.worktree.is_none() {
+                meta.worktree = self.inner.worktree_at(&cwd);
+            }
+        }
+        let place = self.jobs.lanes.join(&handle);
+        let busy = agent.backend.busy(&routed)?;
+        if !busy && !self.conversations.knows(&handle) {
+            return Err(ToolError::invalid_arguments(format!(
+                "no conversation {handle} in this session; it ended, or it was forgotten after it sat idle"
+            )));
+        }
+        if place.ahead == 0 && !busy {
+            return self
+                .start_as(agent, arguments, &context, Turn::Next(place), meta)
+                .map(OwnerCall::Job);
+        }
+        if mode != SendMode::Queue
+            && agent
+                .backend
+                .steer(routed.clone(), context.clone())
+                .await?
+                .is_some()
+        {
+            return Ok(OwnerCall::Steered);
+        }
+        if mode == SendMode::Steer {
+            return Err(ToolError::failed(format!(
+                "conversation {handle} cannot take a prompt into its running turn (its agent \
+                 does not steer, or no turn is running yet); send it queued instead"
+            )));
+        }
+        queue_room(agent, &handle, &place)?;
+        self.start_as(agent, arguments, &context, Turn::Queued(place), meta)
+            .map(OwnerCall::Job)
+    }
+
+    /// Whether `agent` is offered and takes `option` (`model`, `effort`,
+    /// or `session`).
+    pub(crate) fn takes(&self, agent: &str, option: &str) -> bool {
+        self.inner.find(agent).is_some_and(|offered| match option {
+            "model" => offered.accepts.model,
+            "effort" => offered.accepts.effort,
+            "session" => offered.accepts.session,
+            _ => false,
+        })
+    }
+
+    /// Whether the session has conversation `handle`, so the owner can send
+    /// it a prompt.
+    pub(crate) fn knows(&self, handle: &str) -> bool {
+        self.conversations.knows(handle)
+    }
+
+    /// Take in conversation `vendor` that `agent` saved, so a call can
+    /// continue it in `cwd`, when that agent can continue a conversation
+    /// from its own session ID alone. Returns the handle, which is the one
+    /// this session already holds for that agent, session, and directory.
+    pub(crate) fn adopt(&self, agent: &str, cwd: &std::path::Path, vendor: &str) -> Option<String> {
+        let offered = self.inner.find(agent)?;
+        if !offered.accepts.session || !offered.backend.adoptable() {
+            return None;
+        }
+        self.conversations.adopt(agent, cwd, vendor).ok()
     }
 }
 

@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::{
     args::bounded,
     delegate::{
+        activity::RunActivity,
         progress::redact,
         scv::{LineProgress, Reply},
     },
@@ -28,6 +29,7 @@ impl Progress {
         params: &Value,
         reply: &mut Reply,
         sink: &scv_core::ProgressSink,
+        activity: Option<&RunActivity>,
     ) {
         let Some(update) = params.get("update") else {
             return;
@@ -40,6 +42,9 @@ impl Progress {
                 {
                     reply.delta(chunk);
                     self.lines.push(chunk, sink);
+                    if let Some(activity) = activity {
+                        activity.text(chunk);
+                    }
                 }
             }
             Some("tool_call") => {
@@ -49,7 +54,11 @@ impl Progress {
                 if let Some(id) = text("toolCallId") {
                     self.titles.insert(id.to_owned(), title.to_owned());
                 }
-                sink.report(&line(kind, title));
+                let line = line(kind, title);
+                if let Some(activity) = activity {
+                    activity.tool(&line);
+                }
+                sink.report(&line);
             }
             Some("tool_call_update") => {
                 if let (Some(id), Some(title)) = (text("toolCallId"), text("title")) {
@@ -59,7 +68,11 @@ impl Progress {
                     let title = text("toolCallId")
                         .and_then(|id| self.titles.get(id))
                         .map_or("tool call", String::as_str);
-                    sink.report(&format!("{} failed", line("", title)));
+                    let failed = format!("{} failed", line("", title));
+                    if let Some(activity) = activity {
+                        activity.tool(&failed);
+                    }
+                    sink.report(&failed);
                 }
             }
             Some("plan") => {
@@ -82,6 +95,9 @@ impl Progress {
                 {
                     let step = format!("plan: {}", line("", content));
                     if self.plan.as_deref() != Some(step.as_str()) {
+                        if let Some(activity) = activity {
+                            activity.plan(&line("", content));
+                        }
                         sink.report(&step);
                         self.plan = Some(step);
                     }

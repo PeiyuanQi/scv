@@ -83,6 +83,89 @@ fn the_reviewer_checks_a_reported_landing_and_names_what_it_approves() {
 }
 
 #[test]
+fn an_empty_open_list_omits_prior_and_a_listed_one_is_settled_by_id() {
+    let empty = reviewer_prompt(&ReviewerBrief {
+        land: LandMode::NoLanding,
+        prompt: "Fix the flaky checkout test.",
+        focus: None,
+        reply: "Replaced the sleep with a lock.",
+        open: &[],
+        landed: None,
+    });
+    assert!(
+        empty.contains("There are no open findings, so omit \"prior\" or set it to []."),
+        "{empty}"
+    );
+    assert!(
+        empty.contains("Do not invent finding ids such as \"1\" or \"1.1\"."),
+        "{empty}"
+    );
+    assert!(
+        empty.contains("A \"prior\" entry is valid only for an id listed under open findings."),
+        "{empty}"
+    );
+    assert!(!empty.contains("settle every open finding"), "{empty}");
+    assert!(empty.contains("\"prior\":[]"), "{empty}");
+    assert!(!empty.contains("<open finding ID>"), "{empty}");
+    assert!(
+        empty.contains(
+            "\"prior\" is required only when open findings were listed, one entry per listed id"
+        ),
+        "{empty}"
+    );
+    assert!(
+        empty.contains("otherwise omit \"prior\" or set it to []"),
+        "{empty}"
+    );
+
+    let open = [
+        finding("1.1", Severity::Blocking),
+        finding("1.2", Severity::Minor),
+    ];
+    let later = reviewer_prompt(&ReviewerBrief {
+        land: LandMode::NoLanding,
+        prompt: "Fix the flaky checkout test.",
+        focus: None,
+        reply: "Replaced the sleep with a lock.",
+        open: &open,
+        landed: None,
+    });
+    assert!(
+        later.contains("First settle every open finding below by its ID in \"prior\""),
+        "{later}"
+    );
+    assert!(later.contains("- 1.1 [blocking]"), "{later}");
+    assert!(later.contains("- 1.2 [minor]"), "{later}");
+    assert!(
+        later.contains(
+            "\"prior\" is required only when open findings were listed, one entry per listed id"
+        ),
+        "{later}"
+    );
+    assert!(!later.contains("There are no open findings"), "{later}");
+    assert!(!later.contains("<open finding ID>"), "{later}");
+}
+
+#[test]
+fn the_repair_prompt_keeps_the_parser_error_and_forbids_an_invented_prior_id() {
+    let clause = "If the error is that \"prior\" names an id that is not an open finding, omit \
+                  \"prior\" or send [] unless the review listed open findings, and never invent \
+                  an id.";
+    let missing = repair_prompt("no scv-verdict block");
+    assert!(missing.starts_with(
+        "Your reply had no valid scv-verdict block (no scv-verdict block). Reply with only that \
+         block,"
+    ));
+    assert!(missing.contains(clause), "{missing}");
+    let named = repair_prompt("prior names \"1.1\", which is not an open finding");
+    assert!(
+        named.contains("(prior names \"1.1\", which is not an open finding)"),
+        "{named}"
+    );
+    assert!(named.contains(clause), "{named}");
+}
+
+#[test]
 fn quoted_text_is_bounded() {
     let long = "x".repeat(20 * 1024);
     let prompt = reviewer_prompt(&ReviewerBrief {

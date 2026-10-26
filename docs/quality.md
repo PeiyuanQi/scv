@@ -213,9 +213,11 @@ Daemon and component changes require focused coverage for:
   data (last block wins, bounded, schema and consistency rules, cut replies
   malformed), the round limit never passed and never told to the reviewer,
   the last builder turn always reviewed, reviewer routing per builder with
-  fallback only on an availability failure, a refusal handing the review to
-  Grok and never to the builder's own agent, a named reviewer never swapped,
-  one repair turn for a malformed verdict, a negative verdict counting
+  fallback on an availability failure and, after one repair turn, on a
+  verdict that stays malformed, a refusal handing the review to Grok and
+  never to the builder's own agent, a named reviewer never swapped for
+  unavailability or a refusal, one repair turn for a malformed verdict, a
+  negative verdict counting
   however its run ended, landing authorization and evidence labels, the
   approving reviewer's one confirmation, every reviewer conversation
   released and the builder's pinned, a cancel's outcome matching the
@@ -231,7 +233,26 @@ Daemon and component changes require focused coverage for:
   `scv exec`, the TUI, and a nested SCV's count following all of it, with the
   owner never sent a bare failure line;
 - TUI reconnect creating a fresh session without history restoration or
-  automatic replay of submitted work.
+  automatic replay of submitted work, its kept queue restored paused once,
+  and the running prompt named but never sent again, including after a
+  SIGKILLed daemon;
+- the workbench: activity logs paged by position, bounded, truncated past
+  their size, redacted, and shown `unknown` when quiet or `interrupted` when
+  their process died; the job ledger recording each job's life, marking
+  unfinished jobs interrupted, pruning, numbering a returning session's
+  jobs after its records, and keeping a dismissal and a resume link against
+  a snapshot taken before either; snapshots joining jobs, runs, approvals,
+  and kept queues; the owner's start, send, steer, cancel (reported to the model
+  as the user's stop), resume through the agent's own conversation or a
+  rerun, and attended approvals that wait only while watched and never grant
+  more than the foreground; worktrees created, listed, counted as the
+  workspace, and removed only when SCV made them; `scv jobs` refusing
+  actions inside a delegated run; and, end to end, an owner job started and
+  read from `scv jobs`, and a job a SIGKILLed daemon interrupted resumed in
+  its agent's own conversation;
+- the dashboard: key specifications and `[tui.keys]` conflicts, tabs, panes,
+  sidebar grouping and actions, agent-view paging and sending, notifications
+  from snapshot changes, and an older daemon without the workbench.
 
 Mail changes require focused coverage for:
 

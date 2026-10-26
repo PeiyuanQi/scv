@@ -631,3 +631,101 @@ fn the_offered_agents_are_read_from_the_registry() {
         .unwrap();
     assert_eq!(offered_agents(&registry), ["codex", "pi"]);
 }
+
+#[test]
+fn worktree_is_offered_only_with_a_worktrees_directory_and_only_for_new_conversations() {
+    let codex = Recorder::new("codex");
+    let plain = dispatcher(&[&codex], &["codex"]);
+    assert!(
+        plain.spec().parameters["properties"]
+            .get("worktree")
+            .is_none()
+    );
+    let refused = plain
+        .risk(&json!({"prompt":"go","worktree":true}))
+        .unwrap_err();
+    assert!(refused.message.contains("not available"), "{refused}");
+
+    let tool = dispatcher(&[&codex], &["codex"]).with_worktrees(Some("/h/worktrees".into()));
+    assert_eq!(
+        tool.spec().parameters["properties"]["worktree"]["type"],
+        "boolean"
+    );
+    let refused = tool
+        .risk(&json!({"prompt":"go","worktree":true,"session":"codex-1"}))
+        .unwrap_err();
+    assert!(refused.message.contains("new conversation"), "{refused}");
+    let summary = tool
+        .approval_summary(&json!({"prompt":"go","worktree":true}))
+        .unwrap();
+    assert!(summary.contains("new git worktree"), "{summary}");
+    assert!(
+        !tool
+            .approval_summary(&json!({"prompt":"go"}))
+            .unwrap()
+            .contains("worktree")
+    );
+}
+
+#[tokio::test]
+async fn a_worktree_call_runs_its_agent_inside_a_new_worktree_and_names_it() {
+    if which::which("git").is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().canonicalize().unwrap().join("workspace");
+    let repo = workspace.join("shop");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README"), "shop\n").unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["-c", "user.name=t", "-c", "user.email=t@t", "add", "."],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let root = dir.path().join("worktrees");
+    let codex = Recorder::new("codex");
+    let tool = dispatcher(&[&codex], &["codex"]).with_worktrees(Some(root.clone()));
+    let output = tool
+        .execute(
+            json!({"prompt":"go","cwd":"shop","worktree":true}),
+            ToolContext::new(workspace.clone(), CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_str(&output.content).unwrap();
+    let path = value["worktree"]["path"].as_str().unwrap().to_owned();
+    assert!(
+        path.starts_with(root.canonicalize().unwrap().to_str().unwrap()),
+        "{value}"
+    );
+    assert!(
+        value["worktree"]["branch"]
+            .as_str()
+            .unwrap()
+            .starts_with("scv/codex-")
+    );
+    let ran = codex.ran.lock().unwrap()[0].clone();
+    assert_eq!(ran["cwd"], path);
+    assert!(ran.get("worktree").is_none(), "{ran}");
+    assert!(std::path::Path::new(&path).join("README").is_file());
+}

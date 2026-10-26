@@ -83,7 +83,7 @@ pub(crate) async fn handle_connected_key(
                 );
                 return Ok(());
             }
-            KeyCode::Char('x') if app.turn.is_some() && app.queue_selected.is_some() => {
+            KeyCode::Char('x') if app.queue_selected.is_some() => {
                 let index = app.queue_selected.expect("guarded by the match arm");
                 if let Some(entry) = app.queue.get(index).cloned() {
                     client
@@ -103,7 +103,9 @@ pub(crate) async fn handle_connected_key(
 
     match key.code {
         KeyCode::Enter => submit_input(client, app).await?,
-        KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) && app.turn.is_some() => {
+        // The queue's keys work while it holds prompts, a restored and
+        // paused one included, not only while a turn runs.
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) && !app.queue.is_empty() => {
             let index = app
                 .queue_selected
                 .unwrap_or_else(|| app.queue.len().saturating_sub(1));
@@ -114,7 +116,7 @@ pub(crate) async fn handle_connected_key(
                 app.queue_selected = Some(index);
             }
         }
-        KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) && app.turn.is_some() => {
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) && !app.queue.is_empty() => {
             if !app.queue.is_empty() {
                 let index = app
                     .queue_selected
@@ -127,7 +129,10 @@ pub(crate) async fn handle_connected_key(
                 }
             }
         }
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) && app.turn.is_some() => {
+        KeyCode::Char('p')
+            if key.modifiers.contains(KeyModifiers::ALT)
+                && (app.turn.is_some() || app.queue_paused || !app.queue.is_empty()) =>
+        {
             client
                 .send(&ClientMessage::SessionPause {
                     request_id: new_id(),

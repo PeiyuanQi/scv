@@ -56,7 +56,15 @@ for line in sys.stdin:
         result = {"protocolVersion": 2 if MODE == "v2" else 1, "agentCapabilities": {}, "authMethods": []}
         if MODE == "steer":
             result["_meta"] = {"steering": {"supported": True}}
+        if MODE == "load":
+            result["agentCapabilities"] = {"loadSession": True}
         send({"id": rid, "result": result})
+    elif method == "session/load":
+        log("session/load id=" + params["sessionId"] + " cwd=" + params["cwd"])
+        # The saved conversation is replayed before the answer.
+        chunk(params["sessionId"], "earlier reply")
+        memory = "loaded " + params["sessionId"]
+        send({"id": rid, "result": {"configOptions": OPTIONS}})
     elif method == "session/new":
         sessions += 1
         json.dump(params, open(os.path.join(DIR, "session.json"), "w"))

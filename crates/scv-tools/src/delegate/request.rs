@@ -28,6 +28,9 @@ pub(crate) struct AgentArgs {
     pub(crate) effort: Option<String>,
     #[serde(default, deserialize_with = "blank_busy_as_none")]
     pub(crate) on_busy: Option<BusyBehavior>,
+    /// Run in a new git worktree of the repository holding `cwd`.
+    #[serde(default)]
+    pub(crate) worktree: bool,
 }
 
 /// Models often send an optional string they mean to leave unset as `""`, so
@@ -83,6 +86,39 @@ pub(crate) fn resolve_agent_cwd(workspace: &Path, cwd: Option<&str>) -> Result<P
         )));
     }
     Ok(resolved)
+}
+
+/// Where a call runs: `cwd` resolved as [`resolve_agent_cwd`] does, except
+/// that it may also name a directory in a worktree SCV created (under
+/// `worktrees`) from a repository inside the workspace; and a call that
+/// continues a conversation without naming `cwd` runs where that
+/// conversation runs (`conversation`).
+pub(crate) fn resolve_call_cwd(
+    workspace: &Path,
+    worktrees: Option<&Path>,
+    cwd: Option<&str>,
+    conversation: Option<PathBuf>,
+) -> Result<PathBuf, ToolError> {
+    let Some(cwd) = cwd else {
+        return match conversation {
+            Some(cwd) => Ok(cwd),
+            None => resolve_agent_cwd(workspace, None),
+        };
+    };
+    match resolve_agent_cwd(workspace, Some(cwd)) {
+        Ok(resolved) => Ok(resolved),
+        Err(error) => {
+            let root = std::fs::canonicalize(workspace)
+                .map_err(|error| ToolError::failed(format!("resolve workspace: {error}")))?;
+            let in_worktree = worktrees.and_then(|worktrees| {
+                let resolved = std::fs::canonicalize(root.join(cwd)).ok()?;
+                (resolved.is_dir()
+                    && crate::delegate::worktree::in_workspace(worktrees, &resolved, &root))
+                .then_some(resolved)
+            });
+            in_worktree.ok_or(error)
+        }
+    }
 }
 
 /// Effort values the `agent` tool's schema always lists; an ACP agent's own

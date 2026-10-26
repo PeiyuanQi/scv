@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.2`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.2` pins.
+The current workspace release is `0.4.3`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.3` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -38,7 +38,8 @@ default, accepts a Cargo index override through `[update].index_url`,
 binary through Cargo. It restarts an active systemd user daemon after
 installation. A foreground `scv run` daemon requires an explicit restart.
 Existing TUI clients reconnect and start fresh sessions without restoring
-server history or automatically replaying submitted or queued work.
+server history; their queued prompts come back paused (from `0.4.3`), and
+nothing submitted or queued is replayed automatically.
 
 Multiple SCV profiles may run concurrently. Select one with `--scv-home` or
 `SCV_HOME`; each profile has an independent socket, systemd user unit, provider
@@ -51,6 +52,65 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.3
+
+`0.4.3` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+so a planned restart from `0.4.2` checks the new release and can roll it back.
+Everything it adds is additive: an instance that configures none of it
+behaves as before, apart from the records below, which are written for every
+delegated run and job.
+
+- **The workbench.** The TUI is a dashboard: chat tabs in several
+  workspaces, agent views that follow a delegated agent's live activity and
+  take prompts for its conversation, two panes, a sidebar of every
+  workspace's jobs and runs, notifications, and `[tui.keys]` bindings.
+  `scv jobs` does the same from the command line. The owner can start jobs
+  of their own, steer or queue prompts into a delegated conversation, stop,
+  resume, and forget jobs, and answer a background job's approval request
+  while watching instead of having it denied. See
+  [the workbench](tools.md#the-workbench) and [TUI](tui.md#dashboard).
+- **Durable records.** Every delegated run writes an activity log and state
+  under `state/runs/`, and every background job a ledger record under
+  `state/jobs/`, each kept seven days. A TUI session keeps its queue under
+  `state/sessions/` while it runs. Older releases ignore all three.
+- **Crash recovery.** Jobs a restart or crash cut off are listed as
+  interrupted and can be resumed in the agent's own conversation (Claude
+  Code, Codex, pi, and Cursor by session ID; ACP agents whose server loads
+  sessions), or rerun with a note that an earlier attempt may have left
+  changes. A TUI that reconnects after a restart gets its queued prompts
+  back, paused. Delegated processes still stop with the daemon.
+- **Agent states.** Runs and jobs report `awaiting_input`, `idle`,
+  `interrupted`, and `unknown` (no activity for five minutes) with the
+  reason, besides the working and final states.
+- **More agents.** `gemini`, `qwen`, `opencode`, `copilot`, `cursor`, `amp`,
+  and `kimi` are offered when installed, with their sign-ins unchecked; Kimi
+  runs over ACP only. Devin is not supported. See
+  [Delegated agents](tools.md#delegated-agents-agent).
+- **Worktrees.** `worktree: true` on an `agent` call (or `--worktree` on
+  `scv jobs start`) runs a new conversation in a git worktree under
+  `worktrees/`, kept until `scv agents worktrees --remove`.
+- **Protocol.** New `daemon.control` actions (`workbench`, `run_log`,
+  `workbench_*`, `worktrees`, `worktree_remove`), their `daemon.status`
+  fields, `session.start`'s `persist_queue` and `restore`, `session.started`'s
+  `keys` and `restored`, and the `workbench_error` code are additive. Older
+  daemons answer the new actions with `invalid_json`, and the TUI then runs
+  without the dashboard's workbench.
+- **Behavior.** A call that continues a conversation without `cwd` now runs
+  in the conversation's own directory rather than failing when that was not
+  the workspace root. A model's background job the owner cancels is
+  reported to the model as cancelled, saying the user stopped it.
+- `0.4.2` rejects `[tui.keys]` and the new `[agents.<name>]` tables, so with
+  them in `config.toml` it cannot start, and an automatic rollback would fail
+  too. Remove them before going back to `0.4.2`.
+
+What changes for code that embeds SCV's crates: `scv-core`'s `ToolContext`
+gains `job` (`ToolContext::new` sets it to `None`). `scv-protocol`'s
+`DaemonStatus`, `DaemonCommand`, `ClientMessage::SessionStart`, and
+`ServerEvent::SessionStarted` gain the fields and variants above, so struct
+literals and exhaustive matches need them. `scv-tools`'s `ToolsConfig` gains
+`worktrees`, `workbench`, `label`, `jobs`, and `workspace`, and it adds the
+public `workbench`, `activity`, `worktree`, and `background::ledger` modules.
 
 ## Upgrading to 0.4.2
 

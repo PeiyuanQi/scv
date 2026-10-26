@@ -49,6 +49,11 @@ impl Config {
             chat_attach: None,
             chat_history: None,
             precheck_agent_models: true,
+            worktrees: None,
+            workbench: None,
+            label: String::new(),
+            jobs: None,
+            workspace: std::path::PathBuf::new(),
         }
     }
 
@@ -241,7 +246,10 @@ impl Config {
                                         (OsString::from(variable), OsString::from(value))
                                     })
                                     .collect(),
-                                required: config.transport == AgentTransport::Acp,
+                                // An agent without a verified one-prompt
+                                // mode runs over ACP only.
+                                required: config.transport == AgentTransport::Acp
+                                    || !descriptor.cli_turns,
                                 session_options: launch.session_options,
                             }
                         }),

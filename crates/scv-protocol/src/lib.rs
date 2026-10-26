@@ -18,6 +18,7 @@ mod error;
 mod frame;
 mod review;
 mod server;
+mod workbench;
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +41,11 @@ pub use review::{
     ReviewOutcome, ReviewSummary, ReviewerResult, TriedReviewer, describe_outcome, outcome_notice,
 };
 pub use server::ServerEvent;
+pub use workbench::{
+    AgentState, JobOrigin, RestorableSession, RestoredQueue, RunEvent, RunEventKind, RunLogPage,
+    SendMode, WorkbenchApproval, WorkbenchJob, WorkbenchRun, WorkbenchSession, WorkbenchSnapshot,
+    WorktreeInfo, WorktreeRef,
+};
 
 /// The protocol version. Client and server must speak the same one.
 pub const PROTOCOL_VERSION: u32 = 3;

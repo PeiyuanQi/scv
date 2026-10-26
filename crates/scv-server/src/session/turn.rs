@@ -110,6 +110,7 @@ impl TurnStarter {
             broker: Arc::clone(&self.approvals),
             meta,
             output: self.output.clone(),
+            workbench: current.workbench.clone(),
         });
         let runtime = Arc::clone(&current.runtime);
         let history = Arc::clone(&current.history);

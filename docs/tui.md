@@ -1,13 +1,151 @@
 # Terminal User Experience
 
-Status: proposed final design for v0.2
-
-The SCV TUI is an event-driven Ratatui/Crossterm client. Rendering is derived
-from local UI state, while the server remains authoritative for sessions,
-turns, tools, approvals, and context metrics. The v0.2 experience is designed
-for sustained coding sessions: information stays readable while output streams,
-the composer behaves like a capable terminal editor, and common actions are
+The SCV TUI is an event-driven Ratatui/Crossterm client of the daemon's Unix
+socket. Rendering is derived from local UI state, while the server remains
+authoritative for sessions, turns, tools, approvals, context metrics, and the
+workbench of delegated agents and background jobs. It is designed for
+sustained coding sessions: information stays readable while output streams,
+the composer behaves like a capable terminal editor, several chats and
+delegated agents can be followed side by side, and common actions are
 discoverable without making the interface dense.
+
+## Dashboard
+
+The TUI is a dashboard of tabs. A **chat tab** is one daemon session in one
+workspace: the TUI opens with a chat in the current directory, and `/open
+<directory>` or the `new_tab` key opens another in a different workspace, so
+one TUI can hold a chat per repository. An **agent view** follows a delegated
+agent of the [workbench](tools.md#the-workbench): a background job, a
+conversation, or a single run. Below the header, a one-line tab bar names
+every tab with its state mark; the active tab is highlighted.
+
+The body is the sidebar beside one or two panes. The `split` key divides the
+body into two side-by-side panes (each shows a tab; `focus_other_pane` moves
+between them) and joins them again. The **sidebar** groups, top to bottom:
+approvals waiting for the owner, this TUI's chat tabs, every workspace's jobs
+and live agent runs (each line a state mark, agent, job, and task), jobs a
+restart interrupted that can be resumed, and queues kept from sessions that
+stopped. `focus_sidebar` moves keys to it and back to the pane they left; there `Up`/`Down`,
+`PageUp`/`PageDown`, and `Home`/`End` select, `Enter` opens the selection (a
+chat tab, or an agent view), `y`/`n` answer the selected approval, `x`
+pressed twice stops a running job, `r` resumes an interrupted job or
+restores a kept queue, `d` pressed twice forgets a finished job, `w` lists
+worktrees, and `Esc` returns to the pane focus left. `y`/`n` on a job row
+name the request they will answer and act on the second press, so a new
+request on that job is not answered by a key meant for the previous one.
+`Enter` on a tab or view the second
+pane already shows focuses that pane. The selection stays on its entry as
+the list changes, and a second `x` or `d` counts only on the entry the first
+was pressed on, within three seconds. When the selected entry goes away (an
+approval answered or expired, a job forgotten), the selection falls to the
+entry now nearest its row, and the next `Enter` or letter only moves the
+selection there and says so: pressed again, it acts. The sidebar gives way
+below 70 columns, and the second pane below 60 columns beside it. Below 12 rows or 50
+columns the focused pane's chat is drawn alone, as it would be without the
+dashboard. Keys go only to what is drawn: a chat drawn alone takes them, and
+with the sidebar or the second pane given way, they go to the first pane.
+
+Closing a chat tab ends its session, and quitting ends every tab's: their
+running turns and background jobs stop, their jobs are recorded as
+interrupted, and their queued prompts are dropped. When that would stop or
+drop something (a running turn, an unfinished background job, or a queued
+prompt, a restored and paused queue included), closing or quitting
+(`Ctrl+C` on an idle chat, `/quit`) says what and waits for the same request
+again within three seconds. The confirming `Ctrl+C` quits; it does not
+cancel the running turn. While a chat shows an approval prompt, it takes
+every key but the dashboard keys below wherever focus is, since it covers
+the screen. A dashboard key may move focus, and the prompt stays that
+chat's until it is answered: `y` and `n` or `Esc` still answer it, and
+other keys do nothing, so nothing behind it opens or moves. On a terminal
+too small for the dashboard, that prompt is drawn over the chat shown
+alone, so it is still what those keys answer. A request
+from another chat while one is drawn is announced and does not replace
+it, including a request from the chat focus just moved to.
+
+A tab's connection failing in a way other than ending (a server frame too
+large, or one the TUI cannot read) is that tab's alone: the tab shows the
+error, disconnects, and reconnects as when its connection is lost, and the
+other tabs keep running. A new chat tab (`/open`, `/restore`, or a restored
+queue from the sidebar) takes the focused pane when its session starts only
+if focus is still where it was asked for; otherwise the tab is added and a
+notification names it, so keys typed meanwhile stay where they went.
+
+State marks read without color: `◌` starting, `●` working, `?` waiting for
+input, `○` idle, `…` queued, `✓` completed, `✗` failed or timed out, `⊘`
+declined, `■` cancelled, `⟳` interrupted, and `~` unknown. The header counts
+jobs working, waiting for the owner, and interrupted. A chat tab is working
+while its turn runs, waiting while it shows an approval, and unknown while
+disconnected.
+
+An agent view is the agent's live activity log as the daemon records it:
+turn boundaries with each prompt, the agent's messages, tool calls and
+failures, plans, approvals asked and answered, steering, and the turn's
+outcome, with run separators when a conversation's turns ran in several
+processes. Its top line says the agent, state, and why (for example
+`waiting for your approval: Run cargo publish`, or `no activity for 6 min; last: $ cargo test`).
+It follows new lines while at the bottom; `PageUp`/`PageDown` scroll and
+`End` returns. The view has its own one-line composer: `Enter` sends the
+text to the agent's conversation (into its running turn when the agent can
+take steering, else as the conversation's next turn, queued behind a running
+one). If the daemon refuses it, the connection breaks, or the send is not
+answered in time, the text comes back; a send that timed out may still have
+reached the daemon, so check the conversation before sending it again. Text
+typed while it was in flight stays after it, on the next line.
+One prompt is sent at a time: `Enter` while the
+last is unanswered keeps the text in the composer and says so. `Ctrl+J`
+inserts a newline, and `Esc` clears it. While the job waits for an approval,
+`Ctrl+Y` approves and `Ctrl+N` denies the request the view is showing. When
+a later request replaces that one, the first of those chords names the new
+request and the next one answers it. `y` and `n` are always text, so a
+prompt starting "yes" or "no" never answers it. `Ctrl+X` twice
+stops the job; `Ctrl+R` resumes an interrupted one. Input is sent only by
+these keys: the view never forwards keystrokes to the agent's process.
+
+The dashboard asks the daemon for a workbench snapshot every second and
+reads each open view's log every 400 ms, on one connection of its own.
+While that connection is down it asks only for the snapshot, once a second,
+and an action it could not deliver is reported, not dropped. An older daemon
+without the workbench leaves the TUI a set of chat tabs and says so once;
+the TUI asks again every 30 seconds, so a daemon restarted into this release
+is found. Changes raise notifications: an approval request, a job waiting
+for input, completing, failing, timing out, being declined or interrupted
+(also when it is first seen already so), and a job going quiet. The newest shows in the footer for ten seconds,
+`notifications` lists the last hundred, and an approval, a wait for input, a
+failure, or an interruption also rings the terminal bell.
+
+### Keys
+
+Dashboard keys come before a chat's own keys. Defaults:
+
+| Action (`[tui.keys]` name) | Default | Does |
+| --- | --- | --- |
+| `focus_sidebar` | `Ctrl+G` | focus the sidebar, or go back to the pane |
+| `toggle_sidebar` | `Alt+S` | show or hide the sidebar |
+| `next_tab` / `prev_tab` | `Alt+.` / `Alt+,` | next or previous tab |
+| `tab_1` … `tab_9` | `Alt+1` … `Alt+9` | go to that tab |
+| `new_tab` | `Ctrl+T` | open a chat tab in another workspace (types `/open ` into an empty composer) |
+| `close_tab` | `Alt+W` | close the tab (an agent view, or a chat that is not the last) |
+| `split` | `Alt+V` | split into two panes, or join them |
+| `focus_other_pane` | `Alt+O` | focus the other pane |
+| `notifications` | `Alt+N` | list notifications |
+| `help` | `F1` | keys and commands |
+
+`[tui.keys]` in the home configuration rebinds them
+([configuration](configuration.md#terminal-ui-keys)): each value is modifiers (`ctrl`,
+`alt`, `shift`) joined by `+` to one key (a character, `f1`-`f12`, `enter`,
+`esc`, `tab`, `space`, arrows, `home`, `end`, `pageup`, `pagedown`, `insert`,
+`delete`, `backspace`), such as `ctrl+pagedown`. A binding needs `ctrl` or
+`alt` unless it is a function key, since the rest is the composer's and the
+views' own, and may not take a key they use (`ctrl+a`, `ctrl+b`, `ctrl+c`,
+`ctrl+e`, `ctrl+f`, `ctrl+j`, `ctrl+k`, `ctrl+n`, `ctrl+o`, `ctrl+r`,
+`ctrl+u`, `ctrl+w`, `ctrl+x`, `ctrl+y`, `alt+b`, `alt+f`, `alt+p`,
+`alt+enter`, and `alt` with an arrow). `shift` with a character means the
+character (`ctrl+shift+x` is `ctrl+x`), and `shift+tab` is the terminal's back-tab. The server sends the
+table with `session.started`. Configured bindings come first, in the order
+of the table above; an action whose configured key the TUI cannot use, or
+that an earlier action's configured key took, keeps its default, and an
+action whose default a configured binding took has no key. The TUI says
+which in a notification at startup.
 
 ## Layout and responsive behavior
 
@@ -99,7 +237,9 @@ session. It renders queue position, prompt preview, submitter label, and
 revision. It supports adding, selecting, moving, editing, and removing queued
 prompts. `Alt+Up` selects the previous queued prompt for editing; `Alt+Down`
 selects the next one; `Enter` saves the edit; `Ctrl+X` removes the selected
-entry; `Alt+P` pauses or resumes automatic dequeue. The help overlay presents
+entry; `Alt+P` pauses or resumes automatic dequeue. These keys work whenever
+the queue holds prompts, not only while a turn runs, and resuming an idle
+session's queue starts its next prompt at once. The help overlay presents
 these bindings rather than keeping them in the footer.
 
 Edits, moves, and removals name both queue ID and revision. The server rejects
@@ -111,10 +251,25 @@ and cannot be edited or reordered.
 Queue size and prompt bytes are server-configured limits. Enqueueing beyond a
 limit fails without losing the composer input. `session.clear` clears queued
 prompts as well as history, and a session can be paused to prevent automatic
-dequeue while preserving its queue. Queue state is retained while the local
-server is running but is not durable across a server restart. When the daemon
-is upgraded or restarted, the TUI retries the Unix socket and creates a fresh
-session; the prior queue and active turn are not replayed.
+dequeue while preserving its queue.
+
+The TUI's sessions keep their queues on disk (`session.start` with
+`persist_queue`): after every queue change and turn boundary, before it
+announces the change, the daemon records the queued prompts and the running
+one. When the TUI leaves (closing the connection or losing it), the record
+goes. When the daemon stops or dies instead, it stays: a TUI that
+reconnects asks for it (`restore`), and its new session starts with the old
+queue **paused**, with a note naming how many prompts came back, how many
+were left out because an attachment was missing or a prompt was too long,
+and the prompt that was running, which is not sent again because its outcome
+is unknown; `Alt+P` resumes the queue once reviewed, starting its first prompt.
+A chat tab reconnects once at a time, however many keys arrive meanwhile, and
+waits up to a minute for its session to start (connecting gets three
+seconds), so the queue it restores stays with it; a TUI that leaves before
+its session starts leaves the queue as it was, to restore again. A queue no
+TUI reconnected for is listed under "Restorable queues" in the sidebar (and by
+`scv jobs`) for seven days; `r` there or `/restore <id prefix>` opens a chat
+tab in its workspace that restores it. A queue is restored at most once.
 
 ## Commands and overlays
 
@@ -125,7 +280,7 @@ Typing filters by command prefix and words; `Up`/`Down` changes selection,
 palette without clearing input. Unknown slash-prefixed text remains a normal
 prompt rather than being silently discarded.
 
-The v0.2 local commands are:
+The local commands are:
 
 - `/help`: open a searchable key and command reference overlay.
 - `/clear`: clear the authoritative session after server confirmation.
@@ -134,7 +289,18 @@ The v0.2 local commands are:
   turn details available to the client.
 - `/copy`: copy the latest completed assistant response through the platform
   clipboard command when one is available, otherwise show a clear error.
-- `/quit` and `/exit`: leave the TUI after orderly child-server shutdown.
+- `/quit` and `/exit`: leave the TUI after orderly child-server shutdown
+  (asked again first when that would stop work; see [Dashboard](#dashboard)).
+- `/open <directory>`: open a chat tab in another workspace (`~` and paths
+  relative to the tab's workspace work).
+- `/close`: close the active tab.
+- `/jobs`: show and focus the sidebar.
+- `/job <agent> [--cwd DIR] [--model M] [--effort E] [--worktree] <prompt>`:
+  start a background job of the owner's own in this tab's workspace (see
+  [owner jobs](tools.md#the-workbench)).
+- `/restore <id prefix>`: open a chat tab restoring a kept queue.
+- `/notifications`: list notifications.
+- `/worktrees`: list the worktrees SCV created, with their jobs.
 
 Help, context, status, tool inspection, and approval are overlays rather than
 transcript messages. They scroll when their content exceeds the available
@@ -143,9 +309,16 @@ height and preserve the underlying transcript and composer state.
 ## Approval and failure behavior
 
 An approval overlay shows the tool, risk, workspace, full bounded summary, and
-the exact available decisions. `y` or `Enter` allows once; `n` or `Esc` denies.
+the exact available decisions. `y` allows once; `n` or `Esc` denies; other
+keys, `Enter` included, do nothing.
 Input meant for the composer cannot leak into an approval decision. The TUI
 emits a terminal bell when an approval arrives while terminal focus is lost.
+
+A background job's approval is not a chat overlay: it waits in the sidebar
+under "Waiting for you" and in the job's agent view, and rings the bell.
+While a dashboard is open the daemon holds such a request for the owner (up
+to two minutes) instead of denying it at once; see
+[attended approvals](tools.md#the-workbench).
 
 Configuration, provider, protocol, and tool errors appear as concise transcript
 entries with a remediation hint when one is known. Normal interaction never
@@ -177,13 +350,16 @@ report as a note quoting each job's reply.
 
 ## Compatibility boundary
 
-The v0.2 TUI uses SCV protocol version 3 over the existing authenticated stdio
-child server. It supports multiple queued prompts in one client session, but
-does not yet share a queue between separate server processes. It still permits
-only one active turn per session. It does not add durable sessions, remote
-network connections, model
-switching inside a session, shell-command shortcuts, file mentions, image
-input, or configurable key maps.
+The TUI uses SCV protocol version 3 over the daemon's Unix socket. It permits
+one active turn per chat session. Agent views show the structured activity
+log SCV records for a delegated agent, not the agent's own terminal: SCV runs
+agents headless (JSON event streams or ACP), so there is no terminal screen to
+mirror, and taking over an agent means sending it text through its
+conversation, never typing into its process. Delegated processes do not
+outlive the daemon; after a restart, an interrupted job is resumed in the
+agent's own conversation, not reattached. The TUI does not add remote network
+connections, model switching inside a session, shell-command shortcuts, file
+mentions, or image input.
 
 ## Acceptance checks
 
@@ -192,7 +368,19 @@ multiline cursor visibility, paste behavior, server queue transitions,
 concurrent queue edit conflicts, command filtering and dispatch, Markdown and diff rendering, wrap-aware scrolling,
 tool-inspector selection, overlay precedence, transcript and prompt-history
 caps, authoritative session clearing, narrow and short layouts, oversized
-server frames, and terminal-content sanitization.
+server frames, and terminal-content sanitization. Dashboard tests cover key
+specifications and `[tui.keys]` conflicts and reserved keys, tab and pane
+movement, keys reaching only what is drawn, sidebar grouping and actions
+(confirmations bound to their entry), one reconnection per tab, approval
+prompts' keys (nothing behind a chat's prompt acts, and an agent view's
+plain `y`/`n` are text), a stale sidebar selection only moving, quitting
+with work running or prompts queued, a tab's failed connection staying that
+tab's, a slow new tab not taking a pane the owner left, agent-view log
+paging (no line twice), sending one prompt at a time and getting a refused
+prompt back, control characters in workbench text, notifications from
+snapshot changes, an older daemon checked again, restored-queue notes, and
+`/job` parsing; integration tests cover a queue restored across a killed
+daemon and resumed.
 
 Render snapshots or stable buffer assertions cover idle, streaming, scrolled,
 tool-running, tool-inspector, approval, command-palette, help, error, and

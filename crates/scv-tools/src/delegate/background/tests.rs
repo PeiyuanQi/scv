@@ -1189,3 +1189,5 @@ fn a_cancels_change_pushed_out_unsent_leaves_its_outcome_to_an_update() {
     jobs.stop_for_tests(&reviewed_outcome(false));
     assert_eq!(jobs.take_updates(), [reviewed_outcome(false)]);
 }
+
+mod owner;

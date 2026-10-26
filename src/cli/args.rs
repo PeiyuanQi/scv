@@ -131,7 +131,8 @@ pub(crate) enum Command {
         command: MailCommand,
     },
     /// Sign in the agent CLIs SCV delegates to (Claude Code, Codex, Grok
-    /// Build, DeepSeek Harness, pi).
+    /// Build, DeepSeek Harness, pi, Gemini CLI, Qwen Code, OpenCode, GitHub
+    /// Copilot CLI, Cursor CLI, Amp, Kimi CLI).
     ///
     /// Each agent keeps its own credentials in SCV's private agent home
     /// (`<SCV home>/agents/<agent>`), separate from your personal login.
@@ -144,6 +145,13 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// The workbench from the command line: background jobs of every
+    /// session, their delegated agents' live logs, and the owner's own jobs.
+    /// Without a subcommand, lists the jobs.
+    Jobs {
+        #[command(subcommand)]
+        command: Option<JobsCommand>,
+    },
     /// Print this binary's version and config layout as JSON; the daemon
     /// runs it on a newly installed release before restarting into it.
     #[command(hide = true)]
@@ -155,6 +163,69 @@ pub(crate) enum Command {
         #[arg(long, value_name = "PATH")]
         plan: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum JobsCommand {
+    /// List background jobs, delegated runs, waiting approvals, and
+    /// restorable queues. Reads the records on disk when no daemon runs.
+    List {
+        /// Also list finished jobs and ended runs.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print a job's or a run's activity log: what its agent said and did.
+    Log {
+        /// A job (`job-3`, or `<session prefix>/job-3`) or a run handle
+        /// (such as `codex-3f9a2c`).
+        target: String,
+        /// Keep printing new activity until the run ends (Ctrl-C stops).
+        #[arg(long, short)]
+        follow: bool,
+    },
+    /// Start your own background job in this directory's workspace: no
+    /// model is involved, and no model is told about it.
+    Start {
+        /// The agent, such as codex.
+        #[arg(long, value_parser = agent_names())]
+        agent: String,
+        /// A directory inside the workspace to run in.
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        /// Run in a new git worktree of the repository holding the directory.
+        #[arg(long)]
+        worktree: bool,
+        /// The prompt.
+        prompt: String,
+    },
+    /// Send a prompt to a job's conversation: a new turn of it, joining its
+    /// running turn when the agent can take it, else queued.
+    Send {
+        job: String,
+        prompt: String,
+        /// Always queue behind a running turn.
+        #[arg(long, conflicts_with = "steer")]
+        queue: bool,
+        /// Only add it to the running turn; fail when a turn is running and
+        /// cannot take it. With no turn running, start one.
+        #[arg(long)]
+        steer: bool,
+    },
+    /// Stop a running background job.
+    Cancel { job: String },
+    /// Run an interrupted job again, continuing its agent's conversation
+    /// when the agent can.
+    Resume { job: String },
+    /// Forget a finished or interrupted job's record.
+    Dismiss { job: String },
+    /// Approve an approval request a background job waits on.
+    Approve { id: String },
+    /// Deny an approval request a background job waits on.
+    Deny { id: String },
 }
 
 #[derive(Subcommand)]
@@ -514,6 +585,16 @@ pub(crate) enum AgentsCommand {
         /// Show what would be removed without removing anything.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// List the git worktrees SCV created for jobs (`worktree: true`), or
+    /// remove one. Removing keeps its branch.
+    Worktrees {
+        /// Remove the worktree at this path.
+        #[arg(long, value_name = "PATH")]
+        remove: Option<PathBuf>,
+        /// With --remove: even with uncommitted changes.
+        #[arg(long, requires = "remove")]
+        force: bool,
     },
     /// Stop a delegated run (its process group and tagged descendants).
     Kill {

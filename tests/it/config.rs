@@ -43,6 +43,8 @@ fn session_model(home: &std::path::Path, workspace: &std::path::Path) -> String 
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     ] {
         writeln!(input, "{}", serde_json::to_string(&message).unwrap()).unwrap();
@@ -100,6 +102,9 @@ fn agent_sign_in_ignores_project_configuration() {
         .arg(home.path())
         .args(["agents", "status", "claude"])
         .env("OPENAI_API_KEY", "test-only")
+        // Keep the installation part of this status assertion independent of
+        // whichever native agents happen to be installed on the host.
+        .env("PATH", home.path().join("empty-bin"))
         .current_dir(workspace.path())
         .output()
         .unwrap();

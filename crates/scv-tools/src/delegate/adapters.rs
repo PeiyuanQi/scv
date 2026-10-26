@@ -33,6 +33,10 @@ pub enum Status {
     Command(&'static [&'static str]),
     /// SCV inspects the CLI's credential file without printing secrets.
     Stored(KeyStore),
+    /// SCV has no verified way to tell: the agent is offered whenever it is
+    /// installed, a call that fails signed out gets the sign-in hint, and
+    /// `scv agents check` tells by calling it.
+    Unchecked,
 }
 
 /// What a CLI prints on stdout when SCV runs it, and so how SCV reads its
@@ -50,6 +54,16 @@ pub enum OutputFormat {
     /// pi `--mode json`: JSON events per line; the reply is the last
     /// assistant `message_end`.
     PiJson,
+    /// Gemini CLI `--output-format stream-json`: `init`, `message` (deltas
+    /// or whole messages), `tool_use`, `tool_result`, `error`, and a final
+    /// `result` with usage. A single `{"response":…}` object (its `json`
+    /// format) reads too.
+    GeminiStreamJson,
+    /// Cursor CLI `--output-format stream-json`: Claude Code's event shapes
+    /// (`system` init, `assistant`, `result`) plus `tool_call` events.
+    CursorStreamJson,
+    /// Amp `--stream-json`, which follows Claude Code's stream-json events.
+    AmpStreamJson,
 }
 
 impl OutputFormat {
@@ -60,7 +74,18 @@ impl OutputFormat {
             Self::ClaudeStreamJson => &["--output-format", "stream-json", "--verbose"],
             Self::CodexJsonl => &["--json"],
             Self::PiJson => &["--mode", "json"],
+            Self::GeminiStreamJson | Self::CursorStreamJson => &["--output-format", "stream-json"],
+            Self::AmpStreamJson => &["--stream-json"],
         }
+    }
+
+    /// Whether the reply, usage, and session come in Claude Code's
+    /// stream-json event shapes.
+    pub(crate) fn claude_like(self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeStreamJson | Self::CursorStreamJson | Self::AmpStreamJson
+        )
     }
 }
 
@@ -170,6 +195,11 @@ pub enum Logout {
     Command(&'static [&'static str]),
     /// SCV removes the credentials it can see in the CLI's own files.
     Stored(KeyStore),
+    /// Open the CLI interactively; `hint` names its in-app sign-out.
+    Interactive {
+        args: &'static [&'static str],
+        hint: &'static str,
+    },
 }
 
 /// A CLI's native credential file, relative to the agent home.
@@ -275,6 +305,10 @@ pub struct AdapterDescriptor {
     /// transport = "auto"` SCV prefers it over [`Transport::Process`] once the
     /// command is installed.
     pub acp: Option<AcpLaunch>,
+    /// Whether its CLI has a verified one-process-per-turn mode. An agent
+    /// without one runs only over its ACP server: `auto` then requires the
+    /// server, and `transport = "resume"` is a configuration error.
+    pub cli_turns: bool,
 }
 
 /// Directories every adapter searches before `PATH`, relative to the user's home.
@@ -293,6 +327,14 @@ const COMMON_REMOVED_ENVIRONMENT: &[&str] = &[
     "GOOGLE_API_KEY",
     "AZURE_OPENAI_API_KEY",
     "AZURE_OPENAI_ENDPOINT",
+    // Static AWS keys and the Bedrock bearer token. OpenCode and Amp can
+    // use them as model credentials, which no delegated agent may inherit.
+    // Profile, web-identity, and container credential variables are not
+    // keys and stay.
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
 ];
 
 const PI_STORE: KeyStore = KeyStore::Pi { dir: ".pi/agent" };
@@ -361,6 +403,7 @@ const CLAUDE_BASE: AdapterDescriptor = AdapterDescriptor {
         full_environment: &[],
         session_options: false,
     }),
+    cli_turns: true,
 };
 
 pub const ADAPTERS: &[AdapterDescriptor] = &[
@@ -466,6 +509,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_environment: &[("CODEX_CONFIG", r#"{"web_search":"live"}"#)],
             session_options: false,
         }),
+        cli_turns: true,
     },
     AdapterDescriptor {
         name: "grok",
@@ -510,6 +554,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_environment: &[],
             session_options: false,
         }),
+        cli_turns: true,
     },
     AdapterDescriptor {
         name: "dsh",
@@ -552,6 +597,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_environment: &[],
             session_options: true,
         }),
+        cli_turns: true,
     },
     AdapterDescriptor {
         name: "pi",
@@ -595,6 +641,297 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         transport: Transport::Process,
         // Only a community ACP adapter exists.
         acp: None,
+        cli_turns: true,
+    },
+    AdapterDescriptor {
+        name: "gemini",
+        family: "gemini",
+        auth: AgentAuth::None,
+        product: "Gemini CLI",
+        offers: "Google's coding agent; it reads, edits, and runs code in a project and has Google Search",
+        command: "gemini",
+        args: &[],
+        prompt_args: &["-p"],
+        model_args: &["-m", "{model}"],
+        effort_args: &[],
+        model_hint: "Gemini model ID, such as gemini-2.5-pro.",
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &[
+            "GEMINI_*",
+            "GOOGLE_GENAI_*",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ],
+        // YOLO mode approves every tool call without asking.
+        full_permission_args: &["--yolo"],
+        full_permission_environment: &[],
+        search_dirs: &[".npm-global/bin"],
+        login: Login::Interactive {
+            args: &[],
+            hint: "choose how to sign in (Login with Google, or a Gemini API key), then /quit",
+        },
+        status: Status::Unchecked,
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Interactive {
+            args: &[],
+            hint: "sign out with its own command (/auth), then /quit",
+        },
+        output: OutputFormat::GeminiStreamJson,
+        // Its saved sessions resume by list index, which SCV cannot pin to
+        // one conversation; over ACP a session continues.
+        resume: Resume::Unsupported,
+        conversation_files: None,
+        credential_files: &[".gemini/oauth_creds.json", ".gemini/.env"],
+        transport: Transport::Process,
+        // Native: Gemini CLI was the first ACP agent (`--experimental-acp`).
+        acp: Some(AcpLaunch {
+            command: "gemini",
+            args: &["{full}", "--experimental-acp"],
+            full_args: &["--yolo"],
+            full_mode: None,
+            full_environment: &[],
+            session_options: false,
+        }),
+        cli_turns: true,
+    },
+    AdapterDescriptor {
+        name: "qwen",
+        family: "qwen",
+        auth: AgentAuth::None,
+        product: "Qwen Code",
+        offers: "Alibaba's coding agent on Qwen models; it reads, edits, and runs code in a project",
+        command: "qwen",
+        args: &[],
+        prompt_args: &["-p"],
+        model_args: &["-m", "{model}"],
+        effort_args: &[],
+        model_hint: "Qwen model ID, such as qwen3-coder-plus.",
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &["QWEN_*", "DASHSCOPE_*"],
+        full_permission_args: &["--yolo"],
+        full_permission_environment: &[],
+        search_dirs: &[".npm-global/bin"],
+        login: Login::Interactive {
+            args: &[],
+            hint: "choose how to sign in (Qwen OAuth, or an OpenAI-compatible key), then /quit",
+        },
+        status: Status::Unchecked,
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Interactive {
+            args: &[],
+            hint: "sign out with its own command (/auth), then /quit",
+        },
+        // Its stream-json output is unverified here; stdout is the reply.
+        output: OutputFormat::Text,
+        resume: Resume::Unsupported,
+        conversation_files: None,
+        credential_files: &[".qwen/oauth_creds.json", ".qwen/.env"],
+        transport: Transport::Process,
+        // Native: a Gemini CLI fork with the same ACP mode.
+        acp: Some(AcpLaunch {
+            command: "qwen",
+            args: &["{full}", "--experimental-acp"],
+            full_args: &["--yolo"],
+            full_mode: None,
+            full_environment: &[],
+            session_options: false,
+        }),
+        cli_turns: true,
+    },
+    AdapterDescriptor {
+        name: "opencode",
+        family: "opencode",
+        auth: AgentAuth::None,
+        product: "OpenCode",
+        offers: "an open-source coding agent that runs on many model providers; it reads, edits, and runs code in a project",
+        command: "opencode",
+        args: &["run"],
+        prompt_args: &[],
+        model_args: &["-m", "{model}"],
+        effort_args: &[],
+        model_hint: "provider/model as OpenCode names it, such as anthropic/claude-sonnet-4-5.",
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &["OPENCODE_*"],
+        // Its permissions are configuration, not a switch.
+        full_permission_args: &[],
+        full_permission_environment: &[],
+        search_dirs: &[".opencode/bin", ".npm-global/bin"],
+        login: Login::Command(&["auth", "login"]),
+        status: Status::Unchecked,
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Command(&["auth", "logout"]),
+        output: OutputFormat::Text,
+        resume: Resume::Unsupported,
+        conversation_files: None,
+        credential_files: &["data/opencode/auth.json"],
+        transport: Transport::Process,
+        // Native: `opencode acp`.
+        acp: Some(AcpLaunch {
+            command: "opencode",
+            args: &["acp"],
+            full_args: &[],
+            full_mode: None,
+            full_environment: &[],
+            session_options: false,
+        }),
+        cli_turns: true,
+    },
+    AdapterDescriptor {
+        name: "copilot",
+        family: "copilot",
+        auth: AgentAuth::None,
+        product: "GitHub Copilot CLI",
+        offers: "GitHub's coding agent; it reads, edits, and runs code in a project and knows GitHub",
+        command: "copilot",
+        args: &[],
+        prompt_args: &["-p"],
+        model_args: &["--model", "{model}"],
+        effort_args: &[],
+        model_hint: "a model Copilot CLI offers, such as claude-sonnet-4.5 or gpt-5.",
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &["COPILOT_*"],
+        // Without it, a prompt run denies every tool that needs approval.
+        full_permission_args: &["--allow-all-tools"],
+        full_permission_environment: &[],
+        search_dirs: &[".npm-global/bin"],
+        login: Login::Interactive {
+            args: &[],
+            hint: "run /login, then /exit",
+        },
+        status: Status::Unchecked,
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Interactive {
+            args: &[],
+            hint: "run /logout, then /exit",
+        },
+        output: OutputFormat::Text,
+        // Its resume flags could not be verified headless here.
+        resume: Resume::Unsupported,
+        conversation_files: None,
+        credential_files: &[],
+        transport: Transport::Process,
+        // No ACP server SCV has verified.
+        acp: None,
+        cli_turns: true,
+    },
+    AdapterDescriptor {
+        name: "cursor",
+        family: "cursor",
+        auth: AgentAuth::None,
+        product: "Cursor CLI",
+        offers: "Cursor's coding agent; it reads, edits, and runs code in a project",
+        command: "cursor-agent",
+        args: &["-p"],
+        prompt_args: &[],
+        model_args: &["--model", "{model}"],
+        effort_args: &[],
+        model_hint: "a model Cursor offers, such as sonnet-4.5 or gpt-5.",
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &["CURSOR_*"],
+        // Runs commands without asking.
+        full_permission_args: &["--force"],
+        full_permission_environment: &[],
+        search_dirs: &[],
+        login: Login::Command(&["login"]),
+        status: Status::Unchecked,
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Command(&["logout"]),
+        output: OutputFormat::CursorStreamJson,
+        // The chat ID arrives with its events; `--resume <id>` continues it.
+        resume: Resume::Supported {
+            start: &[],
+            subcommand: &[],
+            options: &["--resume", "{session}"],
+            positional: &[],
+        },
+        conversation_files: None,
+        credential_files: &[],
+        transport: Transport::Process,
+        acp: None,
+        cli_turns: true,
+    },
+    AdapterDescriptor {
+        name: "amp",
+        family: "amp",
+        auth: AgentAuth::None,
+        product: "Amp",
+        offers: "Sourcegraph's coding agent; it reads, edits, and runs code in a project and can search the web",
+        command: "amp",
+        args: &[],
+        prompt_args: &["-x"],
+        // Amp chooses its own models.
+        model_args: &[],
+        effort_args: &[],
+        model_hint: "Amp chooses its own model; omit model.",
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &["AMP_*"],
+        full_permission_args: &["--dangerously-allow-all"],
+        full_permission_environment: &[],
+        search_dirs: &[".amp/bin", ".npm-global/bin"],
+        login: Login::Command(&["login"]),
+        status: Status::Unchecked,
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Command(&["logout"]),
+        output: OutputFormat::AmpStreamJson,
+        // Its thread continuation could not be verified headless here.
+        resume: Resume::Unsupported,
+        conversation_files: None,
+        credential_files: &[],
+        transport: Transport::Process,
+        acp: None,
+        cli_turns: true,
+    },
+    AdapterDescriptor {
+        name: "kimi",
+        family: "kimi",
+        auth: AgentAuth::None,
+        product: "Kimi CLI",
+        offers: "Moonshot AI's coding agent on Kimi models; it reads, edits, and runs code in a project",
+        command: "kimi",
+        args: &[],
+        prompt_args: &[],
+        model_args: &[],
+        effort_args: &[],
+        model_hint: "a model its ACP server lists.",
+        home_environment: &[],
+        fixed_environment: &[],
+        removed_environment: &["KIMI_*", "MOONSHOT_*"],
+        full_permission_args: &[],
+        full_permission_environment: &[],
+        search_dirs: &[],
+        login: Login::Interactive {
+            args: &[],
+            hint: "sign in with its own command (/setup or /login), then /exit",
+        },
+        status: Status::Unchecked,
+        status_summary: StatusSummary::ExitStatus,
+        logout: Logout::Interactive {
+            args: &[],
+            hint: "sign out with its own command, then /exit",
+        },
+        output: OutputFormat::Text,
+        resume: Resume::Unsupported,
+        conversation_files: None,
+        credential_files: &[],
+        transport: Transport::Process,
+        // Native: `kimi --acp`. Its one-prompt mode is not verified, so it
+        // runs over ACP only.
+        acp: Some(AcpLaunch {
+            command: "kimi",
+            args: &["--acp"],
+            full_args: &[],
+            full_mode: None,
+            full_environment: &[],
+            session_options: true,
+        }),
+        cli_turns: false,
     },
     AdapterDescriptor {
         name: "scv",
@@ -629,6 +966,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         credential_files: &["config.toml"],
         transport: Transport::ScvProtocol,
         acp: None,
+        cli_turns: true,
     },
 ];
 

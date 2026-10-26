@@ -20,3 +20,4 @@ mod restart;
 mod server;
 mod support;
 mod update;
+mod workbench;

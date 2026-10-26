@@ -13,6 +13,7 @@ async fn spawn(home: &std::path::Path, script: &str) -> (Arc<DelegationRegistry>
             args: vec!["-c".into(), script.into()],
             cwd: home.to_owned(),
             environment: pending.environment.clone(),
+            activity: None,
             max_line_bytes: 1024,
         },
         Some((Arc::clone(&registry), pending)),

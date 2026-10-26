@@ -28,8 +28,10 @@ use scv_protocol::{
 use std::{fmt, path::Path, time::Duration};
 use tokio::{io::BufReader, net::UnixStream};
 
-/// Largest management reply, counting its line ending.
-const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
+/// Largest management reply, counting its line ending. Workbench actions
+/// reply with a snapshot the daemon may send up to its 8 MiB frame limit;
+/// a smaller cap here reports failure after the action already took effect.
+const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Environment variable carrying a delegated process's depth; SCV sets it on
 /// every agent it starts.
@@ -95,12 +97,19 @@ impl std::error::Error for ControlError {
 
 /// How long a management exchange may take. A command that can stop a
 /// running account waits for it to stop, and an email account finishes a
-/// mail action under way first, for up to 65 seconds.
-fn control_timeout(command: &DaemonCommand) -> Duration {
+/// mail action under way first, for up to 65 seconds; a workbench action
+/// that may run `git` on worktrees (each command up to 30 seconds), or
+/// wait for an agent to accept steering (up to 30 seconds), gets 90.
+pub fn control_timeout(command: &DaemonCommand) -> Duration {
     match command {
         DaemonCommand::Reload
         | DaemonCommand::ChannelSet { .. }
-        | DaemonCommand::ChannelLogout { .. } => Duration::from_secs(90),
+        | DaemonCommand::ChannelLogout { .. }
+        | DaemonCommand::WorkbenchStart { .. }
+        | DaemonCommand::WorkbenchResume { .. }
+        | DaemonCommand::WorkbenchSend { .. }
+        | DaemonCommand::Worktrees
+        | DaemonCommand::WorktreeRemove { .. } => Duration::from_secs(90),
         _ => Duration::from_secs(20),
     }
 }

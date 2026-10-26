@@ -38,13 +38,23 @@ use crate::{
     session::{
         Session, SessionClient,
         build::build_session,
-        next_seq,
+        next_seq, persist,
         turn::{ActiveTurn, TurnDone, TurnStarter, shutdown_active_turn},
         valid_channel_name, valid_system_prompt,
     },
+    workbench::{self, Hosts},
 };
 
 const PROMPT_LIMIT_BYTES: usize = 256 * 1024;
+
+/// What a connection shares with the process serving it.
+pub(crate) struct Shared {
+    /// The daemon's components; a stdio server has none.
+    pub(crate) components: Option<Arc<Mutex<components::Components>>>,
+    pub(crate) registry: Arc<DelegationRegistry>,
+    /// The daemon's workbench; a stdio server has none.
+    pub(crate) hosts: Option<Arc<Hosts>>,
+}
 
 /// Serve one client until it disconnects, the server shuts down, or it
 /// speaks an unsupported protocol version.
@@ -53,8 +63,7 @@ pub(crate) async fn run_managed<R, W>(
     reader: R,
     writer: W,
     instance: Instance,
-    components: Option<Arc<Mutex<components::Components>>>,
-    registry: Arc<DelegationRegistry>,
+    shared: Shared,
     cancellation: CancellationToken,
     tasks: TaskTracker,
 ) -> Result<()>
@@ -76,6 +85,11 @@ where
     });
     let _writer_abort = AbortGuard(writer_task.abort_handle());
     let (done, mut done_rx) = mpsc::channel::<TurnDone>(4);
+    let Shared {
+        components,
+        registry,
+        hosts,
+    } = shared;
     let mut connection = Connection {
         turns: TurnStarter {
             output: output.clone(),
@@ -88,11 +102,16 @@ where
         instance,
         components,
         registry,
+        hosts,
         cancellation: cancellation.clone(),
         initialized: false,
+        client_name: String::new(),
         session: None,
         activity: None,
         active: None,
+        active_prompt: None,
+        persist: false,
+        restored: None,
         background_rx: None,
         background_ready: false,
         fatal: false,
@@ -141,6 +160,7 @@ where
     if let Some(active) = connection.active.take() {
         shutdown_active_turn(active, SHUTDOWN_GRACE).await;
     }
+    connection.leave(cancellation.is_cancelled());
     let fatal = connection.fatal;
     // The session outlives the writer, as it did before the split: only the
     // connection's own senders go now, so the writer can finish.
@@ -178,6 +198,8 @@ struct SessionStartRequest {
     auto_approve: Option<bool>,
     chat: Option<scv_protocol::ChatLog>,
     system_prompt: Option<String>,
+    persist_queue: Option<bool>,
+    restore: Option<String>,
 }
 
 /// One connection's state: its session, the turn it runs, and where its
@@ -190,13 +212,25 @@ struct Connection {
     instance: Instance,
     components: Option<Arc<Mutex<components::Components>>>,
     registry: Arc<DelegationRegistry>,
+    /// The daemon's workbench; `None` on a stdio connection.
+    hosts: Option<Arc<Hosts>>,
     cancellation: CancellationToken,
     initialized: bool,
+    /// The program that connected, as `initialize` named it.
+    client_name: String,
     session: Option<Session>,
     /// The session's turn and report activity, which a planned restart asked
     /// for from this session waits out.
     activity: Option<restart::SessionTracker>,
     active: Option<ActiveTurn>,
+    /// The start of the client prompt the active turn serves, for the saved
+    /// queue; `None` for a report turn.
+    active_prompt: Option<String>,
+    /// The client asked for its queue to be kept on disk.
+    persist: bool,
+    /// The saved queue this connection's session restored, until its client
+    /// has the session (sends anything after `session.start`).
+    restored: Option<Restored>,
     /// Woken when a background job finishes; set until its report turn starts.
     background_rx: Option<mpsc::UnboundedReceiver<()>>,
     background_ready: bool,
@@ -204,7 +238,37 @@ struct Connection {
     fatal: bool,
 }
 
+/// A saved queue restored into a session whose client may not have it yet.
+struct Restored {
+    /// The new session, which keeps the restored prompts.
+    session: String,
+    /// The saved queue, as it was before the restore took it.
+    old: persist::SavedQueue,
+}
+
 impl Connection {
+    /// Settle the saved queues of a connection that ends. A client that went
+    /// (closing the connection, or losing it) wants nothing of its session
+    /// kept, though a queue it restored but never saw the session of goes
+    /// back as it was, for it to restore again; a daemon that stops
+    /// (`stopping`) keeps the queue for a session started after it.
+    fn leave(&mut self, stopping: bool) {
+        let restored = self.restored.take();
+        if stopping {
+            return;
+        }
+        let layout = &self.instance.layout;
+        if let Some(restored) = restored {
+            // Put back before the new record goes, so a crash in between
+            // loses neither.
+            persist::save(layout, &restored.old);
+            persist::remove(layout, &restored.session);
+        }
+        if let Some(session) = &self.session {
+            persist::remove(layout, &session.id);
+        }
+    }
+
     fn track_activity(&self) {
         if let Some(activity) = &self.activity {
             activity.set_busy(self.active.is_some() || self.background_ready);
@@ -306,12 +370,20 @@ impl Connection {
     }
 
     async fn handle(&mut self, message: ClientMessage) -> Result<Flow> {
+        // A client that speaks after `session.start` has its answer, and
+        // with it the prompts any restore moved to the new session.
+        self.restored = None;
         match message {
             ClientMessage::Initialize {
                 request_id,
                 protocol_version,
-                ..
-            } => return self.initialize(request_id, protocol_version).await,
+                client,
+            } => {
+                if !self.initialized {
+                    self.client_name = client.name;
+                }
+                return self.initialize(request_id, protocol_version).await;
+            }
             other if !self.initialized => {
                 self.reject(
                     other.request_id(),
@@ -336,6 +408,8 @@ impl Connection {
                 auto_approve,
                 chat,
                 system_prompt,
+                persist_queue,
+                restore,
             } => {
                 let request = SessionStartRequest {
                     cwd,
@@ -348,6 +422,8 @@ impl Connection {
                     auto_approve,
                     chat,
                     system_prompt,
+                    persist_queue,
+                    restore,
                 };
                 self.session_start(request_id, request).await?;
             }
@@ -465,6 +541,37 @@ impl Connection {
     }
 
     async fn control(&self, request_id: String, command: DaemonCommand) -> Result<Flow> {
+        if workbench::is_workbench_command(&command) {
+            let Some(hosts) = &self.hosts else {
+                self.reject(
+                    &request_id,
+                    ErrorCode::Unsupported,
+                    "The workbench requires the daemon socket",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            };
+            let result = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return Ok(Flow::Stop),
+                result = workbench::control(hosts, command) => result,
+            };
+            match result {
+                Ok(status) => {
+                    send_event(
+                        &self.output,
+                        ServerEvent::DaemonStatus { request_id, status },
+                        self.server_frame_limit(),
+                    )
+                    .await?;
+                }
+                Err(message) => {
+                    self.reject(&request_id, ErrorCode::WorkbenchError, &message)
+                        .await?;
+                }
+            }
+            return Ok(Flow::Continue);
+        }
         let Some(components) = &self.components else {
             self.reject(
                 &request_id,
@@ -582,7 +689,20 @@ impl Connection {
                 return Ok(());
             }
         }
+        if request.restore.is_some() && self.hosts.is_none() {
+            // A restore claims a saved queue in this process only, so only
+            // the daemon, which every client shares, may restore one.
+            self.reject(
+                &request_id,
+                ErrorCode::InvalidRequest,
+                "restore needs the daemon; a stdio server does not restore saved queues",
+            )
+            .await?;
+            return Ok(());
+        }
+        let label = session_label(request.channel.as_deref(), &self.client_name);
         let client = SessionClient {
+            label,
             channel: request.channel,
             auto_approve: request.auto_approve.unwrap_or(false),
             chat,
@@ -602,6 +722,7 @@ impl Connection {
             overrides,
             request.delegation_depth.unwrap_or(0),
             &self.registry,
+            self.hosts.as_ref().map(|hosts| hosts.workbench()),
             client,
         )
         .await;
@@ -614,6 +735,24 @@ impl Connection {
             }
         };
         self.background_rx = finished;
+        self.persist = request.persist_queue == Some(true);
+        let restored = match &request.restore {
+            Some(old) => self.restore_queue(&session, old).await,
+            None => None,
+        };
+        // The restored queue is kept under the new session before the old
+        // record goes, so a crash in between loses neither; the claim on
+        // the old record goes with it. Until the client has the new session
+        // the old record can come back ([`Connection::leave`]).
+        self.save_queue_of(&session, None).await;
+        let restored = restored.map(|(claim, old, restored)| {
+            claim.remove();
+            self.restored = Some(Restored {
+                session: session.id.clone(),
+                old,
+            });
+            restored
+        });
         let max_bytes = session.config.protocol.max_server_frame_bytes;
         self.output
             .ensure_capacity(output_queue_bytes(max_bytes)?)?;
@@ -628,6 +767,8 @@ impl Connection {
             max_transcript_items: session.config.tui.max_transcript_items,
             max_prompt_history_bytes: session.config.tui.max_prompt_history_bytes,
             max_prompt_history_items: session.config.tui.max_prompt_history_items,
+            keys: session.config.tui.keys.clone(),
+            restored,
         };
         send_event(&self.output, started, max_bytes).await?;
         let snapshot = ServerEvent::QueueSnapshot {
@@ -646,6 +787,107 @@ impl Connection {
         tracing::Span::current().record("session", session.id.as_str());
         self.session = Some(session);
         Ok(())
+    }
+
+    /// Restore into `session` the queued prompts of session `old`, which
+    /// stopped with its process and saved them. They join paused, and the
+    /// prompt that was running is only named. The old record is claimed
+    /// first, so a restore of it already under way leaves it to that one,
+    /// and the claim is returned to be released once the record goes, with
+    /// the record as it was.
+    async fn restore_queue(
+        &self,
+        session: &Session,
+        old: &str,
+    ) -> Option<(
+        persist::Claim,
+        persist::SavedQueue,
+        scv_protocol::RestoredQueue,
+    )> {
+        let layout = &self.instance.layout;
+        let claim = persist::claim(layout, old)?;
+        let saved = persist::load(layout, old)?;
+        if !persist::stopped(&saved) || saved.workspace != session.workspace {
+            return None;
+        }
+        let mut restored = 0u32;
+        let mut dropped = 0u32;
+        for entry in saved.entries.iter().cloned() {
+            if entry.prompt.len() > PROMPT_LIMIT_BYTES
+                || attachments::validate(&entry.attachments).is_err()
+            {
+                dropped += 1;
+                continue;
+            }
+            if session
+                .enqueue(entry.prompt, entry.submitter, entry.attachments)
+                .await
+                .is_ok()
+            {
+                restored += 1;
+            }
+        }
+        if restored > 0 {
+            session.paused.store(true, Ordering::Release);
+        }
+        let restored = scv_protocol::RestoredQueue {
+            from: old.to_owned(),
+            queued: restored,
+            interrupted: saved.active.clone(),
+            dropped,
+        };
+        Some((claim, saved, restored))
+    }
+
+    /// Keep the session's queue on disk, when its client asked. A change
+    /// is saved before it is announced, so a client that saw it knows it is
+    /// kept.
+    async fn save_queue(&self) {
+        if let Some(session) = &self.session {
+            self.save_queue_of(session, self.active_prompt.as_deref())
+                .await;
+        }
+    }
+
+    /// [`Self::save_queue`] for `session`, whose running turn serves the
+    /// prompt `active` starts, before the connection holds either.
+    async fn save_queue_of(&self, session: &Session, active: Option<&str>) {
+        if !self.persist {
+            return;
+        }
+        let Some(owner) = scv_tools::delegation::ProcessIdentity::current() else {
+            return;
+        };
+        let saved = persist::SavedQueue {
+            v: 1,
+            session: session.id.clone(),
+            label: session.label.clone(),
+            workspace: session.workspace.clone(),
+            owner,
+            saved_unix: persist::unix_now(),
+            paused: session.paused.load(Ordering::Acquire),
+            entries: session.queue.lock().await.iter().cloned().collect(),
+            active: active.map(str::to_owned),
+        };
+        // Saved off the runtime's threads (it syncs to disk), and waited
+        // for, so this connection's saves land in order.
+        let layout = self.instance.layout.clone();
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || persist::save(&layout, &saved)).await
+        {
+            tracing::debug!(%error, "could not save a session's queue");
+        }
+    }
+
+    /// Tell the workbench what the session is doing.
+    fn show_state(&self, state: scv_protocol::AgentState) {
+        if let Some(registration) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.workbench.as_ref())
+        {
+            registration.set_state(state, None);
+        }
     }
 
     async fn turn_start(
@@ -693,20 +935,36 @@ impl Connection {
                 entry,
                 position,
             };
-            return send_event(
+            self.save_queue().await;
+            send_event(
                 &self.output,
                 event,
                 current.config.protocol.max_server_frame_bytes,
             )
-            .await;
+            .await?;
+            return Ok(());
         }
         let input = current.turn_input(&prompt, &attachments);
-        let turn = self
+        // Recorded as running before its turn is announced.
+        let running = persist::active_line(&prompt);
+        self.save_queue_of(current, Some(&running)).await;
+        let started = self
             .turns
             .start(current, Uuid::new_v4().to_string(), request_id, input, None)
-            .await?;
-        self.active = Some(turn);
-        Ok(())
+            .await;
+        match started {
+            Ok(turn) => {
+                self.active = Some(turn);
+                self.active_prompt = Some(running);
+                self.show_state(scv_protocol::AgentState::Working);
+                Ok(())
+            }
+            Err(error) => {
+                // Its turn never started, so nothing runs.
+                self.save_queue().await;
+                Err(error)
+            }
+        }
     }
 
     async fn queue_update(
@@ -737,12 +995,14 @@ impl Connection {
                     seq: next_seq(&current.seq),
                     entry,
                 };
+                self.save_queue().await;
                 send_event(
                     &self.output,
                     event,
                     current.config.protocol.max_server_frame_bytes,
                 )
-                .await
+                .await?;
+                Ok(())
             }
             Err(code) => {
                 self.reject(
@@ -785,12 +1045,14 @@ impl Connection {
                     position,
                     revision,
                 };
+                self.save_queue().await;
                 send_event(
                     &self.output,
                     event,
                     current.config.protocol.max_server_frame_bytes,
                 )
-                .await
+                .await?;
+                Ok(())
             }
             Err(code) => {
                 self.reject(
@@ -828,12 +1090,14 @@ impl Connection {
                     queue_id,
                     revision,
                 };
+                self.save_queue().await;
                 send_event(
                     &self.output,
                     event,
                     current.config.protocol.max_server_frame_bytes,
                 )
-                .await
+                .await?;
+                Ok(())
             }
             Err(code) => {
                 self.reject(
@@ -847,7 +1111,7 @@ impl Connection {
     }
 
     async fn session_pause(
-        &self,
+        &mut self,
         request_id: String,
         session_id: String,
         paused: bool,
@@ -862,12 +1126,74 @@ impl Connection {
             seq: next_seq(&current.seq),
             paused,
         };
-        send_event(
-            &self.output,
-            event,
-            current.config.protocol.max_server_frame_bytes,
-        )
-        .await
+        let max_bytes = current.config.protocol.max_server_frame_bytes;
+        self.save_queue().await;
+        send_event(&self.output, event, max_bytes).await?;
+        // Resuming an idle session's queue (a restored one, or one paused
+        // until its turn ended) runs its next prompt now.
+        if !paused && self.active.is_none() {
+            self.start_queued().await?;
+            if self.active.is_some() {
+                self.show_state(scv_protocol::AgentState::Working);
+            }
+        }
+        Ok(())
+    }
+
+    /// Start the next queued prompt's turn, when the session is idle and its
+    /// queue is not paused. The prompt is recorded as running, and no longer
+    /// queued, before either is announced.
+    async fn start_queued(&mut self) -> Result<()> {
+        if self.active.is_some() {
+            return Ok(());
+        }
+        let Some(current) = self.session.as_ref() else {
+            return Ok(());
+        };
+        if current.paused.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        // Taken on its own, so the queue is not locked while it is saved.
+        let next = current.queue.lock().await.pop_front();
+        let Some(entry) = next else {
+            return Ok(());
+        };
+        let running = persist::active_line(&entry.prompt);
+        self.save_queue_of(current, Some(&running)).await;
+        let turn_id = Uuid::new_v4().to_string();
+        let dequeued = ServerEvent::QueueDequeued {
+            request_id: entry.submitter.clone(),
+            session_id: current.id.clone(),
+            seq: next_seq(&current.seq),
+            queue_id: entry.queue_id.clone(),
+            turn_id: turn_id.clone(),
+        };
+        let started = async {
+            send_event(
+                &self.output,
+                dequeued,
+                current.config.protocol.max_server_frame_bytes,
+            )
+            .await?;
+            let input = current.turn_input(&entry.prompt, &entry.attachments);
+            self.turns
+                .start(current, turn_id, entry.submitter.clone(), input, None)
+                .await
+        }
+        .await;
+        match started {
+            Ok(turn) => {
+                self.active = Some(turn);
+                self.active_prompt = Some(running);
+                Ok(())
+            }
+            Err(error) => {
+                // Its turn never started, so it is still queued.
+                current.queue.lock().await.push_front(entry);
+                self.save_queue().await;
+                Err(error)
+            }
+        }
     }
 
     async fn turn_cancel(
@@ -960,7 +1286,6 @@ impl Connection {
             session_id: current.id.clone(),
             seq: next_seq(&current.seq),
         };
-        send_event(&self.output, cleared, max_bytes).await?;
         let snapshot = ServerEvent::QueueSnapshot {
             request_id: None,
             session_id: current.id.clone(),
@@ -968,7 +1293,10 @@ impl Connection {
             entries: Vec::new(),
             paused: current.paused.load(Ordering::Acquire),
         };
-        send_event(&self.output, snapshot, max_bytes).await
+        self.save_queue().await;
+        send_event(&self.output, cleared, max_bytes).await?;
+        send_event(&self.output, snapshot, max_bytes).await?;
+        Ok(())
     }
 
     /// A background job finished: report it now when the session is idle,
@@ -984,6 +1312,9 @@ impl Connection {
             let turn = self.turns.report_background(current).await?;
             self.background_ready = turn.is_some();
             self.active = turn;
+            if self.active.is_some() {
+                self.show_state(scv_protocol::AgentState::Working);
+            }
         }
         Ok(())
     }
@@ -1110,6 +1441,10 @@ impl Connection {
         }
         let delivered = self.settle_report(&mut done).await?;
         let succeeded = done.result.is_ok();
+        // The prompt's turn is recorded as over before that is announced.
+        if self.active_prompt.take().is_some() {
+            self.save_queue().await;
+        }
         if let Some(current) = self.session.as_ref() {
             let seq = next_seq(&current.seq);
             let event = match done.result {
@@ -1152,6 +1487,7 @@ impl Connection {
         if let Some(mut active) = self.active.take() {
             let _ = (&mut active.task).await;
         }
+        self.show_state(scv_protocol::AgentState::Idle);
         if let Some(current) = self.session.as_ref() {
             // The turn has let go of the history: the model learns there
             // that the user already has what it could not report.
@@ -1167,31 +1503,7 @@ impl Connection {
                 self.background_ready |= jobs.retry_now();
             }
         }
-        if let Some(current) = self.session.as_ref()
-            && !current.paused.load(Ordering::Acquire)
-            && let Some(entry) = current.queue.lock().await.pop_front()
-        {
-            let turn_id = Uuid::new_v4().to_string();
-            let dequeued = ServerEvent::QueueDequeued {
-                request_id: entry.submitter.clone(),
-                session_id: current.id.clone(),
-                seq: next_seq(&current.seq),
-                queue_id: entry.queue_id,
-                turn_id: turn_id.clone(),
-            };
-            send_event(
-                &self.output,
-                dequeued,
-                current.config.protocol.max_server_frame_bytes,
-            )
-            .await?;
-            let input = current.turn_input(&entry.prompt, &entry.attachments);
-            let turn = self
-                .turns
-                .start(current, turn_id, entry.submitter, input, None)
-                .await?;
-            self.active = Some(turn);
-        }
+        self.start_queued().await?;
         // Report finished background jobs once the user's own work is done.
         if self.active.is_none()
             && self.background_ready
@@ -1201,7 +1513,25 @@ impl Connection {
             self.background_ready = turn.is_some();
             self.active = turn;
         }
+        if self.active.is_some() {
+            self.show_state(scv_protocol::AgentState::Working);
+        }
         Ok(())
+    }
+}
+
+/// Who a session serves, as the job ledger and the workbench name it: its
+/// chat channel, or else the program that connected.
+fn session_label(channel: Option<&str>, client: &str) -> String {
+    if let Some(channel) = channel {
+        return channel.to_owned();
+    }
+    match client {
+        "scv-tui" => "TUI".into(),
+        "scv-exec" => "scv exec".into(),
+        "scv-agent" => "nested SCV".into(),
+        "" => "client".into(),
+        other => other.chars().filter(|c| !c.is_control()).take(32).collect(),
     }
 }
 

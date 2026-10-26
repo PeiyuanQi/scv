@@ -27,8 +27,15 @@ mod restart;
 mod session;
 #[cfg(test)]
 mod test_support;
+mod workbench;
 
 pub use daemon::{run_socket, run_stdio};
+
+/// Saved queues of sessions that stopped, for `scv jobs` when no daemon is
+/// running. The daemon's own snapshot fills the same list.
+pub fn restorable_queues(layout: &scv_client::Layout) -> Vec<scv_protocol::RestorableSession> {
+    session::persist::restorable(layout)
+}
 pub use restart::{BuildInfo, build_info, watchdog as restart_watchdog};
 
 #[cfg(test)]

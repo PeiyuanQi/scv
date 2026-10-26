@@ -172,6 +172,8 @@ struct Inner {
 pub struct DelegationRegistry {
     record_dir: PathBuf,
     conversation_dir: PathBuf,
+    /// Where each run's activity log and state go.
+    runs_dir: PathBuf,
     instance: String,
     owner: Option<ProcessIdentity>,
     depth: u32,
@@ -204,6 +206,7 @@ impl DelegationRegistry {
         Self {
             record_dir: layout.delegations(),
             conversation_dir: layout.conversations(),
+            runs_dir: layout.runs(),
             instance,
             owner: ProcessIdentity::current(),
             depth: current_depth(),
@@ -249,6 +252,21 @@ impl DelegationRegistry {
         &self.conversation_dir
     }
 
+    /// Where each run's activity log and state go.
+    pub fn runs_dir(&self) -> &Path {
+        &self.runs_dir
+    }
+
+    /// Start the activity log of the run `header` describes, owned by this
+    /// process; `None` when it cannot be written.
+    pub(crate) fn open_activity(
+        &self,
+        header: crate::delegate::activity::RunHeader,
+    ) -> Option<crate::delegate::activity::RunActivity> {
+        let owner = self.owner?;
+        crate::delegate::activity::RunActivity::open(&self.runs_dir, owner, header)
+    }
+
     #[cfg(test)]
     pub(crate) fn begin(
         &self,
@@ -270,8 +288,17 @@ impl DelegationRegistry {
         cwd: &Path,
         conversation: Option<(&str, u32)>,
     ) -> PendingDelegation {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let handle = format!("{agent}-{}", &suffix[..6]);
+        let draw = || {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            format!("{agent}-{}", &suffix[..6])
+        };
+        // Never a handle a retained run log has: its run would get no log.
+        let handle = std::iter::repeat_with(draw)
+            .take(16)
+            .find(|handle| {
+                std::fs::symlink_metadata(self.runs_dir.join(format!("{handle}.jsonl"))).is_err()
+            })
+            .unwrap_or_else(draw);
         let entry = format!("{}/{session}/{handle}", self.instance);
         let chain = match &self.chain {
             Some(chain) => format!("{chain};{entry}"),
@@ -656,14 +683,30 @@ pub(crate) fn write_private_json(
     name: &str,
     value: &impl Serialize,
 ) -> std::io::Result<()> {
+    let bytes = private_json(dir, value)?;
+    scv_client::fs::replace_private(&dir.join(name), &bytes)
+}
+
+/// [`write_private_json`] without syncing to disk, for state rewritten
+/// often that only says what is happening now.
+pub(crate) fn write_private_json_unsynced(
+    dir: &Path,
+    name: &str,
+    value: &impl Serialize,
+) -> std::io::Result<()> {
+    let bytes = private_json(dir, value)?;
+    scv_client::fs::replace_private_unsynced(&dir.join(name), &bytes)
+}
+
+/// Make `dir` (and its parent) private, and serialize `value`.
+fn private_json(dir: &Path, value: &impl Serialize) -> std::io::Result<Vec<u8>> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir)?;
     if let Some(run) = dir.parent() {
         std::fs::set_permissions(run, std::fs::Permissions::from_mode(0o700))?;
     }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
-    scv_client::fs::replace_private(&dir.join(name), &bytes)
+    serde_json::to_vec_pretty(value).map_err(std::io::Error::other)
 }
 
 fn read_record(path: &Path) -> Option<DelegationRecord> {

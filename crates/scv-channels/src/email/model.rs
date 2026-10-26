@@ -92,6 +92,8 @@ pub(crate) async fn turn(
             auto_approve: Some(false),
             chat: None,
             system_prompt: Some(frame.to_owned()),
+            persist_queue: None,
+            restore: None,
         })
         .await
         .context("could not start a triage session")?;

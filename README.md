@@ -44,8 +44,9 @@ own: SCV answers inside the thread, on a session of its own.
 ### One agent, many agents
 
 One `agent` tool delegates to Claude Code, Codex, Grok Build, DeepSeek Harness,
-pi, or a nested SCV, over the [Agent Client Protocol](https://agentclientprotocol.com)
-where available. Your `prefer` list and `use_for` notes pick who does what,
+pi, Gemini CLI, Qwen Code, OpenCode, GitHub Copilot CLI, Cursor CLI, Amp, Kimi
+CLI, or a nested SCV, over the [Agent Client Protocol](https://agentclientprotocol.com)
+where available, each job optionally in a git worktree of its own. Your `prefer` list and `use_for` notes pick who does what,
 each agent's default model and effort (and a separate effort for hard tasks)
 set how, and `agent_wait`, `agent_status`, and `agent_cancel` manage
 background jobs. Ask for a review and a fresh agent on another harness checks
@@ -56,6 +57,17 @@ with every release. A built-in `delegating` skill teaches it how to brief an
 agent and what to do when a call fails, and `scv agents check` shows every
 agent working.
 
+### A workbench for every agent
+
+The terminal UI is a dashboard: a chat tab per workspace, and agent views
+that follow each delegated agent live (what it says, the commands it runs,
+the approvals it waits on) and take your prompts for its conversation. A
+sidebar shows every workspace's jobs with their state and why: working,
+waiting for you, idle, quiet for too long, or interrupted. Start jobs of
+your own, stop them, answer their approvals while you watch, and resume a
+job a restart cut off in the agent's own conversation; your queued prompts
+come back too. `scv jobs` does the same from the command line.
+
 ### Private homes, private keys
 
 Each agent signs in once with `scv agents login` and runs in its own home under
@@ -63,7 +75,8 @@ Each agent signs in once with `scv agents login` and runs in its own home under
 `~/.codex`, and never inherits your `*_API_KEY` variables. Claude Code is two
 of those agents: `claude` bills an Anthropic API key SCV stores in its home,
 and `claude-ai` uses the owner's Claude subscription login, which Claude Code
-owns in a separate home. SCV pins the selected billing identity on every launch.
+owns in a separate home. SCV pins the selected billing identity on every launch:
+`claude` calls `https://allrouter.cc` and `claude-ai` calls `https://api.anthropic.com`.
 
 ### Updates without dropping work
 
@@ -165,7 +178,8 @@ for selection rules and limits.
 | `scv run`, `start`, `stop`, `status`, `reload` | Run or manage the daemon |
 | `scv channels login`, `run`, `stop`, `status`, `logout` | Manage chat accounts (`wechat`, `feishu`, `lark`, `slack`) and mailboxes (`email`: read-only unless `mail.actions` is on) |
 | `scv mail status`, `cancel` | List or withdraw mail actions waiting for approval. Approval happens only in the mail chat |
-| `scv agents login`, `status`, `check`, `ps`, `kill` | Sign agents in, check them, and list or stop their runs |
+| `scv agents login`, `status`, `check`, `ps`, `kill`, `worktrees` | Sign agents in, check them, list or stop their runs, and list or remove job worktrees |
+| `scv jobs`, `log`, `start`, `send`, `cancel`, `resume`, `approve` | The workbench: every job and run, live logs, your own jobs, and acting on them |
 | `scv confirm "…"` | Ask the owner yes or no in chat; exits 0 only on yes |
 | `scv project create`, `status`, `tasks`, `report` | Opt into a durable project ledger and inspect its evidence |
 | `scv project add-task`, `update-task`, `run-start`, `run-progress`, `run-finish`, `heartbeat`, `events` | Drive or inspect project tasks and supervised run heartbeats |
@@ -225,7 +239,8 @@ own release flow asks this way before it publishes.
                                  │ tools, gated by approval policy
                                  ▼
      read · write · bash · web_fetch · read_skill · chat_attach
-     agent ─► Claude Code · Codex · Grok Build · DeepSeek Harness · pi · SCV
+     agent ─► Claude Code · Codex · Grok Build · DeepSeek Harness · pi ·
+              Gemini · Qwen · OpenCode · Copilot · Cursor · Amp · Kimi · SCV
               over ACP, the agent's CLI, or SCV's protocol, in private homes
 ```
 
@@ -294,12 +309,12 @@ and report vulnerabilities as
 | --- | --- |
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | Crates, the agent loop, planned restarts, and where to start reading the code |
 | [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | Feishu/Lark, WeChat, and Slack: sign-in, media, background reports, questions to the owner; mail triage reported to a mail chat, and mail actions the owner approves there |
-| [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | Built-in tools, delegated agents, their models and checks, ACP, background jobs, and agent sign-ins |
+| [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | Built-in tools, delegated agents, their models and checks, ACP, background jobs, worktrees, the workbench, and agent sign-ins |
 | [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | Instance layout, every setting, providers, the daemon, and notices |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | Trust boundaries, approvals, remote tools, and delegated runs |
 | [Context management](https://github.com/PeiyuanQi/scv/blob/main/docs/context-management.md) | The token budget and deterministic compaction |
 | [Protocol](https://github.com/PeiyuanQi/scv/blob/main/docs/protocol.md) | The JSONL protocol for clients |
-| [Terminal UI](https://github.com/PeiyuanQi/scv/blob/main/docs/tui.md) | Keys, layout, approvals, and headless `scv exec` |
+| [Terminal UI](https://github.com/PeiyuanQi/scv/blob/main/docs/tui.md) | The dashboard, keys, layout, approvals, and headless `scv exec` |
 | [Release](https://github.com/PeiyuanQi/scv/blob/main/docs/release.md) | Platforms, compatibility, upgrade notes, and publishing |
 | [Quality](https://github.com/PeiyuanQi/scv/blob/main/docs/quality.md) and [evaluation](https://github.com/PeiyuanQi/scv/blob/main/docs/evaluation.md) | Test and performance contract, and the v0.1 measurements |
 

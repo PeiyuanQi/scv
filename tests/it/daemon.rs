@@ -107,6 +107,8 @@ async fn session(
             auto_approve: None,
             chat: None,
             system_prompt: None,
+            persist_queue: None,
+            restore: None,
         },
     ] {
         write

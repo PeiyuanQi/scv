@@ -81,6 +81,7 @@ fn tool(
         output_limit: 64 * 1024,
         delegation,
         conversations,
+        worktrees: None,
     }
 }
 

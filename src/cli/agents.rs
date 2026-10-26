@@ -165,6 +165,10 @@ pub(crate) async fn agents(
                         }
                     }
                     Status::Command(_) => {}
+                    Status::Unchecked if installed.is_some() => println!(
+                        "  sign-in not checked by SCV; `scv agents check {name}` calls it to find out"
+                    ),
+                    Status::Unchecked => {}
                     Status::Stored(store) => {
                         let StoredStatus { ready, lines } =
                             setup::agent_stored_status(&config, name, store)?;
@@ -224,6 +228,9 @@ pub(crate) async fn agents(
                 }
             }
             Ok(())
+        }
+        AgentsCommand::Worktrees { remove, force } => {
+            super::jobs::worktrees(layout, remove.as_deref(), force).await
         }
         AgentsCommand::Kill { handle, orphans } => {
             let status = control(layout, DaemonCommand::DelegationKill { handle, orphans }).await?;
@@ -315,6 +322,10 @@ pub(crate) async fn agents(
                         println!("{line}");
                     }
                     Ok(())
+                }
+                Logout::Interactive { args, hint } => {
+                    println!("Opening {} in SCV's agent home: {hint}.", adapter.product);
+                    run_agent(user_config, adapter.name, args, &[], "sign-out")
                 }
             }
         }

@@ -3,6 +3,7 @@
 //! [`turn`].
 
 pub(crate) mod build;
+pub(crate) mod persist;
 mod queue;
 mod reload;
 pub(crate) mod turn;
@@ -36,6 +37,11 @@ pub(crate) struct Session {
     pub(crate) background: Option<Arc<BackgroundJobs>>,
     /// Whether the model has tools, and so may see attachments' paths.
     pub(crate) tools: bool,
+    /// Who the session serves, such as `TUI` or `WeChat`.
+    pub(crate) label: String,
+    /// The session's place in the daemon's workbench, which shows what it
+    /// is doing; `None` outside the daemon.
+    pub(crate) workbench: Option<Arc<scv_tools::workbench::SessionHandle>>,
 }
 
 impl Session {
@@ -61,6 +67,9 @@ pub(crate) fn next_seq(sequence: &AtomicU64) -> u64 {
 /// What a client declared about itself in `session.start`.
 #[derive(Debug, Default)]
 pub(crate) struct SessionClient {
+    /// Who the session serves, for the job ledger and the workbench: the
+    /// channel, or the client program.
+    pub(crate) label: String,
     /// The chat channel the session answers on, such as `WeChat`.
     pub(crate) channel: Option<String>,
     /// The client approves every approval request without asking anyone.

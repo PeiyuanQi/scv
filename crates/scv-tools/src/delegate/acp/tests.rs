@@ -927,6 +927,12 @@ fn permission_risks_follow_scvs_own_tools() {
         "[claude-1 acp]",
     );
     assert_eq!(summary, "[claude-1 acp] Edit file (edit) on /tmp/a");
+    // An escape sequence in the agent's text reaches no terminal.
+    let (_, summary) = describe_permission(
+        &json!({"toolCall":{"kind":"ex\u{7}","title":"Run \u{1b}]52;c;eA==\u{7}"}}),
+        "[claude-1 acp]",
+    );
+    assert_eq!(summary, "[claude-1 acp] Run  ]52;c;eA==  (ex )");
     assert_eq!(
         choose_option(Some(&json!([{"optionId":"x","kind":"allow_always"}])), true),
         json!({"outcome":"selected","optionId":"x"})
@@ -1479,4 +1485,132 @@ fn without_its_acp_server_such_an_agent_takes_no_model_or_effort() {
     assert!(over_acp.model && over_acp.effort);
     let once_per_turn = accepts(false);
     assert!(!once_per_turn.model && !once_per_turn.effort);
+}
+
+#[tokio::test]
+async fn an_adopted_conversation_loads_the_agents_saved_session_when_it_can() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "load");
+    let registry = Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let conversations = store(Duration::from_secs(3600));
+    let tool = acp_tool(
+        &script,
+        Arc::clone(&conversations),
+        Some(delegation(&registry)),
+        None,
+    );
+    let workspace = dir.path().canonicalize().unwrap();
+    let handle = conversations
+        .adopt("claude", &workspace, "s-saved")
+        .unwrap();
+    let output = tool
+        .execute(
+            json!({"prompt":"recall","session":handle}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    let value = json(&output);
+    assert_eq!(value["status"], "completed", "{value}");
+    assert!(
+        value["reply"]
+            .as_str()
+            .unwrap()
+            .contains("the word is loaded s-saved in s-saved"),
+        "{value}"
+    );
+    let log = calls(dir.path());
+    assert!(log.contains("session/load id=s-saved"), "{log}");
+    assert!(!log.contains("session/new"), "{log}");
+    // Its run's activity log names the loaded session for a later resume.
+    let state = crate::delegate::activity::list_states(registry.runs_dir())
+        .pop()
+        .unwrap();
+    assert_eq!(state.vendor.as_deref(), Some("s-saved"));
+    assert_eq!(state.state, scv_protocol::AgentState::Idle);
+}
+
+#[tokio::test]
+async fn a_server_that_cannot_load_sessions_fails_the_resumed_turn_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "normal");
+    let conversations = store(Duration::from_secs(3600));
+    let tool = acp_tool(&script, Arc::clone(&conversations), None, None);
+    let workspace = dir.path().canonicalize().unwrap();
+    let handle = conversations
+        .adopt("claude", &workspace, "s-saved")
+        .unwrap();
+    let output = tool
+        .execute(
+            json!({"prompt":"recall","session":handle}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    let value = json(&output);
+    assert_eq!(value["status"], "failed", "{value}");
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot load a saved session"),
+        "{value}"
+    );
+    assert!(!calls(dir.path()).contains("session/new"));
+}
+
+#[tokio::test]
+async fn an_acp_runs_turns_tools_and_approvals_reach_its_activity_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "normal");
+    let registry = Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let tool = acp_tool(
+        &script,
+        store(Duration::from_secs(3600)),
+        Some(delegation(&registry)),
+        None,
+    );
+    let gate = Arc::new(Gate {
+        answer: true,
+        requests: StdMutex::default(),
+    });
+    let mut context = context(dir.path(), Some(gate));
+    context.job = Some("job-5".into());
+    tool.execute(json!({"prompt":"remember heron"}), context.clone())
+        .await
+        .unwrap();
+    tool.execute(json!({"prompt":"permission","session":"claude-1"}), context)
+        .await
+        .unwrap();
+    let state = crate::delegate::activity::list_states(registry.runs_dir())
+        .pop()
+        .unwrap();
+    assert_eq!((state.job.as_deref(), state.turn), (Some("job-5"), Some(2)));
+    let page =
+        crate::delegate::activity::read_page(registry.runs_dir(), &state.handle, 0, 500).unwrap();
+    use scv_protocol::RunEventKind as Kind;
+    let kinds: Vec<Kind> = page.events.iter().map(|event| event.kind).collect();
+    for kind in [
+        Kind::RunStarted,
+        Kind::TurnStarted,
+        Kind::Text,
+        Kind::Tool,
+        Kind::ToolFailed,
+        Kind::Plan,
+        Kind::TurnEnded,
+        Kind::ApprovalRequested,
+        Kind::ApprovalResolved,
+    ] {
+        assert!(kinds.contains(&kind), "{kind:?} missing from {kinds:?}");
+    }
+    let texts: String = page.events.iter().map(|event| event.text.clone()).collect();
+    for private in ["PRIVATE-OUTPUT", "PRIVATE-THOUGHT", "sk-live-123456"] {
+        assert!(!texts.contains(private), "{private} leaked: {texts}");
+    }
 }

@@ -17,11 +17,13 @@
 //! The reviewer is routed by family: Claude-family work goes to Codex then
 //! Grok, Codex work goes to claude-ai then claude then Grok, and other work
 //! goes to claude-ai, claude, Codex, then Grok; a fresh conversation of the
-//! builder's own agent is the last resort. Only an unavailable reviewer
-//! moves to the next agent: the availability classification of the result,
-//! or a reply that is nothing but a provider error. A refusal hands the
-//! review to Grok for the rest of the job, never to the builder's own agent.
-//! A named reviewer is never swapped.
+//! builder's own agent is the last resort. An unavailable reviewer moves to
+//! the next agent and is skipped for the rest of the job: the availability
+//! classification of the result, or a reply that is nothing but a provider
+//! error. A verdict that stays malformed after its one repair turn moves to
+//! the next reviewer still in the plan, for that round only. A refusal hands
+//! the review to Grok for the rest of the job, never to the builder's own
+//! agent. A named reviewer is never swapped for unavailability or a refusal.
 
 mod blocks;
 mod journal;
@@ -1370,6 +1372,15 @@ impl<'a> Run<'a> {
                             self.reviewed(round, agent, &verdict);
                             return Ok((verdict, agent.to_owned(), held.take()));
                         }
+                        // A verdict that stays malformed does not end the
+                        // round while another listed reviewer can be asked.
+                        // A decline, timeout, failure, or unavailability
+                        // still ends it: those do not move on.
+                        Err(reason)
+                            if reason == "malformed_verdict" && self.reviewer_remains(agent) =>
+                        {
+                            // The loop asks the next listed reviewer.
+                        }
                         Err(reason) => return Err(self.no_verdict(round, agent, &reason)),
                     }
                 }
@@ -1412,8 +1423,9 @@ impl<'a> Run<'a> {
     }
 
     /// The one repair turn for a malformed verdict, in the reviewer's own
-    /// conversation `handle`: a usable verdict, or why the round has none.
-    /// Whatever it ends with, no other reviewer is asked.
+    /// conversation `handle`: a usable verdict, or why this reviewer gave
+    /// none. The caller asks the next reviewer only when the reason is a
+    /// verdict that stayed malformed.
     async fn repair(
         &mut self,
         round: u32,
@@ -1734,6 +1746,28 @@ impl<'a> Run<'a> {
             Err(error) => event["error"] = error.clone().into(),
         }
         self.tool.write("verdict", event)
+    }
+
+    /// Whether a reviewer after `agent` in the plan can still be asked:
+    /// not skipped, and still allowed after a refusal.
+    fn reviewer_remains(&self, agent: &str) -> bool {
+        let builder = self.plan().builder.as_str();
+        let mut after = false;
+        for reviewer in &self.plan().reviewers {
+            if !after {
+                after = reviewer.agent == agent;
+                continue;
+            }
+            let next = reviewer.agent.as_str();
+            if self.skipped.contains_key(next) {
+                continue;
+            }
+            if self.refused && (next != "grok" || next == builder) {
+                continue;
+            }
+            return true;
+        }
+        false
     }
 
     /// Why `agent` reviews instead of the agents before it in the order.

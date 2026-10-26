@@ -18,6 +18,8 @@ pub(super) const MAX_QUEUED_TURNS: usize = 32;
 pub(super) const MAX_USE_FOR_BYTES: usize = 500;
 /// The longest episode gap: a year.
 const MAX_EPISODE_GAP_MINUTES: u64 = 365 * 24 * 60;
+/// The most `[tui.keys]` bindings.
+const MAX_KEY_BINDINGS: usize = 64;
 
 impl ApprovalPolicy {
     fn strictness(self) -> u8 {
@@ -206,6 +208,28 @@ impl Config {
                 bail!("notify.owner cannot name a mail chat ({account}); it carries only mail");
             }
         }
+        if self.tui.keys.len() > MAX_KEY_BINDINGS {
+            bail!("tui.keys may bind at most {MAX_KEY_BINDINGS} actions");
+        }
+        for (action, key) in &self.tui.keys {
+            let action_ok = !action.is_empty()
+                && action.len() <= 32
+                && action
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+            if !action_ok {
+                bail!("tui.keys action {action:?} must be 1-32 lowercase letters, digits, or '_'");
+            }
+            let key_ok = !key.trim().is_empty()
+                && key.len() <= 32
+                && key.chars().all(|c| c.is_ascii_graphic());
+            if !key_ok {
+                bail!(
+                    "tui.keys.{action} must be a key such as \"alt+]\" or \"ctrl+t\": 1-32 \
+                     printable characters without spaces"
+                );
+            }
+        }
         if !(1..=MAX_EPISODE_GAP_MINUTES).contains(&self.history.episode_gap_minutes) {
             bail!("history.episode_gap_minutes must be between 1 and {MAX_EPISODE_GAP_MINUTES}");
         }
@@ -379,6 +403,15 @@ impl Config {
                          selection{only_over_acp}"
                     );
                 }
+            }
+            if adapter.transport == AgentTransport::Resume
+                && scv_tools::adapters::adapter(agent)
+                    .is_some_and(|descriptor| !descriptor.cli_turns)
+            {
+                bail!(
+                    "agents.{agent}.transport = \"resume\" but {agent} has no verified \
+                     one-prompt mode and runs over its ACP server only; use \"auto\" or \"acp\""
+                );
             }
             if adapter.transport == AgentTransport::Acp
                 && scv_tools::adapters::adapter(agent)
@@ -655,6 +688,13 @@ pub(super) fn validate_project_keys(value: &toml::Value) -> Result<()> {
         .is_some_and(|skills| skills.contains_key("user_dir"))
     {
         bail!("project configuration cannot set skills.user_dir");
+    }
+    if table
+        .get("tui")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|tui| tui.contains_key("keys"))
+    {
+        bail!("project configuration cannot set tui.keys");
     }
     if table
         .get("agent")

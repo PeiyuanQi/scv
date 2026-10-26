@@ -16,13 +16,100 @@ const DETAIL_CHARS: usize = 120;
 pub(crate) fn progress_lines(format: OutputFormat, kind: &str, event: &Value) -> Vec<String> {
     match format {
         OutputFormat::Text => Vec::new(),
-        OutputFormat::ClaudeStreamJson => claude(kind, event),
+        OutputFormat::ClaudeStreamJson | OutputFormat::AmpStreamJson => claude(kind, event, true),
+        OutputFormat::CursorStreamJson => {
+            let mut lines = claude(kind, event, true);
+            lines.extend(cursor(kind, event));
+            lines
+        }
         OutputFormat::CodexJsonl => codex(kind, event),
         OutputFormat::PiJson => pi(kind, event),
+        OutputFormat::GeminiStreamJson => gemini(kind, event),
     }
 }
 
-fn claude(kind: &str, event: &Value) -> Vec<String> {
+/// The lines naming tool calls and commands one parsed event contributes,
+/// without the message text a status line may quote: the activity log
+/// records that text whole.
+pub(crate) fn tool_lines(format: OutputFormat, kind: &str, event: &Value) -> Vec<String> {
+    match format {
+        OutputFormat::ClaudeStreamJson | OutputFormat::AmpStreamJson => claude(kind, event, false),
+        OutputFormat::CursorStreamJson => {
+            let mut lines = claude(kind, event, false);
+            lines.extend(cursor(kind, event));
+            lines
+        }
+        _ => progress_lines(format, kind, event),
+    }
+}
+
+/// Cursor CLI's `tool_call` events, as each starts.
+fn cursor(kind: &str, event: &Value) -> Vec<String> {
+    if kind != "tool_call" || event.get("subtype").and_then(Value::as_str) != Some("started") {
+        return Vec::new();
+    }
+    let Some((key, call)) = event
+        .get("tool_call")
+        .and_then(Value::as_object)
+        .and_then(|calls| calls.iter().next())
+    else {
+        return Vec::new();
+    };
+    let args = call.get("args").unwrap_or(&Value::Null);
+    let field = |name: &str| args.get(name).and_then(Value::as_str);
+    let name = key.strip_suffix("ToolCall").unwrap_or(key);
+    let line = match name {
+        "shell" => field("command").map(shell),
+        "read" | "write" | "edit" | "delete" => field("path").map(|path| {
+            let mut title = name.to_owned();
+            title[..1].make_ascii_uppercase();
+            format!("{title} {}", short_path(path))
+        }),
+        "grep" | "glob" => field("pattern")
+            .or_else(|| field("globPattern"))
+            .map(|pattern| format!("{name} {}", detail(pattern))),
+        _ => None,
+    };
+    vec![line.unwrap_or_else(|| detail(name))]
+}
+
+/// Gemini CLI's `tool_use` and failed `tool_result` events.
+fn gemini(kind: &str, event: &Value) -> Vec<String> {
+    let name = event
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    match kind {
+        "tool_use" => {
+            let parameters = event.get("parameters").unwrap_or(&Value::Null);
+            let field = |key: &str| parameters.get(key).and_then(Value::as_str);
+            let line = match name {
+                "run_shell_command" => field("command").map(shell),
+                "read_file" | "write_file" | "replace" | "read_many_files" => field("file_path")
+                    .or_else(|| field("absolute_path"))
+                    .or_else(|| field("path"))
+                    .map(|path| format!("{name} {}", short_path(path))),
+                "google_web_search" => {
+                    field("query").map(|query| format!("search: {}", detail(query)))
+                }
+                "web_fetch" => field("prompt")
+                    .or_else(|| field("url"))
+                    .map(|url| format!("fetch {}", url_without_query(url))),
+                "glob" | "search_file_content" => {
+                    field("pattern").map(|pattern| format!("{name} {}", detail(pattern)))
+                }
+                _ => None,
+            };
+            vec![line.unwrap_or_else(|| detail(name))]
+        }
+        "tool_result" if event.get("status").and_then(Value::as_str) == Some("error") => {
+            vec![format!("{} failed", detail(name))]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn claude(kind: &str, event: &Value, with_text: bool) -> Vec<String> {
     if kind != "assistant" {
         return Vec::new();
     }
@@ -36,7 +123,7 @@ fn claude(kind: &str, event: &Value) -> Vec<String> {
                 let name = part.get("name").and_then(Value::as_str)?;
                 Some(claude_tool(name, part.get("input").unwrap_or(&Value::Null)))
             }
-            Some("text") => {
+            Some("text") if with_text => {
                 let text = part.get("text").and_then(Value::as_str)?;
                 let first = text.lines().find(|line| !line.trim().is_empty())?;
                 Some(detail(first))
@@ -236,6 +323,24 @@ const SECRET_PREFIXES: [&str; 9] = [
     "xoxp-",
     "AKIA",
 ];
+
+/// `text` as one display line: whitespace runs collapsed, every URL without
+/// its query or fragment (which can carry tokens), and credentials
+/// [`redact`]ed. For lines SCV keeps, such as activity logs, whatever
+/// produced them.
+pub(crate) fn scrub(text: &str) -> String {
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("://") {
+                &word[..word.find(['?', '#']).unwrap_or(word.len())]
+            } else {
+                word
+            }
+        })
+        .collect();
+    redact(&words.join(" "))
+}
 
 /// Replace values that look like credentials with `…`. A heuristic for
 /// display lines, not a guarantee: it covers `Bearer <token>`,

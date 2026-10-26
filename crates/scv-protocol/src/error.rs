@@ -49,6 +49,9 @@ pub enum ErrorCode {
     /// The daemon could not ask the owner a question (no owner chat to ask
     /// in, or one already waiting there), or does not know the one named.
     ConfirmError,
+    /// A workbench action was refused: the session, job, conversation, run,
+    /// approval, or worktree it names is unknown, or cannot do that now.
+    WorkbenchError,
     /// The model provider failed the turn.
     ProviderError,
     /// The turn's history does not fit the model's context window.
@@ -88,6 +91,7 @@ impl ErrorCode {
             Self::DelegationError => "delegation_error",
             Self::RestartError => "restart_error",
             Self::ConfirmError => "confirm_error",
+            Self::WorkbenchError => "workbench_error",
             Self::ProviderError => "provider_error",
             Self::ContextLimit => "context_limit",
             Self::StepLimit => "step_limit",

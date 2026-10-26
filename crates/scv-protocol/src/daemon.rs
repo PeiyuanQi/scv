@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::workbench::{RunLogPage, SendMode, WorkbenchSnapshot, WorktreeInfo};
+
 /// Where a daemon component (a channel account) is in its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -203,6 +205,24 @@ pub struct DaemonStatus {
     /// What a `mail_cancel` request did, in SCV's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail_note: Option<String>,
+    /// The workbench, for a `workbench` request and after each other
+    /// `workbench_*` action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench: Option<WorkbenchSnapshot>,
+    /// Part of a run's activity log, for a `run_log` request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_log: Option<RunLogPage>,
+    /// What a `workbench_*` or `worktree_remove` action did, in SCV's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench_note: Option<String>,
+    /// The job a `workbench_start`, `workbench_send`, or `workbench_resume`
+    /// started, as `<session>/<job>`; absent when the prompt steered a
+    /// running turn instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench_job: Option<String>,
+    /// The worktrees SCV created, for a `worktrees` request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktrees: Vec<WorktreeInfo>,
 }
 
 /// The lifecycle phase observed for a durable project.
@@ -755,5 +775,104 @@ pub enum DaemonCommand {
         /// Withdraw every action that has not started.
         #[serde(default)]
         all: bool,
+    },
+    /// Report the workbench: sessions, background jobs, delegated runs,
+    /// approval requests waiting for the owner, and restorable sessions.
+    Workbench {
+        /// The owner is watching (a dashboard that keeps asking): for the
+        /// next 15 seconds, a background job's approval request that the
+        /// session would deny unattended waits up to two minutes for the
+        /// owner's answer instead.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        watch: bool,
+    },
+    /// Read a delegated run's activity log after position `after`.
+    RunLog {
+        /// The run's delegation handle.
+        handle: String,
+        /// Return events after this position; 0 reads from the start.
+        #[serde(default)]
+        after: u64,
+        /// At most this many events (default and ceiling 500).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// Start a background job for the owner, in the workbench's own session
+    /// for `workspace`: no model is involved, and the job is not reported to
+    /// any model.
+    WorkbenchStart {
+        /// The absolute workspace directory the job belongs to.
+        workspace: String,
+        /// The agent to run, such as `codex`.
+        agent: String,
+        /// The prompt, as the agent reads it.
+        prompt: String,
+        /// A directory inside the workspace to run in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// The model for the agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The reasoning effort for the agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        /// Run in a new git worktree of the repository holding `cwd`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        worktree: bool,
+    },
+    /// Send the owner's prompt to a delegated conversation of a live session
+    /// (attach and take over): a new turn of it, queued behind a running
+    /// turn, or added to the running turn (`mode`).
+    WorkbenchSend {
+        /// The session that holds the conversation.
+        session: String,
+        /// The conversation, such as `codex-2`.
+        conversation: String,
+        /// The owner's prompt.
+        prompt: String,
+        /// What to do while the conversation runs a turn.
+        #[serde(default)]
+        mode: SendMode,
+    },
+    /// Stop a background job of a live session.
+    WorkbenchCancel {
+        /// The session that owns it.
+        session: String,
+        /// The job, such as `job-3`.
+        job: String,
+    },
+    /// Answer an approval request a background job relayed.
+    WorkbenchApprove {
+        /// The request, as the workbench listed it.
+        id: String,
+        /// Whether the request may go ahead.
+        approved: bool,
+    },
+    /// Run an interrupted job again in the workbench's session for its
+    /// workspace, continuing its agent's own conversation when that agent
+    /// can.
+    WorkbenchResume {
+        /// The session that owned it.
+        session: String,
+        /// The job.
+        job: String,
+    },
+    /// Forget a finished or interrupted job's record.
+    WorkbenchDismiss {
+        /// The session that owned it.
+        session: String,
+        /// The job.
+        job: String,
+    },
+    /// List the git worktrees SCV created for jobs.
+    Worktrees,
+    /// Remove a worktree SCV created; one with uncommitted changes only
+    /// with `force`. Its branch is kept.
+    WorktreeRemove {
+        /// The worktree's directory, as `worktrees` lists it.
+        path: String,
+        /// Remove it even with uncommitted changes.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
     },
 }

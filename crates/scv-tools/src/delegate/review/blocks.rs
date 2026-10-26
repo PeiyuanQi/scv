@@ -343,7 +343,9 @@ pub(crate) fn parse_verdict(
     })
 }
 
-/// `prior`: exactly one entry per open finding, by its ID.
+/// `prior`: exactly one entry per open finding, by its ID. When nothing is
+/// open, an entry whose id is not open settles nothing and is ignored;
+/// reviewers name such ids on round 1.
 fn prior(object: &Map<String, Value>, open: &[String]) -> Result<Vec<Settled>, String> {
     let entries = items(object, "prior", usize::MAX)?;
     let mut settled: Vec<Settled> = Vec::new();
@@ -353,6 +355,9 @@ fn prior(object: &Map<String, Value>, open: &[String]) -> Result<Vec<Settled>, S
             .ok_or("each prior entry must be an object")?;
         let id = required_text(entry, "id", 16)?;
         if !open.contains(&id) {
+            if open.is_empty() {
+                continue;
+            }
             return Err(format!("prior names {id:?}, which is not an open finding"));
         }
         if settled.iter().any(|earlier| earlier.id == id) {

@@ -63,6 +63,15 @@ async fn emit(peer: &mut BufReader<UnixStream>, event: ServerEvent) {
 }
 
 async fn accept_session(listener: &UnixListener, id: &str) -> BufReader<UnixStream> {
+    accept_session_after(listener, id, Duration::ZERO).await
+}
+
+/// Accept a connection and start session `id`, taking `delay` to build it.
+async fn accept_session_after(
+    listener: &UnixListener,
+    id: &str,
+    delay: Duration,
+) -> BufReader<UnixStream> {
     let (stream, _) = tokio::time::timeout(Duration::from_secs(6), listener.accept())
         .await
         .unwrap()
@@ -88,6 +97,7 @@ async fn accept_session(listener: &UnixListener, id: &str) -> BufReader<UnixStre
         receive(&mut peer).await,
         ClientMessage::SessionStart { .. }
     ));
+    tokio::time::sleep(delay).await;
     emit(
         &mut peer,
         ServerEvent::SessionStarted {
@@ -101,6 +111,8 @@ async fn accept_session(listener: &UnixListener, id: &str) -> BufReader<UnixStre
             max_transcript_items: 100,
             max_prompt_history_bytes: 1024,
             max_prompt_history_items: 10,
+            keys: std::collections::BTreeMap::new(),
+            restored: None,
         },
     )
     .await;
@@ -439,6 +451,28 @@ async fn reconnect_retries_a_stalled_handshake_with_a_bounded_wait() {
     assert_eq!(session.id, "new-session");
 }
 
+#[tokio::test]
+async fn a_session_start_slower_than_the_handshake_timeout_is_waited_for() {
+    let path = SocketPath::new();
+    let listener = UnixListener::bind(&path.0).unwrap();
+    let options = LaunchOptions::default();
+    // Giving up would end the new session, and the queue it restored.
+    let (connection, _peer) = tokio::join!(
+        Client::connect_restoring(
+            &path.0,
+            Path::new("/tmp"),
+            &options,
+            Some("old-session".into())
+        ),
+        accept_session_after(
+            &listener,
+            "new-session",
+            SOCKET_TIMEOUT + Duration::from_secs(1)
+        ),
+    );
+    assert_eq!(connection.unwrap().1.id, "new-session");
+}
+
 #[test]
 fn transient_io_errors_are_distinct_from_protocol_errors() {
     for kind in [
@@ -462,6 +496,8 @@ fn transient_io_errors_are_distinct_from_protocol_errors() {
 fn app() -> App {
     App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -526,6 +562,8 @@ fn running_tools_show_their_latest_progress_line() {
     let meta = |seq| (String::from("r"), String::from("s"), String::from("t"), seq);
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -606,6 +644,8 @@ fn running_tools_show_their_latest_progress_line() {
 fn tool_status_comes_from_the_error_kind_never_the_output_text() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -700,6 +740,8 @@ fn tool_status_comes_from_the_error_kind_never_the_output_text() {
 fn events_of_unknown_types_are_skipped_without_a_sequence_warning() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -745,6 +787,8 @@ async fn client_reader_rejects_frames_before_unbounded_allocation() {
 fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -792,6 +836,8 @@ fn a_server_started_report_turn_is_announced_and_runs_like_any_turn() {
 fn a_failed_report_says_when_it_is_tried_again_and_a_direct_report_shows_the_reply() {
     let mut app = App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -901,6 +947,8 @@ fn agent_calls_are_labelled_with_the_agent_they_run_on() {
 fn roomy_app() -> App {
     App::new(SessionInfo {
         id: "s".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -1069,6 +1117,8 @@ fn a_reconnected_sessions_reused_job_handle_is_not_taken_for_the_old_one() {
     app.disconnect();
     app.reconnect(SessionInfo {
         id: "new-session".into(),
+        keys: std::collections::BTreeMap::new(),
+        restored: None,
         cwd: "/tmp".into(),
         model: "test".into(),
         context_max_tokens: 100,
@@ -1106,3 +1156,5 @@ fn a_reconnected_sessions_reused_job_handle_is_not_taken_for_the_old_one() {
         TranscriptItem::System(text) if text.contains("rev-new-session") && text.contains("still open")
     )));
 }
+
+mod dashboard;

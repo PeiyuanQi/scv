@@ -39,7 +39,13 @@ fn descriptors_are_unique_and_self_consistent() {
                 adapter.name
             );
             assert!(!names_session(subcommand), "{}", adapter.name);
-            assert!(adapter.conversation_files.is_some(), "{}", adapter.name);
+            // Cursor CLI's chat store layout is not verified, so `scv agents
+            // gc` leaves its transcripts alone.
+            assert!(
+                adapter.conversation_files.is_some() || adapter.name == "cursor",
+                "{}",
+                adapter.name
+            );
         }
         // Anything SCV sets must survive the removal pass.
         for (variable, _) in adapter
@@ -53,11 +59,11 @@ fn descriptors_are_unique_and_self_consistent() {
         for store in [
             match adapter.status {
                 Status::Stored(store) => Some(store),
-                Status::Command(_) => None,
+                Status::Command(_) | Status::Unchecked => None,
             },
             match adapter.logout {
                 Logout::Stored(store) => Some(store),
-                Logout::Command(_) => None,
+                Logout::Command(_) | Logout::Interactive { .. } => None,
             },
             match adapter.login {
                 Login::ApiKey(store) => Some(store),
@@ -142,10 +148,35 @@ fn removal_covers_every_adapter_and_generic_api_keys() {
         "PI_CODING_AGENT_DIR",
         "OPENROUTER_API_KEY",
         "SCV_CONFIG",
+        "GEMINI_API_KEY",
+        "GEMINI_CLI_HOME",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "QWEN_HOME",
+        "DASHSCOPE_API_KEY",
+        "OPENCODE_CONFIG",
+        "COPILOT_MODEL",
+        "CURSOR_API_KEY",
+        "AMP_URL",
+        "KIMI_BASE_URL",
+        "MOONSHOT_API_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
     ] {
         assert!(is_removed_agent_variable(OsStr::new(removed)), "{removed}");
     }
-    for kept in ["PATH", "HOME", "LANG", "GH_TOKEN", "GROKKING", "PIPX_HOME"] {
+    // General GitHub credentials stay: other agents' git and gh use them.
+    for kept in [
+        "PATH",
+        "HOME",
+        "LANG",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GROKKING",
+        "PIPX_HOME",
+    ] {
         assert!(!is_removed_agent_variable(OsStr::new(kept)), "{kept}");
     }
 }
@@ -185,4 +216,48 @@ fn executables_resolve_from_per_user_directories_before_path() {
         resolve_agent_executable(executable.to_str().unwrap(), &[]),
         Some(executable)
     );
+}
+
+#[test]
+fn the_added_agents_fail_safe_where_their_integration_is_unverified() {
+    let acp = |name: &str| adapter(name).and_then(|adapter| adapter.acp);
+    for name in ["gemini", "qwen", "opencode", "kimi"] {
+        assert!(acp(name).is_some(), "{name} speaks ACP");
+    }
+    for name in ["copilot", "cursor", "amp"] {
+        assert!(acp(name).is_none(), "{name} has no verified ACP server");
+    }
+    // Kimi CLI runs over ACP only.
+    assert!(!adapter("kimi").unwrap().cli_turns);
+    assert!(
+        ADAPTERS
+            .iter()
+            .filter(|adapter| adapter.name != "kimi")
+            .all(|adapter| adapter.cli_turns)
+    );
+    // SCV cannot check their sign-ins, so it never hides them for it.
+    for name in [
+        "gemini", "qwen", "opencode", "copilot", "cursor", "amp", "kimi",
+    ] {
+        assert_eq!(adapter(name).unwrap().status, Status::Unchecked, "{name}");
+        assert_eq!(adapter(name).unwrap().auth, AgentAuth::None, "{name}");
+    }
+    // Devin is a cloud service with no local CLI or ACP server.
+    assert!(adapter("devin").is_none());
+    let gemini = acp("gemini").unwrap();
+    assert_eq!(acp_args(&gemini, true), ["--yolo", "--experimental-acp"]);
+    assert_eq!(acp_args(&gemini, false), ["--experimental-acp"]);
+    assert_eq!(acp_args(&acp("opencode").unwrap(), true), ["acp"]);
+    assert_eq!(
+        OutputFormat::GeminiStreamJson.args(),
+        ["--output-format", "stream-json"]
+    );
+    assert_eq!(OutputFormat::AmpStreamJson.args(), ["--stream-json"]);
+    assert!(OutputFormat::CursorStreamJson.claude_like());
+    assert!(!OutputFormat::GeminiStreamJson.claude_like());
+    // Each prompt-flag CLI takes the prompt last, as one argument.
+    assert_eq!(adapter("gemini").unwrap().prompt_args, ["-p"]);
+    assert_eq!(adapter("amp").unwrap().prompt_args, ["-x"]);
+    assert_eq!(adapter("cursor").unwrap().args, ["-p"]);
+    assert_eq!(adapter("opencode").unwrap().args, ["run"]);
 }

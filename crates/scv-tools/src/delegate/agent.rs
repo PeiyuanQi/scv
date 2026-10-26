@@ -62,6 +62,14 @@ pub(crate) trait Backend: Send + Sync {
         Ok(None)
     }
 
+    /// Whether a conversation of this agent can be continued from the
+    /// agent's own session ID alone, with no process kept from before, as
+    /// resuming an interrupted job does: a CLI that resumes by ID, or an ACP
+    /// server that loads saved sessions.
+    fn adoptable(&self) -> bool {
+        false
+    }
+
     /// Wait until the conversation the call continues runs no turn.
     async fn wait_idle(
         &self,
@@ -176,6 +184,9 @@ pub(crate) struct AgentTool {
     /// Whether calls may set `no_timeout`: the owner allows it
     /// (`tools.allow_no_timeout`) and the session runs background jobs.
     no_timeout: bool,
+    /// Where calls with `worktree: true` get their git worktrees; `None`
+    /// leaves `worktree` out.
+    worktrees: Option<std::path::PathBuf>,
 }
 
 impl AgentTool {
@@ -191,7 +202,58 @@ impl AgentTool {
             default,
             timeouts,
             no_timeout: false,
+            worktrees: None,
         }
+    }
+
+    /// The SCV worktree holding `cwd`, when this tool creates worktrees
+    /// and `cwd` is inside one of them.
+    pub(crate) fn worktree_at(&self, cwd: &std::path::Path) -> Option<scv_protocol::WorktreeRef> {
+        crate::delegate::worktree::worktree_ref(self.worktrees.as_deref()?, cwd)
+    }
+
+    /// Offer `worktree`, creating worktrees under `root`.
+    pub(crate) fn with_worktrees(mut self, root: Option<std::path::PathBuf>) -> Self {
+        self.worktrees = root;
+        self
+    }
+
+    /// When the call asks for `worktree`, create it and point the call's
+    /// `cwd` at the same directory inside it: the worktree it runs in.
+    /// Nothing happens for a call that does not ask.
+    pub(crate) async fn prepare_worktree(
+        &self,
+        arguments: &mut Value,
+        context: &ToolContext,
+    ) -> Result<Option<scv_protocol::WorktreeRef>, ToolError> {
+        let args = parse_args::<AgentArgs>(arguments)?;
+        if !args.worktree {
+            return Ok(None);
+        }
+        let root = self.worktrees.as_deref().ok_or_else(|| {
+            ToolError::invalid_arguments("worktree is not available in this session")
+        })?;
+        let (agent, _) = self.route(arguments)?;
+        let workspace = std::fs::canonicalize(&context.workspace)
+            .map_err(|error| ToolError::failed(format!("resolve workspace: {error}")))?;
+        let cwd = crate::delegate::request::resolve_agent_cwd(&workspace, args.cwd.as_deref())?;
+        let created = crate::delegate::worktree::create(
+            root,
+            &cwd,
+            &workspace,
+            &agent.name,
+            &context.cancellation,
+        )
+        .await?;
+        context.progress.report(&format!(
+            "worktree {} on branch {}",
+            created.worktree.path, created.worktree.branch
+        ));
+        if let Some(object) = arguments.as_object_mut() {
+            object.remove("worktree");
+            object.insert("cwd".into(), created.cwd.display().to_string().into());
+        }
+        Ok(Some(created.worktree))
     }
 
     /// Let background jobs' calls set `no_timeout` when `offered`.
@@ -236,8 +298,14 @@ impl AgentTool {
     ) -> Result<String, ToolError> {
         self.check_no_timeout(arguments, background_job)?;
         let (agent, arguments) = self.route(arguments)?;
+        let worktree = if parse_args::<AgentArgs>(&arguments)?.worktree {
+            " It runs in a new git worktree of the repository holding that directory, on a new \
+             branch, under SCV's worktrees directory."
+        } else {
+            ""
+        };
         Ok(format!(
-            "agent {}{}: {}",
+            "agent {}{}: {}{worktree}",
             agent.name,
             crate::adapters::adapter(&agent.name)
                 .and_then(|descriptor| match descriptor.auth {
@@ -292,6 +360,19 @@ impl AgentTool {
         ] {
             if given && !agent.accepts.takes(option) {
                 return Err(self.not_taken(agent, option));
+            }
+        }
+        if args.worktree {
+            if self.worktrees.is_none() {
+                return Err(ToolError::invalid_arguments(
+                    "worktree is not available in this session",
+                ));
+            }
+            if args.session.is_some() {
+                return Err(ToolError::invalid_arguments(
+                    "worktree starts a new conversation in a new worktree; a conversation you \
+                     continue keeps its own directory, so omit worktree or session",
+                ));
             }
         }
         Ok((agent, agent.with_defaults(arguments, &args)))
@@ -525,6 +606,18 @@ impl Tool for AgentTool {
                 }),
             );
         }
+        if self.worktrees.is_some() {
+            properties.insert(
+                "worktree".into(),
+                json!({
+                    "type":"boolean",
+                    "description":"Run in a new git worktree of the repository holding cwd, on a \
+                        new branch from its current HEAD, so the agent's changes stay apart from \
+                        the repository's own checkout and from other jobs. The result names the \
+                        worktree and branch. Only for a new conversation."
+                }),
+            );
+        }
         properties.insert("timeout_seconds".into(), timeout_schema(self.timeouts));
         if self.no_timeout {
             properties.insert(
@@ -580,11 +673,17 @@ impl Tool for AgentTool {
 
     async fn execute(
         &self,
-        arguments: Value,
+        mut arguments: Value,
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
+        self.route(&arguments)?;
+        let worktree = self.prepare_worktree(&mut arguments, &context).await?;
         let (agent, arguments) = self.route(&arguments)?;
         self.check_no_timeout(&arguments, context.background_job)?;
+        if let Some(worktree) = worktree {
+            let output = self.run(agent, arguments, context).await?;
+            return Ok(with_worktree(output, &worktree));
+        }
         // Without background jobs (agent.max_background = 0) nothing can
         // queue, so a busy conversation's call steers, waits, or fails.
         // With them, the background wrapper decides before this runs.
@@ -671,6 +770,21 @@ impl AgentTool {
         };
         Self::new(agents, &[name.to_owned()], timeouts)
     }
+}
+
+/// `output` with the worktree the call ran in added to its result.
+pub(crate) fn with_worktree(
+    mut output: ToolOutput,
+    worktree: &scv_protocol::WorktreeRef,
+) -> ToolOutput {
+    if let Ok(Value::Object(mut value)) = serde_json::from_str::<Value>(&output.content) {
+        value.insert(
+            "worktree".into(),
+            serde_json::to_value(worktree).unwrap_or(Value::Null),
+        );
+        output.content = Value::Object(value).to_string();
+    }
+    output
 }
 
 /// The agents a session's `agent` tool offers, sorted: the values its
