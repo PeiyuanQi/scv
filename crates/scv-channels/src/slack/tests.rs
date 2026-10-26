@@ -288,6 +288,8 @@ fn default_response(request: &Request, socket_url: &str, origin: &str) -> (u16, 
         json!({"ok": true, "upload_url": format!("{origin}/upload/F1"), "file_id": "F1"})
     } else if route.starts_with("/files.completeUploadExternal") {
         json!({"ok": true, "files": [{"id": "F1"}]})
+    } else if route.starts_with("/reactions.add") || route.starts_with("/reactions.remove") {
+        json!({"ok": true})
     } else if route.starts_with("/upload/") {
         return (200, headers, "OK - 4".into());
     } else {
@@ -884,6 +886,72 @@ async fn a_threads_root_and_shared_messages_resolve_into_context_and_files() {
 }
 
 #[tokio::test]
+async fn the_working_reaction_is_eyes_and_already_there_or_gone_is_fine() {
+    let mut fake = Fake::start().await;
+    let transport = fake.transport();
+    let id = "C123:1700000000.000002";
+    let message = crate::Message::text(
+        id,
+        "U123",
+        "hi",
+        "slack:C123/thread:1700000000.000001",
+        Some("C123"),
+    );
+    let working = json!({"channel": "C123", "timestamp": "1700000000.000002", "name": "eyes"});
+    assert_eq!(
+        transport.react(&message).await.unwrap().as_deref(),
+        Some("eyes")
+    );
+    let added = fake.request("/reactions.add").await;
+    assert_eq!(added.method, "POST");
+    assert_eq!(added.authorization.as_deref(), Some("Bearer xoxb-test"));
+    assert_eq!(added.body, working);
+    transport.unreact(id, "eyes").await.unwrap();
+    let removed = fake.request("/reactions.remove").await;
+    assert_eq!(removed.method, "POST");
+    assert_eq!(removed.body, working);
+
+    // Slack's answers that the reaction is already there, or already gone,
+    // mean it is as it should be.
+    fake.script(
+        "/reactions.add",
+        200,
+        json!({"ok": false, "error": "already_reacted"}),
+    );
+    assert_eq!(
+        transport.react(&message).await.unwrap().as_deref(),
+        Some("eyes")
+    );
+    fake.script(
+        "/reactions.remove",
+        200,
+        json!({"ok": false, "error": "no_reaction"}),
+    );
+    transport.unreact(id, "eyes").await.unwrap();
+
+    // Without the scope, the error names it; other refusals are errors too.
+    fake.script(
+        "/reactions.add",
+        200,
+        json!({"ok": false, "error": "missing_scope", "needed": "reactions:write"}),
+    );
+    let error = transport.react(&message).await.unwrap_err().to_string();
+    assert!(error.contains("reactions:write"), "{error}");
+    assert!(!error.contains("xoxb"), "{error}");
+    fake.script(
+        "/reactions.remove",
+        200,
+        json!({"ok": false, "error": "message_not_found"}),
+    );
+    let error = transport.unreact(id, "eyes").await.unwrap_err().to_string();
+    assert!(error.contains("message_not_found"), "{error}");
+    // Not a Slack message ID: Slack is not asked.
+    fake.made("/");
+    assert!(transport.unreact("om_1", "eyes").await.is_err());
+    assert_eq!(fake.made("/reactions."), 0);
+}
+
+#[tokio::test]
 async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
     let mut fake = Fake::start().await;
     let directory = tempfile::tempdir().unwrap();
@@ -942,10 +1010,17 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
         |credentials| Ok(credentials == &account()),
     );
     let peer = async {
+        // The claimed message wears the working reaction until its reply is
+        // sent, which removes it.
+        let working = json!({"channel": "D123", "timestamp": reply, "name": "eyes"});
+        let added = fake.request("/reactions.add").await;
+        assert_eq!(added.body, working);
         let posted = fake.request("/chat.postMessage").await;
         assert_eq!(posted.body["channel"], "D123");
         assert_eq!(posted.body["thread_ts"], root);
         assert_eq!(posted.body["text"], crate::FAILURE_REPLY);
+        let removed = fake.request("/reactions.remove").await;
+        assert_eq!(removed.body, working);
         tokio::time::timeout(WAIT, async {
             loop {
                 let state = store.load_state("default").unwrap();

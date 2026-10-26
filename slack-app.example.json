@@ -15,6 +15,7 @@
         "groups:history",
         "im:history",
         "im:write",
+        "reactions:write",
         "users:read"
       ]
     }

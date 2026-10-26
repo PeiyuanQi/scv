@@ -26,7 +26,7 @@ const TRANSIENT: [&str; 5] = [
     "request_timeout",
 ];
 /// The bot token scopes SCV uses; login names any the token lacks.
-pub(super) const BOT_SCOPES: [&str; 9] = [
+pub(super) const BOT_SCOPES: [&str; 10] = [
     "app_mentions:read",
     "channels:history",
     "chat:write",
@@ -35,6 +35,7 @@ pub(super) const BOT_SCOPES: [&str; 9] = [
     "groups:history",
     "im:history",
     "im:write",
+    "reactions:write",
     "users:read",
 ];
 
@@ -297,6 +298,43 @@ impl Api {
                 .await
                 .map(drop),
         )
+    }
+
+    /// Add the reaction `name` to the message `ts` in `channel`; one the
+    /// bot already put there (`already_reacted`) is fine.
+    pub(super) async fn add_reaction(&self, channel: &str, ts: &str, name: &str) -> Result<()> {
+        self.reaction("reactions.add", "already_reacted", channel, ts, name)
+            .await
+    }
+
+    /// Remove the bot's reaction `name` from the message `ts` in `channel`;
+    /// one that is not there (`no_reaction`) is fine.
+    pub(super) async fn remove_reaction(&self, channel: &str, ts: &str, name: &str) -> Result<()> {
+        self.reaction("reactions.remove", "no_reaction", channel, ts, name)
+            .await
+    }
+
+    /// Call the reactions `method`, taking the refusal `settled` as success.
+    async fn reaction(
+        &self,
+        method: &'static str,
+        settled: &str,
+        channel: &str,
+        ts: &str,
+        name: &str,
+    ) -> Result<()> {
+        let params = [("channel", channel), ("timestamp", ts), ("name", name)];
+        let Err(error) = self.call(method, false, Verb::Post, &params).await else {
+            return Ok(());
+        };
+        match error.downcast_ref::<Refusal>() {
+            Some(Refusal(code)) if code == settled => Ok(()),
+            Some(Refusal(code)) if code == "missing_scope" => bail!(
+                "Slack refused the reaction: the bot token lacks reactions:write; add it under \
+                 OAuth & Permissions and reinstall the app (missing_scope)"
+            ),
+            _ => Err(error),
+        }
     }
 
     /// Messages in `channel` after `oldest` (microseconds), newest first.

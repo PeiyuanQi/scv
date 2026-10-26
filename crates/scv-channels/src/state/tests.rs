@@ -92,12 +92,80 @@ fn pending_state_reads_legacy_shape() {
     assert_eq!(pending.client_ids, [] as [String; 0]);
     assert_eq!(pending.next_chunk, 0);
     assert!(pending.key.is_empty() && pending.carried.is_empty() && !pending.transient);
+    assert_eq!(pending.reaction, None);
     let claim: BridgeState = serde_json::from_str(
         r#"{"cursor":"c","seen":[],"pending":null,"in_flight":{"message_id":"m","to_user_id":"u","context_token":"x"}}"#,
     )
     .unwrap();
     assert_eq!(claim.in_flight.len(), 1);
+    assert_eq!(claim.in_flight[0].reaction, None);
     assert!(claim.pending.is_empty());
+}
+
+#[test]
+fn a_reaction_is_written_only_when_set_and_older_releases_read_past_it() {
+    let mut claim = InFlight {
+        message_id: "m".into(),
+        to_user_id: "u".into(),
+        context_token: "x".into(),
+        key: String::new(),
+        reaction: None,
+    };
+    let mut reply = PendingDelivery {
+        message_id: "m".into(),
+        to_user_id: "u".into(),
+        reply: "hi".into(),
+        ..Default::default()
+    };
+    // Without a reaction, claims and replies are written exactly as before.
+    assert!(
+        serde_json::to_value(&claim)
+            .unwrap()
+            .get("reaction")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(&reply)
+            .unwrap()
+            .get("reaction")
+            .is_none()
+    );
+    claim.reaction = Some("r-1".into());
+    reply.reaction = Some("r-2".into());
+    let json = serde_json::to_string(&BridgeState {
+        in_flight: vec![claim],
+        pending: vec![reply],
+        ..Default::default()
+    })
+    .unwrap();
+    let restored: BridgeState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.in_flight[0].reaction.as_deref(), Some("r-1"));
+    assert_eq!(restored.pending[0].reaction.as_deref(), Some("r-2"));
+    // 0.4.3, which a rollback runs, reads claims and replies without
+    // `deny_unknown_fields`, so it ignores the field.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code, reason = "only whether it parses matters")]
+    struct Release043Claim {
+        message_id: String,
+        to_user_id: String,
+        context_token: String,
+        #[serde(default)]
+        key: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code, reason = "only whether it parses matters")]
+    struct Release043Pending {
+        #[serde(default)]
+        message_id: String,
+        to_user_id: String,
+        context_token: String,
+        reply: String,
+    }
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let claim: Release043Claim = serde_json::from_value(value["in_flight"].clone()).unwrap();
+    assert_eq!(claim.message_id, "m");
+    let reply: Release043Pending = serde_json::from_value(value["pending"].clone()).unwrap();
+    assert_eq!(reply.reply, "hi");
 }
 
 #[test]
@@ -207,6 +275,7 @@ fn single_entries_keep_the_legacy_shape_and_many_become_lists() {
         to_user_id: "u".into(),
         context_token: "x".into(),
         key: String::new(),
+        reaction: None,
     };
     let mut state = BridgeState::default();
     let value = serde_json::to_value(&state).unwrap();

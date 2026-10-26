@@ -23,7 +23,8 @@ which remains authoritative for sessions, provider selection, policy, and turn
 execution. `scv-channels` holds the bridge every channel shares and, in a
 module behind a Cargo feature of the same name, each channel's transport
 (`wechat`, `feishu`, `slack`) and mail triage with approval-gated actions
-(`email`), all on by default; a transport supplies only receiving and sending.
+(`email`), all on by default; a transport supplies only receiving and sending,
+and optionally a [working reaction](#working-reaction).
 `scv-server` runs accounts through `scv_channels::run`; the crate uses
 `scv-client` and `scv-protocol` and never depends on the server crate.
 
@@ -350,7 +351,8 @@ Checked live with the owner on 2026-09-24:
 - The app is also subscribed to `im.message.message_read_v1`, which SCV
   acknowledges and ignores.
 - Not yet checked: group chats, threads (built to Feishu's documentation;
-  see [Feishu threads](#feishu-threads)), and company tenants whose
+  see [Feishu threads](#feishu-threads)), the
+  [working reaction](#working-reaction), and company tenants whose
   administrators must approve apps.
 
 **Sign-in by scan.** `scv channels login feishu` runs the device flow that
@@ -380,6 +382,14 @@ hidden prompt or stdin, never an argument, and checked against
 `/open-apis/auth/v3/tenant_access_token/internal` before anything is written.
 `--owner-open-id` names the owner; without it the account grants tools to
 nobody and, unless it answers anyone, answers nobody. Login says so.
+
+**Permissions.** Besides receiving and sending messages and files, the app
+needs `im:message.reactions:write` for the
+[working reaction](#working-reaction) (the older `im:message:send_as_bot`
+also covers it). Whether a scan-created app holds it is not yet checked
+live. An app without it, or one created before SCV used the reaction, adds it
+under *Permissions & Scopes* in the developer console and publishes a new
+version; until then its messages are answered without the reaction.
 
 **Receiving.** Each connection starts with
 `POST {open}/callback/ws/endpoint` (`AppID`, `AppSecret`), which returns a
@@ -447,6 +457,17 @@ Transport failures, HTTP 5xx, 408, and 429, invalid-token codes, and rate-limit
 codes (99991400, 230020, 11232, 11233) retry with the same `uuid`; any other
 error code is a final refusal, logged by code only, and the reply is held as
 for WeChat.
+
+**Working reaction.** A claimed message gets the bot's `Typing` reaction (the
+catalog's "typing", for working on it) through
+`POST /open-apis/im/v1/messages/{message_id}/reactions` with
+`reaction_type.emoji_type`, on the message itself also in a thread. SCV keeps
+the `reaction_id` Feishu returns and removes only that reaction with
+`DELETE /open-apis/im/v1/messages/{message_id}/reactions/{reaction_id}`;
+Feishu holds one reaction of an emoji per operator on a message. A missing
+permission is code 99991672, which SCV logs as needing
+`im:message.reactions:write`; any other code is logged by code only. See
+[Working reaction](#working-reaction).
 
 **Untested:** group chats, threads, and sign-in from company accounts whose
 administrators must approve apps.
@@ -517,6 +538,7 @@ rotation off, opens the App Home's Messages tab, subscribes the bot to
   messages;
 - `files:read` and `files:write` for files both ways, and `im:write` for the
   owner's direct conversation that a file goes to;
+- `reactions:write` for the [working reaction](#working-reaction);
 - `users:read` for `bots.info`, which names the bot's app.
 
 Then, under *Basic Information*, generate an app-level token with
@@ -535,7 +557,10 @@ bot's member ID, and its bot ID; `bots.info` must give the bot's app; and
 `hello` names the same app. Any failure saves nothing; a Socket Mode refusal
 says to enable Socket Mode and check `connections:write`. Login then names
 any scope above that the token's `x-oauth-scopes` leaves out, since what needs
-it fails until the app is reinstalled with it. Without an owner ID the account
+it fails until the app is reinstalled with it. An app set up before SCV used
+the working reaction lacks `reactions:write`: add it under *OAuth &
+Permissions* (or update the manifest) and reinstall the app; until then
+messages are answered without the reaction. Without an owner ID the account
 grants tools to nobody and, unless it answers anyone, answers nobody; login
 says so.
 
@@ -628,11 +653,52 @@ refusal, logged with Slack's error code when it is a plain identifier, and
 the reply is held as for WeChat. `not_in_channel`, `channel_not_found`, and
 `is_archived` mean the bot needs inviting.
 
+**Working reaction.** Slack has no working reaction of its own, so a claimed
+message gets the standard `eyes` emoji from the bot with `reactions.add`
+(`channel`, `timestamp`, `name`), and `reactions.remove` with the same three
+takes it off; no reaction marks completion. `already_reacted` and
+`no_reaction` count as done. Without `reactions:write` Slack answers
+`missing_scope`, which SCV logs as needing that scope; other errors are logged
+by their code. See [Working reaction](#working-reaction).
+
 **Requests.** Web API calls go to `https://slack.com/api` over HTTPS only,
 with a 20-second timeout (120 seconds for a file), no redirects, and
 responses of at most 4 MiB. The bot token goes only to `slack.com` hosts,
 and the app-level token only to `apps.connections.open`. A 429 blocks that
 method until `Retry-After` passes.
+
+## Working reaction
+
+On Feishu and Slack, a message SCV takes on wears a reaction while SCV works
+on it: Feishu's `Typing` and Slack's `eyes` (see each contract above). WeChat
+shows none. A transport supplies the reaction through two optional
+`Transport` methods, `react` and `unreact`, which the bridge calls; WeChat and
+mail chats use neither.
+
+The bridge adds the reaction once the message's claim is durable and before
+its turn is queued, waiting at most 10 seconds, so only claimed messages get
+one: never the bot's own or other apps' messages, a group message that does
+not mention the bot, an envelope from another workspace or app, a message the
+account does not answer, or one answered with a fixed reply instead of a turn
+(the busy and voice replies, an answer to a question, and a mail chat's
+commands). `/new` is claimed like a turn and gets one. What removes it,
+Feishu's `reaction_id` or Slack's emoji name (Slack's message ID already
+names the conversation and `ts`), is saved with the claim
+(`in_flight[].reaction`) and moves into the reply that ends it
+(`pending[].reaction`). It comes off once that reply is delivered, its files
+included, or refused: the model's answer, the failure reply of a turn that
+failed or ran out of time, and the failure or restart reply that recovery
+writes for a claim an interrupted run left. It comes off before the reply
+leaves the state, so a run interrupted in between removes it on its next
+start.
+
+Adding and removing are best effort, each bounded to 10 seconds. A failure,
+such as a missing permission, is logged without the token, secret, or the
+platform's text and changes nothing else: receiving, the turn, and the reply
+go on, a reaction that was not added is never removed, and one that could not
+be removed stays. State from a release before the reaction holds none, so its
+claims and replies remove nothing; such a release ignores the field and
+leaves a reaction in place.
 
 ## Media
 
@@ -779,7 +845,8 @@ live on 2026-09-24, the scan-created app may read message resources and
 upload images and files without any console change. An app that lacks a
 scope gets code 99991672; SCV then logs that `im:resource` or `im:message` must
 be added in the app's developer console and a version published, and the
-model sees `[… download failed]`.
+model sees `[… download failed]`. The reaction's own permission is under
+[Feishu contract](#feishu-contract).
 
 ### Slack media
 

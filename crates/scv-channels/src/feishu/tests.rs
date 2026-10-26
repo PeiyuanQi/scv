@@ -246,6 +246,10 @@ fn default_response(request: &Request, socket_url: &str) -> (u16, String) {
         json!({"code": 0, "bot": {"open_id": "ou_bot"}})
     } else if route.starts_with("/callback/ws/endpoint") {
         json!({"code": 0, "data": {"URL": socket_url, "ClientConfig": {"PingInterval": 90}}})
+    } else if route.contains("/reactions") && request.method == "POST" {
+        json!({"code": 0, "data": {"reaction_id": "r-typing", "reaction_type": {"emoji_type": "Typing"}}})
+    } else if route.contains("/reactions/") && request.method == "DELETE" {
+        json!({"code": 0, "data": {"reaction_id": "r-typing"}})
     } else if route.starts_with("/open-apis/im/v1/messages") && request.method == "GET" {
         json!({"code": 0, "data": {"items": [], "has_more": false}})
     } else if route.starts_with("/open-apis/im/v1/messages") {
@@ -613,6 +617,74 @@ async fn an_untrusted_socket_host_is_never_dialed() {
 }
 
 #[tokio::test]
+async fn the_working_reaction_is_typing_and_comes_off_by_its_own_id() {
+    let mut fake = Fake::start().await;
+    let transport = fake.transport();
+    // A message in a thread: the reaction goes on the message itself.
+    let message = crate::Message::text("om_1", "ou_owner", "hi", "thread:om_1", None);
+    assert_eq!(
+        transport.react(&message).await.unwrap().as_deref(),
+        Some("r-typing")
+    );
+    let added = fake
+        .request("/open-apis/im/v1/messages/om_1/reactions")
+        .await;
+    assert_eq!(added.method, "POST");
+    assert_eq!(added.authorization.as_deref(), Some("Bearer t-1"));
+    assert_eq!(
+        added.body,
+        json!({"reaction_type": {"emoji_type": "Typing"}})
+    );
+    transport.unreact("om_1", "r-typing").await.unwrap();
+    let removed = fake
+        .request("/open-apis/im/v1/messages/om_1/reactions/r-typing")
+        .await;
+    assert_eq!(removed.method, "DELETE");
+    assert_eq!(removed.authorization.as_deref(), Some("Bearer t-1"));
+
+    // A missing permission names the one reactions need, and other refusals
+    // only their code; Feishu's own words, the token, and the secret never
+    // appear.
+    fake.script(
+        "/open-apis/im/v1/messages/om_1/reactions",
+        400,
+        json!({"code": 99991672, "msg": "Access denied. One of the following scopes is required: [im:message.reactions:write]"}),
+    );
+    let error = transport.react(&message).await.unwrap_err().to_string();
+    assert!(
+        error.contains("im:message.reactions:write") && error.contains("99991672"),
+        "{error}"
+    );
+    fake.script(
+        "/open-apis/im/v1/messages/om_1/reactions/r-typing",
+        400,
+        json!({"code": 231003, "msg": "message not found"}),
+    );
+    let refused = transport
+        .unreact("om_1", "r-typing")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("231003"), "{refused}");
+    for error in [error, refused] {
+        assert!(
+            !error.contains("Access denied")
+                && !error.contains("not found")
+                && !error.contains("t-1")
+                && !error.contains("app-secret"),
+            "{error}"
+        );
+    }
+    // A success without a reaction ID leaves nothing to remove by.
+    fake.script(
+        "/open-apis/im/v1/messages/om_1/reactions",
+        200,
+        json!({"code": 0, "data": {}}),
+    );
+    assert!(transport.react(&message).await.is_err());
+}
+
+#[tokio::test]
 async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
     let mut fake = Fake::start().await;
     let directory = tempfile::tempdir().unwrap();
@@ -675,12 +747,23 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
         |credentials| Ok(credentials == &account()),
     );
     let peer = async {
+        // The claimed message wears the working reaction until its reply is
+        // sent, which removes that reaction by its ID.
+        let added = fake
+            .request("/open-apis/im/v1/messages/om_away/reactions")
+            .await;
+        assert_eq!(added.method, "POST");
+        assert_eq!(added.body["reaction_type"]["emoji_type"], "Typing");
         let reply = fake
             .request("/open-apis/im/v1/messages/om_away/reply")
             .await;
         let content: Value = serde_json::from_str(reply.body["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["text"], crate::FAILURE_REPLY);
         assert_ne!(reply.body["uuid"].as_str().unwrap(), "");
+        let removed = fake
+            .request("/open-apis/im/v1/messages/om_away/reactions/r-typing")
+            .await;
+        assert_eq!(removed.method, "DELETE");
         // The reply is delivered and remembered; the checkpoint moved.
         tokio::time::timeout(WAIT, async {
             loop {
@@ -1474,6 +1557,12 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
             thread_item("om_t", "status?", last + 1_000, "omt_1", Some("om_root")),
         ]}}),
     );
+    // The app lacks the reaction permission, which holds up nothing.
+    fake.script(
+        "/open-apis/im/v1/messages/om_t/reactions",
+        400,
+        json!({"code": 99991672, "msg": "Access denied"}),
+    );
     let transport = fake.transport();
     // No daemon listens here, so the turn fails and the bridge answers with
     // its failure reply, inside the thread.
@@ -1504,6 +1593,9 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
         |credentials| Ok(credentials == &account()),
     );
     let peer = async {
+        // On the message itself, not its thread's reply handle.
+        fake.request("/open-apis/im/v1/messages/om_t/reactions")
+            .await;
         let reply = fake.request("/open-apis/im/v1/messages/om_t/reply").await;
         assert_eq!(reply.body["reply_in_thread"], true);
         let content: Value = serde_json::from_str(reply.body["content"].as_str().unwrap()).unwrap();
@@ -1522,6 +1614,10 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
         })
         .await
         .unwrap();
+        // No reaction was added, so none was removed.
+        while let Ok(request) = fake.requests.try_recv() {
+            assert_ne!(request.method, "DELETE", "{}", request.route);
+        }
     };
     tokio::select! {
         result = run => panic!("the bridge stopped: {result:?}"),

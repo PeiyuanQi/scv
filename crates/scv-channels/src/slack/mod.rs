@@ -23,8 +23,8 @@ use tokio::{sync::Mutex, time::Instant};
 
 use crate::retry::{Attempt, SendLabels, retry_send};
 use crate::{
-    AccountRun, Batch, Channel, ChannelKind, Downloaded, Inbound, Media, MediaKind, Outbound,
-    OutboundFile, Resolved, SendOutcome, Transport,
+    AccountRun, Batch, Channel, ChannelKind, Downloaded, Inbound, Media, MediaKind, Message,
+    Outbound, OutboundFile, Resolved, SendOutcome, Transport,
 };
 
 mod api;
@@ -53,6 +53,9 @@ const CATCH_UP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 const CATCH_UP_CHATS: usize = 16;
 const CATCH_UP_THREADS: usize = 16;
 const CATCH_UP_PAGES: usize = 2;
+/// The reaction on a message SCV is working on. Slack has no built-in
+/// working reaction, so a standard emoji stands in.
+const WORKING_EMOJI: &str = "eyes";
 
 /// The Slack channel, through a bot app in one workspace.
 pub struct Slack;
@@ -541,6 +544,20 @@ impl Transport for SocketMode {
         })
         .await?;
         Ok(outcome(shared))
+    }
+
+    /// React with [`WORKING_EMOJI`]; its name is all that removes it again.
+    async fn react(&self, message: &Message) -> Result<Option<String>> {
+        let (channel, ts) = inbound::message_ts(&message.id)?;
+        self.verify().await?;
+        self.api.add_reaction(channel, ts, WORKING_EMOJI).await?;
+        Ok(Some(WORKING_EMOJI.to_owned()))
+    }
+
+    async fn unreact(&self, message_id: &str, reaction: &str) -> Result<()> {
+        let (channel, ts) = inbound::message_ts(message_id)?;
+        self.verify().await?;
+        self.api.remove_reaction(channel, ts, reaction).await
     }
 }
 

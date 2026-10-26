@@ -1,5 +1,6 @@
 //! Feishu Open Platform HTTP calls: the app's tenant token, sending
-//! messages, reading chat history, and the long connection's endpoint.
+//! messages, reactions, reading chat history, and the long connection's
+//! endpoint.
 //! Only the brand's own hosts are contacted, redirects are never followed,
 //! and response bodies are bounded.
 
@@ -411,6 +412,46 @@ impl Api {
         classify(result)
     }
 
+    /// Add the bot's reaction `emoji_type`, such as `Typing`, to the message
+    /// `message_id`, returning its reaction ID, which removes only it.
+    pub(crate) async fn add_reaction(&self, message_id: &str, emoji_type: &str) -> Result<String> {
+        let path = format!(
+            "/open-apis/im/v1/messages/{}/reactions",
+            encode_segment(message_id)
+        );
+        let body = json!({"reaction_type": {"emoji_type": emoji_type}});
+        let (_, value) = self
+            .call(move |client, open| client.post(format!("{open}{path}")).json(&body))
+            .await?;
+        match code(&value) {
+            Some(0) => value
+                .pointer("/data/reaction_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("Feishu reaction response omitted the reaction_id")),
+            Some(code) => Err(reaction_refused(code)),
+            None => bail!("invalid Feishu reaction response"),
+        }
+    }
+
+    /// Remove the reaction `reaction_id` from the message `message_id`.
+    pub(crate) async fn remove_reaction(&self, message_id: &str, reaction_id: &str) -> Result<()> {
+        let path = format!(
+            "/open-apis/im/v1/messages/{}/reactions/{}",
+            encode_segment(message_id),
+            encode_segment(reaction_id)
+        );
+        let (_, value) = self
+            .call(move |client, open| client.delete(format!("{open}{path}")))
+            .await?;
+        match code(&value) {
+            Some(0) => Ok(()),
+            Some(code) => Err(reaction_refused(code)),
+            None => bail!("invalid Feishu reaction response"),
+        }
+    }
+
     /// A message by ID: the message itself, or for a forwarded bundle
     /// (`merge_forward`) the bundle followed by the messages it holds.
     pub(crate) async fn message(&self, message_id: &str) -> Result<Vec<Value>> {
@@ -709,6 +750,19 @@ fn classify(result: Result<(u16, Value)>) -> Attempt {
         Some(code) => Attempt::Refused(format!("code {code}")),
         None if status >= 400 => Attempt::Refused(format!("HTTP status {status}")),
         None => Attempt::Retry("invalid Feishu response".into()),
+    }
+}
+
+/// A reaction call's refusal, naming the permission reactions need when the
+/// app lacks it.
+fn reaction_refused(code: i64) -> anyhow::Error {
+    if code == SCOPE_CODE {
+        anyhow!(
+            "Feishu refused the reaction: the app lacks a permission (code {code}); add \
+             im:message.reactions:write in its developer console and publish a version"
+        )
+    } else {
+        Refusal(code).into()
     }
 }
 
