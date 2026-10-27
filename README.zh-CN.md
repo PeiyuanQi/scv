@@ -60,7 +60,9 @@ Cursor CLI、Amp、Kimi CLI 或一个嵌套的 SCV。条件允许时，它们通
 （它说了什么、运行了哪些命令、在等哪些审批），并能把你的提示发进它的对话。侧边栏列出
 每个工作区的任务、状态及原因：工作中、等你处理、空闲、太久没有动静，或被中断。你可以
 自己启动任务、停止任务、在旁观时回答它们的审批，并在智能体自己的对话里继续一个被重启
-打断的任务；排队的提示也会恢复。`scv jobs` 在命令行里提供同样的功能。
+打断的任务；排队的提示也会恢复。还可以在 Codex 自己的终端里接管一个空闲的对话
+（`Ctrl+O` 或 `scv jobs attach`），直接在里面输入，分离后它继续运行。`scv jobs`
+在命令行里提供同样的功能。
 
 ### 独立的主目录，独立的密钥
 
@@ -154,7 +156,7 @@ scv agents check                 # 版本、可用模型，以及每个智能体
 | `scv channels login`、`run`、`stop`、`status`、`logout` | 管理聊天账号（`feishu`、`lark`、`wechat`、`slack`）和邮箱（`email`：未开启 `mail.actions` 时只读） |
 | `scv mail status`、`cancel` | 列出或撤回等待批准的邮件操作；批准只能在邮件聊天中进行 |
 | `scv agents login`、`status`、`check`、`ps`、`kill`、`worktrees` | 登录并检查智能体，列出或停止它们的运行，列出或删除任务的 worktree |
-| `scv jobs`、`log`、`start`、`send`、`cancel`、`resume`、`approve` | 工作台：所有任务和运行、实时日志、你自己的任务，以及对它们的操作 |
+| `scv jobs`、`log`、`start`、`send`、`cancel`、`resume`、`approve`、`attach` | 工作台：所有任务和运行、实时日志、你自己的任务、对它们的操作，以及在智能体自己的终端里接管对话 |
 | `scv confirm "…"` | 在聊天中向主人提一个是/否问题；只有回答"是"时退出码为 0 |
 | `scv config show` | 列出生效的每个路径和设置，隐藏密钥 |
 | `scv update` | 安装最新版本并重启守护进程 |

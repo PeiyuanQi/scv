@@ -1580,6 +1580,9 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   session has yet to report): its content goes, and what is left keeps the
   job's number taken, and the job it resumed marked resumed, until it is
   pruned. And *approve* or *deny* an approval request a job waits on.
+- *attach*: take a live session's idle conversation over in its agent's
+  own terminal, type into it, detach while it keeps running, and end it
+  ([below](#taking-a-conversation-over)).
 
 **Attended approvals.** A background job's relayed approval request normally
 gets the session's unattended answer at once (above). While the owner
@@ -1603,14 +1606,130 @@ scv jobs cancel job-3
 scv jobs resume job-3
 scv jobs dismiss job-3
 scv jobs approve <id> | scv jobs deny <id>
+scv jobs attach job-3 [--end]             # take its conversation over in the agent's terminal (Ctrl+] detaches)
 ```
 
+`scv jobs attach` needs a terminal: it shows the agent's screen full-screen
+and sends it every key until `Ctrl+]` detaches, leaving the agent running;
+`--end` ends the takeover, with or without a terminal.
 A job is named `job-3` when one session has it, else `<session prefix>/job-3`.
 Listing and logs read the records on disk when no daemon runs; acting needs a
 daemon of this release. Inside a delegated run, `scv jobs` only reads: the
 workbench acts for the owner, so a delegated agent cannot start, steer,
 cancel, resume, or approve through it (cooperative, like the other
 [delegated-run limits](security.md#delegated-runs)).
+
+### Taking a conversation over
+
+A delegated agent runs headless, so its live view is its activity log. The
+owner can instead take one of its conversations over in the agent's own
+interactive terminal ("attach", from an agent view's `Ctrl+O`, or the
+`attach` actions of [`daemon.control`](protocol.md#the-workbench)): the
+daemon starts the agent's interactive UI on the conversation's own agent
+session, on a pseudo-terminal the daemon holds, and the owner reads its
+screen and types into it.
+
+**What runs.** The agent's own CLI, found as its delegated runs find it,
+with the arguments its adapter declares for resuming a session
+interactively (Codex: `codex resume <thread>` with its `permissions =
+"full"` switches, `--dangerously-bypass-approvals-and-sandbox -c
+web_search="live"`), in the conversation's directory (its worktree, when it
+has one), with exactly the environment its delegated runs get: its private
+home and state variables, every inherited credential, endpoint, and
+state-location variable removed, the project Rust environment, and the
+delegation tags (`SCV_PARENT`, `SCV_DELEGATION_DEPTH`), plus `TERM` for the
+screen SCV keeps. It is a delegated run of its own (transport `terminal`):
+recorded under `state/delegations` while it runs (`scv agents ps` lists it
+as idle, since no SCV turn runs in it, and `scv agents kill` stops it), with
+an activity log that notes the takeover, each attach and detach, and how
+the terminal closed, never what it showed. The process leads a session of
+its own with the terminal as its controlling terminal, so its process group
+is what SCV stops, and a hangup reaches it. The terminal is the only one of
+SCV's descriptors it gets: on Linux each one SCV opens for the terminal is
+created closed on exec, so no other process SCV starts meanwhile inherits
+it (elsewhere the flag is set right after opening).
+
+**Who can be taken over.** Only an agent whose terminal asks nothing SCV's
+approval gate decides, so a key typed into it never answers an approval:
+the adapter declares an interactive resume whose `permissions = "full"`
+switches turn every prompt off, and the agent is configured with
+`permissions = "full"`, under which its delegated runs relay no approval
+either. That is Codex. With its own prompts on, Codex asks in its terminal
+what its delegated runs relay to the gate, so it is refused; Claude Code is
+refused always, because its terminal still asks before some actions with
+its prompts off (deleting files, publishing), which its ACP runs relay to
+the gate; agents without a verified interactive resume, and nested SCVs,
+are refused with that reason. A conversation that runs a turn, has turns
+waiting in its queue, is held by a reviewed job between its rounds, or has
+no agent session yet is refused too, as is a ninth takeover while eight
+run.
+
+**The conversation meanwhile.** Taking a conversation over first stops the
+live ACP server it kept, if any, and waits until it is gone, so two
+processes never drive one agent session. Until the takeover ends, the
+conversation runs no turn of SCV's: a call to it (the model's, the owner's
+`send`, a queued follow-up) queues behind the takeover in its line, waits
+when its `on_busy` waits, and fails saying the conversation is taken over
+when it does not. When the terminal closes, the conversation's next turn
+continues the same agent session (`exec resume` for the per-turn CLI, or a
+new ACP server that loads the session), with what was done in the
+terminal.
+
+**The screen.** The daemon reads the terminal whether or not anyone
+watches, so the agent never blocks on its output, and keeps its screen
+(20x5 to 400x200 cells, 100x30 unless the client names a size; no
+scrollback) with the `vt100` parser. It answers the queries a terminal UI
+makes as it starts (cursor position, device status and attributes) as a
+terminal would. The agent's output is untrusted, so before the parser sees
+it SCV bounds the counts of the sequences whose cost grows with their count
+(inserting, deleting, and erasing lines and characters, and scrolling) by
+the screen's size, which changes nothing they do; drops a control sequence
+too long to be a real one (over 256 bytes); keeps a cursor restored to
+where it was saved before the screen shrank on the screen, as a terminal
+does; and parses at most 512 bytes at a time, so a read of the screen never
+waits long. Should the parser still fail on it, the takeover ends ("SCV
+could not keep its screen"), as it does when the terminal's I/O fails:
+nobody would read the terminal any more. Clients read the rows that changed
+since the generation they have, as styled text: never the agent's escape
+sequences, and with values that look like credentials masked by the
+activity log's rules (the same `NAME=value`, `Bearer`, `--token`, and
+token-prefix rules, and URL queries), the mask taking the secret's cells.
+Masking reads each line across the rows it wraps over, and a line that ends
+in a name whose value is still to come, or in a hidden value that runs to
+the right edge, hides the next line's first word too, so a value a UI
+wraps onto an indented row is masked on both; a row whose masking changes
+is sent again. Nothing of the screen or the terminal's output is written to
+disk: it lives in the daemon's memory while the takeover lasts, and for a
+minute after the terminal closes so an attached client reads how it ended,
+and the parser's own logs, which would quote escape sequences, are always
+off.
+
+**Clients.** `attach` returns a hold; reads and keys name it. One client
+holds a terminal at a time: another `attach` takes the hold, and the first
+one's next read is refused. A hold not read for 30 seconds lapses (the
+client counts as detached; the agent runs on). Attaching to a takeover that
+runs never waits; takeovers start one at a time, and none starts once the
+daemon is stopping. Input is at most 64 KiB per
+request and written within two seconds: what an agent that stopped reading
+its terminal does not take is dropped, and the reply says how much. Typing
+sends only the bytes a terminal would send; no client signals the agent's
+process directly. Flow control
+is off on the terminal, so `Ctrl+S` is a key rather than a pause, and the
+terminal stop keys never stop the agent, whose process group has no parent
+in its session.
+
+**Ending.** The owner ends a takeover (`attach_end`, or `Ctrl+X` twice in
+its agent view), the agent's UI exits by itself, its session closes, or the
+daemon stops: the terminal is hung up, the agent gets two seconds to exit,
+and then its process group and everything tagged with its run are stopped.
+The daemon dying closes the terminal's master side, which makes the kernel
+hang the terminal up the same way, and the next daemon stops anything left
+of it as an orphaned delegation. A planned restart does not wait for a
+takeover, nor for the prompts queued behind one, which wait for the owner
+and are kept for the next session like any queued prompt; it ends the
+takeover like a stop. A failure to open the terminal is reported
+to the owner and changes nothing else: the conversation is free again, and
+its next turn starts its agent as before.
 
 ### Nested SCV (`scv`)
 
@@ -2094,7 +2213,26 @@ policy they never override, and worktrees in scratch repositories (a linked
 worktree's, one reaching outside the workspace, hooks, a locked one);
 integration tests run an owner job from `scv jobs` against a daemon and
 resume a job a SIGKILLed daemon interrupted through the agent's own
-conversation.
+conversation. Takeover tests cover which agents may be offered and why the
+others are refused, the terminal's session, controlling terminal, flow
+control, resize, and hangup, terminal queries answered as of the output
+before them, only changed rows sent, credentials masked across wrapped rows,
+input given up at its deadline, counts bounded by the screen and costly
+output kept cheap, a cursor saved before the screen shrank restored onto it,
+random output and resizes never failing the screen, a failing screen ending
+the takeover and input waiting no more once the terminal's I/O ends, a value
+a UI wraps onto an indented row masked on both and a row sent again when its
+masking changes, none of the terminal's own descriptors inherited by the
+agent, the conversation held (calls queue behind it, a turn refused) and
+given back on end, exit, or a session's end, an agent that ignores the
+hangup stopped with what it started, a live ACP server stopped first and its
+session loaded by the next turn, one client at a time and a silent one
+detached, nothing of the screen written to disk or logged, reads of the
+screen that never scan the process table, no takeover started once the
+daemon stops, a planned restart that does not wait for the prompts queued
+behind a takeover, and, end to end, a takeover typed into, detached,
+attached again, ended, hung up by a killed daemon, and driven from `scv jobs
+attach` in a real pseudo-terminal.
 
 ## Tool extension contract
 

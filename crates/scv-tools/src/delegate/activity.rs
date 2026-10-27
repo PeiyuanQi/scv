@@ -68,6 +68,9 @@ pub(crate) enum RunTransport {
     Acp,
     /// A nested `scv server --stdio` for the whole conversation.
     Scv,
+    /// The agent's own interactive UI in a terminal SCV holds, while the
+    /// owner has the conversation taken over.
+    Terminal,
 }
 
 impl RunTransport {
@@ -76,6 +79,7 @@ impl RunTransport {
             Self::Cli => "cli",
             Self::Acp => "acp",
             Self::Scv => "scv",
+            Self::Terminal => "terminal",
         }
     }
 }
@@ -101,7 +105,7 @@ pub struct RunState {
     pub handle: String,
     pub agent: String,
     pub session: String,
-    /// `cli`, `acp`, or `scv`.
+    /// `cli`, `acp`, `scv`, or `terminal` (the owner's takeover).
     pub transport: String,
     pub cwd: PathBuf,
     /// The SCV process that owns the run.
@@ -461,6 +465,45 @@ impl RunActivity {
             writer.end(how);
             writer.transition(ended, Some(format!("its process {how}")));
         }
+    }
+
+    /// The owner's takeover of the run's conversation in its agent's
+    /// terminal: `note` is logged, and the run works with `detail` until its
+    /// terminal closes. Nothing the terminal shows is logged.
+    pub(crate) fn terminal(&self, note: &str, detail: &str) {
+        let mut writer = lock(&self.0);
+        writer.event(
+            RunEventKind::Note,
+            bounded_chars(&redact(note), MAX_EVENT_CHARS),
+            |_| {},
+        );
+        writer.transition(AgentState::Working, Some(detail.to_owned()));
+    }
+
+    /// The takeover's terminal closed (`how`, such as `exit 0`): the run
+    /// has ended, and the conversation goes back to SCV's turns.
+    pub(crate) fn terminal_closed(&self, how: &str) {
+        let mut writer = lock(&self.0);
+        if writer.state.ended {
+            return;
+        }
+        writer.event(
+            RunEventKind::Note,
+            bounded_chars(
+                &format!("the terminal closed: {}", redact(how)),
+                MAX_EVENT_CHARS,
+            ),
+            |_| {},
+        );
+        writer.transition(
+            AgentState::Completed,
+            Some(format!(
+                "the terminal closed: {}",
+                bounded_chars(&redact(how), 200)
+            )),
+        );
+        writer.end("exited");
+        writer.save();
     }
 
     /// The agent's own session ID, for resuming the conversation later.
@@ -878,6 +921,10 @@ pub fn current(state: &RunState, now_unix: u64) -> (AgentState, Option<String>) 
             AgentState::Interrupted,
             Some("the SCV process that ran it stopped".into()),
         );
+    }
+    // A takeover's terminal is the owner's: its quiet is the owner's too.
+    if state.transport == RunTransport::Terminal.as_str() {
+        return (state.state, state.detail.clone());
     }
     let quiet = now_unix.saturating_sub(state.last_activity_unix);
     match state.state {

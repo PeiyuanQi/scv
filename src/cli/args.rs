@@ -226,6 +226,17 @@ pub(crate) enum JobsCommand {
     Approve { id: String },
     /// Deny an approval request a background job waits on.
     Deny { id: String },
+    /// Take a job's idle conversation over in its agent's own terminal and
+    /// attach this terminal to it: every key goes to the agent, and Ctrl+]
+    /// detaches, leaving it running. Only agents whose terminal asks no
+    /// approvals (Codex with permissions = "full").
+    Attach {
+        job: String,
+        /// End the takeover instead: hang its terminal up, stop its
+        /// process, and give the conversation back to SCV's turns.
+        #[arg(long)]
+        end: bool,
+    },
 }
 
 #[derive(Subcommand)]

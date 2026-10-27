@@ -5,7 +5,7 @@
 //! and a later call never overtakes one already waiting.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -28,6 +28,8 @@ struct State {
     next: u64,
     /// Each lane's places, first one first. An empty lane is removed.
     lanes: HashMap<String, VecDeque<u64>>,
+    /// The places the owner's takeovers of conversations hold.
+    takeovers: HashSet<u64>,
 }
 
 /// One call's place in its conversation's lane, given up when dropped.
@@ -43,12 +45,34 @@ pub(in crate::delegate) struct Place {
 impl Lanes {
     /// Join the end of `handle`'s lane.
     pub(in crate::delegate) fn join(self: &Arc<Self>, handle: &str) -> Place {
+        self.join_as(handle, false)
+    }
+
+    /// Join the end of `handle`'s lane for the owner's takeover of it.
+    pub(in crate::delegate) fn join_takeover(self: &Arc<Self>, handle: &str) -> Place {
+        self.join_as(handle, true)
+    }
+
+    /// Whether the first place in `handle`'s lane is a takeover's.
+    pub(in crate::delegate) fn held_by_takeover(&self, handle: &str) -> bool {
+        let state = lock(&self.state);
+        state
+            .lanes
+            .get(handle)
+            .and_then(VecDeque::front)
+            .is_some_and(|id| state.takeovers.contains(id))
+    }
+
+    fn join_as(self: &Arc<Self>, handle: &str, takeover: bool) -> Place {
         let mut state = lock(&self.state);
         state.next += 1;
         let id = state.next;
         let lane = state.lanes.entry(handle.to_owned()).or_default();
         let ahead = lane.len();
         lane.push_back(id);
+        if takeover {
+            state.takeovers.insert(id);
+        }
         Place {
             lanes: Arc::clone(self),
             handle: handle.to_owned(),
@@ -106,6 +130,7 @@ impl Drop for Place {
                 state.lanes.remove(&self.handle);
             }
         }
+        state.takeovers.remove(&self.id);
         drop(state);
         self.lanes.changed.notify_waiters();
     }

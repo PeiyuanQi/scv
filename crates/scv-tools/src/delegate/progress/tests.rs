@@ -107,6 +107,11 @@ fn credentials_are_redacted() {
         redact("echo sk-abcdefghijklmnop ghp_0123456789abcdef"),
         "echo … …"
     );
+    // Spaces lined up in columns do not let the value after a name go.
+    assert_eq!(
+        redact("password:    hunter2   --token  abc  Bearer   xyz  done"),
+        "password:    …   --token  …  Bearer   …  done"
+    );
     assert_eq!(redact("cargo test -p scv-tools"), "cargo test -p scv-tools");
     assert_eq!(redact("git log --oneline -3"), "git log --oneline -3");
     assert_eq!(

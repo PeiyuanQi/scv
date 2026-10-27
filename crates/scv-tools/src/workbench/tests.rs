@@ -1114,3 +1114,267 @@ async fn a_follow_up_whose_worktree_was_removed_resumes_in_a_new_one() {
     assert_ne!(cwd, workspace.display().to_string());
     host.release.notify_waiters();
 }
+
+/// An agent whose conversations open a fake CLI's terminal, which records
+/// its PID in `dir` and echoes what is typed.
+struct Terminal {
+    launch: crate::delegate::takeover::TakeoverLaunch,
+}
+
+#[async_trait]
+impl Backend for Terminal {
+    fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
+        Ok(ToolRisk::Delegate)
+    }
+    fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
+        Ok(String::new())
+    }
+    async fn execute(
+        &self,
+        _arguments: Value,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::success(
+            json!({"status":"completed"}).to_string(),
+        ))
+    }
+    fn takeover(&self) -> Result<crate::delegate::takeover::TakeoverLaunch, String> {
+        Ok(self.launch.clone())
+    }
+}
+
+/// A live session whose `codex` conversation `codex-1` can be taken over
+/// in a fake terminal; returns the session's handle, its tool, and where the
+/// terminal writes its PID.
+fn terminal_session(
+    bench: &Bench,
+    session: &str,
+) -> (SessionHandle, Arc<BackgroundCapable>, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = bench.root.path();
+    let pid = dir.join(format!("{session}.pid"));
+    let cli = dir.join(format!("{session}-codex"));
+    std::fs::write(
+        &cli,
+        format!(
+            "#!/bin/sh\necho $$ > {}\necho \"on $2\"\nwhile IFS= read -r line; do echo \"typed $line\"; done\n",
+            pid.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let handle = bench.workbench.register_session(session, "TUI", dir);
+    let jobs = Arc::new(BackgroundJobs::new(4, None));
+    let launch = crate::delegate::takeover::launch(
+        "codex",
+        &cli.display().to_string(),
+        &[],
+        true,
+        &[],
+        None,
+    )
+    .unwrap();
+    let agent = AgentTool::beside(
+        "codex",
+        Arc::new(Terminal { launch }),
+        Accepts {
+            session: true,
+            ..Accepts::default()
+        },
+        &[],
+    );
+    let tool = Arc::new(BackgroundCapable::plain(Arc::new(agent), Arc::clone(&jobs)));
+    tool.conversations
+        .adopt("codex", dir, "0199a213-81c0-7800-8aa1-bbab2a035a53")
+        .unwrap();
+    bench
+        .workbench
+        .attach(session, Arc::downgrade(&tool), Arc::downgrade(&jobs));
+    (handle, tool, pid)
+}
+
+fn screen_of(page: &AttachPage) -> String {
+    page.lines
+        .iter()
+        .flat_map(|row| row.spans.iter().map(|span| span.text.as_str()))
+        .collect()
+}
+
+async fn wait_for_pid(path: &Path) -> u32 {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pid) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+async fn wait_gone(pid: u32) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while crate::delegate::records::group_exists(pid) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("terminal {pid} outlived its takeover"));
+}
+
+#[tokio::test]
+async fn a_takeover_holds_one_client_at_a_time_and_detaches_one_that_stops_reading() {
+    let bench = bench();
+    let (_handle, tool, pid_file) = terminal_session(&bench, "session-a");
+    let first = bench
+        .workbench
+        .attach_terminal("session-a", "codex-1", Some(60), Some(10))
+        .await
+        .unwrap();
+    assert!(first.full);
+    assert_eq!((first.cols, first.rows), (60, 10));
+    let pid = wait_for_pid(&pid_file).await;
+    assert!(tool.conversations.is_busy("codex-1"));
+    let typed = bench
+        .workbench
+        .attach_io(&first.id, 0, "hi\r", None, None)
+        .await
+        .unwrap();
+    assert!(typed.note.is_none());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let page = bench
+                .workbench
+                .attach_io(&first.id, 0, "", None, None)
+                .await
+                .unwrap();
+            if screen_of(&page).contains("typed hi") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Too much input at once is refused before anything is typed.
+    let flood = "x".repeat(crate::delegate::takeover::MAX_INPUT_BYTES + 1);
+    assert!(
+        bench
+            .workbench
+            .attach_io(&first.id, 0, &flood, None, None)
+            .await
+            .is_err()
+    );
+    // A second client takes the terminal; the first hold stops working.
+    let second = bench
+        .workbench
+        .attach_terminal("session-a", "codex-1", None, None)
+        .await
+        .unwrap();
+    assert_ne!(second.id, first.id);
+    assert!(screen_of(&second).contains("typed hi"));
+    assert!(
+        bench
+            .workbench
+            .attach_io(&first.id, 0, "", None, None)
+            .await
+            .unwrap_err()
+            .contains("not attached here")
+    );
+    // A client that stops reading is detached; the agent runs on.
+    if let Some(stale) = Instant::now().checked_sub(ATTACH_LEASE) {
+        for held in lock(&bench.workbench.takeovers).values_mut() {
+            if let Some((_, read)) = &mut held.lease {
+                *read = stale;
+            }
+        }
+        bench.workbench.expire_takeovers();
+        assert!(bench.workbench.detach(&second.id).is_err());
+        assert!(crate::delegate::records::group_exists(pid));
+    }
+    let (note, last) = bench
+        .workbench
+        .end_takeover("session-a", "codex-1")
+        .await
+        .unwrap();
+    assert!(note.contains("ended from SCV"), "{note}");
+    assert!(last.ended);
+    wait_gone(pid).await;
+    assert!(!tool.conversations.is_busy("codex-1"));
+    assert!(
+        bench
+            .workbench
+            .end_takeover("session-a", "codex-1")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_takeover_ends_with_its_session_and_with_the_daemon() {
+    let bench = bench();
+    let (handle, _tool, pid_file) = terminal_session(&bench, "session-a");
+    bench
+        .workbench
+        .attach_terminal("session-a", "codex-1", None, None)
+        .await
+        .unwrap();
+    let pid = wait_for_pid(&pid_file).await;
+    assert_eq!(
+        bench.workbench.takeover_sessions(),
+        HashSet::from(["session-a".to_owned()])
+    );
+    drop(handle);
+    wait_gone(pid).await;
+    assert!(bench.workbench.takeover_sessions().is_empty());
+
+    let (_handle, _tool, pid_file) = terminal_session(&bench, "session-b");
+    bench
+        .workbench
+        .attach_terminal("session-b", "codex-1", None, None)
+        .await
+        .unwrap();
+    let pid = wait_for_pid(&pid_file).await;
+    bench.workbench.end_takeovers().await;
+    assert!(!crate::delegate::records::group_exists(pid));
+}
+
+#[tokio::test]
+async fn an_agent_whose_terminal_is_not_offered_is_refused_and_nothing_changes() {
+    let bench = bench();
+    let live = live(&bench, "session-a");
+    live.tool
+        .conversations
+        .adopt(
+            "codex",
+            Path::new("/w"),
+            "0199a213-81c0-7800-8aa1-bbab2a035a53",
+        )
+        .unwrap();
+    let refused = bench
+        .workbench
+        .attach_terminal("session-a", "codex-1", None, None)
+        .await
+        .unwrap_err();
+    assert!(refused.contains("no terminal of its own"), "{refused}");
+    assert!(!live.tool.conversations.is_busy("codex-1"));
+    assert!(
+        bench
+            .workbench
+            .attach_terminal("nobody", "codex-1", None, None)
+            .await
+            .unwrap_err()
+            .contains("does not run in this daemon")
+    );
+    assert!(
+        bench
+            .workbench
+            .attach_io("at-unknown", 0, "", None, None)
+            .await
+            .is_err()
+    );
+}

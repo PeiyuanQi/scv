@@ -385,6 +385,7 @@ impl Components {
             workbench_note: None,
             workbench_job: None,
             worktrees: Vec::new(),
+            attach: None,
         }
     }
 
@@ -577,7 +578,11 @@ impl Components {
             | DaemonCommand::WorkbenchResume { .. }
             | DaemonCommand::WorkbenchDismiss { .. }
             | DaemonCommand::Worktrees
-            | DaemonCommand::WorktreeRemove { .. } => return Ok(self.status()),
+            | DaemonCommand::WorktreeRemove { .. }
+            | DaemonCommand::Attach { .. }
+            | DaemonCommand::AttachIo { .. }
+            | DaemonCommand::AttachDetach { .. }
+            | DaemonCommand::AttachEnd { .. } => return Ok(self.status()),
             DaemonCommand::Reload => {}
             DaemonCommand::ChannelSet {
                 channel,

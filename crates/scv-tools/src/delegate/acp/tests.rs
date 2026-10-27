@@ -1614,3 +1614,114 @@ async fn an_acp_runs_turns_tools_and_approvals_reach_its_activity_log() {
         assert!(!texts.contains(private), "{private} leaked: {texts}");
     }
 }
+
+#[tokio::test]
+async fn a_conversation_taken_over_in_its_terminal_stops_its_server_and_then_loads_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "load");
+    // The agent's own CLI, whose terminal the owner takes the session over in.
+    let cli = dir.path().join("codex-cli");
+    std::fs::write(
+        &cli,
+        "#!/bin/sh\necho \"terminal $*\"\nwhile IFS= read -r line; do echo \"typed $line\"; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registry = Arc::new(DelegationRegistry::for_test(&scv_client::Layout::new(
+        home.path(),
+    )));
+    let conversations = store(Duration::from_secs(3600));
+    let mut config = adapter(true);
+    config.command = cli.display().to_string();
+    let tool = AcpAgentTool::new(
+        "codex".into(),
+        &config,
+        AcpAgentLaunch {
+            command: script.display().to_string(),
+            args: Vec::new(),
+            full_mode: None,
+            environment: Vec::new(),
+            required: false,
+            session_options: false,
+        },
+        Some(script.clone()),
+        Timeouts {
+            default: Duration::from_secs(20),
+            max: Duration::from_secs(30),
+        },
+        64 * 1024,
+        Some(delegation(&registry)),
+        Arc::clone(&conversations),
+    );
+    let first = tool
+        .execute(
+            json!({"prompt":"remember heron"}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&first)["session"], "codex-1", "{}", first.content);
+    let server = pid(dir.path());
+    assert!(alive(server));
+
+    let mut hold = conversations.take_over("codex-1").unwrap();
+    let attachment = hold.attachment.take().expect("the live server is kept");
+    tool.release(attachment).await;
+    // The server is gone before the terminal opens on its session.
+    assert!(!alive(server));
+    let lanes = Arc::new(crate::delegate::background::lane::Lanes::default());
+    let place = lanes.join("codex-1");
+    let launch = tool.takeover().unwrap();
+    let takeover = crate::delegate::takeover::start(&launch, hold, place, "parent", (100, 20))
+        .await
+        .unwrap();
+    let mut shown = String::new();
+    for _ in 0..200 {
+        shown = takeover
+            .page("client", 0)
+            .lines
+            .iter()
+            .flat_map(|row| row.spans.iter().map(|span| span.text.clone()))
+            .collect();
+        if shown.contains("terminal resume s1") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        shown.contains("terminal resume s1 --dangerously-bypass-approvals-and-sandbox"),
+        "{shown}"
+    );
+    // No SCV turn runs on the session meanwhile.
+    let refused = tool
+        .execute(
+            json!({"prompt":"recall","session":"codex-1"}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.message.contains("taken over"),
+        "{}",
+        refused.message
+    );
+    takeover.end().await;
+
+    // The next turn starts a server that loads the session the terminal had.
+    let next = tool
+        .execute(
+            json!({"prompt":"recall","session":"codex-1"}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    let value = json(&next);
+    assert_eq!(value["status"], "completed", "{value}");
+    assert!(
+        calls(dir.path()).contains("session/load id=s1"),
+        "{}",
+        calls(dir.path())
+    );
+    assert_ne!(pid(dir.path()), server);
+}

@@ -174,11 +174,13 @@ impl Hosts {
     }
 
     /// Drop workbench sessions that have had nothing running or waiting,
-    /// and no owner action, for [`HOST_IDLE`]. A session with a job going
-    /// counts as used, so the hour starts when its last job ends.
+    /// and no owner action, for [`HOST_IDLE`]. A session with a job going,
+    /// or a conversation taken over, counts as used, so the hour starts
+    /// when the last of them ends.
     pub(crate) async fn expire_idle(&self) {
+        let taken_over = self.workbench.takeover_sessions();
         self.hosts.lock().await.retain(|_, host| {
-            if host.jobs.pending() > 0 {
+            if host.jobs.pending() > 0 || taken_over.contains(&host.session) {
                 host.last_used = Instant::now();
             }
             host.last_used.elapsed() < HOST_IDLE
@@ -199,9 +201,10 @@ impl Hosts {
         }
     }
 
-    /// Drop every workbench session, which stops their jobs, and wait a
-    /// little for their agents to go.
+    /// End every takeover, then drop every workbench session, which stops
+    /// their jobs, and wait a little for their agents to go.
     pub(crate) async fn shutdown(&self) {
+        self.workbench.end_takeovers().await;
         let sessions: Vec<String> = {
             let mut hosts = self.hosts.lock().await;
             let sessions = hosts.values().map(|host| host.session.clone()).collect();
@@ -235,6 +238,10 @@ pub(crate) fn is_workbench_command(command: &DaemonCommand) -> bool {
             | DaemonCommand::WorkbenchDismiss { .. }
             | DaemonCommand::Worktrees
             | DaemonCommand::WorktreeRemove { .. }
+            | DaemonCommand::Attach { .. }
+            | DaemonCommand::AttachIo { .. }
+            | DaemonCommand::AttachDetach { .. }
+            | DaemonCommand::AttachEnd { .. }
     )
 }
 
@@ -244,7 +251,18 @@ pub(crate) async fn control(
     command: DaemonCommand,
 ) -> std::result::Result<DaemonStatus, String> {
     let workbench = hosts.workbench();
-    let mut status = base_status(&hosts.registry);
+    // A taken-over terminal is read every 50 ms and at each key: those
+    // replies leave the delegations, which take a process table scan, out.
+    let mut status = if matches!(
+        command,
+        DaemonCommand::Attach { .. }
+            | DaemonCommand::AttachIo { .. }
+            | DaemonCommand::AttachDetach { .. }
+    ) {
+        status_with(DelegationSummary::default())
+    } else {
+        base_status(&hosts.registry)
+    };
     let mut snapshot = true;
     match command {
         DaemonCommand::Workbench { watch } => {
@@ -360,6 +378,43 @@ pub(crate) async fn control(
             status.worktrees = worktrees(hosts).await;
             snapshot = false;
         }
+        DaemonCommand::Attach {
+            session,
+            conversation,
+            cols,
+            rows,
+        } => {
+            hosts.touch(&session).await;
+            status.attach = Some(
+                workbench
+                    .attach_terminal(&session, &conversation, cols, rows)
+                    .await?,
+            );
+            snapshot = false;
+        }
+        DaemonCommand::AttachIo {
+            id,
+            after,
+            input,
+            cols,
+            rows,
+        } => {
+            status.attach = Some(workbench.attach_io(&id, after, &input, cols, rows).await?);
+            snapshot = false;
+        }
+        DaemonCommand::AttachDetach { id } => {
+            status.workbench_note = Some(workbench.detach(&id)?);
+            snapshot = false;
+        }
+        DaemonCommand::AttachEnd {
+            session,
+            conversation,
+        } => {
+            hosts.touch(&session).await;
+            let (note, page) = workbench.end_takeover(&session, &conversation).await?;
+            status.workbench_note = Some(note);
+            status.attach = Some(page);
+        }
         _ => return Err("not a workbench action".into()),
     }
     if snapshot {
@@ -403,17 +458,22 @@ async fn worktrees(hosts: &Hosts) -> Vec<WorktreeInfo> {
 /// A status naming this daemon and its delegations, without its
 /// components, whose lock a dashboard's frequent requests never wait for.
 fn base_status(registry: &DelegationRegistry) -> DaemonStatus {
+    status_with(DelegationSummary {
+        active: registry.list(false).len() as u64,
+        idle: None,
+        reaped: registry.reaped_total(),
+        entries: Vec::new(),
+        killed: Vec::new(),
+    })
+}
+
+/// A status naming this daemon, with `delegations`.
+fn status_with(delegations: DelegationSummary) -> DaemonStatus {
     DaemonStatus {
         version: env!("CARGO_PKG_VERSION").into(),
         pid: std::process::id(),
         components: Vec::new(),
-        delegations: DelegationSummary {
-            active: registry.list(false).len() as u64,
-            idle: None,
-            reaped: registry.reaped_total(),
-            entries: Vec::new(),
-            killed: Vec::new(),
-        },
+        delegations,
         restart: None,
         confirm: None,
         project: None,
@@ -424,6 +484,7 @@ fn base_status(registry: &DelegationRegistry) -> DaemonStatus {
         workbench_note: None,
         workbench_job: None,
         worktrees: Vec::new(),
+        attach: None,
     }
 }
 

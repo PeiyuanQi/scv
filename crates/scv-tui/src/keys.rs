@@ -14,9 +14,11 @@ use std::collections::BTreeMap;
 /// Keys a chat's composer or an agent view uses, which no dashboard action
 /// may take: editing (`ctrl+a`/`b`/`e`/`f`/`k`/`u`/`w`, `alt+b`/`f`, word
 /// movement), newlines (`ctrl+j`, `alt+enter`), cancelling and quitting
-/// (`ctrl+c`), tool details (`ctrl+o`), the queue (`alt+p`, `alt+up`,
-/// `alt+down`, `ctrl+x`), and an agent view's approval answers (`ctrl+y`,
-/// `ctrl+n`), stop, and resume (`ctrl+x`, `ctrl+r`).
+/// (`ctrl+c`), tool details and an agent view's attach (`ctrl+o`), the
+/// queue (`alt+p`, `alt+up`, `alt+down`, `ctrl+x`), and an agent view's
+/// approval answers (`ctrl+y`, `ctrl+n`), stop, and resume (`ctrl+x`,
+/// `ctrl+r`). An attached terminal takes every key but its detach key
+/// (`ctrl+]`), dashboard keys included.
 pub(crate) const RESERVED: &[&str] = &[
     "ctrl+a",
     "ctrl+b",

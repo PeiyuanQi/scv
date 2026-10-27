@@ -98,8 +98,60 @@ inserts a newline, and `Esc` clears it. While the job waits for an approval,
 a later request replaces that one, the first of those chords names the new
 request and the next one answers it. `y` and `n` are always text, so a
 prompt starting "yes" or "no" never answers it. `Ctrl+X` twice
-stops the job; `Ctrl+R` resumes an interrupted one. Input is sent only by
-these keys: the view never forwards keystrokes to the agent's process.
+stops the job; `Ctrl+R` resumes an interrupted one. In the activity view
+input is sent only by these keys; typing into the agent's own terminal is
+attaching, below.
+
+### Attaching to an agent's terminal
+
+A delegated agent runs headless (a CLI process per turn, or an ACP server
+speaking JSON-RPC on its standard streams), so its activity view is SCV's
+log of it, not a screen. `Ctrl+O` in an agent view takes the view's idle
+conversation over in the agent's own interactive terminal instead: the
+daemon opens the agent's own UI on the conversation's session (for Codex,
+`codex resume <thread>`), in the conversation's directory and the agent's
+private home, on a pseudo-terminal the daemon holds (see
+[taking a conversation over](tools.md#taking-a-conversation-over)). The
+view then shows that terminal's screen live, sized to the pane, under a
+line naming it, and every key goes to the agent, the dashboard's keys and
+the view's own chords included; a paste goes as one bracketed paste when
+the agent asked for that. `Ctrl+]` detaches: the view is the activity log
+again, and the agent keeps running in its terminal with nobody watching.
+`Ctrl+O` attaches again, to the screen as it is now. `Ctrl+X` twice in the
+activity view of a conversation taken over ends the takeover: its terminal
+is hung up, which asks the agent's UI to save and exit, and its process
+group is stopped two seconds later if it has not. The agent leaving its UI
+ends it too. However it ends, the view says how and
+shows the activity log, and the conversation's next turn continues the same
+agent session, with what was done in the terminal.
+
+While a conversation is taken over, SCV runs no turn of it: a prompt sent
+to it from a view, by the model, or with `scv jobs send` waits in its queue
+until the takeover ends, and a call that does not wait fails saying so.
+`Ctrl+O` is refused, with why, when the conversation runs a turn or has one
+waiting (stop its job first), is held by a reviewed job between its rounds,
+has no agent session yet, or belongs to an
+agent whose terminal may not be offered: only an agent whose terminal asks
+nothing SCV's approval gate decides can be taken over, which is Codex with
+`permissions = "full"`. Claude Code is always refused, because its terminal
+asks before some actions even with its own prompts off, and keys typed
+there would answer those prompts instead of the gate. Attaching is not a
+way to approve anything: approval requests go where they always go, and
+the keys typed into a terminal reach only the agent. A daemon before 0.4.5
+answers `Ctrl+O` with a notice and the view stays as it was; an
+attach that fails, a terminal that closes, or a connection that breaks
+falls back to the activity log and says so.
+
+The screen is drawn from what the daemon sends: styled text, never the
+agent's escape sequences, so nothing the agent prints reaches the owner's
+terminal as a control sequence, and values that look like credentials are
+masked by the activity log's rules. One dashboard holds a terminal at a
+time: attaching from another takes it, and the first falls back to the
+activity log at its next read. A dashboard that stops reading (closed or
+killed) counts as detached after 30 seconds, and the agent runs on. The
+terminal is read on a connection of its own every 50 ms, and at once after
+each key; starting and ending a takeover, which may take seconds, go on a
+third, so typing into another attached view never waits for them.
 
 The dashboard asks the daemon for a workbench snapshot every second and
 reads each open view's log every 400 ms, on one connection of its own.
@@ -352,12 +404,15 @@ report as a note quoting each job's reply.
 
 The TUI uses SCV protocol version 3 over the daemon's Unix socket. It permits
 one active turn per chat session. Agent views show the structured activity
-log SCV records for a delegated agent, not the agent's own terminal: SCV runs
-agents headless (JSON event streams or ACP), so there is no terminal screen to
-mirror, and taking over an agent means sending it text through its
-conversation, never typing into its process. Delegated processes do not
-outlive the daemon; after a restart, an interrupted job is resumed in the
-agent's own conversation, not reattached. The TUI does not add remote network
+log SCV records for a delegated agent: SCV runs agents headless (JSON event
+streams or ACP), so there is no screen of a running turn to mirror, and a
+prompt sent from the view goes through the agent's conversation. Typing into
+an agent's own terminal is a takeover of its idle conversation in the agent's
+interactive UI, offered only for agents whose terminal asks nothing SCV's
+approval gate decides; it is not available on every transport or agent, and
+it never mirrors or types into a headless run. Delegated processes, a
+takeover's terminal included, do not outlive the daemon; after a restart, an
+interrupted job is resumed in the agent's own conversation, not reattached. The TUI does not add remote network
 connections, model switching inside a session, shell-command shortcuts, file
 mentions, or image input.
 
@@ -379,8 +434,17 @@ tab's, a slow new tab not taking a pane the owner left, agent-view log
 paging (no line twice), sending one prompt at a time and getting a refused
 prompt back, control characters in workbench text, notifications from
 snapshot changes, an older daemon checked again, restored-queue notes, and
-`/job` parsing; integration tests cover a queue restored across a killed
-daemon and resumed.
+`/job` parsing. Attach tests cover keys encoded as a terminal sends them
+(application cursor keys, modifiers, the detach key however the terminal
+reports it), pastes that cannot end their bracket early, every key but
+detach reaching the agent (an approval chord typed into the terminal
+answers nothing), one read in flight, starting and ending a takeover on a
+connection of their own, falling back to the activity log on a
+refusal, a daemon without attach, a terminal that closes, or a lost
+connection, a closed view detaching, and `Ctrl+X` twice ending a takeover.
+Integration tests cover a queue restored across a killed daemon and resumed,
+and a conversation taken over, typed into, detached, attached again, ended,
+and hung up by a daemon that was killed.
 
 Render snapshots or stable buffer assertions cover idle, streaming, scrolled,
 tool-running, tool-inspector, approval, command-palette, help, error, and

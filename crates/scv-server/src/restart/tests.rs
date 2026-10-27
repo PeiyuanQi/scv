@@ -852,6 +852,102 @@ async fn a_restart_waits_for_a_workbench_sessions_jobs() {
     assert_eq!(sessions_with_jobs(&path), (0, 0));
 }
 
+#[tokio::test]
+async fn a_restart_does_not_wait_for_prompts_queued_behind_a_takeover() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(home.path()).unwrap();
+    let agent = path.join("fake-codex");
+    std::fs::write(
+        &agent,
+        concat!(
+            "#!/bin/sh\n",
+            "case \"$1\" in\n",
+            "  resume) echo \"codex terminal on $2\"; while read -r line; do :; done ;;\n",
+            "  *)\n",
+            "    echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
+            "    echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+            "    ;;\n",
+            "esac\n",
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        path.join("config.toml"),
+        format!(
+            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\npermissions = \"full\"\n",
+            agent.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        path.join("config.toml"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let instance = crate::test_support::test_instance(&path);
+    let registry = Arc::new(DelegationRegistry::new(&instance.layout));
+    let hosts = crate::workbench::Hosts::new(instance, Arc::clone(&registry));
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_path = std::fs::canonicalize(workspace.path()).unwrap();
+    let act = |command| crate::workbench::control(&hosts, command);
+    act(DaemonCommand::WorkbenchStart {
+        workspace: workspace_path.display().to_string(),
+        agent: "codex".into(),
+        prompt: "a quick fix".into(),
+        cwd: None,
+        model: None,
+        effort: None,
+        worktree: false,
+    })
+    .await
+    .expect("the owner's job starts");
+    eventually(|| sessions_with_jobs(&path) == (0, 0)).await;
+    let jobs = act(DaemonCommand::Workbench { watch: false })
+        .await
+        .unwrap()
+        .workbench
+        .unwrap()
+        .jobs;
+    let session = jobs[0].session.clone();
+    let conversation = jobs[0].conversation.clone().unwrap();
+    act(DaemonCommand::Attach {
+        session: session.clone(),
+        conversation: conversation.clone(),
+        cols: None,
+        rows: None,
+    })
+    .await
+    .expect("the conversation is taken over");
+    act(DaemonCommand::WorkbenchSend {
+        session: session.clone(),
+        conversation: conversation.clone(),
+        prompt: "after the takeover".into(),
+        mode: scv_protocol::SendMode::Queue,
+    })
+    .await
+    .expect("the prompt queues behind the takeover");
+    // The prompt waits for the owner, who may keep the terminal for
+    // hours: the restart, which ends the takeover, does not wait for it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(sessions_with_jobs(&path), (0, 0));
+    assert!(!session_busy(&session));
+    let entry = registry
+        .list(true)
+        .into_iter()
+        .find(|entry| entry.record.agent == "codex")
+        .expect("the takeover is recorded");
+    assert!(!entry.working(), "{entry:?}");
+    act(DaemonCommand::AttachEnd {
+        session: session.clone(),
+        conversation,
+    })
+    .await
+    .unwrap();
+    hosts.shutdown().await;
+}
+
 #[test]
 fn session_activity_counts_turns_until_the_session_ends() {
     let tracker = SessionTracker::new(Path::new("/activity-test"), "session-activity-test", None);

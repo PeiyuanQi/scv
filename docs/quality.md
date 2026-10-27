@@ -264,9 +264,32 @@ Daemon and component changes require focused coverage for:
   actions inside a delegated run; and, end to end, an owner job started and
   read from `scv jobs`, and a job a SIGKILLed daemon interrupted resumed in
   its agent's own conversation;
+- takeovers (attach): only agents whose terminal asks no approval offered,
+  the others refused with why; the terminal's process leading its own
+  session on its controlling terminal with flow control off, resized, and
+  hung up when the master side closes; detach leaving it running, ending
+  and the session's end stopping its group (one that ignores the hangup
+  included) and giving the conversation back, with calls queued behind it
+  meanwhile and a live ACP server stopped first and its session loaded
+  after; one client at a time, a silent one detached, and none started
+  once the daemon stops; terminal queries answered; the agent's output
+  bounded before the parser (counts by the screen's size, a restored cursor
+  kept on it, random output and resizes never failing it) and a failing
+  parser ending the takeover; none of the terminal's own descriptors (its
+  master, its wake pipe, its slave past the standard streams) inherited by
+  the agent, whatever else its parent passed down;
+  credentials masked across wrapped rows and onto a UI's indented
+  continuation, and nothing of the screen on disk or in the logs; reads
+  that skip the process table scan; a planned restart not waiting for the
+  prompts queued behind a takeover; and, end to end, a SIGKILLed daemon's
+  terminal hung up and `scv jobs attach` driven in a pseudo-terminal;
 - the dashboard: key specifications and `[tui.keys]` conflicts, tabs, panes,
-  sidebar grouping and actions, agent-view paging and sending, notifications
-  from snapshot changes, and an older daemon without the workbench.
+  sidebar grouping and actions, agent-view paging and sending, attaching
+  (keys encoded as a terminal sends them, every key but detach reaching the
+  agent, starting and ending a takeover on a connection of their own, and
+  falling back to the activity view on a refusal, an older daemon, a closed
+  terminal, or a lost connection), notifications from snapshot changes, and
+  an older daemon without the workbench.
 
 Mail changes require focused coverage for:
 

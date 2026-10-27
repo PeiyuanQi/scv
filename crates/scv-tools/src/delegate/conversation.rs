@@ -76,6 +76,9 @@ struct Conversation {
     pins: u32,
     /// Released while a turn ran: it goes when that turn ends.
     released: bool,
+    /// The owner holds it in the agent's own terminal ([`TakeoverHold`]);
+    /// `busy` is set too, so no turn runs meanwhile.
+    taken_over: bool,
 }
 
 #[derive(Debug, Default)]
@@ -117,6 +120,47 @@ pub(crate) struct TurnGuard {
     /// [`TurnGuard::attach`] set, stored when the turn finishes.
     attachment: Option<Attachment>,
     finished: bool,
+}
+
+/// The owner's hold on a conversation taken over in its agent's own
+/// terminal: until it drops, the conversation runs no turn (calls wait or
+/// queue as behind a running turn) and is neither evicted nor expired.
+#[derive(Debug)]
+pub(crate) struct TakeoverHold {
+    store: Arc<ConversationStore>,
+    pub(crate) handle: String,
+    pub(crate) cwd: PathBuf,
+    /// The agent's own session ID, which its terminal resumes.
+    pub(crate) vendor: String,
+    /// Turns the conversation has run.
+    pub(crate) turns: u32,
+    /// What the conversation kept between turns (a live ACP server), taken
+    /// out so the caller stops it: its next turn starts a new one that
+    /// loads the session, with what was done in the terminal.
+    pub(crate) attachment: Option<Attachment>,
+}
+
+impl Drop for TakeoverHold {
+    fn drop(&mut self) {
+        let mut inner = lock(&self.store.inner);
+        if let Some(conversation) = inner.conversations.get_mut(&self.handle)
+            && conversation.taken_over
+        {
+            conversation.taken_over = false;
+            conversation.busy = false;
+            conversation.last_used = Instant::now();
+            if conversation.released {
+                let removed = inner.conversations.remove(&self.handle);
+                drop(inner);
+                self.store.remove_marker(
+                    removed
+                        .and_then(|conversation| conversation.vendor)
+                        .as_deref(),
+                );
+            }
+        }
+        self.store.changed.notify_waiters();
+    }
 }
 
 /// A reviewed job's hold on a conversation, keeping it out of eviction and
@@ -232,6 +276,52 @@ impl ConversationStore {
             .map(|conversation| conversation.cwd.clone())
     }
 
+    /// The agent conversation `handle` belongs to.
+    pub(crate) fn agent_of(&self, handle: &str) -> Option<String> {
+        lock(&self.inner)
+            .conversations
+            .get(handle)
+            .map(|conversation| conversation.agent.clone())
+    }
+
+    /// Hold conversation `handle` for the owner's takeover in its agent's
+    /// own terminal: it must run no turn and have the agent's session ID.
+    pub(crate) fn take_over(self: &Arc<Self>, handle: &str) -> Result<TakeoverHold, String> {
+        let mut inner = lock(&self.inner);
+        let conversation = inner.conversations.get_mut(handle).ok_or_else(|| {
+            format!("no conversation {handle} in this session; it ended, or it was forgotten after it sat idle")
+        })?;
+        if conversation.taken_over {
+            return Err(format!("{handle} is taken over in its terminal already"));
+        }
+        if conversation.busy {
+            return Err(format!(
+                "{handle} is running a turn; attach once it is idle, or stop its job first"
+            ));
+        }
+        if conversation.pins > 0 {
+            return Err(format!(
+                "{handle} is held by a reviewed job between its rounds; attach once the review ends"
+            ));
+        }
+        let Some(vendor) = conversation.vendor.clone() else {
+            return Err(format!(
+                "{handle} has no session of the agent's own to open in its terminal"
+            ));
+        };
+        conversation.busy = true;
+        conversation.taken_over = true;
+        conversation.last_used = Instant::now();
+        Ok(TakeoverHold {
+            store: Arc::clone(self),
+            handle: handle.to_owned(),
+            cwd: conversation.cwd.clone(),
+            vendor,
+            turns: conversation.turns,
+            attachment: conversation.attachment.take(),
+        })
+    }
+
     /// Whether conversation `handle` is running a turn.
     pub(crate) fn is_busy(&self, handle: &str) -> bool {
         lock(&self.inner)
@@ -322,6 +412,11 @@ impl ConversationStore {
                 conversation.agent
             )));
         }
+        if conversation.taken_over {
+            return Err(ToolError::failed(format!(
+                "session busy: conversation {handle} is taken over by the user in its terminal"
+            )));
+        }
         if conversation.busy {
             return Err(ToolError::failed(format!(
                 "session busy: conversation {handle} is still running a turn"
@@ -397,6 +492,7 @@ impl ConversationStore {
                 attachment: None,
                 pins: 0,
                 released: false,
+                taken_over: false,
             },
         );
         if let Some(vendor) = &vendor {
@@ -473,6 +569,7 @@ impl ConversationStore {
                 attachment: None,
                 pins: 0,
                 released: false,
+                taken_over: false,
             },
         );
         drop(inner);

@@ -97,6 +97,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1827,7 +1833,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scv-channels"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "aes",
  "anyhow",
@@ -1862,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "scv-cli"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "base64",
@@ -1884,13 +1890,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
  "tracing-subscriber",
  "uuid",
 ]
 
 [[package]]
 name = "scv-client"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1904,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "scv-core"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -1916,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "scv-protocol"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1924,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "scv-provider-openai"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -1941,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "scv-server"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1965,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "scv-tools"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1986,12 +1993,13 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "vt100",
  "which",
 ]
 
 [[package]]
 name = "scv-tui"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2702,6 +2710,39 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vt100"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84cd863bf0db7e392ba3bd04994be3473491b31e66340672af5d11943c6274de"
+dependencies = [
+ "itoa",
+ "log",
+ "unicode-width 0.1.14",
+ "vte",
+]
+
+[[package]]
+name = "vte"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5022b5fbf9407086c180e9557be968742d839e68346af7792b8592489732197"
+dependencies = [
+ "arrayvec",
+ "utf8parse",
+ "vte_generate_state_changes",
+]
+
+[[package]]
+name = "vte_generate_state_changes"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e369bee1b05d510a7b4ed645f5faa90619e05437111783ea5848f28d97d3c2e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
 
 [[package]]
 name = "walkdir"

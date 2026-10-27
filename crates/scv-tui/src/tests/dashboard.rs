@@ -81,6 +81,7 @@ fn status(snapshot: WorkbenchSnapshot) -> Box<DaemonStatus> {
         workbench_note: None,
         workbench_job: None,
         worktrees: Vec::new(),
+        attach: None,
     })
 }
 
@@ -1336,4 +1337,330 @@ async fn a_request_from_the_focused_chat_under_a_pinned_prompt_is_announced() {
     ));
     let pending = tokio::time::timeout(Duration::from_millis(50), receive(&mut second_peer)).await;
     assert!(pending.is_err(), "the second chat was approved");
+}
+
+/// The dashboard with job-3's view open and drawn: its dashboard
+/// requests, its attached terminals' reads, keys, and detaches, and its
+/// takeovers' starts and ends come out of the three receivers.
+struct Attachable {
+    ui: Ui,
+    requests: mpsc::UnboundedReceiver<Request>,
+    terminal: mpsc::UnboundedReceiver<Request>,
+    takeover: mpsc::UnboundedReceiver<Request>,
+    target: Target,
+    _peer: BufReader<UnixStream>,
+    _path: SocketPath,
+}
+
+async fn attachable() -> Attachable {
+    let (mut ui, requests, peer, path) = dashboard().await;
+    let (terminal, terminal_requests) = mpsc::unbounded_channel();
+    ui.terminal_requests = Some(terminal);
+    let (takeover, takeover_requests) = mpsc::unbounded_channel();
+    ui.takeover_requests = Some(takeover);
+    let target = Target::Job {
+        session: "chat-session".into(),
+        job: "job-3".into(),
+    };
+    ui.open_view(target.clone());
+    ui.size = (120, 36);
+    screen(&ui, 120, 36);
+    Attachable {
+        ui,
+        requests,
+        terminal: terminal_requests,
+        takeover: takeover_requests,
+        target,
+        _peer: peer,
+        _path: path,
+    }
+}
+
+fn attach_page(id: &str, generation: u64, text: &str) -> scv_protocol::AttachPage {
+    scv_protocol::AttachPage {
+        id: id.into(),
+        session: "chat-session".into(),
+        conversation: "codex-2".into(),
+        agent: "codex".into(),
+        run: Some("codex-9f3e21".into()),
+        generation,
+        cols: 80,
+        rows: 10,
+        lines: vec![scv_protocol::AttachRow {
+            row: 0,
+            spans: vec![scv_protocol::AttachSpan {
+                text: text.into(),
+                ..scv_protocol::AttachSpan::default()
+            }],
+        }],
+        full: true,
+        cursor: Some([0, 5]),
+        application_cursor: false,
+        bracketed_paste: false,
+        ended: false,
+        exit: None,
+        note: None,
+    }
+}
+
+fn attach_status(page: scv_protocol::AttachPage) -> Box<DaemonStatus> {
+    let mut status = status(snapshot());
+    status.workbench = None;
+    status.attach = Some(page);
+    status
+}
+
+#[tokio::test]
+async fn ctrl_o_attaches_and_every_key_but_detach_goes_to_the_agent() {
+    let Attachable {
+        mut ui,
+        mut requests,
+        mut terminal,
+        mut takeover,
+        target,
+        ..
+    } = attachable().await;
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    // A takeover starts on a connection of its own.
+    assert!(terminal.try_recv().is_err());
+    let Request { tag, command } = takeover.try_recv().unwrap();
+    assert_eq!(tag, Tag::Attach(target.clone()));
+    let DaemonCommand::Attach {
+        session,
+        conversation,
+        cols,
+        rows,
+    } = command
+    else {
+        panic!("{command:?}");
+    };
+    assert_eq!(
+        (session.as_str(), conversation.as_str()),
+        ("chat-session", "codex-2")
+    );
+    // The terminal takes the view's size.
+    assert!(cols.is_some_and(|cols| cols > 40) && rows.is_some_and(|rows| rows > 10));
+    let note = ui
+        .workbench
+        .terminal_answer(Answer::Status(
+            Tag::Attach(target.clone()),
+            attach_status(attach_page("at-1", 1, "codex> ready")),
+        ))
+        .unwrap();
+    assert!(note.contains("Ctrl+]"), "{note}");
+    let shown = screen(&ui, 120, 36);
+    assert!(shown.contains("codex> ready"), "{shown}");
+    assert!(shown.contains("own terminal, taken over"), "{shown}");
+
+    // A dashboard key (new tab) is the agent's while attached.
+    let tabs = ui.tabs.len();
+    ui.key(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert_eq!(ui.tabs.len(), tabs);
+    let Request { command, .. } = terminal.try_recv().unwrap();
+    assert!(
+        matches!(&command, DaemonCommand::AttachIo { id, input, .. } if id == "at-1" && input == "\x14"),
+        "{command:?}"
+    );
+    // So are the view's own approval chords: an approval waits on job-3,
+    // and Ctrl+Y typed into the terminal answers nothing.
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    ui.key(key(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(requests.try_recv().is_err());
+    ui.workbench.terminal_answer(Answer::Status(
+        Tag::AttachIo(target.clone()),
+        attach_status(attach_page("at-1", 2, "codex> y")),
+    ));
+    ui.terminal_tick();
+    let Request { command, .. } = terminal.try_recv().unwrap();
+    assert!(
+        matches!(&command, DaemonCommand::AttachIo { input, after: 2, .. } if input == "\x19y"),
+        "{command:?}"
+    );
+    ui.workbench.terminal_answer(Answer::Status(
+        Tag::AttachIo(target.clone()),
+        attach_status(attach_page("at-1", 3, "codex> y")),
+    ));
+
+    ui.key(key(KeyCode::Char(']'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(ui.workbench.views[&target].terminal.is_none());
+    assert!(matches!(
+        terminal.try_recv().unwrap().command,
+        DaemonCommand::AttachDetach { id } if id == "at-1"
+    ));
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("keeps running"), "{notice}");
+    // Detached, the keys are the dashboard's and the view's again.
+    let shown = screen(&ui, 120, 36);
+    assert!(shown.contains("send to codex-2"), "{shown}");
+}
+
+#[tokio::test]
+async fn a_refused_attach_keeps_the_activity_view_and_says_why() {
+    let Attachable {
+        mut ui,
+        mut takeover,
+        target,
+        ..
+    } = attachable().await;
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(takeover.try_recv().is_ok());
+    let note = ui
+        .workbench
+        .terminal_answer(Answer::Refused(
+            Tag::Attach(target.clone()),
+            "claude cannot be taken over in its terminal: …".into(),
+        ))
+        .unwrap();
+    assert!(note.contains("cannot be taken over"), "{note}");
+    let view = &ui.workbench.views[&target];
+    assert!(view.terminal.is_none() && !view.attaching);
+    // An older daemon that does not know the action keeps today's view.
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(takeover.try_recv().is_ok());
+    let note = ui.workbench.terminal_answer(Answer::Unsupported).unwrap();
+    assert!(note.contains("predates attach"), "{note}");
+    assert!(ui.workbench.views[&target].terminal.is_none());
+    assert_eq!(
+        ui.workbench.availability,
+        crate::workbench::Availability::Ready
+    );
+    let shown = screen(&ui, 120, 36);
+    assert!(shown.contains("send to codex-2"), "{shown}");
+}
+
+#[tokio::test]
+async fn a_terminal_that_closes_or_loses_the_daemon_falls_back_to_the_activity_view() {
+    let Attachable {
+        mut ui,
+        mut takeover,
+        target,
+        ..
+    } = attachable().await;
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    takeover.try_recv().unwrap();
+    ui.workbench.terminal_answer(Answer::Status(
+        Tag::Attach(target.clone()),
+        attach_status(attach_page("at-1", 1, "bye")),
+    ));
+    let mut ended = attach_page("at-1", 2, "bye");
+    ended.ended = true;
+    ended.exit = Some("exit 0".into());
+    let note = ui
+        .workbench
+        .terminal_answer(Answer::Status(
+            Tag::AttachIo(target.clone()),
+            attach_status(ended),
+        ))
+        .unwrap();
+    assert!(note.contains("closed (exit 0)"), "{note}");
+    assert!(ui.workbench.views[&target].terminal.is_none());
+    // Attached again, the daemon goes away.
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    takeover.try_recv().unwrap();
+    ui.workbench.terminal_answer(Answer::Status(
+        Tag::Attach(target.clone()),
+        attach_status(attach_page("at-2", 1, "again")),
+    ));
+    let note = ui
+        .workbench
+        .terminal_answer(Answer::Disconnected(Tag::AttachIo(target.clone())))
+        .unwrap();
+    assert!(note.contains("detached"), "{note}");
+    assert!(ui.workbench.views[&target].terminal.is_none());
+}
+
+#[tokio::test]
+async fn a_view_closed_while_attached_detaches_from_its_terminal() {
+    let Attachable {
+        mut ui,
+        mut terminal,
+        mut takeover,
+        target,
+        ..
+    } = attachable().await;
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    takeover.try_recv().unwrap();
+    ui.workbench.terminal_answer(Answer::Status(
+        Tag::Attach(target.clone()),
+        attach_status(attach_page("at-1", 1, "x")),
+    ));
+    ui.tabs
+        .retain(|tab| !matches!(&tab.kind, TabKind::Agent(open) if *open == target));
+    ui.tick();
+    let mut detached = false;
+    while let Ok(Request { command, .. }) = terminal.try_recv() {
+        detached |= matches!(command, DaemonCommand::AttachDetach { id } if id == "at-1");
+    }
+    assert!(detached);
+}
+
+#[tokio::test]
+async fn ctrl_x_twice_ends_a_takeover_the_view_follows() {
+    let Attachable {
+        mut ui,
+        mut terminal,
+        mut takeover,
+        ..
+    } = attachable().await;
+    let mut taken = snapshot();
+    taken.runs.push(scv_protocol::WorkbenchRun {
+        handle: "codex-9f3e21".into(),
+        agent: "codex".into(),
+        session: "chat-session".into(),
+        transport: "terminal".into(),
+        conversation: Some("codex-2".into()),
+        turn: Some(1),
+        job: None,
+        jobs: Vec::new(),
+        cwd: "/w/projects/shop".into(),
+        state: AgentState::Working,
+        detail: Some("taken over in its terminal; nobody is attached".into()),
+        started_unix_seconds: 5,
+        last_activity_unix_seconds: 5,
+        live: true,
+        steerable: false,
+    });
+    ui.workbench
+        .answer(Answer::Status(Tag::Snapshot, status(taken)));
+    let view = Target::Conversation {
+        session: "chat-session".into(),
+        conversation: "codex-2".into(),
+    };
+    ui.open_view(view.clone());
+    ui.key(key(KeyCode::Char('x'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(takeover.try_recv().is_err());
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(notice.contains("end the takeover of codex-2"), "{notice}");
+    ui.key(key(KeyCode::Char('x'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(matches!(
+        takeover.try_recv().unwrap().command,
+        DaemonCommand::AttachEnd { session, conversation }
+            if session == "chat-session" && conversation == "codex-2"
+    ));
+    // Ending it never holds up an attached terminal's reads and keys.
+    assert!(terminal.try_recv().is_err());
 }

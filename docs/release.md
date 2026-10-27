@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.4`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.4` pins.
+The current workspace release is `0.4.5`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.5` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -52,6 +52,20 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.5
+
+`0.4.5` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3.
+It adds taking a delegated conversation over in its agent's own terminal
+([takeover](tools.md#taking-a-conversation-over)): `Ctrl+O` in a TUI agent
+view, `scv jobs attach`, and the additive `attach`, `attach_io`,
+`attach_detach`, and `attach_end` `daemon.control` actions with
+`daemon.status.attach`. Only Codex with `permissions = "full"` is offered;
+other agents are refused with why. A `0.4.4` daemon answers the new actions
+with `invalid_json`, and a `0.4.5` TUI then keeps its activity views; a
+`0.4.4` TUI never sends them. A takeover's terminal stops with the daemon,
+like every delegated process. The daemon depends on the `vt100` crate to
+keep a taken-over terminal's screen.
 
 ## Upgrading to 0.4.4
 

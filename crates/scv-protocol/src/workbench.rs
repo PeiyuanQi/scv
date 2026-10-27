@@ -1,11 +1,13 @@
 //! The agent workbench: what SCV knows about delegated agents, background
 //! jobs, and their sessions across the whole instance, as a dashboard reads
-//! it ([`WorkbenchSnapshot`]), and the activity a delegated run records for
-//! its live view ([`RunEvent`], [`RunLogPage`]).
+//! it ([`WorkbenchSnapshot`]), the activity a delegated run records for
+//! its live view ([`RunEvent`], [`RunLogPage`]), and the screen of a
+//! conversation the owner took over in its agent's own terminal
+//! ([`AttachPage`]).
 //!
 //! Every type here is additive to protocol version 3: a daemon sends them
-//! only in answer to the `workbench*`, `run_log`, and `worktree*`
-//! `daemon.control` actions, which only newer clients send.
+//! only in answer to the `workbench*`, `run_log`, `worktree*`, and
+//! `attach*` `daemon.control` actions, which only newer clients send.
 
 use serde::{Deserialize, Serialize};
 
@@ -409,6 +411,106 @@ pub enum SendMode {
     Queue,
     /// Steer the running turn, or fail when it cannot be steered.
     Steer,
+}
+
+/// A color of a cell of a taken-over terminal: one of the terminal's 256
+/// indexed colors, or a direct RGB color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AttachColor {
+    /// An indexed color: 0-15 are the terminal's own, 16-255 the xterm cube.
+    Index(u8),
+    /// A direct color, as `[red, green, blue]`.
+    Rgb([u8; 3]),
+}
+
+/// A run of cells of one row of a taken-over terminal, all in one style.
+/// Its text is display-only: printable characters, never an escape
+/// sequence, with values that look like credentials masked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachSpan {
+    /// The characters, one per cell (two for a wide one).
+    pub text: String,
+    /// Foreground color; absent is the terminal's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fg: Option<AttachColor>,
+    /// Background color; absent is the terminal's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg: Option<AttachColor>,
+    /// Bold.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    /// Italic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    /// Underlined.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    /// Foreground and background swapped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inverse: bool,
+}
+
+/// One row of a taken-over terminal's screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachRow {
+    /// The row, from 0 at the top.
+    pub row: u16,
+    /// Its cells, left to right; cells past the last span are blank.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<AttachSpan>,
+}
+
+/// The screen of a conversation the owner took over in its agent's own
+/// terminal, as `attach` and `attach_io` return it: the rows that changed
+/// since the client's `after`, never the terminal's raw output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachPage {
+    /// This client's hold on the terminal: `attach_io` and `attach_detach`
+    /// name it. Another `attach` of the same conversation replaces it.
+    pub id: String,
+    /// The session that holds the conversation.
+    pub session: String,
+    /// The conversation taken over, such as `codex-2`.
+    pub conversation: String,
+    /// The agent, such as `codex`.
+    pub agent: String,
+    /// The takeover's delegated run, whose activity log records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Pass as `after` to read only what changes next.
+    pub generation: u64,
+    /// The screen's width, in cells.
+    pub cols: u16,
+    /// The screen's height, in rows.
+    pub rows: u16,
+    /// Every row whose content changed since `after`; all of them when
+    /// `full`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<AttachRow>,
+    /// `lines` holds the whole screen: the client starts over from blank.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full: bool,
+    /// The cursor, as `[row, col]`; absent while the agent hides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<[u16; 2]>,
+    /// The agent asked for application cursor keys (`ESC O A` for Up).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub application_cursor: bool,
+    /// The agent asked for bracketed paste.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bracketed_paste: bool,
+    /// The agent's terminal closed: its process exited or was stopped, so
+    /// the conversation goes back to SCV's turns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ended: bool,
+    /// How it ended, such as `exit 0` or `stopped by the owner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<String>,
+    /// SCV's sentence about input it could not deliver, such as an agent
+    /// that stopped reading its terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// What `session.start` restored from a session that stopped.

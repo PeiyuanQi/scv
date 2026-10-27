@@ -22,6 +22,8 @@
 //!   format, inside SCV's private agent homes.
 //! - [`worktree`]: git worktrees SCV creates for a call's agent to work in.
 //! - [`live`]: a long-lived child process read line by line.
+//! - [`takeover`] and [`pty`]: the owner's takeover of a conversation in
+//!   its agent's own terminal.
 //! - [`output`] and [`progress`]: reading a run's output into one bounded
 //!   result, and its progress into short lines.
 
@@ -38,9 +40,11 @@ pub(crate) mod native;
 pub mod options;
 pub(crate) mod output;
 pub(crate) mod progress;
+pub(crate) mod pty;
 pub mod records;
 pub(crate) mod request;
 pub(crate) mod review;
 pub(crate) mod scv;
 pub mod stores;
+pub(crate) mod takeover;
 pub mod worktree;

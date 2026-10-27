@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::workbench::{RunLogPage, SendMode, WorkbenchSnapshot, WorktreeInfo};
+use crate::workbench::{AttachPage, RunLogPage, SendMode, WorkbenchSnapshot, WorktreeInfo};
 
 /// Where a daemon component (a channel account) is in its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -223,6 +223,10 @@ pub struct DaemonStatus {
     /// The worktrees SCV created, for a `worktrees` request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktrees: Vec<WorktreeInfo>,
+    /// A taken-over terminal's screen, for an `attach`, `attach_io`, or
+    /// `attach_end` request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<AttachPage>,
 }
 
 /// The lifecycle phase observed for a durable project.
@@ -874,5 +878,51 @@ pub enum DaemonCommand {
         /// Remove it even with uncommitted changes.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force: bool,
+    },
+    /// Take a live session's idle conversation over in its agent's own
+    /// terminal, or attach to the takeover already running, and return its
+    /// screen. Only agents whose terminal asks nothing SCV's approval gate
+    /// decides can be taken over; others are refused with why.
+    Attach {
+        /// The session that holds the conversation.
+        session: String,
+        /// The conversation, such as `codex-2`.
+        conversation: String,
+        /// The client's screen width for the terminal, in cells.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        /// The client's screen height for the terminal, in rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
+    },
+    /// Type into an attached terminal and read what changed on its screen.
+    AttachIo {
+        /// The hold `attach` returned.
+        id: String,
+        /// The generation the client has; 0 reads the whole screen.
+        #[serde(default)]
+        after: u64,
+        /// Keys to send the agent, as the bytes a terminal sends them.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        input: String,
+        /// A new screen width, in cells.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        /// A new screen height, in rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
+    },
+    /// Stop watching an attached terminal; the agent keeps running in it.
+    AttachDetach {
+        /// The hold `attach` returned.
+        id: String,
+    },
+    /// End a takeover: hang up the agent's terminal, stop its process, and
+    /// give the conversation back to SCV's turns.
+    AttachEnd {
+        /// The session that holds the conversation.
+        session: String,
+        /// The conversation taken over.
+        conversation: String,
     },
 }
