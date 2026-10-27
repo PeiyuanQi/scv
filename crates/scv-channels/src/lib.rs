@@ -23,11 +23,15 @@
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use futures_util::stream::{FuturesUnordered, StreamExt as _};
+use futures_util::{
+    future::BoxFuture,
+    stream::{FuturesUnordered, StreamExt as _},
+};
 use scv_client::history;
 use scv_protocol::Attachment;
 use std::{
     collections::HashMap,
+    convert::Infallible,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -216,8 +220,13 @@ const MAX_HELD_REPLY_BYTES: usize = MAX_REPLY_BYTES / 2;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long downloading one file may take.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
-/// How long adding or removing a working reaction may take.
+/// How long adding or removing a working reaction may take; an add that
+/// takes longer no longer holds up its turn.
 const REACTION_TIMEOUT: Duration = Duration::from_secs(10);
+/// How much longer such an add is seen through, apart from the turn, so a
+/// reaction it still puts on is kept or taken off. Longer than the
+/// transports' own request timeouts.
+const LATE_REACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often old media files are removed.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
@@ -614,6 +623,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
                 .map(|recent| (recent.key.clone(), recent.outcome)),
         );
     }
+    let (late, mut lately) = mpsc::unbounded_channel();
     let bridge = Bridge {
         transport,
         account,
@@ -631,18 +641,23 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         state: Mutex::new(state),
         turns: Semaphore::new(MAX_CONCURRENT_TURNS),
         replies: Notify::new(),
+        late,
+        removals: Notify::new(),
     };
     bridge.prune_media();
     // Replies recovered from an earlier run go out before the first poll.
     bridge.deliver_backlog().await?;
-    // Conversations run as futures owned by this one, never as spawned tasks,
-    // so cancellation drops every session and request with it.
+    // Conversations, and late reactions, run as futures owned by this one,
+    // never as spawned tasks, so cancellation drops every session and
+    // request with it.
     let (start, mut started) = mpsc::unbounded_channel();
     let mut conversations = FuturesUnordered::new();
+    let mut reacting = FuturesUnordered::new();
     let poll = bridge.poll(tool_owner.as_ref(), &start);
     let deliver = bridge.deliver();
     let notices = bridge.store_notices(notices);
-    tokio::pin!(poll, deliver, notices);
+    let removals = bridge.remove_reactions();
+    tokio::pin!(poll, deliver, notices, removals);
     // Every future that changes delivery state is polled side by side here,
     // and no arm awaits: a future waiting out a busy account in `save` holds
     // the state lock until it is polled again, so an arm that waited for
@@ -652,8 +667,11 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
             result = &mut poll => return result,
             result = &mut deliver => return result,
             result = &mut notices => return result,
+            never = &mut removals => match never {},
             Some((owner, recipient, jobs, watching)) = started.recv() => conversations.push(bridge.converse(owner, recipient, jobs, watching)),
             Some(result) = conversations.next(), if !conversations.is_empty() => result?,
+            Some((message_id, add)) = lately.recv() => reacting.push(bridge.finish_reaction(message_id, add)),
+            Some(()) = reacting.next(), if !reacting.is_empty() => {}
         }
     }
 }
@@ -761,6 +779,10 @@ type Starter = mpsc::UnboundedSender<(
     Arc<AtomicBool>,
 )>;
 
+/// An add of a working reaction that outlasted [`REACTION_TIMEOUT`]: the
+/// message's ID and the transport's add, still running.
+type LateReaction<'a> = (String, BoxFuture<'a, Result<Option<String>>>);
+
 /// Where a direct chat's conversation sends what answers no message, such as
 /// a background report: the chat's partner, in the direct chat itself or in
 /// one of its threads. Groups receive no such messages.
@@ -801,6 +823,10 @@ struct Bridge<'a, C, T> {
     turns: Semaphore,
     /// Wakes the delivery loop when a reply is queued.
     replies: Notify,
+    /// Hands the run adds of working reactions that outlasted their wait.
+    late: mpsc::UnboundedSender<LateReaction<'a>>,
+    /// Wakes the removal loop when a reaction is to come off.
+    removals: Notify,
 }
 
 impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
@@ -1051,7 +1077,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         drop(state);
         // Before the turn is queued, so it cannot end before the reaction
         // is saved with its claim.
-        self.react(message).await?;
+        self.react(message).await;
         if let Some(evict) = evict {
             // Dropping its queue ends that conversation after its current turn.
             conversations.remove(&evict);
@@ -1235,33 +1261,74 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     }
 
     /// Put the transport's working reaction on `message`, whose claim is
-    /// durable, and save what takes it off again with the claim. A reaction
-    /// that fails or times out is only logged: it never holds up receiving,
-    /// the turn, or the reply.
-    async fn react(&self, message: &Message) -> Result<()> {
-        let reaction =
-            match tokio::time::timeout(REACTION_TIMEOUT, self.transport.react(message)).await {
-                Ok(Ok(Some(reaction))) => reaction,
-                Ok(Ok(None)) => return Ok(()),
-                Ok(Err(error)) => {
-                    tracing::warn!(error = %error, "could not add the working reaction");
-                    return Ok(());
-                }
-                Err(_) => {
-                    tracing::warn!("timed out adding the working reaction");
-                    return Ok(());
-                }
-            };
-        let mut state = self.state.lock().await;
-        let Some(claim) = state
-            .in_flight
-            .iter_mut()
-            .find(|claim| claim.message_id == message.id)
-        else {
-            return Ok(());
+    /// durable, and save what takes it off again with the claim
+    /// ([`Bridge::keep_reaction`]). An add that outlasts [`REACTION_TIMEOUT`]
+    /// stops holding up the turn and is seen through apart from it
+    /// ([`Bridge::finish_reaction`]), since dropping it would not undo a
+    /// reaction the platform already took. Nothing here fails the account:
+    /// a reaction never holds up receiving, the turn, or the reply.
+    async fn react(&self, message: &Message) {
+        let transport = self.transport;
+        let owned = message.clone();
+        let mut add = Box::pin(async move { transport.react(&owned).await });
+        if let Ok(added) = tokio::time::timeout(REACTION_TIMEOUT, &mut add).await {
+            self.keep_reaction(&message.id, added).await;
+        } else {
+            tracing::warn!("adding the working reaction is slow; the turn goes ahead");
+            // The run receives it as long as it lasts.
+            let _ = self.late.send((message.id.clone(), add));
+        }
+    }
+
+    /// See an add that outlasted [`REACTION_TIMEOUT`] through, for up to
+    /// [`LATE_REACTION_TIMEOUT`] more, then keep or take off what it put on
+    /// `message_id`.
+    async fn finish_reaction(
+        &self,
+        message_id: String,
+        add: BoxFuture<'_, Result<Option<String>>>,
+    ) {
+        if let Ok(added) = tokio::time::timeout(LATE_REACTION_TIMEOUT, add).await {
+            self.keep_reaction(&message_id, added).await;
+        } else {
+            tracing::warn!("gave up adding the working reaction");
+        }
+    }
+
+    /// Save the working reaction that `added` put on `message_id` with the
+    /// message's claim, so its reply takes it off. A reaction that cannot
+    /// be saved there, because the turn already ended or the save fails, is
+    /// taken off at once: nothing else would. Neither fails the account or
+    /// the turn, which goes on without a reaction; a failed add is only
+    /// logged.
+    async fn keep_reaction(&self, message_id: &str, added: Result<Option<String>>) {
+        let reaction = match added {
+            Ok(Some(reaction)) => reaction,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(error = %error, "could not add the working reaction");
+                return;
+            }
         };
-        claim.reaction = Some(reaction);
-        self.save(&state).await
+        {
+            let mut state = self.state.lock().await;
+            let claim = state
+                .in_flight
+                .iter()
+                .position(|claim| claim.message_id == message_id);
+            if let Some(index) = claim {
+                state.in_flight[index].reaction = Some(reaction.clone());
+                let Err(error) = self.save(&state).await else {
+                    return;
+                };
+                state.in_flight[index].reaction = None;
+                tracing::warn!(
+                    error = %error,
+                    "could not save the working reaction; taking it off again"
+                );
+            }
+        }
+        self.unreact(message_id, &reaction).await;
     }
 
     /// Take the working reaction `reaction` off the message `message_id`.
@@ -1278,6 +1345,28 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 tracing::warn!(error = %error, "could not remove the working reaction");
             }
             Err(_) => tracing::warn!("timed out removing the working reaction"),
+        }
+    }
+
+    /// Take off, oldest first, the working reactions whose replies are done
+    /// with, for the life of the run. Apart from delivery, so a slow removal
+    /// never holds up the next reply; each stays in the state until it was
+    /// tried, so one a run left is tried on the next start. Saving that it
+    /// was tried only logs a failure: the next save records it.
+    async fn remove_reactions(&self) -> Infallible {
+        loop {
+            let next = self.state.lock().await.removing.first().cloned();
+            let Some(reaction) = next else {
+                self.removals.notified().await;
+                continue;
+            };
+            self.unreact(&reaction.message_id, &reaction.reaction).await;
+            let mut state = self.state.lock().await;
+            // Only this loop takes reactions out, so the first is this one.
+            state.removing.remove(0);
+            if let Err(error) = self.save(&state).await {
+                tracing::warn!(error = %error, "could not save a removed working reaction");
+            }
         }
     }
 
@@ -2021,10 +2110,11 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     }
 
     /// Send the oldest pending reply: its text parts, then its files, then
-    /// take its message's working reaction off. Only this path edits or
-    /// removes pending replies, so the first entry stays the same one
-    /// between state locks. A question's text opens the question once it is
-    /// delivered and fails it when refused.
+    /// queue its message's working reaction to come off
+    /// ([`Bridge::remove_reactions`]). Only this path edits or removes
+    /// pending replies, so the first entry stays the same one between state
+    /// locks. A question's text opens the question once it is delivered and
+    /// fails it when refused.
     async fn deliver_next(&self) -> Result<Step> {
         let mut pending = {
             let mut state = self.state.lock().await;
@@ -2129,13 +2219,16 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             state.pending[0].next_file = pending.next_file;
             self.save(&state).await?;
         }
-        // The work is over, delivered or refused. Taken off before the reply
-        // leaves the state, so a restart in between takes it off again.
-        if let Some(reaction) = &pending.reaction {
-            self.unreact(&pending.message_id, reaction).await;
-        }
         let mut state = self.state.lock().await;
         state.pending.remove(0);
+        // The work is over, delivered or refused. Queued in the write that
+        // removes the reply, so a restart in between still takes it off.
+        if let Some(reaction) = &pending.reaction {
+            state.removing.push(state::Reaction {
+                message_id: pending.message_id.clone(),
+                reaction: reaction.clone(),
+            });
+        }
         if !pending.message_id.is_empty() {
             mark_seen(&mut state, &pending.message_id);
         }
@@ -2163,6 +2256,9 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         }
         self.save(&state).await?;
         drop(state);
+        if pending.reaction.is_some() {
+            self.removals.notify_one();
+        }
         if let Some((key, outcome)) = keyed {
             if refused {
                 tracing::warn!("the platform refused a mail notice");

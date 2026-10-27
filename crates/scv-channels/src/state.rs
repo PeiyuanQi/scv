@@ -204,6 +204,19 @@ pub(crate) struct BridgeState {
     /// handed over twice is stored once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) recent_keys: Vec<RecentKey>,
+    /// Working reactions whose replies are done with, oldest first, still
+    /// to come off; see [`InFlight::reaction`]. Older releases ignore it and
+    /// leave them on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) removing: Vec<Reaction>,
+}
+
+/// A working reaction to take off: the message it is on, and what the
+/// transport removes it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Reaction {
+    pub(crate) message_id: String,
+    pub(crate) reaction: String,
 }
 
 /// A quarantined notice a mail chat stored, and its delivery so far.
@@ -222,7 +235,8 @@ pub(crate) const RECENT_KEY_SECONDS: u64 = 7 * 24 * 60 * 60;
 impl BridgeState {
     /// Whether the account has run as an ordinary chat: it holds a
     /// transport position, messages seen, replies or notices to deliver,
-    /// claims to recover, or background jobs to report.
+    /// claims to recover, background jobs to report, or reactions to take
+    /// off.
     pub(crate) fn ordinary(&self) -> bool {
         !self.cursor.is_empty()
             || !self.seen.is_empty()
@@ -230,6 +244,7 @@ impl BridgeState {
             || !self.in_flight.is_empty()
             || !self.held.is_empty()
             || !self.jobs.is_empty()
+            || !self.removing.is_empty()
     }
 
     /// Forget notice keys past their age, then the oldest beyond the count.

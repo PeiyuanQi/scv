@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.3`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.3` pins.
+The current workspace release is `0.4.4`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.4` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -38,7 +38,7 @@ default, accepts a Cargo index override through `[update].index_url`,
 binary through Cargo. It restarts an active systemd user daemon after
 installation. A foreground `scv run` daemon requires an explicit restart.
 Existing TUI clients reconnect and start fresh sessions without restoring
-server history; their queued prompts come back paused (from `0.4.3`), and
+server history; their queued prompts come back paused (from `0.4.4`), and
 nothing submitted or queued is replayed automatically.
 
 Multiple SCV profiles may run concurrently. Select one with `--scv-home` or
@@ -53,13 +53,14 @@ and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
 
-## Upgrading to 0.4.3
+## Upgrading to 0.4.4
 
-`0.4.3` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
+`0.4.4` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3,
 so a planned restart from `0.4.2` checks the new release and can roll it back.
-Everything it adds is additive: an instance that configures none of it
-behaves as before, apart from the records below, which are written for every
-delegated run and job.
+`0.4.3` was published only for `scv-core` and `scv-protocol`, so `0.4.4` is
+the first full release since `0.4.2`. Everything it adds is additive: an
+instance that configures none of it behaves as before, apart from the records
+below, which are written for every delegated run and job.
 
 - **The workbench.** The TUI is a dashboard: chat tabs in several
   workspaces, agent views that follow a delegated agent's live activity and

@@ -165,7 +165,7 @@ know these commands.
 These actions read and act on the [workbench](tools.md#the-workbench): the
 instance's delegated runs and background jobs, for the TUI dashboard and
 `scv jobs`. They are additive and keep protocol version 3; a daemon before
-0.4.3 answers them with `invalid_json`, which clients take as "no
+0.4.4 answers them with `invalid_json`, which clients take as "no
 workbench".
 
 ```json

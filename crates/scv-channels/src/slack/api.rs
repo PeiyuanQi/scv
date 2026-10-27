@@ -269,6 +269,12 @@ impl Api {
         Ok(identity)
     }
 
+    /// The installation [`Api::identity`] found, without asking Slack;
+    /// `None` before it asked this run and once Slack rejected the token.
+    pub(super) async fn verified(&self) -> Option<Identity> {
+        self.identity.lock().await.clone()
+    }
+
     /// A fresh Socket Mode URL, which `apps.connections.open` gives the
     /// app-level token.
     pub(super) async fn socket_url(&self) -> Result<reqwest::Url> {

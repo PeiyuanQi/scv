@@ -131,11 +131,16 @@ Daemon and component changes require focused coverage for:
   never for an ignored, unanswered, or fixed-reply message; saved with the
   claim and carried into its reply; removed with the same reaction ID or
   emoji once the reply is sent, also for a failed turn and a claim recovered
-  after an interruption; failures to add or remove only logged, never
-  holding up the turn or its reply; and state without a reaction removing
-  nothing. Feishu reacts with `Typing` and removes by `reaction_id`, naming
-  `im:message.reactions:write` on code 99991672; Slack reacts with `eyes`,
-  `already_reacted` and `no_reaction` counting as success;
+  after an interruption, and a removal an earlier run queued tried on the
+  next start; failures to add or remove only logged, never holding up the
+  turn or its reply; an add that outlasts its wait saved with a claim still
+  in flight and taken off once the turn ended; a reaction whose ID cannot
+  be saved taken off, with the turn and the account going on; a slow
+  removal never delaying the next reply; and state without a reaction
+  removing nothing. Feishu reacts with `Typing` and removes by
+  `reaction_id`, naming `im:message.reactions:write` on code 99991672;
+  Slack reacts with `eyes`, `already_reacted` and `no_reaction` counting as
+  success, and adding never asks `auth.test` itself;
 - polling and other senders continuing during a long owner turn, a
   conversation's messages running in order with their own context tokens, at
   most four turns at once, busy notices beyond the queue limits without a

@@ -149,7 +149,21 @@ impl SocketMode {
     /// The tokens still belong to the saved installation. Slack is asked
     /// once per run, and again after it rejects the bot token.
     async fn verify(&self) -> Result<()> {
-        let identity = self.api.identity().await?;
+        self.check(&self.api.identity().await?)
+    }
+
+    /// [`SocketMode::verify`] without asking Slack: it already answered
+    /// this run and has not rejected the bot token since.
+    async fn verified(&self) -> Result<()> {
+        let identity = self
+            .api
+            .verified()
+            .await
+            .ok_or_else(|| anyhow!("Slack has not verified the bot token yet"))?;
+        self.check(&identity)
+    }
+
+    fn check(&self, identity: &api::Identity) -> Result<()> {
         if identity.team_id != self.credentials.team_id
             || identity.app_id != self.credentials.app_id
             || identity.bot_user_id != self.credentials.bot_user_id
@@ -547,13 +561,18 @@ impl Transport for SocketMode {
     }
 
     /// React with [`WORKING_EMOJI`]; its name is all that removes it again.
+    /// The receive that brought the message verified the tokens, so the
+    /// reaction, which its acknowledgement waits for, never asks again.
     async fn react(&self, message: &Message) -> Result<Option<String>> {
         let (channel, ts) = inbound::message_ts(&message.id)?;
-        self.verify().await?;
+        self.verified().await?;
         self.api.add_reaction(channel, ts, WORKING_EMOJI).await?;
         Ok(Some(WORKING_EMOJI.to_owned()))
     }
 
+    /// Asks Slack only when nothing verified the tokens yet, as for a
+    /// reaction an earlier run left, which can come off before the first
+    /// receive.
     async fn unreact(&self, message_id: &str, reaction: &str) -> Result<()> {
         let (channel, ts) = inbound::message_ts(message_id)?;
         self.verify().await?;

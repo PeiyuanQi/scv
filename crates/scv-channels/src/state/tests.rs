@@ -130,19 +130,32 @@ fn a_reaction_is_written_only_when_set_and_older_releases_read_past_it() {
             .get("reaction")
             .is_none()
     );
+    // Nor is state without reactions to take off.
+    assert!(
+        serde_json::to_value(BridgeState::default())
+            .unwrap()
+            .get("removing")
+            .is_none()
+    );
     claim.reaction = Some("r-1".into());
     reply.reaction = Some("r-2".into());
+    let spent = Reaction {
+        message_id: "done".into(),
+        reaction: "r-3".into(),
+    };
     let json = serde_json::to_string(&BridgeState {
         in_flight: vec![claim],
         pending: vec![reply],
+        removing: vec![spent.clone()],
         ..Default::default()
     })
     .unwrap();
     let restored: BridgeState = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.in_flight[0].reaction.as_deref(), Some("r-1"));
     assert_eq!(restored.pending[0].reaction.as_deref(), Some("r-2"));
-    // 0.4.3, which a rollback runs, reads claims and replies without
-    // `deny_unknown_fields`, so it ignores the field.
+    assert_eq!(restored.removing, [spent]);
+    // 0.4.3, which a rollback runs, reads the state, its claims, and its
+    // replies without `deny_unknown_fields`, so it ignores the fields.
     #[derive(serde::Deserialize)]
     #[allow(dead_code, reason = "only whether it parses matters")]
     struct Release043Claim {
