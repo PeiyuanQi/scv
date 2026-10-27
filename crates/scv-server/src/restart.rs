@@ -308,8 +308,15 @@ fn session_busy(id: &str) -> bool {
                 .background
                 .as_ref()
                 .and_then(Weak::upgrade)
-                .is_some_and(|jobs| jobs.pending() > 0)
+                .is_some_and(|jobs| waited_jobs(&jobs) > 0)
     })
+}
+
+/// The jobs of a session a planned restart waits for: those still running
+/// or unreported, but not the queued prompts that wait only for the
+/// owner's takeover of their conversation, which the restart ends.
+fn waited_jobs(jobs: &BackgroundJobs) -> usize {
+    jobs.pending().saturating_sub(jobs.behind_takeovers())
 }
 
 /// The sessions of the instance at `home` that have background jobs still
@@ -326,7 +333,7 @@ fn sessions_with_jobs(home: &Path) -> (usize, usize) {
     sessions
         .iter()
         .filter_map(|activity| activity.background.as_ref().and_then(Weak::upgrade))
-        .map(|jobs| jobs.pending())
+        .map(|jobs| waited_jobs(&jobs))
         .filter(|&pending| pending > 0)
         .fold((0, 0), |(sessions, jobs), pending| {
             (sessions + 1, jobs + pending)

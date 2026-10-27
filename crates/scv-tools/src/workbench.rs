@@ -17,12 +17,20 @@
 //!   interrupted one again, [`Workbench::dismiss`] forgets a finished one;
 //! - an approval request a background job relayed while the owner watches
 //!   ([`Workbench::watch`]): it waits for [`Workbench::approve`] up to
-//!   [`ATTENDED_WAIT`], then gets the session's unattended answer.
+//!   [`ATTENDED_WAIT`], then gets the session's unattended answer;
+//! - a conversation taken over in its agent's own terminal
+//!   ([`Workbench::attach_terminal`]): the owner reads its screen and types into it
+//!   ([`Workbench::attach_io`]), detaches while it keeps running
+//!   ([`Workbench::detach`]), and ends it ([`Workbench::end_takeover`]).
+//!   A takeover ends with its session, and with the daemon.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,7 +38,7 @@ use async_trait::async_trait;
 use scv_client::Layout;
 use scv_core::{AgentError, ApprovalGate, ApprovalRequest};
 use scv_protocol::{
-    AgentState, RunLogPage, SendMode, WorkbenchApproval, WorkbenchJob, WorkbenchRun,
+    AgentState, AttachPage, RunLogPage, SendMode, WorkbenchApproval, WorkbenchJob, WorkbenchRun,
     WorkbenchSession, WorkbenchSnapshot,
 };
 use serde_json::{Value, json};
@@ -45,6 +53,7 @@ use crate::{
             ledger::{self, JobRecord},
         },
         records::{DelegationRegistry, ProcessIdentity},
+        takeover::{self, Takeover},
     },
     sync::lock,
 };
@@ -61,6 +70,15 @@ const MAX_LISTED: usize = 200;
 pub const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Ended runs kept at most.
 pub const MAX_RUNS: usize = 500;
+/// How long a client attached to a taken-over terminal counts as watching
+/// after its last read: one that stops reading (its dashboard closed or
+/// died) is detached, and the agent keeps running.
+pub const ATTACH_LEASE: Duration = Duration::from_secs(30);
+/// How long a takeover whose terminal closed is kept, so a client still
+/// attached reads how it ended.
+const CLOSED_KEPT: Duration = Duration::from_secs(60);
+/// Takeovers that may run at once.
+const MAX_TAKEOVERS: usize = 8;
 
 /// The daemon's workbench.
 pub struct Workbench {
@@ -72,6 +90,24 @@ pub struct Workbench {
     watched_until: Mutex<Option<Instant>>,
     /// Jobs being resumed now, `<session>/<job>`: each is resumed once.
     resuming: Mutex<HashSet<String>>,
+    /// Conversations taken over in their agents' terminals, by
+    /// `<session>/<conversation>`.
+    takeovers: Mutex<HashMap<String, Held>>,
+    /// Held while a takeover starts, so two `attach`es of one conversation
+    /// do not both start one. Attaching to one that runs never waits for it.
+    attaching: tokio::sync::Mutex<()>,
+    /// SCV is stopping: no takeover starts any more. Set and read with
+    /// `takeovers` locked, so none is kept after they all were ended.
+    closing: AtomicBool,
+}
+
+/// A takeover, and the client attached to it.
+struct Held {
+    takeover: Arc<Takeover>,
+    /// The attached client's hold, and when it last read.
+    lease: Option<(String, Instant)>,
+    /// When the terminal was first seen closed.
+    closed: Option<Instant>,
 }
 
 impl std::fmt::Debug for Workbench {
@@ -148,6 +184,9 @@ impl Drop for SessionHandle {
             .is_some_and(|slot| slot.token == self.token)
         {
             inner.sessions.remove(&self.id);
+            drop(inner);
+            // Its conversations go with it, taken over or not.
+            workbench.end_takeovers_of(Some(&self.id));
         }
     }
 }
@@ -184,6 +223,9 @@ impl Workbench {
             inner: Mutex::default(),
             watched_until: Mutex::new(None),
             resuming: Mutex::default(),
+            takeovers: Mutex::default(),
+            attaching: tokio::sync::Mutex::const_new(()),
+            closing: AtomicBool::new(false),
         })
     }
 
@@ -337,6 +379,7 @@ impl Workbench {
     /// Everything the workbench shows now. `restorable` is left for the
     /// server, which keeps session queues.
     pub fn snapshot(&self) -> WorkbenchSnapshot {
+        self.expire_takeovers();
         let now = unix_now();
         let live_handles = self.live_handles();
         let (slots, approvals): (Vec<_>, Vec<_>) = {
@@ -987,9 +1030,260 @@ impl Workbench {
         ledger::load(&self.jobs, session, job)
     }
 
+    /// Take conversation `conversation` of live session `session` over in
+    /// its agent's own terminal for the owner, or attach to the takeover of
+    /// it already running, and return the whole screen. A second client's
+    /// attach takes the terminal from the first, whose hold stops working.
+    pub async fn attach_terminal(
+        &self,
+        session: &str,
+        conversation: &str,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    ) -> Result<AttachPage, String> {
+        self.expire_takeovers();
+        let key = format!("{session}/{conversation}");
+        let id = format!("at-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+        if let Some(page) = self.attach_running(&key, &id, cols, rows) {
+            return Ok(page);
+        }
+        let _starting = self.attaching.lock().await;
+        // It may have started while this one waited.
+        if let Some(page) = self.attach_running(&key, &id, cols, rows) {
+            return Ok(page);
+        }
+        if self.closing.load(Ordering::Acquire) {
+            return Err(stopping());
+        }
+        let running = lock(&self.takeovers)
+            .values()
+            .filter(|held| !held.takeover.is_finished())
+            .count();
+        if running >= MAX_TAKEOVERS {
+            return Err(format!(
+                "{MAX_TAKEOVERS} conversations are taken over already; end one first"
+            ));
+        }
+        let (agent, _) = self.agent(session)?;
+        let takeover = agent
+            .take_over(conversation, session, takeover::clamp_size(cols, rows))
+            .await?;
+        let page = takeover.page(&id, 0);
+        {
+            let mut takeovers = lock(&self.takeovers);
+            if !self.closing.load(Ordering::Acquire) {
+                takeovers.insert(
+                    key,
+                    Held {
+                        takeover,
+                        lease: Some((id, Instant::now())),
+                        closed: None,
+                    },
+                );
+                return Ok(page);
+            }
+        }
+        // SCV began stopping while it started: it ends like the others.
+        takeover.end().await;
+        Err(stopping())
+    }
+
+    /// Attach client `id` to the takeover of `key` if it runs, sized `cols`
+    /// by `rows`, and return the whole screen; forget one that closed.
+    fn attach_running(
+        &self,
+        key: &str,
+        id: &str,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    ) -> Option<AttachPage> {
+        let (takeover, watched) = {
+            let mut takeovers = lock(&self.takeovers);
+            match takeovers.get_mut(key) {
+                Some(held) if !held.takeover.is_finished() => {
+                    let watched = held.lease.is_some();
+                    held.lease = Some((id.to_owned(), Instant::now()));
+                    (Arc::clone(&held.takeover), watched)
+                }
+                Some(_) => {
+                    takeovers.remove(key);
+                    return None;
+                }
+                None => return None,
+            }
+        };
+        if !watched {
+            takeover.note_attached(true);
+        }
+        takeover.resize(cols, rows);
+        Some(takeover.page(id, 0))
+    }
+
+    /// Type `input` into the terminal client `id` is attached to, resize it,
+    /// and return what changed on its screen since generation `after`.
+    pub async fn attach_io(
+        &self,
+        id: &str,
+        after: u64,
+        input: &str,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    ) -> Result<AttachPage, String> {
+        if input.len() > takeover::MAX_INPUT_BYTES {
+            return Err(format!(
+                "at most {} KiB can be typed at once",
+                takeover::MAX_INPUT_BYTES / 1024
+            ));
+        }
+        self.expire_takeovers();
+        let takeover = self.leased(id)?;
+        let note = takeover.input(input.as_bytes()).await;
+        takeover.resize(cols, rows);
+        let mut page = takeover.page(id, after);
+        page.note = note;
+        Ok(page)
+    }
+
+    /// Stop client `id` watching its terminal; the agent keeps running.
+    pub fn detach(&self, id: &str) -> Result<String, String> {
+        let takeover = {
+            let mut takeovers = lock(&self.takeovers);
+            let held = takeovers
+                .values_mut()
+                .find(|held| held.lease.as_ref().is_some_and(|(lease, _)| lease == id))
+                .ok_or_else(not_attached)?;
+            held.lease = None;
+            Arc::clone(&held.takeover)
+        };
+        takeover.note_attached(false);
+        Ok(if takeover.is_running() {
+            format!(
+                "Detached from {}; it keeps running in its terminal.",
+                takeover.conversation
+            )
+        } else {
+            format!(
+                "Detached from {}, whose terminal has closed.",
+                takeover.conversation
+            )
+        })
+    }
+
+    /// End the takeover of `conversation` of `session`: hang its terminal
+    /// up, stop its process, and give the conversation back to SCV's
+    /// turns. Returns SCV's note and the final screen.
+    pub async fn end_takeover(
+        &self,
+        session: &str,
+        conversation: &str,
+    ) -> Result<(String, AttachPage), String> {
+        let key = format!("{session}/{conversation}");
+        let held = lock(&self.takeovers)
+            .remove(&key)
+            .ok_or_else(|| format!("{conversation} of {session} is not taken over"))?;
+        held.takeover.end().await;
+        let id = held.lease.map(|(id, _)| id).unwrap_or_default();
+        let page = held.takeover.page(&id, 0);
+        let how = page.exit.clone().unwrap_or_else(|| "closed".into());
+        Ok((
+            format!("Ended the takeover of {conversation}: the terminal closed ({how})."),
+            page,
+        ))
+    }
+
+    /// End every takeover, waiting for each: the daemon is stopping, so
+    /// none starts any more.
+    pub async fn end_takeovers(&self) {
+        let held: Vec<Held> = {
+            let mut takeovers = lock(&self.takeovers);
+            self.closing.store(true, Ordering::Release);
+            takeovers.drain().map(|(_, held)| held).collect()
+        };
+        futures_util::future::join_all(held.iter().map(|held| held.takeover.end())).await;
+    }
+
+    /// Sessions with a takeover still running, which count as in use.
+    pub fn takeover_sessions(&self) -> HashSet<String> {
+        lock(&self.takeovers)
+            .values()
+            .filter(|held| !held.takeover.is_finished())
+            .map(|held| held.takeover.session.clone())
+            .collect()
+    }
+
+    /// End the takeovers of `session` (every one with `None`) in the
+    /// background: their session is gone.
+    fn end_takeovers_of(&self, session: Option<&str>) {
+        let ending: Vec<Arc<Takeover>> = {
+            let mut takeovers = lock(&self.takeovers);
+            let keys: Vec<String> = takeovers
+                .iter()
+                .filter(|(_, held)| session.is_none_or(|session| held.takeover.session == session))
+                .map(|(key, _)| key.clone())
+                .collect();
+            keys.iter()
+                .filter_map(|key| takeovers.remove(key))
+                .map(|held| held.takeover)
+                .collect()
+        };
+        if ending.is_empty() {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    futures_util::future::join_all(ending.iter().map(|takeover| takeover.end()))
+                        .await;
+                });
+            }
+            Err(_) => ending.iter().for_each(|takeover| takeover.kill_now()),
+        }
+    }
+
+    /// The running or recently closed takeover client `id` holds.
+    fn leased(&self, id: &str) -> Result<Arc<Takeover>, String> {
+        let mut takeovers = lock(&self.takeovers);
+        let held = takeovers
+            .values_mut()
+            .find(|held| held.lease.as_ref().is_some_and(|(lease, _)| lease == id))
+            .ok_or_else(not_attached)?;
+        if let Some((_, read)) = &mut held.lease {
+            *read = Instant::now();
+        }
+        Ok(Arc::clone(&held.takeover))
+    }
+
+    /// Detach clients that stopped reading, and forget takeovers whose
+    /// terminal closed a while ago.
+    fn expire_takeovers(&self) {
+        let now = Instant::now();
+        let mut detached = Vec::new();
+        let mut takeovers = lock(&self.takeovers);
+        takeovers.retain(|_, held| {
+            if held.takeover.is_finished() {
+                let closed = *held.closed.get_or_insert(now);
+                return now.duration_since(closed) < CLOSED_KEPT;
+            }
+            if held
+                .lease
+                .as_ref()
+                .is_some_and(|(_, read)| now.duration_since(*read) >= ATTACH_LEASE)
+            {
+                held.lease = None;
+                detached.push(Arc::clone(&held.takeover));
+            }
+            true
+        });
+        drop(takeovers);
+        for takeover in detached {
+            takeover.note_attached(false);
+        }
+    }
+
     /// Settle what processes that stopped left unfinished, and remove old
     /// records: the daemon runs this at startup and every minute.
     pub fn maintain(&self) -> Maintenance {
+        self.expire_takeovers();
         let interrupted_jobs = ledger::settle_orphans(&self.jobs)
             .into_iter()
             .map(|record| format!("{}/{}", record.session, record.job))
@@ -1002,6 +1296,16 @@ impl Workbench {
             pruned,
         }
     }
+}
+
+fn stopping() -> String {
+    "SCV is stopping, so it takes no conversation over now".into()
+}
+
+fn not_attached() -> String {
+    "this terminal is not attached here any more (another dashboard attached to it, or its \
+     takeover ended); attach again"
+        .into()
 }
 
 /// A job claimed for resuming, released when dropped.

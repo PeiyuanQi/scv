@@ -112,7 +112,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.4.4` and exact workspace dependency pins.
+`0.4.5` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -176,7 +176,8 @@ What lives where in the largest crates:
 | | `delegate/adapters.rs`, `delegate/choice.rs`, `delegate/options.rs` | One descriptor per delegated agent CLI, how the `agent` tool describes each agent and names the others after a failure, and the model and effort values each ACP agent last offered (public as `scv_tools::agent_options`) |
 | | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, the per-conversation line busy calls wait in (`background/lane.rs`), and the durable job ledger (`background/ledger.rs`, public as `scv_tools::background::ledger`), multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
 | | `delegate/activity.rs`, `delegate/worktree.rs` | Each delegated run's activity log and state (public as `scv_tools::activity`), and the git worktrees jobs run in (public as `scv_tools::worktree`) |
-| | `workbench.rs` | The workbench: snapshots assembled from the records and live sessions, run logs, and the owner's actions (start, send, cancel, resume, dismiss, attended approvals) |
+| | `workbench.rs` | The workbench: snapshots assembled from the records and live sessions, run logs, and the owner's actions (start, send, cancel, resume, dismiss, attended approvals, and attaching to a conversation taken over in its agent's terminal) |
+| | `delegate/takeover.rs`, `delegate/pty.rs` | The owner's takeover of a conversation in its agent's own terminal: which agents may be offered, the daemon-held pseudo-terminal the agent's interactive UI runs on, its screen (kept with the `vt100` parser, credentials masked), and its lifecycle |
 | | `delegate/review.rs` | Reviewed jobs: the builder and fresh-reviewer loop, reviewer routing, the landing confirmation, and its parts: the verdict and landing blocks (`blocks`), the live state every surface reads (`state`), SCV's prompt texts (`prompts`), and the journal (`journal`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
@@ -196,13 +197,14 @@ What lives where in the largest crates:
 | | `runtime.rs` | `AgentRuntime` and its turn loop |
 | `scv-protocol` | `client.rs`, `server.rs` | `ClientMessage` and `ServerEvent` |
 | | `daemon.rs`, `attachment.rs`, `background.rs`, `review.rs` | Daemon control and status, attached files, background-job reporting, and reviewed jobs' outcomes with SCV's lines for them (`describe_outcome`, `outcome_notice`) |
-| | `workbench.rs` | The workbench's wire types: `AgentState`, snapshots of sessions, jobs, runs, approvals, and kept queues, run-log pages, and worktrees |
+| | `workbench.rs` | The workbench's wire types: `AgentState`, snapshots of sessions, jobs, runs, approvals, and kept queues, run-log pages, worktrees, and a taken-over terminal's screen (`AttachPage`) |
 | | `error.rs` | `ErrorCode` (why a request or turn failed) and `ToolErrorKind` (why a tool call did) |
 | `scv-provider-openai` | `request.rs` | `OpenAiProvider`: requests, retries, and error reporting |
 | | `stream.rs`, `wire.rs`, `encode.rs` | Assembling a response from its event stream, the wire shapes, and replaying history as input |
 | `scv-tui` | `app.rs`, `transcript.rs` | What a chat shows and how server events change it; bounded transcript and prompt history |
 | | `ui.rs`, `keys.rs` | The dashboard: tabs, panes, the sidebar, overlays, and where each key goes; the bindings and `[tui.keys]` |
-| | `workbench.rs`, `poller.rs` | The dashboard's copy of the workbench (snapshot, notifications, agent views' logs), and its own daemon connection |
+| | `workbench.rs`, `poller.rs` | The dashboard's copy of the workbench (snapshot, notifications, agent views' logs), and its own daemon connections |
+| | `attach.rs` | An agent view attached to a taken-over terminal: its screen, drawn as styled text, and keys and pastes encoded as a terminal sends them |
 | | `input.rs`, `render.rs`, `terminal.rs` | A chat's keys and composer, drawing, and terminal setup |
 | | `client.rs`, `exec.rs` | A chat's server connection, and headless `scv exec` |
 
@@ -306,7 +308,10 @@ an owner's chat request to change, publish, and deploy SCV itself.
    included, and a cancelled reviewed job whose final outcome has not been
    sent), and (through the channel hub) no unstored report; no other
    session of the daemon has such a background job either, a workbench
-   session's owner jobs included, since the restart would stop it, and no
+   session's owner jobs included, since the restart would stop it (a
+   prompt queued behind the owner's takeover of a conversation waits for
+   the owner, not for SCV, so it does not count: the restart ends the
+   takeover, and the prompt is kept like any queued one), and no
    chat has a background report not yet stored in its outbox; and no chat
    bridge holds an owner message it has not answered durably, and no email
    account is carrying out a mail action. While jobs hold it, `daemon.status`
@@ -317,7 +322,8 @@ an owner's chat request to change, publish, and deploy SCV itself.
    so it is at work only while a turn runs on it (`idle_since_unix` is absent
    then) or, for a nested SCV, while background jobs of its own session still
    run or wait to be reported to its model (`background_jobs`), which its
-   delegation record tells (`DelegationEntry::working`). At the request's
+   delegation record tells (`DelegationEntry::working`). A takeover's
+   terminal, where no SCV turn runs, is recorded idle. At the request's
    deadline it goes ahead anyway and the plan says so. Before it hands over,
    email accounts start no new mail action, and one under way gets up to a
    minute to finish.

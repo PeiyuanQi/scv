@@ -25,6 +25,7 @@ use crate::{
         request::{
             AgentArgs, resolve_call_cwd, valid_effort, valid_model_name, validate_agent_cwd,
         },
+        takeover::{self, TakeoverLaunch},
     },
     process::{APPROVAL_TIMEOUT, startup_deadline},
 };
@@ -63,6 +64,9 @@ pub(crate) struct AcpAgentTool {
     default_model: Option<String>,
     /// Where worktrees SCV created live, which a call may name as `cwd`.
     pub(super) worktrees: Option<PathBuf>,
+    /// How the owner takes a conversation over in the agent's own terminal
+    /// (its CLI, not this server), or why not.
+    takeover: Result<TakeoverLaunch, String>,
 }
 
 impl AcpAgentTool {
@@ -85,6 +89,14 @@ impl AcpAgentTool {
                 options::load(file, &name, executable, SystemTime::now())
             });
         let session_options = launch.session_options;
+        let takeover = takeover::launch(
+            &name,
+            &adapter.command,
+            &adapter.search_dirs,
+            adapter.full_permission_args.is_some(),
+            &adapter.environment,
+            delegation.as_ref(),
+        );
         Self {
             name,
             launch,
@@ -106,6 +118,7 @@ impl AcpAgentTool {
             precheck: true,
             default_model: adapter.defaults.model.clone(),
             worktrees: None,
+            takeover,
         }
     }
 
@@ -305,6 +318,19 @@ impl Backend for AcpAgentTool {
             self.conversations.wait_idle(handle, cancellation).await?;
         }
         Ok(())
+    }
+
+    fn takeover(&self) -> Result<TakeoverLaunch, String> {
+        self.takeover.clone()
+    }
+
+    /// Shut the conversation's server down and wait for it: the agent's
+    /// terminal then holds its session alone, and the next turn starts a
+    /// server that loads it.
+    async fn release(&self, attachment: Attachment) {
+        if let Ok(child) = Arc::downcast::<AcpChild>(attachment.0) {
+            child.rpc.live.close().await;
+        }
     }
 
     async fn steer(

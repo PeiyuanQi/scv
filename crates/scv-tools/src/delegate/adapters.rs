@@ -139,6 +139,34 @@ pub fn acp_args(launch: &AcpLaunch, full: bool) -> Vec<String> {
     args
 }
 
+/// Whether the owner can take a conversation over in the CLI's own
+/// interactive terminal (`attach`). A terminal is offered only where it
+/// asks nothing that SCV's approval gate decides: keys typed into it must
+/// never answer an approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Takeover {
+    /// No verified interactive mode that resumes a session by its ID.
+    Unsupported,
+    /// Its terminal answers approval prompts that SCV's gate must decide;
+    /// the text says which, for the refusal.
+    Refused(&'static str),
+    /// `args` (with `{session}` replaced) open the CLI's interactive UI on
+    /// the conversation's own session, and `full_args`, its
+    /// `permissions = "full"` switches, turn every approval prompt off. The
+    /// takeover is offered only under `permissions = "full"`: with its
+    /// prompts on, the CLI asks in its terminal what it relays to SCV's gate
+    /// when SCV runs it.
+    Supported {
+        args: &'static [&'static str],
+        full_args: &'static [&'static str],
+    },
+}
+
+/// Why Claude Code's terminal is never offered.
+const CLAUDE_TAKEOVER: &str = "Claude Code's own terminal asks before some actions even with its \
+     prompts off (deleting files, publishing), and keys typed there would answer those prompts \
+     instead of SCV's approval gate";
+
 /// How a CLI continues an earlier conversation. `{session}` in any argument
 /// is replaced by the conversation's vendor session ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +337,8 @@ pub struct AdapterDescriptor {
     /// without one runs only over its ACP server: `auto` then requires the
     /// server, and `transport = "resume"` is a configuration error.
     pub cli_turns: bool,
+    /// Whether the owner can take a conversation over in its terminal.
+    pub takeover: Takeover,
 }
 
 /// Directories every adapter searches before `PATH`, relative to the user's home.
@@ -404,6 +434,7 @@ const CLAUDE_BASE: AdapterDescriptor = AdapterDescriptor {
         session_options: false,
     }),
     cli_turns: true,
+    takeover: Takeover::Refused(CLAUDE_TAKEOVER),
 };
 
 pub const ADAPTERS: &[AdapterDescriptor] = &[
@@ -510,6 +541,17 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             session_options: false,
         }),
         cli_turns: true,
+        // `codex resume <thread>` opens its TUI on the thread `exec` and
+        // `codex-acp` use. Under these switches Codex never asks for
+        // approval, so its terminal answers nothing SCV's gate decides.
+        takeover: Takeover::Supported {
+            args: &["resume", "{session}"],
+            full_args: &[
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "web_search=\"live\"",
+            ],
+        },
     },
     AdapterDescriptor {
         name: "grok",
@@ -555,6 +597,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             session_options: false,
         }),
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "dsh",
@@ -598,6 +641,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             session_options: true,
         }),
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "pi",
@@ -642,6 +686,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Only a community ACP adapter exists.
         acp: None,
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "gemini",
@@ -695,6 +740,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             session_options: false,
         }),
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "qwen",
@@ -740,6 +786,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             session_options: false,
         }),
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "opencode",
@@ -779,6 +826,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             session_options: false,
         }),
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "copilot",
@@ -818,6 +866,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // No ACP server SCV has verified.
         acp: None,
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "cursor",
@@ -855,6 +904,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         transport: Transport::Process,
         acp: None,
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "amp",
@@ -887,6 +937,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         transport: Transport::Process,
         acp: None,
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "kimi",
@@ -932,6 +983,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             session_options: true,
         }),
         cli_turns: false,
+        takeover: Takeover::Unsupported,
     },
     AdapterDescriptor {
         name: "scv",
@@ -967,6 +1019,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         transport: Transport::ScvProtocol,
         acp: None,
         cli_turns: true,
+        takeover: Takeover::Unsupported,
     },
 ];
 

@@ -303,3 +303,42 @@ fn ages_parse_with_units() {
     assert!(parse_age("d").is_err());
     assert!(parse_age("-1d").is_err());
 }
+
+#[test]
+fn a_takeover_holds_an_idle_conversation_and_gives_it_back() {
+    let store = store(4, DAY, None);
+    let cwd = Path::new("/w");
+    let handle = store
+        .adopt("codex", cwd, "0199a213-81c0-7800-8aa1-bbab2a035a53")
+        .unwrap();
+    // Not while a reviewed job holds it between its rounds.
+    let pin = store.pin(&handle).unwrap();
+    assert!(
+        store
+            .take_over(&handle)
+            .unwrap_err()
+            .contains("reviewed job")
+    );
+    drop(pin);
+    let hold = store.take_over(&handle).unwrap();
+    assert_eq!(hold.vendor, "0199a213-81c0-7800-8aa1-bbab2a035a53");
+    assert!(store.is_busy(&handle));
+    assert!(store.take_over(&handle).unwrap_err().contains("already"));
+    let refused = store.begin("codex", Some(&handle), cwd, false).unwrap_err();
+    assert!(
+        refused.message.contains("taken over"),
+        "{}",
+        refused.message
+    );
+    // A conversation released meanwhile goes when the takeover ends.
+    store.release(&handle);
+    assert!(store.knows(&handle));
+    drop(hold);
+    assert!(!store.knows(&handle));
+    assert!(
+        store
+            .take_over("codex-9")
+            .unwrap_err()
+            .contains("no conversation")
+    );
+}

@@ -347,25 +347,47 @@ pub(crate) fn scrub(text: &str) -> String {
 /// `NAME=value` and `--name value` where the name mentions a key, token,
 /// secret, or password, and well-known token prefixes.
 pub(crate) fn redact(text: &str) -> String {
-    let words: Vec<&str> = text.split(' ').collect();
-    let mut output = Vec::with_capacity(words.len());
-    let mut hide_next = false;
-    for word in words {
+    let mut output = String::with_capacity(text.len());
+    let mut kept = 0;
+    for range in secret_ranges(text) {
+        output.push_str(&text[kept..range.start]);
+        output.push('…');
+        kept = range.end;
+    }
+    output.push_str(&text[kept..]);
+    output
+}
+
+/// Where [`redact`] hides something in `text`, as byte ranges in order:
+/// each is replaced by `…` there.
+pub(crate) fn secret_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    secret_ranges_after(text, false).0
+}
+
+/// [`secret_ranges`] of text that may go on from earlier text: with
+/// `continued`, its first word is the value a name or auth scheme at the
+/// earlier text's end was waiting for. Also returns whether `text` itself
+/// ends with such a name or scheme.
+fn secret_ranges_after(text: &str, continued: bool) -> (Vec<std::ops::Range<usize>>, bool) {
+    let mut ranges = Vec::new();
+    let mut hide_next = continued;
+    let mut start = 0;
+    for word in text.split(' ') {
+        let end = start + word.len();
         let lower = word.to_ascii_lowercase();
         let bare = lower.trim_matches(|character: char| {
             matches!(character, '"' | '\'' | '-' | ':' | '(' | ')' | ',')
         });
+        let token = word.trim_matches(|character: char| matches!(character, '"' | '\''));
         // An auth scheme is shown; the credential after it is not.
         if bare == "bearer" || bare == "basic" {
-            output.push(word.to_owned());
             hide_next = true;
-            continue;
-        }
-        if std::mem::take(&mut hide_next) && !word.is_empty() {
-            output.push("…".to_owned());
-            continue;
-        }
-        if let Some((name, value)) = word.split_once(['=', ':'])
+        } else if word.is_empty() || (hide_next && !word.chars().any(char::is_alphanumeric)) {
+            // More spaces before the value, as a terminal's columns have,
+            // or a frame a UI draws there (`│`): the value is still next.
+        } else if std::mem::take(&mut hide_next) {
+            ranges.push(start..end);
+        } else if let Some((name, value)) = word.split_once(['=', ':'])
             && !value.starts_with("//")
             && SECRET_NAMES
                 .iter()
@@ -373,30 +395,52 @@ pub(crate) fn redact(text: &str) -> String {
         {
             if value.trim_matches(['"', '\'']).is_empty() {
                 // `Authorization: <value>`: the value is the next word.
-                output.push(word.to_owned());
                 hide_next = true;
             } else {
-                let separator = &word[name.len()..=name.len()];
-                output.push(format!("{name}{separator}…"));
+                // The name and its one-byte separator stay.
+                ranges.push(start + name.len() + 1..end);
             }
-            continue;
-        }
-        if word.starts_with("--") && SECRET_NAMES.iter().any(|secret| bare.contains(secret)) {
-            output.push(word.to_owned());
+        } else if word.starts_with("--") && SECRET_NAMES.iter().any(|secret| bare.contains(secret))
+        {
             hide_next = true;
-            continue;
-        }
-        let token = word.trim_matches(|character: char| matches!(character, '"' | '\''));
-        if SECRET_PREFIXES
+        } else if SECRET_PREFIXES
             .iter()
             .any(|prefix| token.starts_with(prefix) && token.len() >= prefix.len() + 8)
         {
-            output.push("…".to_owned());
-            continue;
+            ranges.push(start..end);
         }
-        output.push(word.to_owned());
+        start = end + 1;
     }
-    output.join(" ")
+    (ranges, hide_next)
+}
+
+/// What [`scrub`] would drop or hide in `text`, without collapsing its
+/// spacing, as byte ranges in order: every URL's query and fragment, and
+/// what [`redact`] hides. For text whose layout must stay, such as a
+/// terminal's screen, read a line at a time: with `continued`, the line
+/// before ended with a name or auth scheme whose value is this line's first
+/// word, or with a hidden value a UI wrapped onto this line. Also returns
+/// whether this line ends with a name or scheme still waiting for its value.
+pub(crate) fn scrubbed_ranges(text: &str, continued: bool) -> (Vec<std::ops::Range<usize>>, bool) {
+    let (mut ranges, waiting) = secret_ranges_after(text, continued);
+    let mut start = 0;
+    for word in text.split(' ') {
+        if word.contains("://")
+            && let Some(query) = word.find(['?', '#'])
+        {
+            ranges.push(start + query..start + word.len());
+        }
+        start += word.len() + 1;
+    }
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    (merged, waiting)
 }
 
 #[cfg(test)]

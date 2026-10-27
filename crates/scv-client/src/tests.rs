@@ -40,4 +40,25 @@ fn a_command_that_can_stop_an_account_outlasts_a_mail_actions_grace() {
         control_timeout(&DaemonCommand::Workbench { watch: true }),
         Duration::from_secs(20)
     );
+    // Opening an agent's terminal may first stop its server and run the
+    // project Rust preflight; typing into it never waits that long.
+    assert_eq!(
+        control_timeout(&DaemonCommand::Attach {
+            session: "s".into(),
+            conversation: "codex-1".into(),
+            cols: None,
+            rows: None,
+        }),
+        Duration::from_secs(90)
+    );
+    assert_eq!(
+        control_timeout(&DaemonCommand::AttachIo {
+            id: "at-1".into(),
+            after: 0,
+            input: String::new(),
+            cols: None,
+            rows: None,
+        }),
+        Duration::from_secs(20)
+    );
 }

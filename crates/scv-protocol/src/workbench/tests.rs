@@ -243,3 +243,128 @@ fn session_started_carries_keys_and_a_restored_queue_only_when_set() {
     assert!(wire.contains(r#""dropped":1"#), "{wire}");
     assert_eq!(serde_json::from_str::<ServerEvent>(&wire).unwrap(), event);
 }
+
+#[test]
+fn attach_actions_are_tagged_daemon_commands_with_optional_fields_left_out() {
+    let attach = DaemonCommand::Attach {
+        session: "s".into(),
+        conversation: "codex-2".into(),
+        cols: Some(120),
+        rows: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&attach).unwrap(),
+        r#"{"action":"attach","session":"s","conversation":"codex-2","cols":120}"#
+    );
+    let io: DaemonCommand = serde_json::from_str(r#"{"action":"attach_io","id":"at-1"}"#).unwrap();
+    assert_eq!(
+        io,
+        DaemonCommand::AttachIo {
+            id: "at-1".into(),
+            after: 0,
+            input: String::new(),
+            cols: None,
+            rows: None,
+        }
+    );
+    for wire in [
+        r#"{"action":"attach_detach","id":"at-1"}"#,
+        r#"{"action":"attach_end","session":"s","conversation":"codex-2"}"#,
+    ] {
+        let command: DaemonCommand = serde_json::from_str(wire).unwrap();
+        assert_eq!(serde_json::to_string(&command).unwrap(), wire);
+    }
+}
+
+#[test]
+fn an_attach_page_round_trips_and_leaves_defaults_off_the_wire() {
+    let page = AttachPage {
+        id: "at-1".into(),
+        session: "s".into(),
+        conversation: "codex-2".into(),
+        agent: "codex".into(),
+        run: Some("codex-3f9a2c".into()),
+        generation: 4,
+        cols: 80,
+        rows: 24,
+        lines: vec![AttachRow {
+            row: 3,
+            spans: vec![
+                AttachSpan {
+                    text: "ok".into(),
+                    fg: Some(AttachColor::Index(2)),
+                    bold: true,
+                    ..AttachSpan::default()
+                },
+                AttachSpan {
+                    text: " done".into(),
+                    bg: Some(AttachColor::Rgb([1, 2, 3])),
+                    ..AttachSpan::default()
+                },
+            ],
+        }],
+        full: false,
+        cursor: Some([3, 7]),
+        application_cursor: true,
+        bracketed_paste: false,
+        ended: false,
+        exit: None,
+        note: None,
+    };
+    let wire = serde_json::to_string(&page).unwrap();
+    assert!(wire.contains(r#""fg":2"#), "{wire}");
+    assert!(wire.contains(r#""bg":[1,2,3]"#), "{wire}");
+    for absent in [
+        "\"full\"",
+        "\"ended\"",
+        "\"exit\"",
+        "\"note\"",
+        "\"italic\"",
+        "\"bracketed_paste\"",
+    ] {
+        assert!(!wire.contains(absent), "{absent} in {wire}");
+    }
+    assert_eq!(serde_json::from_str::<AttachPage>(&wire).unwrap(), page);
+}
+
+#[test]
+fn a_status_with_or_without_a_screen_reads_on_either_side_of_the_change() {
+    // A daemon before attach sends no `attach`; this client reads none.
+    let older = r#"{"version":"0.4.4","pid":1,"components":[]}"#;
+    let status: DaemonStatus = serde_json::from_str(older).unwrap();
+    assert!(status.attach.is_none());
+    // An older client ignores the field it does not know.
+    let mut status = status;
+    status.attach = Some(AttachPage {
+        id: "at-1".into(),
+        session: "s".into(),
+        conversation: "codex-2".into(),
+        agent: "codex".into(),
+        run: None,
+        generation: 1,
+        cols: 80,
+        rows: 24,
+        lines: Vec::new(),
+        full: true,
+        cursor: None,
+        application_cursor: false,
+        bracketed_paste: false,
+        ended: true,
+        exit: Some("exit 0".into()),
+        note: None,
+    });
+    let event = ServerEvent::DaemonStatus {
+        request_id: "d1".into(),
+        status,
+    };
+    let wire = serde_json::to_value(&event).unwrap();
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code, reason = "the fields an older client knows")]
+    struct OlderStatus {
+        version: String,
+        pid: u32,
+        components: Vec<serde_json::Value>,
+    }
+    let older: OlderStatus = serde_json::from_value(wire["status"].clone()).unwrap();
+    assert_eq!(older.version, "0.4.4");
+}

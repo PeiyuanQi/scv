@@ -28,6 +28,7 @@ use crate::{
         choice, conversation,
         options::AgentOptions,
         request::{AGENT_EFFORTS, AgentArgs},
+        takeover::TakeoverLaunch,
     },
 };
 
@@ -77,6 +78,22 @@ pub(crate) trait Backend: Send + Sync {
         _cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<(), ToolError> {
         Ok(())
+    }
+
+    /// How the owner takes one of this agent's conversations over in its
+    /// own terminal, or why that is refused.
+    fn takeover(&self) -> Result<TakeoverLaunch, String> {
+        Err(
+            "this agent's conversations speak SCV's own protocol, which has no terminal of \
+             its own to take over; follow its activity view and send it prompts instead"
+                .into(),
+        )
+    }
+
+    /// Stop what a conversation kept between turns (a live server) before
+    /// the owner takes it over, and wait until it is gone.
+    async fn release(&self, attachment: conversation::Attachment) {
+        drop(attachment);
     }
 
     async fn execute(

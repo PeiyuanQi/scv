@@ -214,7 +214,9 @@ bundled Claude Code process inherits that variable until the pin blanks it,
 as [Pinned Claude Code credentials](#pinned-claude-code-credentials) describes.
 SCV declares no client file-system or terminal capabilities and refuses
 every `fs/*`, `terminal/*`, or other agent-to-client request, so the agent
-cannot use SCV to read, write, or run anything. The agent's own
+cannot use SCV to read, write, or run anything. (A takeover's terminal is a
+different thing: SCV runs the agent's own CLI on it for the owner, see
+below.) The agent's own
 `session/request_permission` requests go through the calling session's
 approval gate (labelled `[claude-1 acp]`) with a risk derived from the ACP tool
 kind in the same way as SCV's own tools: reads are read-only unless they touch
@@ -288,6 +290,47 @@ can. Resuming an interrupted job re-sends its recorded prompt (bounded,
 private, and the owner's or the model's own text) in the agent's own
 conversation or as a new run; a reviewed job is never resumed, since its
 journal, not a replay, is its record.
+
+A [takeover](tools.md#taking-a-conversation-over) (attach) runs the agent's
+own interactive UI on a conversation's session in a pseudo-terminal the
+daemon holds, and is the owner's own action like the others above. It is
+not a way around the approval gate. A terminal is offered only where it
+asks nothing the gate decides: an agent whose adapter declares an
+interactive resume with switches that turn every prompt off, configured
+with `permissions = "full"`, whose delegated runs relay no approval either
+(Codex). An agent whose terminal would ask what its delegated runs relay to
+the gate is refused: Codex with its own prompts on, and Claude Code always,
+since it asks before deleting files or publishing even with its prompts
+off. Keys typed into a terminal reach only the agent's terminal, never an
+approval; the requests other runs relay still wait in the workbench, and
+the agent in its terminal can do exactly what its delegated runs can, with
+the same permissions it was configured with. It runs as a delegated run of
+the same agent: the same private home, the same environment with every
+inherited credential, endpoint, and state-location variable removed, the
+same delegation tags (so `scv jobs` refuses to act inside it), recorded,
+stopped with its process group, and swept with its tagged descendants when
+it ends, the daemon stops, or the daemon dies (the kernel hangs up a
+terminal whose master side closes, and the next daemon stops what is left
+as an orphan). No other agent's home, token, or environment is involved,
+and the terminal is the only descriptor of SCV's the agent gets (on Linux
+each one SCV opens for it is created closed on exec, so no other process
+SCV starts inherits the terminal and could read or type into it); the
+protocol carries only what the agent's own terminal shows. That screen is
+untrusted delegated-agent output: the daemon sends it to the TUI as styled
+text, never as escape sequences, so it cannot drive the owner's terminal,
+and masks values that look like credentials by the activity log's rules,
+across a line's wrapped rows and onto the next line where a value or a
+name's value goes on there. Before the parser sees that output, SCV bounds
+the counts whose cost grows with them by the screen's size and parses a
+slice at a time, so it cannot stall the daemon or the agent; a parser
+failure ends the takeover. Masking is a heuristic, and the screen can still
+show whatever the agent prints, so it is never written to disk: it is held
+in the daemon's memory, at most one screen per takeover with no scrollback,
+until a minute after the terminal closes, and the parser's own logs, which
+would quote escape sequences, are always off. The activity log of a
+takeover notes its start, attaches, detaches, and end, never the screen.
+While a conversation is taken over no SCV turn runs on it, and its live ACP
+server is stopped first, so no two processes drive one agent session.
 
 Activity logs, the job ledger, and kept queues are private files (0700
 directories, 0600 files) under `state/`, written atomically or appended by

@@ -134,8 +134,10 @@ pub(crate) async fn run_daemon(
 }
 
 pub(crate) fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let filter = terminal_logs_off(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+    );
     // Colour only for a terminal: the user service sends stderr to the
     // journal, where escape codes would hide `WARN`/`ERROR` from searches.
     let _ = tracing_subscriber::fmt()
@@ -144,3 +146,14 @@ pub(crate) fn init_tracing() {
         .with_ansi(io::stderr().is_terminal())
         .try_init();
 }
+
+/// `filter` with the logs of the `vt100` parser off, whatever `RUST_LOG`
+/// asks: it logs the escape sequences it does not handle with their text
+/// (a link's URL, a clipboard's contents), and nothing of a taken-over
+/// terminal's screen may reach the journal.
+fn terminal_logs_off(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+    filter.add_directive("vt100=off".parse().expect("a valid log directive"))
+}
+
+#[cfg(test)]
+mod tests;

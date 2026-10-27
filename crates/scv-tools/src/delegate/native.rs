@@ -27,6 +27,7 @@ use crate::{
         request::{
             AgentArgs, resolve_call_cwd, valid_effort, valid_model_name, validate_agent_cwd,
         },
+        takeover::{self, TakeoverLaunch},
     },
     process::{ProcessSpec, child_pid, drain_output, spawn_process, supervise},
 };
@@ -55,6 +56,8 @@ pub(crate) struct NativeAgentTool {
     auth: AgentAuthPlan,
     /// Where worktrees SCV created live, which a call may name as `cwd`.
     worktrees: Option<PathBuf>,
+    /// How the owner takes a conversation over in its terminal, or why not.
+    takeover: Result<TakeoverLaunch, String>,
 }
 
 impl NativeAgentTool {
@@ -145,6 +148,14 @@ impl NativeAgentTool {
         conversations: Arc<ConversationStore>,
     ) -> Self {
         let resolved = adapters::resolve_agent_executable(&config.command, &config.search_dirs);
+        let takeover = takeover::launch(
+            &name,
+            &config.command,
+            &config.search_dirs,
+            config.full_permission_args.is_some(),
+            &config.environment,
+            delegation.as_ref(),
+        );
         Self {
             name,
             command: config.command,
@@ -164,6 +175,7 @@ impl NativeAgentTool {
             conversations,
             auth: config.auth,
             worktrees: None,
+            takeover,
         }
     }
 
@@ -276,6 +288,10 @@ impl Backend for NativeAgentTool {
 
     fn adoptable(&self) -> bool {
         self.resume.is_supported()
+    }
+
+    fn takeover(&self) -> Result<TakeoverLaunch, String> {
+        self.takeover.clone()
     }
 
     async fn wait_idle(

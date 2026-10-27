@@ -59,6 +59,7 @@ use crate::{
         output::AgentReply,
         request::AgentArgs,
         review::{self, Record, ReviewedTool},
+        takeover,
     },
     sync::lock,
 };
@@ -186,6 +187,8 @@ struct Job {
     origin: JobOrigin,
     /// A queued prompt whose turn has not come yet.
     queued_waiting: bool,
+    /// The conversation whose lane a queued prompt waits in.
+    lane: Option<String>,
     /// The owner stopped it from the workbench, so the model was not told.
     owner_cancelled: bool,
     /// Its durable record, when the session keeps a ledger, and that
@@ -399,6 +402,10 @@ impl BackgroundJobs {
                 .unwrap_or_default(),
         );
         let queued = matches!(turn, Turn::Queued(_));
+        let lane = match &turn {
+            Turn::Queued(place) => Some(place.handle().to_owned()),
+            Turn::New | Turn::Next(_) => None,
+        };
         let reserved = match review {
             Some(review) => {
                 let id = {
@@ -471,6 +478,7 @@ impl BackgroundJobs {
                 cancelling: false,
                 origin,
                 queued_waiting: queued,
+                lane,
                 owner_cancelled: false,
                 record,
                 record_revision: 1,
@@ -1088,6 +1096,23 @@ impl BackgroundJobs {
             .collect();
         pending.extend(state.owed.jobs());
         pending.len()
+    }
+
+    /// Of the [`pending`](Self::pending) jobs, the queued prompts that wait
+    /// only for the owner's takeover of their conversation to end. A planned
+    /// restart does not wait for them: the restart ends the takeover, and
+    /// they are kept for the next session like any queued prompt.
+    pub fn behind_takeovers(&self) -> usize {
+        self.state()
+            .jobs
+            .iter()
+            .filter(|job| job.outcome.is_none() && job.queued_waiting)
+            .filter(|job| {
+                job.lane
+                    .as_deref()
+                    .is_some_and(|lane| self.lanes.held_by_takeover(lane))
+            })
+            .count()
     }
 
     /// Whether any job is still running.
@@ -2024,6 +2049,38 @@ impl BackgroundCapable {
             return None;
         }
         self.conversations.adopt(agent, cwd, vendor).ok()
+    }
+
+    /// Take conversation `handle` over in its agent's own terminal for the
+    /// owner, sized `size`, as SCV session `session`: refused, with why,
+    /// when the agent's terminal may not be offered, or the conversation
+    /// runs a turn, has turns waiting, or has no agent session to open.
+    /// Calls that arrive meanwhile queue behind the takeover in its lane.
+    pub(crate) async fn take_over(
+        &self,
+        handle: &str,
+        session: &str,
+        size: (u16, u16),
+    ) -> Result<Arc<takeover::Takeover>, String> {
+        let agent = self.conversations.agent_of(handle).ok_or_else(|| {
+            format!("no conversation {handle} in this session; it ended, or it was forgotten after it sat idle")
+        })?;
+        let offered = self
+            .inner
+            .find(&agent)
+            .ok_or_else(|| format!("{agent} is not offered in this session"))?;
+        let launch = offered.backend.takeover()?;
+        let place = self.jobs.lanes.join_takeover(handle);
+        if place.ahead > 0 {
+            return Err(format!(
+                "{handle} has a turn running or waiting; attach once it is idle, or stop its jobs first"
+            ));
+        }
+        let mut hold = self.conversations.take_over(handle)?;
+        if let Some(attachment) = hold.attachment.take() {
+            offered.backend.release(attachment).await;
+        }
+        takeover::start(&launch, hold, place, session, size).await
     }
 }
 

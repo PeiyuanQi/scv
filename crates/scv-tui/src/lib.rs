@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod attach;
 mod client;
 mod exec;
 mod input;
@@ -43,6 +44,7 @@ use crate::{
     ui::{ChatTab, Opening, TabKind, Ui},
 };
 
+pub use attach::run_attach;
 pub use client::LaunchOptions;
 pub use exec::run_exec;
 
@@ -69,7 +71,19 @@ pub async fn run_tui(socket: &Path, cwd: &Path, options: LaunchOptions) -> Resul
     );
     let (requests, mut answers) = poller::spawn(socket.to_owned());
     ui.requests = Some(requests);
-    let result = run_event_loop(&mut terminal.terminal, &mut ui, &mut answers, socket).await;
+    let (terminal_requests, mut terminal_answers) = poller::spawn(socket.to_owned());
+    ui.terminal_requests = Some(terminal_requests);
+    let (takeover_requests, mut takeover_answers) = poller::spawn(socket.to_owned());
+    ui.takeover_requests = Some(takeover_requests);
+    let result = run_event_loop(
+        &mut terminal.terminal,
+        &mut ui,
+        &mut answers,
+        &mut terminal_answers,
+        &mut takeover_answers,
+        socket,
+    )
+    .await;
     for tab in &mut ui.tabs {
         if let TabKind::Chat(chat) = &mut tab.kind {
             chat.client.shutdown().await;
@@ -82,10 +96,15 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ui: &mut Ui,
     answers: &mut tokio::sync::mpsc::UnboundedReceiver<poller::Answer>,
+    terminal_answers: &mut tokio::sync::mpsc::UnboundedReceiver<poller::Answer>,
+    takeover_answers: &mut tokio::sync::mpsc::UnboundedReceiver<poller::Answer>,
     socket: &Path,
 ) -> Result<()> {
     let mut terminal_events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
+    // An attached terminal reads its screen more often than the dashboard.
+    let mut terminal_tick = tokio::time::interval(Duration::from_millis(25));
+    terminal_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut connecting: Vec<Connecting> = Vec::new();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
@@ -108,6 +127,19 @@ async fn run_event_loop(
         }
         tokio::select! {
             _ = tick.tick() => ui.tick(),
+            _ = terminal_tick.tick(), if ui.workbench.attached() => ui.terminal_tick(),
+            Some(answer) = terminal_answers.recv() => {
+                if let Some(note) = ui.workbench.terminal_answer(answer) {
+                    ui.workbench.notify(note, false);
+                }
+                ui.terminal_tick();
+            }
+            Some(answer) = takeover_answers.recv() => {
+                if let Some(note) = ui.workbench.terminal_answer(answer) {
+                    ui.workbench.notify(note, false);
+                }
+                ui.terminal_tick();
+            }
             _ = terminate.recv() => ui.quit = true,
             _ = hangup.recv() => ui.quit = true,
             (opening, result) = next_connection(&mut connecting) => match result {
@@ -133,6 +165,7 @@ async fn run_event_loop(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         ui.key(key).await?;
                     }
+                    Some(Ok(Event::Paste(text))) => ui.paste(&text),
                     Some(Ok(_)) => {}
                     Some(Err(error)) => return Err(error.into()),
                     None => return Ok(()),

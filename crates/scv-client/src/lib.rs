@@ -98,8 +98,10 @@ impl std::error::Error for ControlError {
 /// How long a management exchange may take. A command that can stop a
 /// running account waits for it to stop, and an email account finishes a
 /// mail action under way first, for up to 65 seconds; a workbench action
-/// that may run `git` on worktrees (each command up to 30 seconds), or
-/// wait for an agent to accept steering (up to 30 seconds), gets 90.
+/// that may run `git` on worktrees (each command up to 30 seconds), wait
+/// for an agent to accept steering (up to 30 seconds), or stop a live
+/// agent server and run the project Rust preflight before it opens an
+/// agent's terminal (up to 28 seconds), gets 90.
 pub fn control_timeout(command: &DaemonCommand) -> Duration {
     match command {
         DaemonCommand::Reload
@@ -109,7 +111,8 @@ pub fn control_timeout(command: &DaemonCommand) -> Duration {
         | DaemonCommand::WorkbenchResume { .. }
         | DaemonCommand::WorkbenchSend { .. }
         | DaemonCommand::Worktrees
-        | DaemonCommand::WorktreeRemove { .. } => Duration::from_secs(90),
+        | DaemonCommand::WorktreeRemove { .. }
+        | DaemonCommand::Attach { .. } => Duration::from_secs(90),
         _ => Duration::from_secs(20),
     }
 }

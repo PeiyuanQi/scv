@@ -134,6 +134,30 @@ pub(crate) async fn run(layout: &Layout, command: Option<JobsCommand>, cwd: &Pat
             )
             .await
         }
+        JobsCommand::Attach { job, end } => {
+            let job = find_job(&snapshot(layout).await?, &job)?;
+            let conversation = job
+                .conversation
+                .clone()
+                .with_context(|| format!("{} has no conversation to attach to yet", job.job))?;
+            if end {
+                return act(
+                    layout,
+                    DaemonCommand::AttachEnd {
+                        session: job.session,
+                        conversation,
+                    },
+                )
+                .await;
+            }
+            use std::io::IsTerminal as _;
+            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                bail!("`scv jobs attach` needs a terminal; `--end` ends a takeover without one");
+            }
+            let note = scv_tui::run_attach(&layout.socket(), &job.session, &conversation).await?;
+            println!("{}", inert(&note));
+            Ok(())
+        }
     }
 }
 

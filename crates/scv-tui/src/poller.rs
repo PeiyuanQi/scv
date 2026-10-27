@@ -50,6 +50,12 @@ pub(crate) enum Tag {
     Send(crate::workbench::Target),
     /// The worktree list.
     Worktrees,
+    /// A view asked to take its conversation over in its agent's terminal.
+    Attach(crate::workbench::Target),
+    /// An attached view's read of its screen, with what was typed.
+    AttachIo(crate::workbench::Target),
+    /// A view detached, or ended a takeover; the note is shown.
+    AttachDone,
 }
 
 /// What the dashboard learns.

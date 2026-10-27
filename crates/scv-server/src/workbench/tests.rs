@@ -252,3 +252,106 @@ async fn the_snapshot_lists_queues_kept_from_sessions_that_stopped() {
     assert_eq!(snapshot.restorable.len(), 1);
     assert_eq!(snapshot.restorable[0].id, "old-session");
 }
+
+/// An instance whose Codex, with `permissions = "full"`, answers each turn
+/// at once and opens an interactive terminal for `resume <thread>`.
+fn instance_with_terminal_codex() -> (tempfile::TempDir, Instance) {
+    let (home, instance) = instance_with_fake_codex();
+    let agent = instance.layout.home().join("fake-codex");
+    std::fs::write(
+        &agent,
+        concat!(
+            "#!/bin/sh\n",
+            "case \"$1\" in\n",
+            "  resume)\n",
+            "    echo \"codex terminal on $2\"\n",
+            "    while IFS= read -r line; do echo \"typed: $line\"; done\n",
+            "    ;;\n",
+            "  *)\n",
+            "    echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
+            "    echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"done\"}}'\n",
+            "    echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+            "    ;;\n",
+            "esac\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        instance.layout.home().join("config.toml"),
+        format!(
+            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\npermissions = \"full\"\n",
+            agent.display().to_string()
+        ),
+    )
+    .unwrap();
+    (home, instance)
+}
+
+#[tokio::test]
+async fn terminal_reads_skip_the_delegations_and_nothing_is_taken_over_once_stopping() {
+    let (_home, instance) = instance_with_terminal_codex();
+    let hosts = hosts(&instance);
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_path = std::fs::canonicalize(workspace.path()).unwrap();
+    control(
+        &hosts,
+        DaemonCommand::WorkbenchStart {
+            workspace: workspace_path.display().to_string(),
+            agent: "codex".into(),
+            prompt: "a quick fix".into(),
+            cwd: None,
+            model: None,
+            effort: None,
+            worktree: false,
+        },
+    )
+    .await
+    .unwrap();
+    let job = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(job) = snapshot(&hosts)
+                .await
+                .jobs
+                .into_iter()
+                .find(|job| job.state == AgentState::Completed && job.conversation.is_some())
+            {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let attach = DaemonCommand::Attach {
+        session: job.session.clone(),
+        conversation: job.conversation.clone().unwrap(),
+        cols: Some(80),
+        rows: Some(24),
+    };
+    let attached = control(&hosts, attach.clone()).await.unwrap();
+    // The screen's reads come every 50 ms: no process table scan for them.
+    assert_eq!(attached.delegations, DelegationSummary::default());
+    let id = attached.attach.unwrap().id;
+    let read = control(
+        &hosts,
+        DaemonCommand::AttachIo {
+            id,
+            after: 0,
+            input: "hi\r".into(),
+            cols: None,
+            rows: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(read.delegations, DelegationSummary::default());
+    assert!(read.attach.is_some());
+    // Other actions count them, the takeover's run among them.
+    let listed = control(&hosts, DaemonCommand::Workbench { watch: false })
+        .await
+        .unwrap();
+    assert!(listed.delegations.active >= 1, "{:?}", listed.delegations);
+    hosts.shutdown().await;
+    let refused = control(&hosts, attach).await.unwrap_err();
+    assert!(refused.contains("stopping"), "{refused}");
+}

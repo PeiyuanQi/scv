@@ -66,7 +66,9 @@ sidebar shows every workspace's jobs with their state and why: working,
 waiting for you, idle, quiet for too long, or interrupted. Start jobs of
 your own, stop them, answer their approvals while you watch, and resume a
 job a restart cut off in the agent's own conversation; your queued prompts
-come back too. `scv jobs` does the same from the command line.
+come back too. Take an idle Codex conversation over in its own terminal
+(`Ctrl+O`, or `scv jobs attach`), type into it, and detach while it keeps
+running. `scv jobs` does the same from the command line.
 
 ### Private homes, private keys
 
@@ -179,7 +181,7 @@ for selection rules and limits.
 | `scv channels login`, `run`, `stop`, `status`, `logout` | Manage chat accounts (`wechat`, `feishu`, `lark`, `slack`) and mailboxes (`email`: read-only unless `mail.actions` is on) |
 | `scv mail status`, `cancel` | List or withdraw mail actions waiting for approval. Approval happens only in the mail chat |
 | `scv agents login`, `status`, `check`, `ps`, `kill`, `worktrees` | Sign agents in, check them, list or stop their runs, and list or remove job worktrees |
-| `scv jobs`, `log`, `start`, `send`, `cancel`, `resume`, `approve` | The workbench: every job and run, live logs, your own jobs, and acting on them |
+| `scv jobs`, `log`, `start`, `send`, `cancel`, `resume`, `approve`, `attach` | The workbench: every job and run, live logs, your own jobs, acting on them, and taking a conversation over in its agent's terminal |
 | `scv confirm "…"` | Ask the owner yes or no in chat; exits 0 only on yes |
 | `scv project create`, `status`, `tasks`, `report` | Opt into a durable project ledger and inspect its evidence |
 | `scv project add-task`, `update-task`, `run-start`, `run-progress`, `run-finish`, `heartbeat`, `events` | Drive or inspect project tasks and supervised run heartbeats |

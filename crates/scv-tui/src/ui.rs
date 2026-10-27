@@ -92,6 +92,13 @@ pub(crate) struct Ui {
     pub(crate) quit: bool,
     /// Requests for the dashboard's own connection.
     pub(crate) requests: Option<UnboundedSender<Request>>,
+    /// Attached terminals' reads and keys, and detaches, on a connection
+    /// of their own so typing never waits behind a snapshot.
+    pub(crate) terminal_requests: Option<UnboundedSender<Request>>,
+    /// Starting and ending takeovers, which may take seconds (stopping an
+    /// agent's server, the Rust preflight, the agent's grace to exit): on
+    /// a third connection, so typing into another terminal never waits.
+    pub(crate) takeover_requests: Option<UnboundedSender<Request>>,
     /// Chat tabs to connect: new ones and reconnecting ones.
     pub(crate) openings: Vec<Opening>,
     /// A destructive sidebar key waiting to be pressed again: the key, the
@@ -133,6 +140,8 @@ impl Ui {
             overlay_scroll: 0,
             quit: false,
             requests: None,
+            terminal_requests: None,
+            takeover_requests: None,
             openings: Vec::new(),
             confirm: None,
             reconnecting: HashSet::new(),
@@ -362,9 +371,24 @@ impl Ui {
         }
     }
 
+    /// Send an attached terminal's request on the terminal connection.
+    pub(crate) fn terminal_request(&self, tag: Tag, command: DaemonCommand) {
+        if let Some(requests) = &self.terminal_requests {
+            let _ = requests.send(Request { tag, command });
+        }
+    }
+
+    /// Send a takeover's start or end on its own connection.
+    fn takeover_request(&self, tag: Tag, command: DaemonCommand) {
+        if let Some(requests) = &self.takeover_requests {
+            let _ = requests.send(Request { tag, command });
+        }
+    }
+
     /// The requests the workbench needs now.
     pub(crate) fn tick(&mut self) {
-        // Views of tabs that were closed stop reading.
+        // Views of tabs that were closed stop reading; one attached to a
+        // terminal detaches from it, which keeps running.
         let open: Vec<Target> = self
             .tabs
             .iter()
@@ -373,12 +397,133 @@ impl Ui {
                 TabKind::Chat(_) => None,
             })
             .collect();
-        self.workbench
-            .views
-            .retain(|target, _| open.contains(target));
+        let mut detached = Vec::new();
+        self.workbench.views.retain(|target, view| {
+            let keep = open.contains(target);
+            if !keep && let Some(attached) = view.terminal.take() {
+                detached.push(attached.id);
+            }
+            keep
+        });
+        for id in detached {
+            self.terminal_request(Tag::AttachDone, DaemonCommand::AttachDetach { id });
+        }
         for request in self.workbench.due(Instant::now()) {
             self.request(request.tag, request.command);
         }
+        self.terminal_tick();
+    }
+
+    /// The reads attached views need now.
+    pub(crate) fn terminal_tick(&mut self) {
+        for request in self.workbench.terminal_due(Instant::now()) {
+            self.terminal_request(request.tag, request.command);
+        }
+    }
+
+    /// The agent view attached to a terminal that keys go to now: the
+    /// focused pane shows it, and no chat's approval prompt covers it.
+    fn attached_target(&self) -> Option<Target> {
+        if self.overlay.is_some() || self.focus == Focus::Sidebar || self.covering_tab().is_some() {
+            return None;
+        }
+        match &self.tab(self.active_tab()?)?.kind {
+            TabKind::Agent(target)
+                if self
+                    .workbench
+                    .views
+                    .get(target)
+                    .is_some_and(|view| view.terminal.is_some()) =>
+            {
+                Some(target.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// A key for an attached terminal: the detach key detaches, and every
+    /// other key goes to the agent, dashboard keys included.
+    fn terminal_key(&mut self, target: &Target, key: KeyEvent) {
+        let Some(view) = self.workbench.views.get_mut(target) else {
+            return;
+        };
+        let Some(attached) = view.terminal.as_mut() else {
+            return;
+        };
+        if crate::attach::is_detach(key) {
+            let Some(attached) = view.terminal.take() else {
+                return;
+            };
+            self.terminal_request(
+                Tag::AttachDone,
+                DaemonCommand::AttachDetach {
+                    id: attached.id.clone(),
+                },
+            );
+            self.workbench.notify(
+                format!(
+                    "Detached from {}; it keeps running in its terminal. Ctrl+O attaches again; \
+                     Ctrl+X twice ends it.",
+                    attached.conversation
+                ),
+                false,
+            );
+            return;
+        }
+        attached.type_key(key);
+        self.terminal_tick();
+    }
+
+    /// Pasted text: an attached terminal takes it; elsewhere it is dropped.
+    pub(crate) fn paste(&mut self, text: &str) {
+        let Some(target) = self.attached_target() else {
+            return;
+        };
+        if let Some(attached) = self
+            .workbench
+            .views
+            .get_mut(&target)
+            .and_then(|view| view.terminal.as_mut())
+        {
+            attached.paste(text);
+        }
+        self.terminal_tick();
+    }
+
+    /// Take conversation of agent view `target` over in its agent's own
+    /// terminal, or attach to its takeover.
+    fn attach(&mut self, target: &Target) {
+        let conversation = self
+            .workbench
+            .takeover(target)
+            .or_else(|| self.workbench.conversation(target));
+        let Some(view) = self.workbench.views.get_mut(target) else {
+            return;
+        };
+        let Some((session, conversation)) = conversation else {
+            self.workbench.notify(
+                "This view has no conversation to attach to yet; wait for its first turn.".into(),
+                false,
+            );
+            return;
+        };
+        if view.attaching {
+            self.workbench
+                .notify(format!("Still attaching to {conversation}…"), false);
+            return;
+        }
+        view.attaching = true;
+        let (cols, rows) = view.drawn.get();
+        let size = |value: u16| (value > 0).then_some(value);
+        self.takeover_request(
+            Tag::Attach(target.clone()),
+            DaemonCommand::Attach {
+                session,
+                conversation,
+                cols: size(cols),
+                rows: size(rows),
+            },
+        );
     }
 
     /// A chat tab's server sent `event`, or its connection ended or
@@ -462,6 +607,11 @@ impl Ui {
         // Pin the prompt that is on screen before a dashboard key moves
         // focus, so that key does not hide it.
         self.pin_cover();
+        // An attached terminal takes every key but its detach key.
+        if let Some(target) = self.attached_target() {
+            self.terminal_key(&target, key);
+            return Ok(());
+        }
         if let Some(action) = self.keys.action(key) {
             self.act(action);
             self.normalize_focus();
@@ -949,6 +1099,7 @@ impl Ui {
         let approval = self.workbench.approval(target).cloned();
         let job = self.workbench.job(target).cloned();
         let conversation = self.workbench.conversation(target);
+        let takeover = self.workbench.takeover(target);
         let Some(view) = self.workbench.views.get_mut(target) else {
             return;
         };
@@ -988,6 +1139,35 @@ impl Ui {
                         approved,
                     },
                 );
+            }
+            KeyCode::Char('o') if control => self.attach(target),
+            KeyCode::Char('x') if control && takeover.is_some() => {
+                let Some((session, conversation)) = takeover else {
+                    return;
+                };
+                let now = Instant::now();
+                if view
+                    .confirm_end
+                    .is_some_and(|at| now.duration_since(at) < CONFIRM_WINDOW)
+                {
+                    view.confirm_end = None;
+                    self.takeover_request(
+                        Tag::AttachDone,
+                        DaemonCommand::AttachEnd {
+                            session,
+                            conversation,
+                        },
+                    );
+                } else {
+                    view.confirm_end = Some(now);
+                    self.workbench.notify(
+                        format!(
+                            "Press Ctrl+X again to end the takeover of {conversation}: its \
+                             terminal is hung up and its process stopped."
+                        ),
+                        false,
+                    );
+                }
             }
             KeyCode::Char('x') if control => {
                 let Some(job) = job.filter(|job| !job.state.is_final()) else {

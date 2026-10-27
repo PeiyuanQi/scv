@@ -515,15 +515,22 @@ fn footer(ui: &Ui, app: Option<&App>) -> Paragraph<'static> {
             .style(Style::default().fg(Color::DarkGray))
         }
         None => Paragraph::new(format!(
-            " Enter send to the conversation  ·  Ctrl+Y/Ctrl+N approve/deny  ·  Ctrl+X stop  ·  Ctrl+R resume  ·  {keys}"
+            " Enter send to the conversation  ·  Ctrl+Y/Ctrl+N approve/deny  ·  Ctrl+X stop  ·  Ctrl+R resume  ·  Ctrl+O attach  ·  {keys}"
         ))
         .style(Style::default().fg(Color::DarkGray)),
     }
 }
 
 /// Draw an agent view: what the agent is doing, its live log, and the
-/// composer that sends it the owner's prompts.
+/// composer that sends it the owner's prompts; or, while it is attached,
+/// the agent's own terminal.
 fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, focused: bool) {
+    // A terminal it attaches to takes the whole view, below one line.
+    view.drawn.set((area.width, area.height.saturating_sub(1)));
+    if let Some(attached) = &view.terminal {
+        render_terminal(frame, area, attached, focused);
+        return;
+    }
     let approval = ui.workbench.approval(&view.target);
     let job = ui.workbench.job(&view.target);
     let conversation = ui.workbench.conversation(&view.target);
@@ -629,6 +636,48 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
     );
     if focused {
         set_cursor(frame, layout[3], &view.input, view.cursor);
+    }
+}
+
+/// Draw the agent's own terminal, taken over: a line naming it and the
+/// detach key, and its screen as the daemon keeps it.
+pub(crate) fn render_terminal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    attached: &crate::attach::Attached,
+    focused: bool,
+) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    attached.drawn.set((layout[1].width, layout[1].height));
+    let title = Line::from(vec![
+        Span::styled(
+            format!(" {} ", clean(&attached.conversation)),
+            Style::default()
+                .fg(Color::Black)
+                .bg(if focused {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            " {}'s own terminal, taken over · {} detaches",
+            clean(&attached.agent),
+            crate::attach::DETACH_KEY
+        )),
+    ]);
+    frame.render_widget(Paragraph::new(title), layout[0]);
+    frame.render_widget(Paragraph::new(attached.lines()), layout[1]);
+    if focused
+        && let Some([row, col]) = attached.cursor
+        && row < layout[1].height
+        && col < layout[1].width
+    {
+        frame.set_cursor_position((layout[1].x + col, layout[1].y + row));
     }
 }
 
@@ -865,6 +914,10 @@ fn help_lines(ui: &Ui) -> Vec<Line<'static>> {
         "  Enter          send the prompt to the conversation: it joins the running turn when the agent can take it, else queues",
         "  Ctrl+Y/Ctrl+N  approve or deny its approval request (y and n are text)",
         "  Ctrl+X Ctrl+X  stop its job · Ctrl+R resume an interrupted one",
+        "  Ctrl+O         take its idle conversation over in the agent's own terminal, or attach again",
+        "                 (agents whose terminal asks no approvals: Codex with permissions = \"full\")",
+        "  Ctrl+]         in the terminal: detach; every other key goes to the agent",
+        "  Ctrl+X Ctrl+X  with the conversation taken over: end the takeover",
     ] {
         lines.push(Line::raw(line));
     }

@@ -179,6 +179,10 @@ workbench".
 {"type":"daemon.control","request_id":"w8","command":{"action":"workbench_dismiss","session":"5d1c…","job":"job-3"}}
 {"type":"daemon.control","request_id":"w9","command":{"action":"worktrees"}}
 {"type":"daemon.control","request_id":"w10","command":{"action":"worktree_remove","path":"/home/u/.scv/worktrees/shop-1a2b3c4d/codex-9f3e21","force":false}}
+{"type":"daemon.control","request_id":"a1","command":{"action":"attach","session":"5d1c…","conversation":"codex-2","cols":120,"rows":34}}
+{"type":"daemon.control","request_id":"a2","command":{"action":"attach_io","id":"at-0f3c…","after":7,"input":"git status\r","cols":120,"rows":34}}
+{"type":"daemon.control","request_id":"a3","command":{"action":"attach_detach","id":"at-0f3c…"}}
+{"type":"daemon.control","request_id":"a4","command":{"action":"attach_end","session":"5d1c…","conversation":"codex-2"}}
 ```
 
 `workbench` replies with the snapshot in `daemon.status.workbench`; `watch:
@@ -199,13 +203,39 @@ on one job; `workbench_approve` answers a waiting approval request.
 `worktrees` lists the worktrees SCV created, and `worktree_remove` removes
 one (with uncommitted changes, or locked by a cut-off creation, only with
 `force`), keeping its branch, and refuses while a job or a delegated process
-still works in it. A
+still works in it. `attach` takes a live session's idle conversation over in
+its agent's own terminal ([takeover](tools.md#taking-a-conversation-over)),
+or attaches to the takeover of it already running, sized `cols` by `rows`
+(clamped to 20x5-400x200, default 100x30), and replies with
+`daemon.status.attach`: an `AttachPage` holding the client's hold `id`, the
+conversation and agent, the takeover's `run`, the screen's `generation`,
+size, and rows (`lines`, each a `row` and its styled `spans`; `full` when
+they are the whole screen), the `cursor` (absent while hidden), whether the
+agent asked for application cursor keys and bracketed paste, and, once the
+terminal has closed, `ended` and `exit`. It is refused with a
+`workbench_error` naming why for an agent whose terminal may not be offered,
+a conversation that runs or has turns waiting, or one with no agent session.
+`attach_io` types `input` (at most 64 KiB; the bytes a terminal sends,
+UTF-8) into the terminal held as `id`, resizes it when `cols` or `rows` is
+given, and replies with the rows changed since generation `after` (all of
+them for 0, or after a resize), with a `note` when input could not all be
+delivered; a hold another `attach` took, or that went unread for 30
+seconds, is refused. `attach_detach` lets the hold go and leaves the agent
+running; `attach_end` hangs the terminal up, stops its process, gives the
+conversation back to SCV's turns, and replies with the final page. The
+replies to `attach`, `attach_io`, and `attach_detach` leave
+`delegations` empty (all zero), since a client reads them every 50 ms, and
+`attach` is refused while the daemon stops. The
+screen is display text: spans never carry escape sequences, and values that
+look like credentials are masked. A daemon before 0.4.5 answers these
+actions with `invalid_json`; a client then keeps its activity view. A
 refused action (an unknown session, job, conversation, run, approval, or
 worktree, a job in the wrong state, or the call's own validation error) is a
 `workbench_error` with SCV's reason. Each action's reply carries
 `workbench_note`, SCV's sentence about what it did, and `workbench_job`
-(`<session>/<job>`) for the job it started; every action but `run_log` and
-the worktree ones also carries a fresh snapshot.
+(`<session>/<job>`) for the job it started; every action but `run_log`,
+the worktree ones, and `attach`, `attach_io`, and `attach_detach` also
+carries a fresh snapshot.
 
 Component management is unsupported on stdio. The client helper bounds its
 exchange and never automatically retries a mutation after an ambiguous failure;

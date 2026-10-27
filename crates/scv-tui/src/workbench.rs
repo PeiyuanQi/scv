@@ -4,6 +4,7 @@
 //! displays what it reports and remembers how far each log was read.
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
@@ -14,6 +15,7 @@ use scv_protocol::{
 };
 
 use crate::{
+    attach::{Attached, DETACH_KEY},
     poller::{Answer, Request, Tag},
     transcript::{BoundedLog, Measure, bounded_text},
 };
@@ -96,6 +98,15 @@ pub(crate) struct AgentView {
     /// The approval request last shown for this view. A later request on
     /// the same job does not take the first Ctrl+Y or Ctrl+N.
     pub(crate) shown_approval: Option<String>,
+    /// The agent's terminal while the view is attached to its takeover.
+    pub(crate) terminal: Option<Attached>,
+    /// An attach was asked for and not answered yet.
+    pub(crate) attaching: bool,
+    /// The size the view was last drawn at, which a terminal it attaches
+    /// to takes.
+    pub(crate) drawn: Cell<(u16, u16)>,
+    /// An end of the takeover waiting to be pressed again.
+    pub(crate) confirm_end: Option<Instant>,
 }
 
 impl AgentView {
@@ -112,6 +123,10 @@ impl AgentView {
             confirm_cancel: None,
             sent: None,
             shown_approval: None,
+            terminal: None,
+            attaching: false,
+            drawn: Cell::new((0, 0)),
+            confirm_end: None,
         }
     }
 
@@ -277,6 +292,14 @@ impl Workbench {
 
     /// Take in an answer from the dashboard's connection.
     pub(crate) fn answer(&mut self, answer: Answer) -> Option<String> {
+        if let Answer::Status(tag, _)
+        | Answer::Refused(tag, _)
+        | Answer::Disconnected(tag)
+        | Answer::TimedOut(tag) = &answer
+            && matches!(tag, Tag::Attach(_) | Tag::AttachIo(_) | Tag::AttachDone)
+        {
+            return self.terminal_answer(answer);
+        }
         match answer {
             Answer::Status(tag, status) => {
                 self.availability = Availability::Ready;
@@ -310,6 +333,8 @@ impl Workbench {
                         }
                         status.workbench_note
                     }
+                    // Taken in by `terminal_answer`.
+                    Tag::Attach(_) | Tag::AttachIo(_) | Tag::AttachDone => None,
                 }
             }
             Answer::Refused(tag, message) => {
@@ -330,6 +355,7 @@ impl Workbench {
                         }
                     }
                     Tag::Action | Tag::Worktrees => {}
+                    Tag::Attach(_) | Tag::AttachIo(_) | Tag::AttachDone => {}
                 }
                 matches!(tag, Tag::Action | Tag::Worktrees | Tag::Send(_)).then_some(message)
             }
@@ -365,6 +391,7 @@ impl Workbench {
                             .into(),
                     ),
                     Tag::Snapshot | Tag::Log(..) => None,
+                    Tag::Attach(_) | Tag::AttachIo(_) | Tag::AttachDone => None,
                 }
             }
             Answer::TimedOut(tag) => {
@@ -382,6 +409,7 @@ impl Workbench {
                         }
                     }
                     Tag::Action | Tag::Worktrees => {}
+                    Tag::Attach(_) | Tag::AttachIo(_) | Tag::AttachDone => {}
                 }
                 match tag {
                     Tag::Send(_) => Some(
@@ -393,9 +421,135 @@ impl Workbench {
                         "The daemon did not answer in time; check whether that took effect.".into(),
                     ),
                     Tag::Snapshot | Tag::Log(..) => None,
+                    Tag::Attach(_) | Tag::AttachIo(_) | Tag::AttachDone => None,
                 }
             }
         }
+    }
+
+    /// Take in an answer to an attach request, from the dashboard's
+    /// terminal connection. A failure of the terminal falls back to the
+    /// activity view, and says why.
+    pub(crate) fn terminal_answer(&mut self, answer: Answer) -> Option<String> {
+        match answer {
+            Answer::Status(Tag::Attach(target), status) => {
+                // A view closed meanwhile lets its hold lapse.
+                let view = self.views.get_mut(&target)?;
+                view.attaching = false;
+                let page = status.attach?;
+                let conversation = page.conversation.clone();
+                view.terminal = Some(Attached::new(page));
+                Some(format!(
+                    "Attached to {conversation}'s terminal: keys go to the agent; {DETACH_KEY} \
+                     detaches and leaves it running."
+                ))
+            }
+            Answer::Status(Tag::AttachIo(target), status) => {
+                let view = self.views.get_mut(&target)?;
+                let attached = view.terminal.as_mut()?;
+                let Some(page) = status.attach.filter(|page| page.id == attached.id) else {
+                    attached.unanswered();
+                    return None;
+                };
+                let note = page.note.clone();
+                let ended = page
+                    .ended
+                    .then(|| (page.conversation.clone(), page.exit.clone()));
+                attached.apply(page);
+                if let Some((conversation, exit)) = ended {
+                    view.terminal = None;
+                    return Some(format!(
+                        "{conversation}'s terminal closed ({}); its activity view is back.",
+                        exit.as_deref().unwrap_or("closed")
+                    ));
+                }
+                note
+            }
+            Answer::Status(_, status) => status.workbench_note,
+            Answer::Refused(tag, message) => {
+                match tag {
+                    Tag::Attach(target) => {
+                        if let Some(view) = self.views.get_mut(&target) {
+                            view.attaching = false;
+                        }
+                    }
+                    Tag::AttachIo(target) => {
+                        if let Some(view) = self.views.get_mut(&target) {
+                            view.terminal = None;
+                        }
+                    }
+                    _ => {}
+                }
+                Some(message)
+            }
+            Answer::Unsupported => {
+                for view in self.views.values_mut() {
+                    view.attaching = false;
+                    view.terminal = None;
+                }
+                Some(
+                    "This daemon cannot attach to an agent's terminal (it predates attach); \
+                     restart it into this release. The activity view goes on as before."
+                        .into(),
+                )
+            }
+            Answer::Disconnected(tag) | Answer::TimedOut(tag) => match tag {
+                Tag::Attach(target) => {
+                    if let Some(view) = self.views.get_mut(&target) {
+                        view.attaching = false;
+                    }
+                    Some(
+                        "The daemon did not answer the attach; a takeover may have started, so \
+                         check the sidebar before attaching again."
+                            .into(),
+                    )
+                }
+                Tag::AttachIo(target) => self
+                    .views
+                    .get_mut(&target)
+                    .and_then(|view| view.terminal.take())
+                    .map(|attached| {
+                        format!(
+                            "The connection to the daemon broke; detached from {}'s terminal \
+                             (the agent may still run there).",
+                            attached.conversation
+                        )
+                    }),
+                _ => None,
+            },
+        }
+    }
+
+    /// The reads attached views need now, each with what was typed.
+    pub(crate) fn terminal_due(&mut self, now: Instant) -> Vec<Request> {
+        self.views
+            .iter_mut()
+            .filter_map(|(target, view)| {
+                let command = view.terminal.as_mut()?.due(now)?;
+                Some(Request {
+                    tag: Tag::AttachIo(target.clone()),
+                    command,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether any view is attached to a terminal, which then reads often.
+    pub(crate) fn attached(&self) -> bool {
+        self.views.values().any(|view| view.terminal.is_some())
+    }
+
+    /// The live takeover a view's conversation is in, as its session and
+    /// conversation: the newest run the view follows, when it is a
+    /// terminal still running.
+    pub(crate) fn takeover(&self, target: &Target) -> Option<(String, String)> {
+        let snapshot = self.snapshot.as_ref()?;
+        let run = runs_of(snapshot, target)
+            .into_iter()
+            .max_by_key(|run| run.started_unix_seconds)?;
+        (run.transport == "terminal" && run.live)
+            .then(|| Some((run.session.clone(), run.conversation.clone()?)))
+            .flatten()
     }
 
     /// The page of `handle`'s log read from `after` came back: that request
