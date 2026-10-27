@@ -898,6 +898,8 @@ async fn the_working_reaction_is_eyes_and_already_there_or_gone_is_fine() {
         Some("C123"),
     );
     let working = json!({"channel": "C123", "timestamp": "1700000000.000002", "name": "eyes"});
+    // As the receive that brought the message did.
+    transport.verify().await.unwrap();
     assert_eq!(
         transport.react(&message).await.unwrap().as_deref(),
         Some("eyes")
@@ -949,6 +951,63 @@ async fn the_working_reaction_is_eyes_and_already_there_or_gone_is_fine() {
     fake.made("/");
     assert!(transport.unreact("om_1", "eyes").await.is_err());
     assert_eq!(fake.made("/reactions."), 0);
+}
+
+/// The routes of the requests made so far, in order, without waiting.
+fn routes(fake: &mut Fake) -> Vec<String> {
+    std::iter::from_fn(|| fake.requests.try_recv().ok())
+        .map(|request| request.route)
+        .collect()
+}
+
+#[tokio::test]
+async fn reactions_reuse_the_verified_tokens_and_never_ask_auth_test_again() {
+    let mut fake = Fake::start().await;
+    let transport = fake.transport();
+    let id = "C123:1700000000.000002";
+    let message = crate::Message::text(id, "U123", "hi", "slack:C123", Some("C123"));
+    // An add never verifies the tokens itself: before anything did, it is
+    // not tried.
+    let error = transport.react(&message).await.unwrap_err().to_string();
+    assert!(error.contains("not verified"), "{error}");
+    assert_eq!(routes(&mut fake), [] as [String; 0]);
+    // A removal can come before the first receive, for a reaction an
+    // earlier run left, so it verifies them when nothing has yet.
+    transport.unreact(id, "eyes").await.unwrap();
+    assert_eq!(
+        routes(&mut fake),
+        ["/auth.test", "/bots.info?bot=B123", "/reactions.remove"]
+    );
+    // Once verified, neither asks again.
+    for _ in 0..2 {
+        transport.react(&message).await.unwrap();
+        transport.unreact(id, "eyes").await.unwrap();
+    }
+    assert_eq!(
+        routes(&mut fake),
+        [
+            "/reactions.add",
+            "/reactions.remove",
+            "/reactions.add",
+            "/reactions.remove",
+        ]
+    );
+    // Once Slack rejects the bot token, adding waits for the next receive
+    // to verify it again.
+    fake.script(
+        "/reactions.add",
+        200,
+        json!({"ok": false, "error": "invalid_auth"}),
+    );
+    assert!(transport.react(&message).await.is_err());
+    assert!(transport.react(&message).await.is_err());
+    assert_eq!(routes(&mut fake), ["/reactions.add"]);
+    transport.verify().await.unwrap();
+    transport.react(&message).await.unwrap();
+    assert_eq!(
+        routes(&mut fake),
+        ["/auth.test", "/bots.info?bot=B123", "/reactions.add"]
+    );
 }
 
 #[tokio::test]

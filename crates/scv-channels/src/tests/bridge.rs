@@ -46,6 +46,10 @@ struct FakeTransport {
     react_fails: StdMutex<bool>,
     /// Removing one fails.
     unreact_fails: StdMutex<bool>,
+    /// Held by a test, adds and removals that started wait for it, as on a
+    /// slow platform.
+    react_hold: tokio::sync::Mutex<()>,
+    unreact_hold: tokio::sync::Mutex<()>,
 }
 
 impl FakeTransport {
@@ -122,6 +126,7 @@ impl Transport for FakeTransport {
             .lock()
             .unwrap()
             .push(Reacted::Add(message.id.clone()));
+        drop(self.react_hold.lock().await);
         if *self.react_fails.lock().unwrap() {
             bail!("the fake platform lacks the reaction permission");
         }
@@ -133,6 +138,7 @@ impl Transport for FakeTransport {
             .lock()
             .unwrap()
             .push(Reacted::Remove(message_id.into(), reaction.into()));
+        drop(self.unreact_hold.lock().await);
         if *self.unreact_fails.lock().unwrap() {
             bail!("the fake platform lacks the reaction permission");
         }
@@ -182,6 +188,8 @@ impl Bench {
             reactions: StdMutex::new(Vec::new()),
             react_fails: StdMutex::new(false),
             unreact_fails: StdMutex::new(false),
+            react_hold: tokio::sync::Mutex::new(()),
+            unreact_hold: tokio::sync::Mutex::new(()),
         };
         let bench = Self {
             directory,
@@ -565,7 +573,11 @@ async fn a_claimed_message_wears_the_working_reaction_until_its_reply_is_sent() 
                     Reacted::Remove("m1".into(), "reaction-m1".into()),
                 ]
             );
-            eventually(|| bench.state().pending.is_empty()).await;
+            eventually(|| {
+                let saved = bench.state();
+                saved.pending.is_empty() && saved.removing.is_empty()
+            })
+            .await;
         })
         .await;
 }
@@ -596,8 +608,9 @@ async fn a_failed_turn_takes_the_working_reaction_off_with_its_failure_reply() {
 #[tokio::test]
 async fn an_interrupted_claim_takes_its_reaction_off_and_older_state_takes_none_off() {
     let (bench, mut peer) = Bench::new();
-    // A claim saved with its reaction, and a claim and a reply saved by a
-    // release before the reaction, which carry none.
+    // A claim saved with its reaction, a reaction an earlier run had yet to
+    // take off, and a claim and a reply saved by a release before the
+    // reaction, which carry none.
     let mut saved: state::BridgeState = serde_json::from_str(
         r#"{"cursor":"c","seen":[],
             "pending":{"message_id":"done","to_user_id":"carol","context_token":"re-done","reply":"answer"},
@@ -611,6 +624,10 @@ async fn an_interrupted_claim_takes_its_reaction_off_and_older_state_takes_none_
         key: String::new(),
         reaction: Some("reaction-lost".into()),
     });
+    saved.removing.push(state::Reaction {
+        message_id: "spent".into(),
+        reaction: "reaction-spent".into(),
+    });
     bench.store.save_state("default", &saved).unwrap();
     bench
         .run(async {
@@ -623,12 +640,19 @@ async fn an_interrupted_claim_takes_its_reaction_off_and_older_state_takes_none_
                     ("re-lost".to_owned(), FAILURE_REPLY.to_owned()),
                 ]
             );
-            eventually(|| bench.state().pending.is_empty()).await;
+            eventually(|| {
+                let saved = bench.state();
+                saved.pending.is_empty() && saved.removing.is_empty()
+            })
+            .await;
         })
         .await;
     assert_eq!(
         bench.transport.reactions(),
-        [Reacted::Remove("lost".into(), "reaction-lost".into())]
+        [
+            Reacted::Remove("spent".into(), "reaction-spent".into()),
+            Reacted::Remove("lost".into(), "reaction-lost".into()),
+        ]
     );
 }
 
@@ -659,7 +683,7 @@ async fn reaction_failures_are_only_logged_and_never_hold_up_the_turn_or_its_rep
             assert_eq!(peer.sent().await.text, "ok");
             eventually(|| {
                 let saved = bench.state();
-                saved.pending.is_empty() && saved.seen == ["m1", "m2"]
+                saved.pending.is_empty() && saved.seen == ["m1", "m2"] && saved.removing.is_empty()
             })
             .await;
         })
@@ -709,6 +733,154 @@ async fn only_claimed_messages_get_the_working_reaction() {
         [
             Reacted::Add("m1".into()),
             Reacted::Remove("m1".into(), "reaction-m1".into()),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reaction_whose_id_cannot_be_saved_comes_off_and_the_turn_goes_on() {
+    let (bench, mut peer) = Bench::new();
+    let add = bench.transport.react_hold.lock().await;
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            // The claim is durable and the add under way when the account
+            // stays busy for longer than a save waits.
+            eventually(|| bench.transport.reactions() == [Reacted::Add("m1".into())]).await;
+            let transaction = bench.store.transaction("default").unwrap();
+            drop(add);
+            // Unsaved, nothing else would take the reaction off: it comes
+            // off at once.
+            eventually(|| bench.transport.reactions().len() == 2).await;
+            drop(transaction);
+            // The turn goes on without it, and so does the account.
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            assert_eq!(bench.state().in_flight[0].reaction, None);
+            finish_turn(&mut side, "hi").await;
+            assert_eq!(peer.sent().await.text, "hi");
+            eventually(|| {
+                let saved = bench.state();
+                saved.pending.is_empty() && saved.seen == ["m1"]
+            })
+            .await;
+        })
+        .await;
+    // Its reply had nothing left to take off.
+    assert_eq!(
+        bench.transport.reactions(),
+        [
+            Reacted::Add("m1".into()),
+            Reacted::Remove("m1".into(), "reaction-m1".into()),
+        ]
+    );
+    assert_eq!(bench.state().removing, []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reaction_the_platform_adds_after_its_turn_ended_comes_off() {
+    let (bench, mut peer) = Bench::new();
+    let add = bench.transport.react_hold.lock().await;
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            // The add outlasts its wait, so the turn goes ahead without it.
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            assert_eq!(bench.state().in_flight[0].reaction, None);
+            finish_turn(&mut side, "hi").await;
+            assert_eq!(peer.sent().await.text, "hi");
+            eventually(|| bench.state().pending.is_empty()).await;
+            // The platform put the reaction on after all: it comes off.
+            drop(add);
+            eventually(|| bench.transport.reactions().len() == 2).await;
+        })
+        .await;
+    assert_eq!(
+        bench.transport.reactions(),
+        [
+            Reacted::Add("m1".into()),
+            Reacted::Remove("m1".into(), "reaction-m1".into()),
+        ]
+    );
+    let saved = bench.state();
+    assert!(saved.in_flight.is_empty() && saved.removing.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reaction_the_platform_adds_late_during_its_turn_comes_off_with_the_reply() {
+    let (bench, mut peer) = Bench::new();
+    let add = bench.transport.react_hold.lock().await;
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            assert_eq!(bench.state().in_flight[0].reaction, None);
+            // It lands while the turn runs: saved with the claim after all.
+            drop(add);
+            eventually(|| bench.state().in_flight[0].reaction.as_deref() == Some("reaction-m1"))
+                .await;
+            assert_eq!(bench.transport.reactions().len(), 1);
+            finish_turn(&mut side, "hi").await;
+            assert_eq!(peer.sent().await.text, "hi");
+            eventually(|| bench.transport.reactions().len() == 2).await;
+        })
+        .await;
+    assert_eq!(
+        bench.transport.reactions(),
+        [
+            Reacted::Add("m1".into()),
+            Reacted::Remove("m1".into(), "reaction-m1".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_slow_removal_never_holds_up_the_next_reply() {
+    let (bench, mut peer) = Bench::new();
+    let removal = bench.transport.unreact_hold.lock().await;
+    peer.push(vec![message("m1", "alice", "hello")]);
+    bench
+        .run(async {
+            let mut side = accept_session(&peer.daemon).await;
+            assert_eq!(next_turn(&mut side).await, "hello");
+            finish_turn(&mut side, "one").await;
+            assert_eq!(peer.sent().await.text, "one");
+            // Its reaction is coming off, slowly, and stays queued until then.
+            eventually(|| bench.transport.reactions().len() == 2).await;
+            let saved = bench.state();
+            assert!(saved.pending.is_empty());
+            assert_eq!(
+                saved.removing,
+                [state::Reaction {
+                    message_id: "m1".into(),
+                    reaction: "reaction-m1".into(),
+                }]
+            );
+            // The next reply goes out meanwhile; its reaction waits its turn.
+            peer.push(vec![message("m2", "alice", "next")]);
+            assert_eq!(next_turn(&mut side).await, "next");
+            finish_turn(&mut side, "two").await;
+            let two = tokio::time::timeout(REACTION_TIMEOUT / 2, peer.sent())
+                .await
+                .expect("the reply does not wait for the removal");
+            assert_eq!(two.text, "two");
+            assert_eq!(bench.transport.reactions().len(), 3);
+            drop(removal);
+            eventually(|| {
+                bench.transport.reactions().len() == 4 && bench.state().removing.is_empty()
+            })
+            .await;
+        })
+        .await;
+    assert_eq!(
+        bench.transport.reactions(),
+        [
+            Reacted::Add("m1".into()),
+            Reacted::Remove("m1".into(), "reaction-m1".into()),
+            Reacted::Add("m2".into()),
+            Reacted::Remove("m2".into(), "reaction-m2".into()),
         ]
     );
 }
@@ -1727,7 +1899,7 @@ async fn a_chat_that_carried_mail_never_runs_as_an_ordinary_chat() {
 #[tokio::test]
 async fn an_account_that_ran_as_an_ordinary_chat_cannot_become_a_mail_chat() {
     const REPORT: &str = "BACKGROUND REPORT from an ordinary session";
-    let fills: [fn(&mut state::BridgeState); 6] = [
+    let fills: [fn(&mut state::BridgeState); 7] = [
         |state| {
             state
                 .pending
@@ -1765,6 +1937,12 @@ async fn an_account_that_ran_as_an_ordinary_chat_cannot_become_a_mail_chat() {
         },
         |state| state.cursor = "c1".into(),
         |state| state.seen.push("m1".into()),
+        |state| {
+            state.removing.push(state::Reaction {
+                message_id: "m1".into(),
+                reaction: "reaction-m1".into(),
+            });
+        },
     ];
     for fill in fills {
         let (bench, mut peer) = Bench::mail_chat("owner");

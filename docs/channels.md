@@ -657,9 +657,13 @@ the reply is held as for WeChat. `not_in_channel`, `channel_not_found`, and
 message gets the standard `eyes` emoji from the bot with `reactions.add`
 (`channel`, `timestamp`, `name`), and `reactions.remove` with the same three
 takes it off; no reaction marks completion. `already_reacted` and
-`no_reaction` count as done. Without `reactions:write` Slack answers
-`missing_scope`, which SCV logs as needing that scope; other errors are logged
-by their code. See [Working reaction](#working-reaction).
+`no_reaction` count as done. Adding never asks `auth.test`: it uses the
+identity the receive that brought the message verified, and is not tried
+while Slack has rejected the bot token since. Removing asks only when nothing
+has verified it yet this run, as for a reaction an earlier run left. Without
+`reactions:write` Slack answers `missing_scope`, which SCV logs as needing
+that scope; other errors are logged by their code. See
+[Working reaction](#working-reaction).
 
 **Requests.** Web API calls go to `https://slack.com/api` over HTTPS only,
 with a 20-second timeout (120 seconds for a file), no redirects, and
@@ -676,29 +680,39 @@ shows none. A transport supplies the reaction through two optional
 mail chats use neither.
 
 The bridge adds the reaction once the message's claim is durable and before
-its turn is queued, waiting at most 10 seconds, so only claimed messages get
-one: never the bot's own or other apps' messages, a group message that does
-not mention the bot, an envelope from another workspace or app, a message the
-account does not answer, or one answered with a fixed reply instead of a turn
-(the busy and voice replies, an answer to a question, and a mail chat's
-commands). `/new` is claimed like a turn and gets one. What removes it,
-Feishu's `reaction_id` or Slack's emoji name (Slack's message ID already
-names the conversation and `ts`), is saved with the claim
-(`in_flight[].reaction`) and moves into the reply that ends it
+its turn is queued, so only claimed messages get one: never the bot's own or
+other apps' messages, a group message that does not mention the bot, an
+envelope from another workspace or app, a message the account does not
+answer, or one answered with a fixed reply instead of a turn (the busy and
+voice replies, an answer to a question, and a mail chat's commands). `/new`
+is claimed like a turn and gets one. What removes it, Feishu's `reaction_id`
+or Slack's emoji name (Slack's message ID already names the conversation and
+`ts`), is saved with the claim (`in_flight[].reaction`) before the turn is
+queued, so the turn cannot end first, and moves into the reply that ends it
 (`pending[].reaction`). It comes off once that reply is delivered, its files
 included, or refused: the model's answer, the failure reply of a turn that
 failed or ran out of time, and the failure or restart reply that recovery
-writes for a claim an interrupted run left. It comes off before the reply
-leaves the state, so a run interrupted in between removes it on its next
-start.
+writes for a claim an interrupted run left. The write that removes the reply
+queues the reaction to come off (`removing[]`), and a loop apart from
+delivery takes queued reactions off one at a time, oldest first, so a slow
+removal never holds up the next reply. Each stays queued until it was tried,
+so one a run left is tried on its next start.
 
-Adding and removing are best effort, each bounded to 10 seconds. A failure,
-such as a missing permission, is logged without the token, secret, or the
-platform's text and changes nothing else: receiving, the turn, and the reply
-go on, a reaction that was not added is never removed, and one that could not
-be removed stays. State from a release before the reaction holds none, so its
-claims and replies remove nothing; such a release ignores the field and
-leaves a reaction in place.
+Adding and removing are best effort, and neither fails the account, the
+turn, or the reply. The turn waits at most 10 seconds for the add. An add
+that takes longer is seen through apart from the turn for up to 60 seconds
+more, since dropping it would not undo a reaction the platform already took:
+if it lands while the claim is still in flight, its reaction is saved with
+the claim as usual; if the turn already ended, it is taken off at once. A
+reaction whose ID cannot be saved with its claim, such as when the state
+cannot be written, is taken off at once too, and the turn goes on without
+one. Removing is bounded to 10 seconds. A failure, such as a missing
+permission, is logged without the token, secret, or the platform's text and
+changes nothing else: a reaction that was not added is never removed, and
+one that could not be removed stays, as does one whose add outlasted the
+extra wait or the run. State from a release before the reaction holds none,
+so its claims and replies remove nothing; such a release ignores the fields
+and leaves a reaction in place.
 
 ## Media
 
