@@ -275,7 +275,9 @@ Daemon and component changes require focused coverage for:
   once the daemon stops; terminal queries answered; the agent's output
   bounded before the parser (counts by the screen's size, a restored cursor
   kept on it, random output and resizes never failing it) and a failing
-  parser ending the takeover; no descriptor but the terminal inherited;
+  parser ending the takeover; none of the terminal's own descriptors (its
+  master, its wake pipe, its slave past the standard streams) inherited by
+  the agent, whatever else its parent passed down;
   credentials masked across wrapped rows and onto a UI's indented
   continuation, and nothing of the screen on disk or in the logs; reads
   that skip the process table scan; a planned restart not waiting for the

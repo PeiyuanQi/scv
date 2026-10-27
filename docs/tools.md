@@ -2222,16 +2222,17 @@ output kept cheap, a cursor saved before the screen shrank restored onto it,
 random output and resizes never failing the screen, a failing screen ending
 the takeover and input waiting no more once the terminal's I/O ends, a value
 a UI wraps onto an indented row masked on both and a row sent again when its
-masking changes, no descriptor but the terminal inherited, the conversation
-held (calls queue behind it, a turn refused) and given back on end, exit, or
-a session's end, an agent that ignores the hangup stopped with what it
-started, a live ACP server stopped first and its session loaded by the next
-turn, one client at a time and a silent one detached, nothing of the screen
-written to disk or logged, reads of the screen that never scan the process
-table, no takeover started once the daemon stops, a planned restart that
-does not wait for the prompts queued behind a takeover, and, end to end, a
-takeover typed into, detached, attached again, ended, hung up by a killed
-daemon, and driven from `scv jobs attach` in a real pseudo-terminal.
+masking changes, none of the terminal's own descriptors inherited by the
+agent, the conversation held (calls queue behind it, a turn refused) and
+given back on end, exit, or a session's end, an agent that ignores the
+hangup stopped with what it started, a live ACP server stopped first and its
+session loaded by the next turn, one client at a time and a silent one
+detached, nothing of the screen written to disk or logged, reads of the
+screen that never scan the process table, no takeover started once the
+daemon stops, a planned restart that does not wait for the prompts queued
+behind a takeover, and, end to end, a takeover typed into, detached,
+attached again, ended, hung up by a killed daemon, and driven from `scv jobs
+attach` in a real pseudo-terminal.
 
 ## Tool extension contract
 

@@ -178,19 +178,59 @@ async fn stopping_ends_the_io_even_while_the_process_runs() {
 }
 
 #[tokio::test]
-async fn the_process_inherits_no_descriptor_but_its_terminal() {
-    // Linux creates every descriptor of the terminal closed on exec.
+async fn none_of_the_terminals_own_descriptors_leak_into_the_process() {
+    use std::os::fd::AsRawFd as _;
+    // Linux creates every descriptor of the terminal closed on exec. The
+    // process may hold others its test runner passed down (a jobserver's
+    // pipes), so it is checked for the terminal's own: the master, the
+    // wake pipe's two ends, and the slave anywhere but its standard
+    // streams. Each is told by what it opens, not by its number.
     if !cfg!(target_os = "linux") {
         return;
     }
-    let running = sh("ls /proc/$$/fd | tr '\\n' ' '; echo end");
+    let running = sh(
+        r#"for fd in /proc/$$/fd/*; do printf '%s=%s ' "${fd##*/}" "$(readlink "$fd")"; done; echo end"#,
+    );
     running.shows("end").await;
     let seen = running.seen.lock().unwrap().clone();
-    let descriptors: Vec<&str> = seen
+    let held: Vec<(&str, &str)> = seen
         .split_whitespace()
         .take_while(|word| *word != "end")
+        .filter_map(|word| word.split_once('='))
         .collect();
-    assert_eq!(descriptors, ["0", "1", "2"], "{seen:?}");
+    let opens = |fd: RawFd| {
+        std::fs::read_link(format!("/proc/self/fd/{fd}"))
+            .unwrap()
+            .display()
+            .to_string()
+    };
+    let own = [
+        opens(running.pty.master.as_raw_fd()),
+        opens(running.pty.wake_read.as_raw_fd()),
+        opens(running.pty.wake_write.as_raw_fd()),
+    ];
+    assert!(own[0].ends_with("ptmx"), "{own:?}");
+    assert!(
+        own[1..].iter().all(|end| end.starts_with("pipe:")),
+        "{own:?}"
+    );
+    let slave = held.iter().find(|(fd, _)| *fd == "0").map_or_else(
+        || panic!("no standard input in {seen:?}"),
+        |(_, opens)| *opens,
+    );
+    assert!(slave.starts_with("/dev/pts/"), "{seen:?}");
+    for standard in ["0", "1", "2"] {
+        assert!(held.contains(&(standard, slave)), "{seen:?}");
+    }
+    for (fd, opens) in &held {
+        assert!(
+            !own.iter().any(|own| own == opens),
+            "fd {fd} is the terminal's own {opens}: {seen:?}"
+        );
+        if !["0", "1", "2"].contains(fd) {
+            assert_ne!(*opens, slave, "fd {fd} is the slave again: {seen:?}");
+        }
+    }
 }
 
 #[tokio::test]
