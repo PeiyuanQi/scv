@@ -264,9 +264,14 @@ Daemon and component changes require focused coverage for:
   rerun, and attended approvals that wait only while watched and never grant
   more than the foreground; worktrees created, listed, counted as the
   workspace, and removed only when SCV made them; `scv jobs` refusing
-  actions inside a delegated run; and, end to end, an owner job started and
-  read from `scv jobs`, and a job a SIGKILLed daemon interrupted resumed in
-  its agent's own conversation;
+  actions, waits, results, and events inside a delegated run; `job_result`
+  giving the snapshot's state and a bounded reply; automation's JSON lines
+  escaping every control character, text blanking them, `wait`'s exit
+  statuses (against an older daemon and one it cannot read too), `events`
+  diffing snapshots and tailing logs, and no command sending `watch` or an
+  approval; and, end to end, an owner job started, waited on, read, and
+  followed from `scv jobs`, and a job a SIGKILLed daemon interrupted
+  resumed in its agent's own conversation;
 - takeovers (attach): only agents whose terminal asks no approval offered,
   the others refused with why; the terminal's process leading its own
   session on its controlling terminal with flow control off, resized, and

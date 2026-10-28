@@ -157,6 +157,7 @@ scv agents check                 # 版本、可用模型，以及每个智能体
 | `scv mail status`、`cancel` | 列出或撤回等待批准的邮件操作；批准只能在邮件聊天中进行 |
 | `scv agents login`、`status`、`check`、`ps`、`kill`、`worktrees` | 登录并检查智能体，列出或停止它们的运行，列出或删除任务的 worktree |
 | `scv jobs`、`log`、`start`、`send`、`cancel`、`resume`、`approve`、`attach` | 工作台：所有任务和运行、实时日志、你自己的任务、对它们的操作，以及在智能体自己的终端里接管对话 |
+| `scv jobs wait`、`result`、`events`、`--json` | 用脚本驱动工作台：等待任务结束（退出码说明结果）、读取它的回复、以 JSON 行跟踪变化 |
 | `scv confirm "…"` | 在聊天中向主人提一个是/否问题；只有回答"是"时退出码为 0 |
 | `scv config show` | 列出生效的每个路径和设置，隐藏密钥 |
 | `scv update` | 安装最新版本并重启守护进程 |

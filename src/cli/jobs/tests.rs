@@ -53,15 +53,172 @@ fn a_job_is_named_by_its_handle_or_a_session_prefix_and_handle() {
 
 #[test]
 fn only_reading_commands_run_inside_a_delegation() {
-    assert!(!acts(&JobsCommand::List { all: true }));
+    assert!(!acts(&JobsCommand::List {
+        all: true,
+        json: true
+    }));
     assert!(!acts(&JobsCommand::Log {
         target: "job-1".into(),
-        follow: false
+        follow: false,
+        json: true
     }));
     assert!(acts(&JobsCommand::Cancel {
-        job: "job-1".into()
+        job: "job-1".into(),
+        json: false
     }));
     assert!(acts(&JobsCommand::Approve { id: "ap-1".into() }));
+    // Waiting on, reading, and following the owner's jobs is automation
+    // for the owner, refused inside a delegated run like acting.
+    assert!(acts(&JobsCommand::Wait {
+        job: "job-1".into(),
+        timeout: Some(1),
+        json: true
+    }));
+    assert!(acts(&JobsCommand::Result {
+        job: "job-1".into(),
+        json: true
+    }));
+    assert!(acts(&JobsCommand::Events {
+        follow: true,
+        json: true
+    }));
+}
+
+#[test]
+fn a_wait_exits_0_for_completed_1_for_any_other_end_and_goes_on_otherwise() {
+    assert_eq!(wait_exit(AgentState::Completed), Some(0));
+    for state in [
+        AgentState::Failed,
+        AgentState::Declined,
+        AgentState::Timeout,
+        AgentState::Cancelled,
+        AgentState::Interrupted,
+    ] {
+        assert_eq!(wait_exit(state), Some(WAIT_ENDED_OTHERWISE), "{state}");
+    }
+    for state in [
+        AgentState::Starting,
+        AgentState::Working,
+        AgentState::AwaitingInput,
+        AgentState::Idle,
+        AgentState::Queued,
+        AgentState::Unknown,
+    ] {
+        assert_eq!(wait_exit(state), None, "{state}");
+    }
+    assert_eq!(
+        (WAIT_ENDED_OTHERWISE, WAIT_TIMED_OUT, WAIT_REFUSED),
+        (1, 2, 3)
+    );
+}
+
+#[test]
+fn json_output_escapes_every_control_character_and_reads_back_unchanged() {
+    let reply = "done\u{1b}[2J\u{9b}31m\u{7f}\r\nline two\u{7}";
+    let result = JobResult {
+        session: "s".into(),
+        job: "job-1".into(),
+        agent: "codex".into(),
+        state: AgentState::Completed,
+        detail: None,
+        reply: Some(reply.into()),
+        error: None,
+        truncated: false,
+        outcome: None,
+        finished_unix_seconds: Some(2),
+    };
+    let line = json_line(&result).unwrap();
+    assert!(!line.chars().any(char::is_control), "{line:?}");
+    assert!(
+        line.contains(r"\u001b[2J\u009b31m\u007f\r\nline two\u0007"),
+        "{line}"
+    );
+    let back: JobResult = serde_json::from_str(&line).unwrap();
+    assert_eq!(back, result);
+}
+
+#[test]
+fn a_result_from_the_record_is_cut_as_job_result_cuts_it() {
+    let whole = JobResult {
+        session: "s".into(),
+        job: "job-1".into(),
+        agent: "codex".into(),
+        state: AgentState::Failed,
+        detail: None,
+        reply: Some("short".into()),
+        error: Some("short".into()),
+        truncated: false,
+        outcome: None,
+        finished_unix_seconds: None,
+    };
+    assert_eq!(bounded(whole.clone()), whole);
+    // A multi-byte character straddles the bound, so the cut backs off.
+    let long = format!(
+        "{}é{}",
+        "a".repeat(MAX_JOB_RESULT_BYTES - 1),
+        "b".repeat(900)
+    );
+    let cut = bounded(JobResult {
+        error: Some(long.clone()),
+        ..whole.clone()
+    });
+    assert_eq!(
+        (cut.reply.as_deref(), cut.error.as_deref(), cut.truncated),
+        (Some("short"), Some(&long[..MAX_JOB_RESULT_BYTES - 1]), true)
+    );
+}
+
+#[test]
+fn a_printed_reply_keeps_its_lines_and_loses_every_other_control_character() {
+    assert_eq!(
+        inert_text("ok\u{1b}[31m red\r\n\u{9b}2Jnext\tline\n"),
+        "ok [31m red \n 2Jnext line\n"
+    );
+}
+
+#[test]
+fn listing_keeps_unfinished_and_resumable_jobs_and_live_runs_unless_all() {
+    let finished = WorkbenchJob {
+        state: AgentState::Completed,
+        ..job("s", "job-1")
+    };
+    let interrupted = WorkbenchJob {
+        state: AgentState::Interrupted,
+        resumable: true,
+        ..job("s", "job-2")
+    };
+    let snapshot = WorkbenchSnapshot {
+        jobs: vec![finished, interrupted, job("s", "job-3")],
+        ..WorkbenchSnapshot::default()
+    };
+    let names = |snapshot: WorkbenchSnapshot| -> Vec<String> {
+        snapshot.jobs.into_iter().map(|job| job.job).collect()
+    };
+    assert_eq!(names(listed(snapshot.clone(), false)), ["job-2", "job-3"]);
+    assert_eq!(names(listed(snapshot, true)), ["job-1", "job-2", "job-3"]);
+}
+
+#[test]
+fn a_json_log_line_is_its_event_with_the_run_it_belongs_to() {
+    let event = RunEvent {
+        seq: 4,
+        ts_ms: 9,
+        kind: RunEventKind::Text,
+        text: "landed\u{1b}]0;x".into(),
+        turn: Some(1),
+        status: None,
+        job: None,
+        risk: None,
+        by: None,
+    };
+    assert_eq!(
+        json_line(&Logged {
+            run: "codex-3f9a2c",
+            event: &event
+        })
+        .unwrap(),
+        r#"{"run":"codex-3f9a2c","seq":4,"ts_ms":9,"kind":"text","text":"landed\u001b]0;x","turn":1}"#
+    );
 }
 
 #[test]

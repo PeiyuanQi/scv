@@ -38,8 +38,8 @@ use async_trait::async_trait;
 use scv_client::Layout;
 use scv_core::{AgentError, ApprovalGate, ApprovalRequest};
 use scv_protocol::{
-    AgentState, AttachPage, RunLogPage, SendMode, WorkbenchApproval, WorkbenchJob, WorkbenchRun,
-    WorkbenchSession, WorkbenchSnapshot,
+    AgentState, AttachPage, JobResult, MAX_JOB_RESULT_BYTES, RunLogPage, SendMode,
+    WorkbenchApproval, WorkbenchJob, WorkbenchRun, WorkbenchSession, WorkbenchSnapshot,
 };
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -1028,6 +1028,69 @@ impl Workbench {
     /// The ledger record of `job` in `session`.
     pub fn job_record(&self, session: &str, job: &str) -> Option<JobRecord> {
         ledger::load(&self.jobs, session, job)
+    }
+
+    /// Job `job` of `session` as the workbench lists it, with its reply or
+    /// error once it has ended, each cut to [`MAX_JOB_RESULT_BYTES`].
+    pub fn job_result(&self, session: &str, job: &str) -> Result<JobResult, String> {
+        let record = ledger::load(&self.jobs, session, job)
+            .ok_or_else(|| format!("no record of {session}/{job}"))?;
+        let (jobs, awaiting, session_live) = {
+            let inner = lock(&self.inner);
+            let slot = inner.sessions.get(session);
+            (
+                slot.and_then(|slot| slot.jobs.as_ref())
+                    .and_then(Weak::upgrade),
+                inner
+                    .approvals
+                    .values()
+                    .find(|pending| pending.info.session == session && pending.info.job == job)
+                    .map(|pending| pending.info.clone()),
+                slot.is_some(),
+            )
+        };
+        let live = jobs
+            .as_ref()
+            .and_then(|jobs| jobs.live().into_iter().find(|live| live.id == job));
+        // The run that served it last, chosen as the snapshot chooses it.
+        let run = activity::list_states(&self.runs)
+            .into_iter()
+            .filter(|state| {
+                state.session == session
+                    && (state.job.as_deref() == Some(job)
+                        || state.jobs.iter().any(|served| served == job))
+            })
+            .min_by_key(|state| std::cmp::Reverse((state.last_activity_unix, state.started_unix)));
+        let (state, detail) = job_state(
+            &record,
+            live.as_ref(),
+            run.as_ref(),
+            awaiting.as_ref(),
+            session_live,
+            unix_now(),
+        );
+        let mut truncated = false;
+        let mut cut = |text: Option<String>| {
+            text.map(|text| {
+                let kept = scv_client::text::utf8_prefix(&text, MAX_JOB_RESULT_BYTES);
+                truncated |= kept.len() < text.len();
+                kept.to_owned()
+            })
+        };
+        let reply = cut(record.reply);
+        let error = cut(record.error);
+        Ok(JobResult {
+            session: record.session,
+            job: record.job,
+            agent: record.agent,
+            state,
+            detail,
+            reply,
+            error,
+            truncated,
+            outcome: jobs.and_then(|jobs| jobs.outcome(job)),
+            finished_unix_seconds: record.finished_unix,
+        })
     }
 
     /// Take conversation `conversation` of live session `session` over in

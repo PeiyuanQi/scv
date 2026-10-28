@@ -885,3 +885,449 @@ async fn scv_jobs_attach_types_into_the_agents_terminal_and_detaches_or_ends_it(
     until_gone(pid).await;
     terminate(&mut daemon).await;
 }
+
+/// Run `scv` with `arguments` and return its exit status, stdout, and
+/// stderr.
+async fn jobs(home: &Path, cwd: &Path, arguments: &[&str]) -> (Option<i32>, String, String) {
+    let output = scv(home, cwd).args(arguments).output().await.unwrap();
+    (
+        output.status.code(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+fn json_lines(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("not JSON: {line}")))
+        .collect()
+}
+
+/// The next line `lines` prints, as JSON.
+async fn next_json(
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) -> serde_json::Value {
+    let line = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+#[tokio::test]
+async fn a_script_starts_waits_on_reads_and_follows_jobs_with_json() {
+    let (_home, home) = home();
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(workspace.path()).unwrap();
+    let mut daemon = start(&home, &workspace);
+    status(&home).await;
+    // Following from before the job starts sees it added, its activity,
+    // and then its end.
+    let mut follow = scv(&home, &workspace)
+        .args(["jobs", "events", "--follow", "--json"])
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut followed = BufReader::new(follow.stdout.take().unwrap()).lines();
+    assert_eq!(next_json(&mut followed).await["type"], "ready");
+
+    let (code, out, err) = jobs(
+        &home,
+        &workspace,
+        &["jobs", "start", "--json", "--agent", "codex", "a quick fix"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "{out}{err}");
+    let started: scv_protocol::DaemonStatus = serde_json::from_str(out.trim()).unwrap();
+    let name = started.workbench_job.unwrap();
+    let (session, job) = name.split_once('/').unwrap();
+    assert_eq!(job, "job-1");
+
+    let (code, out, err) = jobs(
+        &home,
+        &workspace,
+        &["jobs", "wait", "job-1", "--json", "--timeout", "30"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "{out}{err}");
+    let result: scv_protocol::JobResult = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(
+        (
+            result.session.as_str(),
+            result.state,
+            result.reply.as_deref()
+        ),
+        (session, AgentState::Completed, Some("landed 0.9.9"))
+    );
+
+    // A quick job may already be done when a poll first sees it.
+    let mut seen = Vec::new();
+    loop {
+        let event = next_json(&mut followed).await;
+        let ended = (event["type"] == "job.added" || event["type"] == "job.changed")
+            && event["job"]["job"] == "job-1"
+            && event["job"]["state"] == "completed";
+        seen.push(event);
+        if ended {
+            break;
+        }
+    }
+    assert!(
+        seen.iter()
+            .any(|event| event["type"] == "job.added" && event["job"]["job"] == "job-1"),
+        "{seen:?}"
+    );
+    let said = seen
+        .iter()
+        .position(|event| event["type"] == "run.event" && event["event"]["text"] == "landed 0.9.9");
+    assert!(said.is_some_and(|said| said < seen.len() - 1), "{seen:?}");
+    drop(follow);
+
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "result", "job-1", "--json"]).await;
+    assert_eq!(code, Some(0));
+    let read: scv_protocol::JobResult = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(read.reply.as_deref(), Some("landed 0.9.9"));
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "result", "job-1"]).await;
+    assert_eq!((code, out.as_str()), (Some(0), "landed 0.9.9\n"));
+
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "list", "--all", "--json"]).await;
+    assert_eq!(code, Some(0));
+    let listed: WorkbenchSnapshot = serde_json::from_str(out.trim()).unwrap();
+    assert!(listed.jobs.iter().any(|listed| listed.job == "job-1"));
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "log", "job-1", "--json"]).await;
+    assert_eq!(code, Some(0));
+    let logged = json_lines(&out);
+    assert!(
+        logged
+            .iter()
+            .all(|event| event["run"].is_string() && event["kind"].is_string())
+    );
+    assert!(
+        logged.iter().any(|event| event["text"] == "landed 0.9.9"),
+        "{out}"
+    );
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "events", "--json"]).await;
+    assert_eq!(code, Some(0));
+    let events = json_lines(&out);
+    assert_eq!(events.last().unwrap()["type"], "ready");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "job.added" && event["job"]["job"] == "job-1")
+    );
+
+    // A long job: the wait times out, and after a cancel it ends otherwise.
+    let (code, out, err) = jobs(
+        &home,
+        &workspace,
+        &["jobs", "start", "--agent", "codex", "the long task"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "{out}{err}");
+    let (code, out, _) = jobs(
+        &home,
+        &workspace,
+        &["jobs", "wait", "job-2", "--timeout", "1", "--json"],
+    )
+    .await;
+    assert_eq!(code, Some(2), "{out}");
+    let (code, out, err) = jobs(&home, &workspace, &["jobs", "cancel", "job-2", "--json"]).await;
+    assert_eq!(code, Some(0), "{out}{err}");
+    let cancelled: scv_protocol::DaemonStatus = serde_json::from_str(out.trim()).unwrap();
+    assert!(
+        cancelled
+            .workbench_note
+            .unwrap()
+            .starts_with("Stopping job-2")
+    );
+    let (code, out, _) = jobs(
+        &home,
+        &workspace,
+        &["jobs", "wait", "job-2", "--timeout", "30", "--json"],
+    )
+    .await;
+    assert_eq!(code, Some(1), "{out}");
+    let ended: scv_protocol::JobResult = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(ended.state, AgentState::Cancelled);
+    let (code, _, err) = jobs(&home, &workspace, &["jobs", "wait", "job-99"]).await;
+    assert_eq!(code, Some(3), "{err}");
+
+    // Inside a delegated run, waiting, reading results, and following are
+    // refused; listing still reads.
+    for (arguments, refused) in [
+        (&["jobs", "wait", "job-1"][..], Some(3)),
+        (&["jobs", "result", "job-1", "--json"][..], Some(1)),
+        (&["jobs", "events", "--json"][..], Some(1)),
+        (
+            &["jobs", "start", "--json", "--agent", "codex", "quick"][..],
+            Some(1),
+        ),
+    ] {
+        let output = scv(&home, &workspace)
+            .env("SCV_DELEGATION_DEPTH", "1")
+            .args(arguments)
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), refused, "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("refused inside a delegated agent run"),
+            "{arguments:?}: {output:?}"
+        );
+    }
+    let listed = scv(&home, &workspace)
+        .env("SCV_DELEGATION_DEPTH", "1")
+        .args(["jobs", "list", "--json"])
+        .output()
+        .await
+        .unwrap();
+    assert!(listed.status.success());
+    assert_eq!(snapshot(&home).await.jobs.len(), 2);
+    terminate(&mut daemon).await;
+}
+
+/// How a scripted daemon answers `job_result`.
+#[derive(Clone, Copy)]
+enum JobResultAnswer {
+    /// With the job's result.
+    Result,
+    /// As a daemon before `job_result` does: as a frame it cannot parse.
+    Older,
+    /// With an event no client expects.
+    Garbled,
+}
+
+/// A daemon that answers every management connection by its action from
+/// a fixed workbench listing job-1 in `state`, recording each
+/// `daemon.control` command.
+fn scripted_workbench(
+    home: &Path,
+    state: &'static str,
+    answer: JobResultAnswer,
+) -> std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> {
+    use serde_json::json;
+    std::fs::create_dir_all(home.join("state")).unwrap();
+    let listener = tokio::net::UnixListener::bind(home.join("state/server.sock")).unwrap();
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&commands);
+    let job = json!({"session":"3f2a9c1e-aaaa","job":"job-1","agent":"codex","task":"fix",
+        "workspace":"/w","cwd":"/w","state":state,"started_by":"owner",
+        "conversation":"codex-1","created_unix_seconds":1,"updated_unix_seconds":2});
+    let approval = json!({"id":"ap-1","session":"3f2a9c1e-aaaa","job":"job-1","name":"bash",
+        "risk":"process","cwd":"/w","summary":"Run make","since_unix_seconds":1,
+        "expires_unix_seconds":2});
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let init: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let initialized = json!({"type":"initialized","request_id":init["request_id"],
+                "protocol_version":init["protocol_version"],
+                "server":{"name":"scv-server","version":"0.4.7"}});
+            stream
+                .get_mut()
+                .write_all(format!("{initialized}\n").as_bytes())
+                .await
+                .unwrap();
+            line.clear();
+            stream.read_line(&mut line).await.unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let command = request["command"].clone();
+            seen.lock().unwrap().push(command.clone());
+            let mut status = json!({"version":"0.4.7","pid":1,"components":[]});
+            match (command["action"].as_str().unwrap(), answer) {
+                ("workbench", _) => {
+                    status["workbench"] = json!({"generated_unix_seconds":3,"jobs":[job],
+                        "approvals":[approval]});
+                }
+                ("job_result", JobResultAnswer::Result) => {
+                    status["job_result"] = json!({"session":"3f2a9c1e-aaaa","job":"job-1",
+                        "agent":"codex","state":"completed",
+                        "reply":"done\u{1b}[2J\u{9b}31m\u{7f}"});
+                }
+                ("job_result", JobResultAnswer::Older) => {
+                    status = json!({"type":"error","request_id":request["request_id"],
+                        "code":"invalid_json","message":"invalid JSON","fatal":false});
+                }
+                ("job_result", JobResultAnswer::Garbled) => {
+                    status = json!({"type":"surprise","request_id":request["request_id"]});
+                }
+                _ => {
+                    status["workbench_note"] = json!("Done.");
+                    status["workbench_job"] = json!("3f2a9c1e-aaaa/job-2");
+                }
+            }
+            let reply = if status.get("type").is_some() {
+                status
+            } else {
+                json!({"type":"daemon.status","request_id":request["request_id"],
+                    "status":status})
+            };
+            stream
+                .get_mut()
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    commands
+}
+
+#[tokio::test]
+async fn automation_never_watches_approves_or_prints_raw_control_characters() {
+    let home = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(home.path()).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(workspace.path()).unwrap();
+    let commands = scripted_workbench(&home, "completed", JobResultAnswer::Result);
+    // `scv jobs result` reads the job's record from disk.
+    let jobs_dir = scv_client::Layout::new(&home).jobs();
+    let record = serde_json::json!({"v":1,"session":"3f2a9c1e-aaaa","job":"job-1",
+        "agent":"codex","task":"fix","prompt":"fix","workspace":"/w","label":"workbench",
+        "started_by":"owner","owner":scv_tools::delegation::ProcessIdentity::current().unwrap(),
+        "state":"completed","created_unix":1,"updated_unix":2,"finished_unix":2,
+        "reply":"line one\u{1b}]0;owned\u{7}\nline two\u{9b}2J"});
+    write_private(
+        &jobs_dir.join("3f2a9c1e-aaaa/job-1.json"),
+        &record.to_string(),
+    );
+    for arguments in [
+        &["jobs", "list", "--json"][..],
+        &["jobs", "start", "--json", "--agent", "codex", "go"][..],
+        &["jobs", "send", "job-1", "go on", "--json"][..],
+        &["jobs", "cancel", "job-1", "--json"][..],
+        &["jobs", "resume", "job-1", "--json"][..],
+        &["jobs", "dismiss", "job-1", "--json"][..],
+        &["jobs", "events", "--json"][..],
+    ] {
+        let (code, out, err) = jobs(&home, &workspace, arguments).await;
+        assert_eq!(code, Some(0), "{arguments:?}: {out}{err}");
+        for line in out.lines() {
+            assert!(!line.chars().any(char::is_control), "{line:?}");
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+    }
+
+    // A reply's escape sequences are escaped in JSON and blanked in text.
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "wait", "job-1", "--json"]).await;
+    assert_eq!(code, Some(0));
+    assert!(!out.trim_end().chars().any(char::is_control), "{out:?}");
+    assert!(out.contains(r"done\u001b[2J\u009b31m\u007f"), "{out}");
+    let waited: scv_protocol::JobResult = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(
+        waited.reply.as_deref(),
+        Some("done\u{1b}[2J\u{9b}31m\u{7f}")
+    );
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "result", "job-1", "--json"]).await;
+    assert_eq!(code, Some(0));
+    assert!(!out.trim_end().chars().any(char::is_control), "{out:?}");
+    let read: scv_protocol::JobResult = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(
+        read.reply.as_deref(),
+        Some("line one\u{1b}]0;owned\u{7}\nline two\u{9b}2J")
+    );
+    let (code, out, _) = jobs(&home, &workspace, &["jobs", "result", "job-1"]).await;
+    assert_eq!(
+        (code, out.as_str()),
+        (Some(0), "line one ]0;owned \nline two 2J\n")
+    );
+
+    let commands = commands.lock().unwrap().clone();
+    let actions: Vec<&str> = commands
+        .iter()
+        .map(|command| command["action"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "workbench",
+        "workbench_start",
+        "workbench_send",
+        "workbench_cancel",
+        "workbench_resume",
+        "workbench_dismiss",
+        "job_result",
+    ] {
+        assert!(actions.contains(&expected), "{expected} not in {actions:?}");
+    }
+    // An approval waited the whole time; nothing answered it, and nothing
+    // asked as a watching dashboard, which would hold such requests.
+    assert!(!actions.contains(&"workbench_approve"), "{actions:?}");
+    assert!(
+        commands
+            .iter()
+            .all(|command| command.get("watch").is_none()),
+        "{commands:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_wait_takes_an_older_daemons_listing_and_gives_up_on_a_garbled_answer() {
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(workspace.path()).unwrap();
+    // A daemon before `job_result` lists the job interrupted, though its
+    // record, kept by a process still alive, says it works: the wait goes
+    // by the daemon's listing and the record's reply, cut to 4 KiB.
+    let older = tempfile::tempdir().unwrap();
+    let older = std::fs::canonicalize(older.path()).unwrap();
+    let commands = scripted_workbench(&older, "interrupted", JobResultAnswer::Older);
+    let reply = "r".repeat(scv_protocol::MAX_JOB_RESULT_BYTES + 100);
+    let record = serde_json::json!({"v":1,"session":"3f2a9c1e-aaaa","job":"job-1",
+        "agent":"codex","task":"fix","prompt":"fix","workspace":"/w","label":"workbench",
+        "started_by":"owner","owner":scv_tools::delegation::ProcessIdentity::current().unwrap(),
+        "state":"working","created_unix":1,"updated_unix":2,"reply":reply});
+    write_private(
+        &scv_client::Layout::new(&older)
+            .jobs()
+            .join("3f2a9c1e-aaaa/job-1.json"),
+        &record.to_string(),
+    );
+    let (code, out, err) = jobs(
+        &older,
+        &workspace,
+        &["jobs", "wait", "job-1", "--timeout", "30", "--json"],
+    )
+    .await;
+    assert_eq!(code, Some(1), "{out}{err}");
+    let waited: scv_protocol::JobResult = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(
+        (
+            waited.state,
+            waited.reply.map(|reply| reply.len()),
+            waited.truncated
+        ),
+        (
+            AgentState::Interrupted,
+            Some(scv_protocol::MAX_JOB_RESULT_BYTES),
+            true
+        )
+    );
+    let actions: Vec<String> = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|command| command["action"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(actions.contains(&"job_result".to_owned()), "{actions:?}");
+
+    // A daemon that answers what no client expects is asked a few times,
+    // then the wait gives up rather than waiting for ever.
+    let garbled = tempfile::tempdir().unwrap();
+    let garbled = std::fs::canonicalize(garbled.path()).unwrap();
+    let commands = scripted_workbench(&garbled, "working", JobResultAnswer::Garbled);
+    let (code, out, err) = jobs(&garbled, &workspace, &["jobs", "wait", "job-1"]).await;
+    assert_eq!(code, Some(3), "{out}{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("unexpected SCV management response"), "{err}");
+    let asked = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|command| command["action"] == "job_result")
+        .count();
+    assert_eq!(asked, 4);
+}

@@ -6,10 +6,13 @@
 //! ([`AttachPage`]).
 //!
 //! Every type here is additive to protocol version 3: a daemon sends them
-//! only in answer to the `workbench*`, `run_log`, `worktree*`, and
-//! `attach*` `daemon.control` actions, which only newer clients send.
+//! only in answer to the `workbench*`, `run_log`, `job_result`,
+//! `worktree*`, and `attach*` `daemon.control` actions, which only newer
+//! clients send.
 
 use serde::{Deserialize, Serialize};
+
+use crate::review::JobOutcome;
 
 /// What a delegated run, a background job, or a session is doing, as far as
 /// SCV can tell. A state a client does not know parses as `unknown`, which
@@ -377,6 +380,46 @@ pub struct RunEvent {
     /// that actor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+}
+
+/// The most bytes of a job's reply, and of its error, a [`JobResult`]
+/// carries; a longer one is cut at a character boundary and flagged
+/// `truncated`. The ledger itself keeps up to 8 KiB of each.
+pub const MAX_JOB_RESULT_BYTES: usize = 4 * 1024;
+
+/// A background job's result, for a `job_result` request: where it stands
+/// and, once it has ended, its agent's reply or error, bounded by
+/// [`MAX_JOB_RESULT_BYTES`]. The reply and error are untrusted
+/// delegated-agent text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobResult {
+    /// The session that owns it.
+    pub session: String,
+    /// Its handle in that session, such as `job-3`.
+    pub job: String,
+    /// The agent that runs it, such as `codex`.
+    pub agent: String,
+    /// What it is doing, as the workbench lists it.
+    pub state: AgentState,
+    /// SCV's words for that state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The agent's reply, once the job has ended with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+    /// Why it failed, once it has failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The reply or the error was cut to [`MAX_JOB_RESULT_BYTES`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// A reviewed job's outcome, while the session that ran it still holds
+    /// the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<JobOutcome>,
+    /// When it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_unix_seconds: Option<u64>,
 }
 
 /// Part of a run's activity log, after a position.

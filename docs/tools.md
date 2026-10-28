@@ -1539,7 +1539,8 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   session there and dropped, with its conversations, an hour after its last
   job ended and the owner last acted on it. No approval is asked for the
   launch, since the owner asked for it; no model is told about it, and its
-  result stays in the ledger and log. Background jobs must be on.
+  result stays in the ledger and log (`scv jobs result`, or
+  `job_result`). Background jobs must be on.
 - *send* a prompt to a job's or run's conversation: into its running turn
   when the agent can take steering, else as its next turn, queued behind a
   running one (`--queue` always queues; `--steer` fails when a turn is
@@ -1599,13 +1600,16 @@ the job's own deadline can end the job by its timeout rather than a denial.
 
 ```sh
 scv jobs                                  # unfinished jobs, live runs, approvals, restorable queues
-scv jobs list --all                       # also finished jobs and ended runs
-scv jobs log job-3 [--follow]             # a job's activity (or a run handle such as codex-3f9a2c)
-scv jobs start --agent codex [--cwd DIR] [--model M] [--effort E] [--worktree] "PROMPT"
-scv jobs send job-3 "PROMPT" [--queue | --steer]
-scv jobs cancel job-3
-scv jobs resume job-3
-scv jobs dismiss job-3
+scv jobs list [--all] [--json]            # --all: also finished jobs and ended runs
+scv jobs log job-3 [--follow] [--json]    # a job's activity (or a run handle such as codex-3f9a2c)
+scv jobs start --agent codex [--cwd DIR] [--model M] [--effort E] [--worktree] [--json] "PROMPT"
+scv jobs send job-3 "PROMPT" [--queue | --steer] [--json]
+scv jobs cancel job-3 [--json]
+scv jobs resume job-3 [--json]
+scv jobs dismiss job-3 [--json]
+scv jobs wait job-3 [--timeout SECONDS] [--json]   # exit 0 completed, 1 other end, 2 timed out, 3 refused or unknown
+scv jobs result job-3 [--json]            # its reply or error, from its record
+scv jobs events [--follow] [--json]       # what changes: jobs, approvals, new activity
 scv jobs approve <id> | scv jobs deny <id>
 scv jobs attach job-3 [--end]             # take its conversation over in the agent's terminal (Ctrl+] detaches)
 ```
@@ -1614,11 +1618,88 @@ scv jobs attach job-3 [--end]             # take its conversation over in the ag
 and sends it every key until `Ctrl+]` detaches, leaving the agent running;
 `--end` ends the takeover, with or without a terminal.
 A job is named `job-3` when one session has it, else `<session prefix>/job-3`.
-Listing and logs read the records on disk when no daemon runs; acting needs a
-daemon of this release. Inside a delegated run, `scv jobs` only reads: the
-workbench acts for the owner, so a delegated agent cannot start, steer,
-cancel, resume, or approve through it (cooperative, like the other
-[delegated-run limits](security.md#delegated-runs)).
+Listing, logs, waiting, results, and events read the records on disk when no
+daemon runs; acting needs a daemon of this release. Inside a delegated run,
+`scv jobs` only lists and reads logs: the workbench acts for the owner, so a
+delegated agent cannot start, steer, cancel, resume, or approve through it,
+nor wait on, read the results of, or follow the owner's jobs (cooperative,
+like the other [delegated-run limits](security.md#delegated-runs)); a
+refused `wait` exits 3, everything else 1.
+
+**Automation.** Scripts drive the workbench through the same commands, so a
+job a script starts is the owner's own, exactly as from a terminal (see
+[security](security.md#delegated-runs)). There is no other entry point: no
+listener, and no session of the script's own. With `--json` a command
+prints the protocol's own types, as compact JSON, one object per line, and
+errors stay text on stderr with a non-zero exit:
+
+- `list`: the [workbench snapshot](protocol.md#the-workbench), filtered as
+  the table is unless `--all`;
+- `log`: each run event, with `run` naming its run (`{"run":"codex-3f9a2c",
+  "seq":4,"ts_ms":…,"kind":"text","text":…}`); with `--follow`, a line
+  per event as it is logged until the run ends;
+- `start`, `send`, `cancel`, `resume`, `dismiss`: the daemon's whole reply
+  (`daemon.status`'s status), whose `workbench_job` names the job a start,
+  send, or resume made and `workbench_note` says what happened;
+- `wait`: the job's [`job_result`](protocol.md#the-workbench) once it has
+  ended, or as it last stood when the wait timed out (nothing when no ask
+  was answered);
+- `result`: the same shape, built from the job's state and its ledger
+  record, without a reviewed job's `outcome`;
+- `events`: one change per line, below.
+
+`scv jobs wait` asks about the job every second, through `job_result`,
+until it reaches a final state or `--timeout` seconds pass (no timeout
+waits until it ends); no one ask outlasts the timeout by more than a
+second. When no daemon of this release runs, the job's state is the
+snapshot's (which an older daemon still gives as it sees the job, or else
+the records on disk) and its reply and error its record's, cut as
+`job_result` cuts them. A slow daemon, or an exchange that broke off, is
+asked again up to three times in a row. It exits 0 when the job
+completed; 1 when it ended any other way (`failed`, `declined`, `timeout`,
+`cancelled`, `interrupted`); 2 when the wait timed out; and 3 when it was
+refused (inside a delegated run, or by the daemon), the job is unknown or
+gone, or the daemon still did not answer after those tries. Without
+`--json` it prints one line, the job and its state. `scv jobs result` prints a finished job's reply on
+stdout and, for a job that did not complete, its state and error (or why it
+stopped) on stderr. A job still going is refused, or with `--json` printed
+with its state and no reply. It reads the reply and error from the job's
+[ledger record](#the-workbench) on disk, up to 8 KiB each; `wait`'s are
+`job_result`'s, cut at 4 KiB with `truncated` set. A reply is untrusted
+delegated-agent text: without `--json`, every control character but line
+breaks becomes a space; with `--json`, JSON escapes it, and DEL and the C1
+controls (which JSON leaves alone and some terminals obey) are escaped as
+`\u007f`…`\u009f` too, so a reply cannot drive the terminal a script prints
+it on. Every `--json` line is escaped that way, and every text line is
+inert.
+
+`scv jobs events` follows the workbench without a push from the daemon (no
+subscription exists): it polls the snapshot every second, prints how each
+differs from the one before, and tails the activity logs of the runs it
+lists. Each line is an object tagged with `type`:
+
+| `type` | Fields | When |
+| --- | --- | --- |
+| `job.added` | `job` (a snapshot job) | a job not listed before; at the start, every listed job, oldest first |
+| `job.changed` | `from` (its last state), `job` | its state, run, conversation, worktree, resumability, or `resumed_as` changed (its detail alone does not count) |
+| `job.removed` | `session`, `job` | no longer listed: dismissed, pruned, or past the snapshot's 200 newest finished jobs |
+| `approval.requested` | `approval` (a snapshot approval) | an approval request began waiting for the owner |
+| `approval.resolved` | `id`, `session`, `job` | it stopped waiting: answered or expired |
+| `run.event` | `run`, `session`, `event` (a run event) | a new line of a listed run's activity log |
+| `ready` | `generated_unix_seconds` | once, after the state at the start; everything after is a change |
+
+At the start it prints the current jobs and waiting approvals and `ready`;
+without `--follow` it stops there, and with it it keeps polling until
+Ctrl-C or until nothing reads its output. Logs of runs that were live at the
+start are tailed from their end, so only new activity is printed, and runs
+that appear later from their start; a run's log is no longer read once it
+has ended. Within one poll the log lines come before the changes, so a
+job's last activity is printed before the change that says it ended. A job
+that starts and ends between two polls is added already ended. Approvals
+are text only: `approve` and `deny` have no `--json`, and no command
+approves on its own. Every command asks for the workbench without `watch`,
+so automation never makes a relayed request wait as if the owner were
+watching.
 
 ### Taking a conversation over
 
@@ -2215,7 +2296,13 @@ policy they never override, and worktrees in scratch repositories (a linked
 worktree's, one reaching outside the workspace, hooks, a locked one);
 integration tests run an owner job from `scv jobs` against a daemon and
 resume a job a SIGKILLed daemon interrupted through the agent's own
-conversation. Takeover tests cover which agents may be offered and why the
+conversation. Automation tests start, wait on, cancel, read, and follow
+jobs with `--json` against a daemon (each `wait` exit status, `events`
+lines in order, and the refusals inside a delegated run), and against a
+scripted daemon check that no command sends `watch` or `workbench_approve`,
+that a reply's escape sequences are escaped in JSON and blanked in text,
+and that `wait` goes by an older daemon's listing and gives up on an
+answer it cannot read. Takeover tests cover which agents may be offered and why the
 others are refused, the terminal's session, controlling terminal, flow
 control, resize, and hangup, terminal queries answered as of the output
 before them, only changed rows sent, credentials masked across wrapped rows,

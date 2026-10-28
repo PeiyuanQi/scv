@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.6`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.6` pins.
+The current workspace release is `0.4.7`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.7` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -52,6 +52,30 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.7
+
+`0.4.7` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3.
+It lets scripts drive the workbench
+([automation](tools.md#the-workbench)): `--json` on `scv jobs list`, `log`,
+`start`, `send`, `cancel`, `resume`, and `dismiss`, printing the protocol's
+own types one object per line; `scv jobs wait`, whose exit status says how
+the job ended (0 completed, 1 another end, 2 timed out, 3 refused or
+unknown); `scv jobs result`, a job's reply or error from its ledger record;
+and `scv jobs events`, which follows the workbench as lines by polling it.
+It adds the `job_result` `daemon.control` action, with
+`daemon.status.job_result`: one job's state and its reply or error, bounded
+to 4 KiB. Both are additive: a daemon before `0.4.7`, `0.4.6` included,
+answers `job_result` with `invalid_json`, and `scv jobs wait` then takes the
+job's state from that daemon's snapshot and its reply and error from its
+record on disk; older clients ignore the new field. `approve` and `deny`
+stay text-only, no command sends `watch`, and no listener is added. `wait`,
+`result`, and `events` are refused inside a delegated run, like the actions.
+
+What changes for code that embeds SCV's crates: `scv-protocol`'s
+`DaemonStatus` gains `job_result` and `DaemonCommand` gains `JobResult`, so
+struct literals and exhaustive matches need them; it adds `JobResult` and
+`MAX_JOB_RESULT_BYTES`. `scv-tools`'s `Workbench` gains `job_result`.
 
 ## Upgrading to 0.4.6
 

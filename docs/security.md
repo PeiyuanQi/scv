@@ -292,6 +292,34 @@ private, and the owner's or the model's own text) in the agent's own
 conversation or as a new run; a reviewed job is never resumed, since its
 journal, not a replay, is its record.
 
+Automation of the workbench (`scv jobs` with `--json`, `wait`, `result`, and
+`events`; see [automation](tools.md#the-workbench)) is the same workbench,
+reached the same way. It adds no listener (no TCP, HTTP, or WebSocket port,
+and no second socket) and no token: the daemon's socket, mode 0600 in a
+0700 directory, stays the only check, and any process of the same user can
+open it. It drives the workbench only, never `session.start`. A client
+that opens a session of its own answers that session's approval requests
+itself; a job started through the workbench runs in the daemon's workbench
+session instead, whose gate decides by the policy first and sends what the
+policy would put to a person to the owner (while watching) or to the
+unattended answer, a denial, with `client_approves_all` off, never to the
+script. Automation never asks for the workbench with `watch: true`, so it
+never holds a relayed request as if the owner were watching. `approve` and
+`deny` stay text-only, one request at a time, and no command or flag
+approves on its own. Starting a job is the owner's own action, as before,
+so it needs no approval for its launch: a script that runs `scv jobs start
+--agent codex …` for an agent configured with `permissions = "full"`
+starts exactly what the owner would by typing that command, with that
+agent's full permissions. That grants no new authority: same-user code can
+already speak the socket protocol and send `workbench_start`, or
+`workbench_approve` for any request the workbench lists as waiting.
+`wait`, `result`, and `events` are refused inside a delegated run like the
+actions (cooperative, as above); listing and logs still read there, as
+before, and a log carries what its agent said. A job's reply is untrusted delegated-agent
+text: `job_result` bounds it to 4 KiB, and `scv jobs` prints it inert, or
+in JSON with every control character escaped, DEL and the C1 controls
+included.
+
 A [takeover](tools.md#taking-a-conversation-over) (attach) runs the agent's
 own interactive UI on a conversation's session in a pseudo-terminal the
 daemon holds, and is the owner's own action like the others above. It is
@@ -480,6 +508,8 @@ The normal server transport is a local Unix socket at
 `0600` in a mode `0700` directory. It is a trusted local-user
 interface, including daemon management; it is not a remotely authenticated
 network service. A process running as the same user can access that authority.
+Scripts drive the workbench through it too (`scv jobs --json`); SCV opens
+no other listener for them.
 The stdio endpoint remains available for one-shot local clients and does not
 support component management. Both transports require the versioned handshake.
 

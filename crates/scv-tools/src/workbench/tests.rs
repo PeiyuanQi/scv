@@ -176,6 +176,55 @@ fn a_snapshot_joins_jobs_with_their_runs_and_finds_interrupted_ones() {
     assert_eq!(snapshot.runs[0].handle, "codex-0000a1");
 }
 
+#[test]
+fn a_job_result_is_its_listed_state_with_its_reply_or_error_bounded() {
+    let bench = bench();
+    let jobs = bench.layout.jobs();
+    let mut done = record("s", "job-1", AgentState::Completed, dead());
+    // A multi-byte character straddles the bound, so the cut backs off.
+    let reply = format!(
+        "{}é{}",
+        "a".repeat(MAX_JOB_RESULT_BYTES - 1),
+        "b".repeat(900)
+    );
+    done.reply = Some(reply.clone());
+    done.finished_unix = Some(20);
+    ledger::save(&jobs, &done).unwrap();
+    ledger::save(&jobs, &record("s", "job-2", AgentState::Working, dead())).unwrap();
+    let mut failed = record("s", "job-3", AgentState::Failed, dead());
+    failed.error = Some("tests fail\nmore".into());
+    ledger::save(&jobs, &failed).unwrap();
+
+    let result = bench.workbench.job_result("s", "job-1").unwrap();
+    assert_eq!(result.state, AgentState::Completed);
+    assert!(result.truncated);
+    assert_eq!(
+        result.reply.as_deref(),
+        Some(&reply[..MAX_JOB_RESULT_BYTES - 1])
+    );
+    assert_eq!(result.finished_unix_seconds, Some(20));
+    assert_eq!((result.agent.as_str(), result.outcome), ("codex", None));
+    let crashed = bench.workbench.job_result("s", "job-2").unwrap();
+    assert_eq!(crashed.state, AgentState::Interrupted);
+    assert_eq!((crashed.reply, crashed.truncated), (None, false));
+    let failed = bench.workbench.job_result("s", "job-3").unwrap();
+    assert_eq!(failed.error.as_deref(), Some("tests fail\nmore"));
+    assert_eq!(failed.detail.as_deref(), Some("tests fail"));
+    assert!(!failed.truncated);
+    // Each state is the one the snapshot lists.
+    for job in bench.workbench.snapshot().jobs {
+        let result = bench.workbench.job_result(&job.session, &job.job).unwrap();
+        assert_eq!((result.state, result.detail), (job.state, job.detail));
+    }
+    assert_eq!(
+        bench.workbench.job_result("s", "job-9").unwrap_err(),
+        "no record of s/job-9"
+    );
+    ledger::dismiss(&jobs, "s", "job-3").unwrap();
+    assert!(bench.workbench.job_result("s", "job-3").is_err());
+    assert!(bench.workbench.job_result("../s", "job-1").is_err());
+}
+
 /// An agent that finishes when released.
 struct Waiting {
     release: Arc<Notify>,

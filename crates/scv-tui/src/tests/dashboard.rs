@@ -78,6 +78,7 @@ fn status(snapshot: WorkbenchSnapshot) -> Box<DaemonStatus> {
         mail_note: None,
         workbench: Some(snapshot),
         run_log: None,
+        job_result: None,
         workbench_note: None,
         workbench_job: None,
         worktrees: Vec::new(),

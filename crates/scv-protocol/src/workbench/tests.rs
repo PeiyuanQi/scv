@@ -368,3 +368,68 @@ fn a_status_with_or_without_a_screen_reads_on_either_side_of_the_change() {
     let older: OlderStatus = serde_json::from_value(wire["status"].clone()).unwrap();
     assert_eq!(older.version, "0.4.4");
 }
+
+#[test]
+fn job_result_is_a_tagged_command_and_its_answer_is_additive() {
+    let command = DaemonCommand::JobResult {
+        session: "workbench-0123456789abcdef".into(),
+        job: "job-3".into(),
+    };
+    let wire = serde_json::to_string(&command).unwrap();
+    assert_eq!(
+        wire,
+        r#"{"action":"job_result","session":"workbench-0123456789abcdef","job":"job-3"}"#
+    );
+    // A newer client's extra fields are ignored.
+    let newer: DaemonCommand = serde_json::from_str(
+        r#"{"action":"job_result","session":"workbench-0123456789abcdef","job":"job-3","max_bytes":1}"#,
+    )
+    .unwrap();
+    assert_eq!(newer, command);
+
+    let result = JobResult {
+        session: "s".into(),
+        job: "job-3".into(),
+        agent: "codex".into(),
+        state: AgentState::Working,
+        detail: None,
+        reply: None,
+        error: None,
+        truncated: false,
+        outcome: None,
+        finished_unix_seconds: None,
+    };
+    let wire = serde_json::to_string(&result).unwrap();
+    assert_eq!(
+        wire,
+        r#"{"session":"s","job":"job-3","agent":"codex","state":"working"}"#
+    );
+    let newer = r#"{"session":"s","job":"job-3","agent":"codex","state":"completed","reply":"done","truncated":true,"finished_unix_seconds":9,"cost":{"usd":1}}"#;
+    let read: JobResult = serde_json::from_str(newer).unwrap();
+    assert_eq!(
+        (read.state, read.reply.as_deref(), read.truncated),
+        (AgentState::Completed, Some("done"), true)
+    );
+    assert_eq!(MAX_JOB_RESULT_BYTES, 4096);
+
+    // A daemon before `job_result` sends none; an older client ignores it.
+    let older = r#"{"version":"0.4.6","pid":1,"components":[]}"#;
+    let mut status: DaemonStatus = serde_json::from_str(older).unwrap();
+    assert!(status.job_result.is_none());
+    assert!(
+        !serde_json::to_string(&status)
+            .unwrap()
+            .contains("job_result")
+    );
+    status.job_result = Some(read);
+    let wire = serde_json::to_value(&status).unwrap();
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code, reason = "the fields an older client knows")]
+    struct OlderStatus {
+        version: String,
+        pid: u32,
+        components: Vec<serde_json::Value>,
+    }
+    let older: OlderStatus = serde_json::from_value(wire).unwrap();
+    assert_eq!(older.version, "0.4.6");
+}

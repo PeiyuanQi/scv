@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::workbench::{AttachPage, RunLogPage, SendMode, WorkbenchSnapshot, WorktreeInfo};
+use crate::workbench::{
+    AttachPage, JobResult, RunLogPage, SendMode, WorkbenchSnapshot, WorktreeInfo,
+};
 
 /// Where a daemon component (a channel account) is in its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +214,9 @@ pub struct DaemonStatus {
     /// Part of a run's activity log, for a `run_log` request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_log: Option<RunLogPage>,
+    /// One job's state and result, for a `job_result` request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_result: Option<JobResult>,
     /// What a `workbench_*` or `worktree_remove` action did, in SCV's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workbench_note: Option<String>,
@@ -864,6 +869,14 @@ pub enum DaemonCommand {
     /// Forget a finished or interrupted job's record.
     WorkbenchDismiss {
         /// The session that owned it.
+        session: String,
+        /// The job.
+        job: String,
+    },
+    /// Report one job's state and, once it has ended, its bounded reply or
+    /// error; the reply's `job_result` holds them. It only reads.
+    JobResult {
+        /// The session that owns it.
         session: String,
         /// The job.
         job: String,

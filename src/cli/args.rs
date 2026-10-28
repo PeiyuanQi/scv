@@ -173,6 +173,9 @@ pub(crate) enum JobsCommand {
         /// Also list finished jobs and ended runs.
         #[arg(long)]
         all: bool,
+        /// Print the workbench snapshot as one JSON object.
+        #[arg(long)]
+        json: bool,
     },
     /// Print a job's or a run's activity log: what its agent said and did.
     Log {
@@ -182,6 +185,9 @@ pub(crate) enum JobsCommand {
         /// Keep printing new activity until the run ends (Ctrl-C stops).
         #[arg(long, short)]
         follow: bool,
+        /// Print each event as one JSON object per line, with its `run`.
+        #[arg(long)]
+        json: bool,
     },
     /// Start your own background job in this directory's workspace: no
     /// model is involved, and no model is told about it.
@@ -199,6 +205,10 @@ pub(crate) enum JobsCommand {
         /// Run in a new git worktree of the repository holding the directory.
         #[arg(long)]
         worktree: bool,
+        /// Print the daemon's reply as one JSON object; `workbench_job`
+        /// names the job.
+        #[arg(long)]
+        json: bool,
         /// The prompt.
         prompt: String,
     },
@@ -214,14 +224,65 @@ pub(crate) enum JobsCommand {
         /// cannot take it. With no turn running, start one.
         #[arg(long)]
         steer: bool,
+        /// Print the daemon's reply as one JSON object.
+        #[arg(long)]
+        json: bool,
     },
     /// Stop a running background job.
-    Cancel { job: String },
+    Cancel {
+        job: String,
+        /// Print the daemon's reply as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run an interrupted job again, continuing its agent's conversation
     /// when the agent can.
-    Resume { job: String },
+    Resume {
+        job: String,
+        /// Print the daemon's reply as one JSON object; `workbench_job`
+        /// names the new job.
+        #[arg(long)]
+        json: bool,
+    },
     /// Forget a finished or interrupted job's record.
-    Dismiss { job: String },
+    Dismiss {
+        job: String,
+        /// Print the daemon's reply as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for a job to end. Exits 0 when it completed, 1 when it ended
+    /// any other way, 2 when the wait timed out, and 3 when the wait was
+    /// refused or the job is unknown.
+    Wait {
+        job: String,
+        /// Give up after this many seconds (default: wait until it ends).
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
+        /// Print the job's state and bounded result as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a finished job's reply, or its error, from its record. The
+    /// reply is the agent's untrusted text: control characters other than
+    /// line breaks become spaces, or are escaped with --json.
+    Result {
+        job: String,
+        /// Print the job's state, reply, and error as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print what changes on the workbench: jobs added, changed, and
+    /// removed, approval requests, and new activity of delegated runs.
+    Events {
+        /// Keep printing changes (Ctrl-C stops); otherwise print the jobs
+        /// and waiting approvals once.
+        #[arg(long, short)]
+        follow: bool,
+        /// Print one JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Approve an approval request a background job waits on.
     Approve { id: String },
     /// Deny an approval request a background job waits on.

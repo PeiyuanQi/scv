@@ -382,6 +382,7 @@ impl Components {
             mail_note: None,
             workbench: None,
             run_log: None,
+            job_result: None,
             workbench_note: None,
             workbench_job: None,
             worktrees: Vec::new(),
@@ -577,6 +578,7 @@ impl Components {
             | DaemonCommand::WorkbenchApprove { .. }
             | DaemonCommand::WorkbenchResume { .. }
             | DaemonCommand::WorkbenchDismiss { .. }
+            | DaemonCommand::JobResult { .. }
             | DaemonCommand::Worktrees
             | DaemonCommand::WorktreeRemove { .. }
             | DaemonCommand::Attach { .. }

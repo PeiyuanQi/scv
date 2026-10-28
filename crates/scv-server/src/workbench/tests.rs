@@ -127,6 +127,33 @@ async fn the_owners_job_runs_in_the_workbench_session_for_its_workspace() {
         texts.contains(&(RunEventKind::Text, "landed 0.9.9".into())),
         "{texts:?}"
     );
+    // The job's result: its reply, without a snapshot.
+    let status = control(
+        &hosts,
+        DaemonCommand::JobResult {
+            session: host.clone(),
+            job: "job-1".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(status.workbench.is_none());
+    let result = status.job_result.unwrap();
+    assert_eq!(
+        (result.state, result.reply.as_deref(), result.truncated),
+        (AgentState::Completed, Some("landed 0.9.9"), false)
+    );
+    assert!(result.finished_unix_seconds.is_some());
+    let unknown = control(
+        &hosts,
+        DaemonCommand::JobResult {
+            session: host.clone(),
+            job: "job-9".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(unknown.contains("no record"), "{unknown}");
     // The same workspace reuses its workbench session.
     assert_eq!(
         hosts

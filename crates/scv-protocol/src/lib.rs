@@ -42,9 +42,10 @@ pub use review::{
 };
 pub use server::ServerEvent;
 pub use workbench::{
-    AgentState, AttachColor, AttachPage, AttachRow, AttachSpan, JobOrigin, RestorableSession,
-    RestoredQueue, RunEvent, RunEventKind, RunLogPage, SendMode, WorkbenchApproval, WorkbenchJob,
-    WorkbenchRun, WorkbenchSession, WorkbenchSnapshot, WorktreeInfo, WorktreeRef,
+    AgentState, AttachColor, AttachPage, AttachRow, AttachSpan, JobOrigin, JobResult,
+    MAX_JOB_RESULT_BYTES, RestorableSession, RestoredQueue, RunEvent, RunEventKind, RunLogPage,
+    SendMode, WorkbenchApproval, WorkbenchJob, WorkbenchRun, WorkbenchSession, WorkbenchSnapshot,
+    WorktreeInfo, WorktreeRef,
 };
 
 /// The protocol version. Client and server must speak the same one.

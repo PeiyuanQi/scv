@@ -177,6 +177,7 @@ workbench".
 {"type":"daemon.control","request_id":"w6","command":{"action":"workbench_approve","id":"7c2e…","approved":true}}
 {"type":"daemon.control","request_id":"w7","command":{"action":"workbench_resume","session":"5d1c…","job":"job-3"}}
 {"type":"daemon.control","request_id":"w8","command":{"action":"workbench_dismiss","session":"5d1c…","job":"job-3"}}
+{"type":"daemon.control","request_id":"w11","command":{"action":"job_result","session":"5d1c…","job":"job-3"}}
 {"type":"daemon.control","request_id":"w9","command":{"action":"worktrees"}}
 {"type":"daemon.control","request_id":"w10","command":{"action":"worktree_remove","path":"/home/u/.scv/worktrees/shop-1a2b3c4d/codex-9f3e21","force":false}}
 {"type":"daemon.control","request_id":"a1","command":{"action":"attach","session":"5d1c…","conversation":"codex-2","cols":120,"rows":34}}
@@ -200,6 +201,27 @@ existing absolute directory) with the given `agent` call arguments;
 the agent can and queues otherwise; `queue`; `steer`, which fails when it
 cannot); `workbench_cancel`, `workbench_resume`, and `workbench_dismiss` act
 on one job; `workbench_approve` answers a waiting approval request.
+`job_result` reads one job and replies with `daemon.status.job_result`: its
+`session`, `job`, and `agent`; its `state` and `detail` as the snapshot
+lists them; and, once it has ended, its agent's `reply` or its `error`,
+each cut at a character boundary to 4 KiB (`MAX_JOB_RESULT_BYTES`), with
+`truncated: true` when either was longer (the ledger keeps up to 8 KiB of
+each). A reviewed job carries its `outcome` (a
+[`JobOutcome`](#reviewed-job-outcomes)) while the session that ran it still
+holds the job, and a job whose record says when it ended its
+`finished_unix_seconds`. The reply and error are untrusted delegated-agent
+text. It only reads, acts on nothing, and carries no snapshot; an unknown
+or dismissed job is a `workbench_error`. A daemon before 0.4.7 answers it
+with `invalid_json`, and `scv jobs wait` then takes the job's state from
+that daemon's `workbench` snapshot and its reply and error from its record
+on disk. No action pushes
+workbench changes: clients poll `workbench`, and `scv jobs events` diffs
+what it polls.
+
+```json
+{"type":"daemon.status","request_id":"w11","status":{"version":"0.4.7","pid":4242,"components":[],"delegations":{"active":0,"reaped":0},"job_result":{"session":"5d1c…","job":"job-3","agent":"codex","state":"completed","reply":"Fixed the flaky test; cargo test passes.","finished_unix_seconds":1793167274}}}
+```
+
 `worktrees` lists the worktrees SCV created, and `worktree_remove` removes
 one (with uncommitted changes, or locked by a cut-off creation, only with
 `force`), keeping its branch, and refuses while a job or a delegated process
@@ -234,8 +256,8 @@ worktree, a job in the wrong state, or the call's own validation error) is a
 `workbench_error` with SCV's reason. Each action's reply carries
 `workbench_note`, SCV's sentence about what it did, and `workbench_job`
 (`<session>/<job>`) for the job it started; every action but `run_log`,
-the worktree ones, and `attach`, `attach_io`, and `attach_detach` also
-carries a fresh snapshot.
+`job_result`, the worktree ones, and `attach`, `attach_io`, and
+`attach_detach` also carries a fresh snapshot.
 
 Component management is unsupported on stdio. The client helper bounds its
 exchange and never automatically retries a mutation after an ambiguous failure;

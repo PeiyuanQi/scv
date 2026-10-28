@@ -650,6 +650,16 @@ impl BackgroundJobs {
             .collect()
     }
 
+    /// Reviewed job `job`'s outcome as it stands, while this session still
+    /// keeps the job; `None` for any other job.
+    pub(crate) fn outcome(&self, job: &str) -> Option<JobOutcome> {
+        self.state()
+            .jobs
+            .iter()
+            .find(|entry| entry.id == job)
+            .and_then(Job::outcome)
+    }
+
     /// Stop `job` for the owner, from the workbench: as `agent_cancel` does,
     /// but the model did not ask, so its report turn tells it the owner
     /// stopped the job. A reviewed job's report carries its outcome as the

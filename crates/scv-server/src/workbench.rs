@@ -236,6 +236,7 @@ pub(crate) fn is_workbench_command(command: &DaemonCommand) -> bool {
             | DaemonCommand::WorkbenchApprove { .. }
             | DaemonCommand::WorkbenchResume { .. }
             | DaemonCommand::WorkbenchDismiss { .. }
+            | DaemonCommand::JobResult { .. }
             | DaemonCommand::Worktrees
             | DaemonCommand::WorktreeRemove { .. }
             | DaemonCommand::Attach { .. }
@@ -360,6 +361,15 @@ pub(crate) async fn control(
                     .map_err(|error| error.to_string())??,
             );
         }
+        DaemonCommand::JobResult { session, job } => {
+            let workbench = Arc::clone(workbench);
+            status.job_result = Some(
+                tokio::task::spawn_blocking(move || workbench.job_result(&session, &job))
+                    .await
+                    .map_err(|error| error.to_string())??,
+            );
+            snapshot = false;
+        }
         DaemonCommand::Worktrees => {
             status.worktrees = worktrees(hosts).await;
             snapshot = false;
@@ -481,6 +491,7 @@ fn status_with(delegations: DelegationSummary) -> DaemonStatus {
         mail_note: None,
         workbench: None,
         run_log: None,
+        job_result: None,
         workbench_note: None,
         workbench_job: None,
         worktrees: Vec::new(),
