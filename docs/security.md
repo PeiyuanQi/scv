@@ -359,7 +359,16 @@ until a minute after the terminal closes, and the parser's own logs, which
 would quote escape sequences, are always off. The activity log of a
 takeover notes its start, attaches, detaches, and end, never the screen.
 While a conversation is taken over no SCV turn runs on it, and its live ACP
-server is stopped first, so no two processes drive one agent session.
+server is stopped first, so no two processes drive one agent session. The
+owner may take one over from the background job running its turn
+(interrupt): the conversation's line is reserved for the takeover before
+the job is stopped, so no other prompt starts a turn or steers the
+stopping one in between, and nothing is stopped when it cannot be
+reserved. Only a running turn is stopped: a queued prompt never is, even
+when it is first in line between turns. A job waiting for the owner's
+approval is never stopped for a takeover, since that would withdraw the
+request: neither attaching, nor interrupting, nor a key typed into the
+terminal answers, denies, or withdraws an approval.
 
 Activity logs, the job ledger, and kept queues are private files (0700
 directories, 0600 files) under `state/`, written atomically or appended by

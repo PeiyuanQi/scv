@@ -10,8 +10,9 @@ use std::{
 };
 
 use scv_protocol::{
-    AgentState, DaemonCommand, JobOrigin, RestorableSession, RunEvent, RunEventKind, RunLogPage,
-    WorkbenchApproval, WorkbenchJob, WorkbenchRun, WorkbenchSnapshot, WorktreeInfo,
+    AgentState, AttachOffer, AttachState, DaemonCommand, JobOrigin, RestorableSession, RunEvent,
+    RunEventKind, RunLogPage, WorkbenchApproval, WorkbenchJob, WorkbenchRun, WorkbenchSnapshot,
+    WorktreeInfo,
 };
 
 use crate::{
@@ -107,6 +108,9 @@ pub(crate) struct AgentView {
     pub(crate) drawn: Cell<(u16, u16)>,
     /// An end of the takeover waiting to be pressed again.
     pub(crate) confirm_end: Option<Instant>,
+    /// A takeover that stops the named job's running turn, waiting to be
+    /// pressed again.
+    pub(crate) confirm_interrupt: Option<(Option<String>, Instant)>,
 }
 
 impl AgentView {
@@ -127,6 +131,7 @@ impl AgentView {
             attaching: false,
             drawn: Cell::new((0, 0)),
             confirm_end: None,
+            confirm_interrupt: None,
         }
     }
 
@@ -439,9 +444,14 @@ impl Workbench {
                 let page = status.attach?;
                 let conversation = page.conversation.clone();
                 view.terminal = Some(Attached::new(page));
+                // Which job's turn an interrupting attach stopped.
+                let stopped = status
+                    .workbench_note
+                    .map(|note| format!("{note} "))
+                    .unwrap_or_default();
                 Some(format!(
-                    "Attached to {conversation}'s terminal: keys go to the agent; {DETACH_KEY} \
-                     detaches and leaves it running."
+                    "{stopped}Attached to {conversation}'s terminal: keys go to the agent; \
+                     {DETACH_KEY} detaches and leaves it running."
                 ))
             }
             Answer::Status(Tag::AttachIo(target), status) => {
@@ -552,6 +562,40 @@ impl Workbench {
             .flatten()
     }
 
+    /// Whether the conversation a view follows can be taken over now, and
+    /// why not, as the daemon last said: from the view's job, else from
+    /// any job or run of that conversation. `None` from a daemon that
+    /// predates it, or without a conversation.
+    pub(crate) fn attach_offer(&self, target: &Target) -> Option<&AttachOffer> {
+        if let Some(offer) = self.job(target).and_then(|job| job.attach.as_ref()) {
+            return Some(offer);
+        }
+        let (session, conversation) = self.conversation(target)?;
+        let snapshot = self.snapshot.as_ref()?;
+        let ours = |of: &str, named: Option<&String>| {
+            of == session && named.is_some_and(|named| *named == conversation)
+        };
+        snapshot
+            .jobs
+            .iter()
+            .filter(|job| ours(&job.session, job.conversation.as_ref()))
+            .find_map(|job| job.attach.as_ref())
+            .or_else(|| {
+                snapshot
+                    .runs
+                    .iter()
+                    .filter(|run| ours(&run.session, run.conversation.as_ref()))
+                    .find_map(|run| run.attach.as_ref())
+            })
+    }
+
+    /// The daemon's last offer to stop the job running `target`'s
+    /// conversation's turn and take the conversation over, if it made one.
+    pub(crate) fn stoppable(&self, target: &Target) -> Option<&AttachOffer> {
+        self.attach_offer(target)
+            .filter(|offer| offer.state == AttachState::Busy && offer.interrupt)
+    }
+
     /// The page of `handle`'s log read from `after` came back: that request
     /// is no longer pending, unless a newer one is.
     fn log_answered(&mut self, handle: &str, after: u64) {
@@ -617,6 +661,28 @@ impl Workbench {
         }
         self.snapshot = Some(snapshot);
         self.note_shown_approvals();
+        self.drop_stale_interrupts();
+    }
+
+    /// Forget a first Ctrl+O whose job the new snapshot no longer offers to
+    /// stop, even for a moment, so a turn stoppable again takes two presses.
+    fn drop_stale_interrupts(&mut self) {
+        let stale: Vec<Target> = self
+            .views
+            .iter()
+            .filter(|(target, view)| {
+                view.confirm_interrupt.as_ref().is_some_and(|(asked, _)| {
+                    self.stoppable(target)
+                        .is_none_or(|offer| offer.job != *asked)
+                })
+            })
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in stale {
+            if let Some(view) = self.views.get_mut(&target) {
+                view.confirm_interrupt = None;
+            }
+        }
     }
 
     /// Remember the approval each open view is showing, without replacing

@@ -497,6 +497,11 @@ impl Ui {
             .workbench
             .takeover(target)
             .or_else(|| self.workbench.conversation(target));
+        // A job's running turn is stopped for it only on a second press.
+        let stoppable = self
+            .workbench
+            .stoppable(target)
+            .map(|offer| offer.job.clone());
         let Some(view) = self.workbench.views.get_mut(target) else {
             return;
         };
@@ -512,6 +517,38 @@ impl Ui {
                 .notify(format!("Still attaching to {conversation}…"), false);
             return;
         }
+        let now = Instant::now();
+        // The second press confirms only the job the first one named, and
+        // the daemon stops no other job that runs the turn by then.
+        let (interrupt, interrupt_job) = match stoppable {
+            Some(job)
+                if view.confirm_interrupt.as_ref().is_some_and(|(asked, at)| {
+                    *asked == job && now.duration_since(*at) < CONFIRM_WINDOW
+                }) =>
+            {
+                view.confirm_interrupt = None;
+                (true, job)
+            }
+            Some(job) => {
+                view.confirm_interrupt = Some((job.clone(), now));
+                let job = job.unwrap_or_else(|| "its job".into());
+                self.workbench.notify(
+                    format!(
+                        "{conversation} is running {job}'s turn. Press Ctrl+O again to stop \
+                         {job} and take {conversation} over in its agent's terminal; prompts \
+                         sent meanwhile wait for the takeover."
+                    ),
+                    false,
+                );
+                return;
+            }
+            // A press that stops nothing leaves no confirmation for a turn
+            // that starts later.
+            None => {
+                view.confirm_interrupt = None;
+                (false, None)
+            }
+        };
         view.attaching = true;
         let (cols, rows) = view.drawn.get();
         let size = |value: u16| (value > 0).then_some(value);
@@ -522,6 +559,8 @@ impl Ui {
                 conversation,
                 cols: size(cols),
                 rows: size(rows),
+                interrupt,
+                interrupt_job,
             },
         );
     }

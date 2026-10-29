@@ -181,6 +181,7 @@ workbench".
 {"type":"daemon.control","request_id":"w9","command":{"action":"worktrees"}}
 {"type":"daemon.control","request_id":"w10","command":{"action":"worktree_remove","path":"/home/u/.scv/worktrees/shop-1a2b3c4d/codex-9f3e21","force":false}}
 {"type":"daemon.control","request_id":"a1","command":{"action":"attach","session":"5d1c…","conversation":"codex-2","cols":120,"rows":34}}
+{"type":"daemon.control","request_id":"a5","command":{"action":"attach","session":"5d1c…","conversation":"codex-2","interrupt":true}}
 {"type":"daemon.control","request_id":"a2","command":{"action":"attach_io","id":"at-0f3c…","after":7,"input":"git status\r","cols":120,"rows":34}}
 {"type":"daemon.control","request_id":"a3","command":{"action":"attach_detach","id":"at-0f3c…"}}
 {"type":"daemon.control","request_id":"a4","command":{"action":"attach_end","session":"5d1c…","conversation":"codex-2"}}
@@ -237,6 +238,25 @@ agent asked for application cursor keys and bracketed paste, and, once the
 terminal has closed, `ended` and `exit`. It is refused with a
 `workbench_error` naming why for an agent whose terminal may not be offered,
 a conversation that runs or has turns waiting, or one with no agent session.
+With `interrupt: true`, a conversation whose turn a background job runs is
+taken over anyway: the daemon reserves the conversation's line for the
+takeover behind that turn first, then stops the job, and takes the
+conversation over once the turn has ended, naming the job in
+`workbench_note`; it stops nothing when the line cannot be reserved or
+no turn runs (a queued prompt is never stopped), and gives the line back,
+saying the job was stopped, when the takeover fails after the stop
+([interrupting a turn](tools.md#taking-a-conversation-over)).
+`interrupt_job` names the job the client told the owner it stops, such as
+`job-3`: when another job runs the turn by then, nothing is stopped and
+`attach` is refused naming it; without it, whichever job runs the turn is
+stopped. A daemon that predates `interrupt` ignores it and refuses a busy
+conversation; a client leaves it off unless it is true. In the snapshot,
+each job and run whose conversation the owner can reach carries `attach`:
+what `attach` would do with it now, as `state` (`ready`, `taken_over`,
+`busy`, `ineligible`, `no_session`, `reviewed`, `full`; another state reads
+as `unknown`), `detail` (SCV's reason, when it would refuse), `job` (the
+background job running its turn), and `interrupt` (whether `interrupt`
+would stop that job and take it over). It is absent from older daemons.
 `attach_io` types `input` (at most 64 KiB; the bytes a terminal sends,
 UTF-8) into the terminal held as `id`, resizes it when `cols` or `rows` is
 given, and replies with the rows changed since generation `after` (all of

@@ -488,6 +488,8 @@ async fn until_attached(
                     conversation: job.conversation.clone().unwrap(),
                     cols,
                     rows,
+                    interrupt: false,
+                    interrupt_job: None,
                 },
             )
             .await;

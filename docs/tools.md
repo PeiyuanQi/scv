@@ -1584,7 +1584,10 @@ runtime writes a snapshot it took earlier, and those owner actions win.
   pruned. And *approve* or *deny* an approval request a job waits on.
 - *attach*: take a live session's idle conversation over in its agent's
   own terminal, type into it, detach while it keeps running, and end it
-  ([below](#taking-a-conversation-over)).
+  ([below](#taking-a-conversation-over)); or first stop the background job
+  running its turn.
+  Each job says whether its conversation can be taken over now, and why
+  not.
 
 **Attended approvals.** A background job's relayed approval request normally
 gets the session's unattended answer at once (above). While the owner
@@ -1611,12 +1614,18 @@ scv jobs wait job-3 [--timeout SECONDS] [--json]   # exit 0 completed, 1 other e
 scv jobs result job-3 [--json]            # its reply or error, from its record
 scv jobs events [--follow] [--json]       # what changes: jobs, approvals, new activity
 scv jobs approve <id> | scv jobs deny <id>
-scv jobs attach job-3 [--end]             # take its conversation over in the agent's terminal (Ctrl+] detaches)
+scv jobs attach job-3 [--end | --interrupt] # take its conversation over in the agent's terminal (Ctrl+] detaches)
 ```
 
 `scv jobs attach` needs a terminal: it shows the agent's screen full-screen
 and sends it every key until `Ctrl+]` detaches, leaving the agent running;
-`--end` ends the takeover, with or without a terminal.
+`--end` ends the takeover, with or without a terminal, and `--interrupt`
+first stops the background job running the conversation's turn
+([interrupting](#taking-a-conversation-over)). Without it, a
+conversation running a turn is refused. Under each job whose conversation
+the owner can reach, `scv jobs` says whether it can be taken over now: how
+(`scv jobs attach`, or `--interrupt` and the job it would stop), or why
+not.
 A job is named `job-3` when one session has it, else `<session prefix>/job-3`.
 Listing, logs, waiting, results, and events read the records on disk when no
 daemon runs; acting needs a daemon of this release. Inside a delegated run,
@@ -1756,6 +1765,47 @@ when it does not. When the terminal closes, the conversation's next turn
 continues the same agent session (`exec resume` for the per-turn CLI, or a
 new ACP server that loads the session), with what was done in the
 terminal.
+
+**Interrupting a turn to take over.** The owner can take a conversation
+over from the background job running its turn, with `scv jobs attach
+--interrupt`, `Ctrl+O` twice in its agent view, or `interrupt` on the
+`attach` action. SCV first reserves the conversation's line for the
+takeover right behind the running turn, ahead of every prompt already
+queued: from then on a prompt sent to it (the model's, the owner's `send`,
+a queued follow-up) queues behind the takeover as above, and none steers
+the turn that is about to stop (`--steer` fails, as during a takeover).
+Only then does it stop that job, as `scv jobs cancel` does (the model is
+told the user stopped its job). Once the turn has ended, which it waits up
+to 20 seconds for, the takeover is first in the line, so nothing else
+starts a turn in between, and it starts as above. Nothing is reserved or
+stopped when the agent's terminal is not offered, the conversation is
+taken over or being taken over, a reviewed job holds it, it has no agent
+session yet (its first turn still runs, and stopping that turn would end
+the conversation), the turn is no background job's (a model's call in its
+session's own turn, or a reviewed job's round), no turn runs while a job
+is first in the line (its queued prompt is about to start the next turn,
+or its own turn has just ended: a prompt that waits is never stopped),
+that job waits for the owner's approval (stopping it would withdraw the
+request, and a takeover never answers or withdraws one), eight takeovers
+run, or another job runs the turn than the one the owner was told of (the
+job `scv jobs` listed, or the one the first `Ctrl+O` named, when a queued
+job started in between).
+Should the turn not end in time, or the terminal fail to open after the job was stopped,
+the reservation is let go, the prompts queued behind it run as before, and
+the refusal says which job was stopped. A conversation running no turn is
+taken over as without `interrupt`. A daemon that predates `interrupt`
+ignores it and refuses a busy conversation.
+
+**Whether it can be, now.** For each job and run naming a conversation the
+owner can reach, the workbench snapshot says what `attach` would do with
+it at that moment ([`attach`](protocol.md#the-workbench)): take it over
+(`ready`), attach to its takeover (`taken_over`), or refuse it, and why:
+a turn runs or waits (`busy`, with the background job running it and
+whether `interrupt` would stop that job), its agent's terminal is not
+offered (`ineligible`), it has no agent session yet (`no_session`), a
+reviewed job holds it (`reviewed`), or eight takeovers run (`full`).
+`scv jobs` prints it under each job, and the dashboard in its sidebar and
+agent views ([TUI](tui.md#attaching-to-an-agents-terminal)).
 
 **The screen.** The daemon reads the terminal whether or not anyone
 watches, so the agent never blocks on its output, and keeps its screen
@@ -2321,7 +2371,16 @@ screen that never scan the process table, no takeover started once the
 daemon stops, a planned restart that does not wait for the prompts queued
 behind a takeover, and, end to end, a takeover typed into, detached,
 attached again, ended, hung up by a killed daemon, and driven from `scv jobs
-attach` in a real pseudo-terminal.
+attach` in a real pseudo-terminal. Interrupting tests cover the takeover's
+place reserved behind the running turn and ahead of queued prompts, the
+job stopped only once that place is held (a prompt queued before the stop
+and one sent during it run only after the takeover, and none steers the
+stopping turn), nothing reserved or stopped behind a model's call, a job
+waiting for the owner's approval, an agent not offered, or a job other than
+the one the owner was told of, the line given
+back when the terminal fails to open after the stop, keys typed into a
+takeover never answering an approval (nor its end), and the snapshot's
+answer and reasons for each conversation, at the cap included.
 
 ## Tool extension contract
 

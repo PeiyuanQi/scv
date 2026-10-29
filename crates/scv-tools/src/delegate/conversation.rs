@@ -16,6 +16,7 @@ use std::{
 };
 
 use scv_core::ToolError;
+use scv_protocol::AttachState;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -163,6 +164,70 @@ impl Drop for TakeoverHold {
     }
 }
 
+/// What keeps a conversation from being taken over in its agent's own
+/// terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Obstacle {
+    /// The owner holds it in its terminal already.
+    TakenOver,
+    /// It runs a turn: the only obstacle an interrupting takeover gets
+    /// past, by stopping the job that runs it.
+    Running,
+    /// A reviewed job holds it between its rounds.
+    Reviewed,
+    /// The agent has reported no session of its own for it yet.
+    NoSession,
+}
+
+impl Obstacle {
+    /// The owner's view of it.
+    pub(crate) fn state(self) -> AttachState {
+        match self {
+            Self::TakenOver => AttachState::TakenOver,
+            Self::Running => AttachState::Busy,
+            Self::Reviewed => AttachState::Reviewed,
+            Self::NoSession => AttachState::NoSession,
+        }
+    }
+
+    /// How SCV refuses to take conversation `handle` over for it.
+    pub(crate) fn refusal(self, handle: &str) -> String {
+        match self {
+            Self::TakenOver => format!("{handle} is taken over in its terminal already"),
+            Self::Running => {
+                format!("{handle} is running a turn; attach once it is idle, or stop its job first")
+            }
+            Self::Reviewed => format!(
+                "{handle} is held by a reviewed job between its rounds; attach once the review ends"
+            ),
+            Self::NoSession => {
+                format!("{handle} has no session of the agent's own to open in its terminal")
+            }
+        }
+    }
+}
+
+/// What keeps `conversation` from being taken over, first what
+/// [`ConversationStore::take_over`] names first.
+fn obstacles(conversation: &Conversation) -> Vec<Obstacle> {
+    [
+        (conversation.taken_over, Obstacle::TakenOver),
+        (conversation.busy, Obstacle::Running),
+        (conversation.pins > 0, Obstacle::Reviewed),
+        (conversation.vendor.is_none(), Obstacle::NoSession),
+    ]
+    .into_iter()
+    .filter_map(|(applies, obstacle)| applies.then_some(obstacle))
+    .collect()
+}
+
+/// The refusal for a conversation `handle` the session does not have.
+pub(crate) fn unknown_conversation(handle: &str) -> String {
+    format!(
+        "no conversation {handle} in this session; it ended, or it was forgotten after it sat idle"
+    )
+}
+
 /// A reviewed job's hold on a conversation, keeping it out of eviction and
 /// idle expiry until dropped.
 #[derive(Debug)]
@@ -284,30 +349,26 @@ impl ConversationStore {
             .map(|conversation| conversation.agent.clone())
     }
 
+    /// What keeps conversation `handle` from being taken over in its
+    /// agent's own terminal now, in the order [`Self::take_over`] refuses
+    /// it; `None` when the session does not have it.
+    pub(crate) fn obstacles(&self, handle: &str) -> Option<Vec<Obstacle>> {
+        lock(&self.inner).conversations.get(handle).map(obstacles)
+    }
+
     /// Hold conversation `handle` for the owner's takeover in its agent's
     /// own terminal: it must run no turn and have the agent's session ID.
     pub(crate) fn take_over(self: &Arc<Self>, handle: &str) -> Result<TakeoverHold, String> {
         let mut inner = lock(&self.inner);
-        let conversation = inner.conversations.get_mut(handle).ok_or_else(|| {
-            format!("no conversation {handle} in this session; it ended, or it was forgotten after it sat idle")
-        })?;
-        if conversation.taken_over {
-            return Err(format!("{handle} is taken over in its terminal already"));
-        }
-        if conversation.busy {
-            return Err(format!(
-                "{handle} is running a turn; attach once it is idle, or stop its job first"
-            ));
-        }
-        if conversation.pins > 0 {
-            return Err(format!(
-                "{handle} is held by a reviewed job between its rounds; attach once the review ends"
-            ));
+        let conversation = inner
+            .conversations
+            .get_mut(handle)
+            .ok_or_else(|| unknown_conversation(handle))?;
+        if let Some(obstacle) = obstacles(conversation).first() {
+            return Err(obstacle.refusal(handle));
         }
         let Some(vendor) = conversation.vendor.clone() else {
-            return Err(format!(
-                "{handle} has no session of the agent's own to open in its terminal"
-            ));
+            return Err(Obstacle::NoSession.refusal(handle));
         };
         conversation.busy = true;
         conversation.taken_over = true;

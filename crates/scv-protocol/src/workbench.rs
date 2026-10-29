@@ -197,6 +197,11 @@ pub struct WorkbenchJob {
     /// The job it was resumed as, `<session>/<job>`, once it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_as: Option<String>,
+    /// Whether the owner can take `conversation` over in its agent's own
+    /// terminal now, and why not. Absent without a conversation the owner
+    /// can reach, and from daemons that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<AttachOffer>,
     /// When it was started.
     pub created_unix_seconds: u64,
     /// When its record last changed.
@@ -244,6 +249,81 @@ pub struct WorkbenchRun {
     /// A running turn of it can take a further prompt (ACP steering).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub steerable: bool,
+    /// Whether the owner can take `conversation` over in its agent's own
+    /// terminal now, and why not; absent as on [`WorkbenchJob::attach`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<AttachOffer>,
+}
+
+/// Where a conversation stands for the owner's takeover of it in its
+/// agent's own terminal (`attach`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachState {
+    /// It is idle: `attach` takes it over.
+    Ready,
+    /// It is taken over: `attach` attaches to its terminal, taking the
+    /// hold from any other client.
+    TakenOver,
+    /// A turn runs, or turns wait: `attach` is refused. With `interrupt`,
+    /// when [`AttachOffer::interrupt`] says so, it stops the running turn
+    /// first.
+    Busy,
+    /// Its agent's terminal is never offered (only an agent whose terminal
+    /// asks no approval is).
+    Ineligible,
+    /// It has no session of the agent's own to open yet: its first turn has
+    /// not ended.
+    NoSession,
+    /// A reviewed job holds it.
+    Reviewed,
+    /// As many takeovers as may run at once already run.
+    Full,
+    /// A state this client does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl AttachState {
+    /// The state as SCV writes it, such as `taken_over`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::TakenOver => "taken_over",
+            Self::Busy => "busy",
+            Self::Ineligible => "ineligible",
+            Self::NoSession => "no_session",
+            Self::Reviewed => "reviewed",
+            Self::Full => "full",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Whether the owner can take a conversation over in its agent's own
+/// terminal now, as `attach` would answer it at this moment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachOffer {
+    /// Where it stands.
+    pub state: AttachState,
+    /// SCV's words for why `attach` is refused, as it would refuse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// `attach` with `interrupt` would stop the job running its turn and
+    /// then take it over.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt: bool,
+    /// The background job running its turn, such as `job-3`, which
+    /// `interrupt` stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<String>,
+}
+
+impl AttachOffer {
+    /// Whether `attach` (without `interrupt`) goes ahead.
+    pub fn allowed(&self) -> bool {
+        matches!(self.state, AttachState::Ready | AttachState::TakenOver)
+    }
 }
 
 /// An approval request a background job relayed while the owner watches the

@@ -21,6 +21,7 @@ fn job(name: &str, state: AgentState) -> WorkbenchJob {
         reviewed: false,
         resumable: false,
         resumed_as: None,
+        attach: None,
         created_unix_seconds: 1,
         updated_unix_seconds: 1,
     }
@@ -204,6 +205,7 @@ fn run(handle: &str, live: bool) -> WorkbenchRun {
         last_activity_unix_seconds: 1,
         live,
         steerable: false,
+        attach: None,
     }
 }
 

@@ -12,7 +12,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use scv_protocol::{AgentState, RunEvent, RunEventKind};
+use scv_protocol::{AgentState, AttachOffer, AttachState, RunEvent, RunEventKind};
 
 use crate::{
     app::{App, PendingApproval},
@@ -334,10 +334,11 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, ui: &Ui) {
             ),
             Item::Job(job) => {
                 let mut text = format!(
-                    " {} {} {} {}",
+                    " {} {} {}{} {}",
                     mark(job.state),
                     clean(&job.job),
                     clean(&job.agent),
+                    attach_tag(job.attach.as_ref()),
                     clean(&job.task)
                 );
                 if let Some(worktree) = &job.worktree {
@@ -347,10 +348,11 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, ui: &Ui) {
             }
             Item::Run(run) => (
                 format!(
-                    " {} {} {}",
+                    " {} {} {}{}",
                     mark(run.state),
                     clean(run.conversation.as_deref().unwrap_or(&run.handle)),
-                    clean(&run.agent)
+                    clean(&run.agent),
+                    attach_tag(run.attach.as_ref())
                 ),
                 Style::default().fg(state_color(run.state)),
             ),
@@ -398,6 +400,49 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, ui: &Ui) {
                 }),
         );
     frame.render_widget(widget, area);
+}
+
+/// A sidebar entry's word on taking its conversation over, right after its
+/// agent so a narrow sidebar keeps it. An agent whose terminal is never
+/// offered says nothing; its agent view says why.
+fn attach_tag(offer: Option<&AttachOffer>) -> &'static str {
+    match offer.map(|offer| (offer.state, offer.interrupt)) {
+        None | Some((AttachState::Ineligible, _)) => "",
+        Some((AttachState::Ready, _)) => " [attach]",
+        Some((AttachState::TakenOver, _)) => " [taken over]",
+        Some((AttachState::Busy, true)) => " [stop+attach]",
+        Some(_) => " [no attach]",
+    }
+}
+
+/// An agent view's line on taking its conversation over: how, or why not.
+fn attach_line(offer: &AttachOffer) -> Line<'static> {
+    let (text, color) = match offer.state {
+        AttachState::Ready => (
+            "attach: Ctrl+O takes it over in its agent's own terminal".to_owned(),
+            Color::Cyan,
+        ),
+        AttachState::TakenOver => (
+            "attach: taken over in its terminal · Ctrl+O attaches · Ctrl+X twice ends it"
+                .to_owned(),
+            Color::Cyan,
+        ),
+        AttachState::Busy if offer.interrupt => (
+            format!(
+                "attach: {} runs its turn · Ctrl+O twice stops it and takes it over",
+                offer.job.as_deref().unwrap_or("a job")
+            ),
+            Color::Yellow,
+        ),
+        state => (
+            format!(
+                "no attach: {}",
+                offer.detail.as_deref().unwrap_or(state.as_str())
+            ),
+            Color::DarkGray,
+        ),
+    };
+    Line::styled(format!(" {}", clean(&text)), Style::default().fg(color))
 }
 
 /// Draw a chat's transcript and composer in `area`.
@@ -535,11 +580,12 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
     let job = ui.workbench.job(&view.target);
     let conversation = ui.workbench.conversation(&view.target);
     let (state, detail) = ui.workbench.state(&view.target);
+    let offer = ui.workbench.attach_offer(&view.target);
     let banner = if approval.is_some() { 3 } else { 0 };
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(if offer.is_some() { 3 } else { 2 }),
             Constraint::Length(banner),
             Constraint::Min(3),
             Constraint::Length(3),
@@ -582,10 +628,9 @@ fn render_agent(frame: &mut Frame<'_>, area: Rect, ui: &Ui, view: &AgentView, fo
             Style::default().fg(Color::DarkGray),
         ));
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![Line::from(title), Line::from(status)])),
-        layout[0],
-    );
+    let mut head = vec![Line::from(title), Line::from(status)];
+    head.extend(offer.map(attach_line));
+    frame.render_widget(Paragraph::new(Text::from(head)), layout[0]);
 
     if let Some(approval) = approval {
         let banner = Paragraph::new(format!(
@@ -915,6 +960,7 @@ fn help_lines(ui: &Ui) -> Vec<Line<'static>> {
         "  Ctrl+Y/Ctrl+N  approve or deny its approval request (y and n are text)",
         "  Ctrl+X Ctrl+X  stop its job · Ctrl+R resume an interrupted one",
         "  Ctrl+O         take its idle conversation over in the agent's own terminal, or attach again",
+        "                 (twice while a job runs its turn: stop that job, then take it over)",
         "                 (agents whose terminal asks no approvals: Codex with permissions = \"full\")",
         "  Ctrl+]         in the terminal: detach; every other key goes to the agent",
         "  Ctrl+X Ctrl+X  with the conversation taken over: end the takeover",

@@ -393,13 +393,29 @@ pub(crate) async fn control(
             conversation,
             cols,
             rows,
+            interrupt,
+            interrupt_job,
         } => {
             hosts.touch(&session).await;
-            status.attach = Some(
-                workbench
-                    .attach_terminal(&session, &conversation, cols, rows)
-                    .await?,
-            );
+            if interrupt {
+                let (page, note) = workbench
+                    .interrupt_and_attach(
+                        &session,
+                        &conversation,
+                        cols,
+                        rows,
+                        interrupt_job.as_deref(),
+                    )
+                    .await?;
+                status.attach = Some(page);
+                status.workbench_note = note;
+            } else {
+                status.attach = Some(
+                    workbench
+                        .attach_terminal(&session, &conversation, cols, rows)
+                        .await?,
+                );
+            }
             snapshot = false;
         }
         DaemonCommand::AttachIo {

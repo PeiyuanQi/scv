@@ -917,6 +917,8 @@ async fn a_restart_does_not_wait_for_prompts_queued_behind_a_takeover() {
         conversation: conversation.clone(),
         cols: None,
         rows: None,
+        interrupt: false,
+        interrupt_job: None,
     })
     .await
     .expect("the conversation is taken over");

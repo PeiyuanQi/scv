@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 
 use scv_client::Layout;
-use scv_protocol::{AgentState, JobOrigin, RunEventKind, SendMode};
+use scv_protocol::{AgentState, AttachState, JobOrigin, RunEventKind, SendMode, WorkbenchJob};
 
 use super::*;
 
@@ -281,7 +281,8 @@ async fn the_snapshot_lists_queues_kept_from_sessions_that_stopped() {
 }
 
 /// An instance whose Codex, with `permissions = "full"`, answers each turn
-/// at once and opens an interactive terminal for `resume <thread>`.
+/// at once (one whose prompt says `slow` after 30 seconds) and opens an
+/// interactive terminal for `resume <thread>`.
 fn instance_with_terminal_codex() -> (tempfile::TempDir, Instance) {
     let (home, instance) = instance_with_fake_codex();
     let agent = instance.layout.home().join("fake-codex");
@@ -296,6 +297,7 @@ fn instance_with_terminal_codex() -> (tempfile::TempDir, Instance) {
             "    ;;\n",
             "  *)\n",
             "    echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
+            "    case \"$*\" in *slow*) sleep 30 ;; esac\n",
             "    echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"done\"}}'\n",
             "    echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
             "    ;;\n",
@@ -354,6 +356,8 @@ async fn terminal_reads_skip_the_delegations_and_nothing_is_taken_over_once_stop
         conversation: job.conversation.clone().unwrap(),
         cols: Some(80),
         rows: Some(24),
+        interrupt: false,
+        interrupt_job: None,
     };
     let attached = control(&hosts, attach.clone()).await.unwrap();
     // The screen's reads come every 50 ms: no process table scan for them.
@@ -381,4 +385,114 @@ async fn terminal_reads_skip_the_delegations_and_nothing_is_taken_over_once_stop
     hosts.shutdown().await;
     let refused = control(&hosts, attach).await.unwrap_err();
     assert!(refused.contains("stopping"), "{refused}");
+}
+
+#[tokio::test]
+async fn an_interrupting_attach_stops_the_job_running_a_turn_and_takes_it_over() {
+    let (_home, instance) = instance_with_terminal_codex();
+    let hosts = hosts(&instance);
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_path = std::fs::canonicalize(workspace.path()).unwrap();
+    control(
+        &hosts,
+        DaemonCommand::WorkbenchStart {
+            workspace: workspace_path.display().to_string(),
+            agent: "codex".into(),
+            prompt: "a quick fix".into(),
+            cwd: None,
+            model: None,
+            effort: None,
+            worktree: false,
+        },
+    )
+    .await
+    .unwrap();
+    let job = |name: &'static str, ready: fn(&WorkbenchJob) -> bool| {
+        let hosts = Arc::clone(&hosts);
+        async move {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Some(job) = snapshot(&hosts)
+                        .await
+                        .jobs
+                        .into_iter()
+                        .find(|job| job.job == name && ready(job))
+                    {
+                        break job;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{name} never got there"))
+        }
+    };
+    let first = job("job-1", |job| {
+        job.state == AgentState::Completed && job.conversation.is_some()
+    })
+    .await;
+    assert_eq!(first.attach.unwrap().state, AttachState::Ready);
+    let (session, conversation) = (first.session, first.conversation.unwrap());
+    control(
+        &hosts,
+        DaemonCommand::WorkbenchSend {
+            session: session.clone(),
+            conversation: conversation.clone(),
+            prompt: "slow work".into(),
+            mode: SendMode::Queue,
+        },
+    )
+    .await
+    .unwrap();
+    let running = job("job-2", |job| {
+        job.attach
+            .as_ref()
+            .is_some_and(|offer| offer.state == AttachState::Busy)
+    })
+    .await;
+    let offer = running.attach.unwrap();
+    assert!(
+        offer.interrupt && offer.job.as_deref() == Some("job-2"),
+        "{offer:?}"
+    );
+    let attach = |interrupt, job: Option<&str>| DaemonCommand::Attach {
+        session: session.clone(),
+        conversation: conversation.clone(),
+        cols: None,
+        rows: None,
+        interrupt,
+        interrupt_job: job.map(str::to_owned),
+    };
+    // Without interrupt the running turn is left alone, as before.
+    let refused = control(&hosts, attach(false, None)).await.unwrap_err();
+    assert!(refused.contains("attach once it is idle"), "{refused}");
+    // Nor is it stopped for an owner told of another job.
+    let refused = control(&hosts, attach(true, Some("job-1")))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.contains("not job-1's, so nothing was stopped"),
+        "{refused}"
+    );
+    let taken = control(&hosts, attach(true, offer.job.as_deref()))
+        .await
+        .unwrap();
+    assert_eq!(
+        taken.workbench_note,
+        Some(format!("Stopped job-2 and took {conversation} over."))
+    );
+    assert!(!taken.attach.unwrap().ended);
+    job("job-2", |job| job.state == AgentState::Cancelled).await;
+    let first = job("job-1", |_| true).await;
+    assert_eq!(first.attach.unwrap().state, AttachState::TakenOver);
+    control(
+        &hosts,
+        DaemonCommand::AttachEnd {
+            session,
+            conversation,
+        },
+    )
+    .await
+    .unwrap();
+    hosts.shutdown().await;
 }

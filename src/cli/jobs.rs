@@ -17,8 +17,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use scv_client::{ControlError, Layout};
 use scv_protocol::{
-    AgentState, DaemonCommand, JobResult, MAX_JOB_RESULT_BYTES, RunEvent, RunEventKind, SendMode,
-    WorkbenchJob, WorkbenchSnapshot,
+    AgentState, AttachOffer, AttachState, DaemonCommand, JobResult, MAX_JOB_RESULT_BYTES, RunEvent,
+    RunEventKind, SendMode, WorkbenchJob, WorkbenchSnapshot,
 };
 use serde::Serialize;
 
@@ -196,7 +196,11 @@ pub(crate) async fn run(layout: &Layout, command: Option<JobsCommand>, cwd: &Pat
             )
             .await
         }
-        JobsCommand::Attach { job, end } => {
+        JobsCommand::Attach {
+            job,
+            end,
+            interrupt,
+        } => {
             let job = find_job(&snapshot(layout).await?, &job)?;
             let conversation = job
                 .conversation
@@ -217,7 +221,21 @@ pub(crate) async fn run(layout: &Layout, command: Option<JobsCommand>, cwd: &Pat
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
                 bail!("`scv jobs attach` needs a terminal; `--end` ends a takeover without one");
             }
-            let note = scv_tui::run_attach(&layout.socket(), &job.session, &conversation).await?;
+            // Only the job the listing just named is stopped, not one that
+            // starts the next turn before the daemon gets to it.
+            let stops = job
+                .attach
+                .as_ref()
+                .and_then(|offer| offer.job.as_deref())
+                .filter(|_| interrupt);
+            let note = scv_tui::run_attach(
+                &layout.socket(),
+                &job.session,
+                &conversation,
+                interrupt,
+                stops,
+            )
+            .await?;
             println!("{}", inert(&note));
             Ok(())
         }
@@ -822,6 +840,9 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
                     job.job
                 );
             }
+            if let Some(offer) = &job.attach {
+                println!("{:<18} {}", "", attach_line(job, offer));
+            }
         }
     }
     let runs = &snapshot.runs;
@@ -853,6 +874,29 @@ fn print_snapshot(snapshot: &WorkbenchSnapshot, all: bool) {
                 session.workspace
             );
         }
+    }
+}
+
+/// Whether `job`'s conversation can be taken over in its agent's own
+/// terminal now, and how, or why not, on one line.
+fn attach_line(job: &WorkbenchJob, offer: &AttachOffer) -> String {
+    let conversation = inert(job.conversation.as_deref().unwrap_or("its conversation"));
+    let command = format!("scv jobs attach {}/{}", short(&job.session), job.job);
+    match offer.state {
+        AttachState::Ready => format!("attach: {conversation} is idle; `{command}` takes it over"),
+        AttachState::TakenOver => {
+            format!("attach: {conversation} is taken over; `{command}` attaches, `--end` ends it")
+        }
+        AttachState::Busy if offer.interrupt => format!(
+            "attach: not while {} runs its turn; `{command} --interrupt` stops it and takes \
+             {conversation} over",
+            inert(offer.job.as_deref().unwrap_or("a job"))
+        ),
+        state => format!(
+            "attach: no ({}): {}",
+            state.as_str(),
+            inert(offer.detail.as_deref().unwrap_or("not offered now"))
+        ),
     }
 }
 

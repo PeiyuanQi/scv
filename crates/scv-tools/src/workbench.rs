@@ -19,10 +19,13 @@
 //!   ([`Workbench::watch`]): it waits for [`Workbench::approve`] up to
 //!   [`ATTENDED_WAIT`], then gets the session's unattended answer;
 //! - a conversation taken over in its agent's own terminal
-//!   ([`Workbench::attach_terminal`]): the owner reads its screen and types into it
-//!   ([`Workbench::attach_io`]), detaches while it keeps running
-//!   ([`Workbench::detach`]), and ends it ([`Workbench::end_takeover`]).
-//!   A takeover ends with its session, and with the daemon.
+//!   ([`Workbench::attach_terminal`], or [`Workbench::interrupt_and_attach`],
+//!   which stops the job running its turn once its lane is held): the owner
+//!   reads its screen and types into it ([`Workbench::attach_io`]), detaches
+//!   while it keeps running ([`Workbench::detach`]), and ends it
+//!   ([`Workbench::end_takeover`]). A takeover ends with its session, and
+//!   with the daemon. The snapshot says of each conversation whether it can
+//!   be taken over now, and why not.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -38,8 +41,8 @@ use async_trait::async_trait;
 use scv_client::Layout;
 use scv_core::{AgentError, ApprovalGate, ApprovalRequest};
 use scv_protocol::{
-    AgentState, AttachPage, JobResult, MAX_JOB_RESULT_BYTES, RunLogPage, SendMode,
-    WorkbenchApproval, WorkbenchJob, WorkbenchRun, WorkbenchSession, WorkbenchSnapshot,
+    AgentState, AttachOffer, AttachPage, AttachState, JobResult, MAX_JOB_RESULT_BYTES, RunLogPage,
+    SendMode, WorkbenchApproval, WorkbenchJob, WorkbenchRun, WorkbenchSession, WorkbenchSnapshot,
 };
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -437,6 +440,24 @@ impl Workbench {
                         && slot.agent.as_ref().is_some_and(|agent| agent.knows(handle))
                 })
         };
+        // Whether the owner can take each such conversation over now.
+        let taken_over = self.running_takeovers();
+        let mut offers: HashMap<(String, String), Option<AttachOffer>> = HashMap::new();
+        let mut offer = |session: &str, handle: &str| {
+            offers
+                .entry((session.to_owned(), handle.to_owned()))
+                .or_insert_with(|| {
+                    let slot = slots.iter().find(|slot| slot.id == session)?;
+                    let offer = slot.agent.as_ref()?.attach_offer(handle)?;
+                    let approval = offer.job.as_ref().and_then(|job| {
+                        awaiting
+                            .get(&(session.to_owned(), job.clone()))
+                            .map(|approval| approval.id.as_str())
+                    });
+                    Some(settle_offer(offer, approval, taken_over))
+                })
+                .clone()
+        };
         let mut states = activity::list_states(&self.runs);
         states
             .sort_by_key(|state| std::cmp::Reverse((state.last_activity_unix, state.started_unix)));
@@ -468,15 +489,19 @@ impl Workbench {
                     bounded(&approval.summary, 200)
                 ));
             }
+            let conversation = state
+                .conversation
+                .clone()
+                .filter(|handle| held(&state.owner, &state.session, handle));
             runs.push(WorkbenchRun {
                 handle: state.handle.clone(),
                 agent: state.agent.clone(),
                 session: state.session.clone(),
                 transport: state.transport.clone(),
-                conversation: state
-                    .conversation
-                    .clone()
-                    .filter(|handle| held(&state.owner, &state.session, handle)),
+                attach: conversation
+                    .as_deref()
+                    .and_then(|handle| offer(&state.session, handle)),
+                conversation,
                 turn: state.turn,
                 job: state.job.clone(),
                 jobs: state.jobs.clone(),
@@ -548,6 +573,18 @@ impl Workbench {
                         |cwd| record.workspace.join(cwd).display().to_string(),
                     )
                 });
+            let conversation = record
+                .conversation
+                .clone()
+                .or_else(|| run.and_then(|run| run.conversation.clone()))
+                .or_else(|| {
+                    record
+                        .arguments
+                        .get("session")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .filter(|handle| held(&record.owner, &record.session, handle));
             jobs.push(WorkbenchJob {
                 session: record.session.clone(),
                 job: record.job.clone(),
@@ -558,18 +595,10 @@ impl Workbench {
                 state,
                 detail,
                 started_by: record.started_by,
-                conversation: record
-                    .conversation
-                    .clone()
-                    .or_else(|| run.and_then(|run| run.conversation.clone()))
-                    .or_else(|| {
-                        record
-                            .arguments
-                            .get("session")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .filter(|handle| held(&record.owner, &record.session, handle)),
+                attach: conversation
+                    .as_deref()
+                    .and_then(|handle| offer(&record.session, handle)),
+                conversation,
                 run: run.map(|run| run.handle.clone()),
                 worktree: record.worktree.clone(),
                 reviewed: record.reviewed,
@@ -1104,33 +1133,88 @@ impl Workbench {
         cols: Option<u16>,
         rows: Option<u16>,
     ) -> Result<AttachPage, String> {
+        self.take_terminal(session, conversation, cols, rows, false, None)
+            .await
+            .map(|(page, _)| page)
+    }
+
+    /// [`Self::attach_terminal`], stopping first the background job that
+    /// runs the conversation's turn. The conversation's lane is held for
+    /// the takeover before that job is stopped, so no other prompt starts a
+    /// turn in between, and nothing is stopped when it cannot be held: when
+    /// the agent's terminal is not offered, a takeover of it runs or is
+    /// starting, a reviewed job holds it, it has no agent session yet, the
+    /// running turn is no background job, that job waits for the owner's
+    /// approval (which a takeover never answers or withdraws), or as many
+    /// takeovers as may run do. Given the `job` the owner was told it stops,
+    /// nothing is stopped either when another job runs the turn by then. A
+    /// conversation running no turn is taken over as by `attach_terminal`.
+    /// Also returns SCV's note naming the job it stopped.
+    pub async fn interrupt_and_attach(
+        &self,
+        session: &str,
+        conversation: &str,
+        cols: Option<u16>,
+        rows: Option<u16>,
+        job: Option<&str>,
+    ) -> Result<(AttachPage, Option<String>), String> {
+        self.take_terminal(session, conversation, cols, rows, true, job)
+            .await
+    }
+
+    async fn take_terminal(
+        &self,
+        session: &str,
+        conversation: &str,
+        cols: Option<u16>,
+        rows: Option<u16>,
+        interrupt: bool,
+        named: Option<&str>,
+    ) -> Result<(AttachPage, Option<String>), String> {
         self.expire_takeovers();
         let key = format!("{session}/{conversation}");
         let id = format!("at-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
         if let Some(page) = self.attach_running(&key, &id, cols, rows) {
-            return Ok(page);
+            return Ok((page, None));
         }
         let _starting = self.attaching.lock().await;
         // It may have started while this one waited.
         if let Some(page) = self.attach_running(&key, &id, cols, rows) {
-            return Ok(page);
+            return Ok((page, None));
         }
         if self.closing.load(Ordering::Acquire) {
             return Err(stopping());
         }
-        let running = lock(&self.takeovers)
-            .values()
-            .filter(|held| !held.takeover.is_finished())
-            .count();
-        if running >= MAX_TAKEOVERS {
-            return Err(format!(
-                "{MAX_TAKEOVERS} conversations are taken over already; end one first"
-            ));
+        if self.running_takeovers() >= MAX_TAKEOVERS {
+            return Err(at_cap());
         }
         let (agent, _) = self.agent(session)?;
-        let takeover = agent
-            .take_over(conversation, session, takeover::clamp_size(cols, rows))
-            .await?;
+        let size = takeover::clamp_size(cols, rows);
+        let (takeover, stopped) = if interrupt {
+            // Held before anything is stopped; refused, nothing is.
+            let reserved = agent.reserve_takeover(conversation)?;
+            if let (Some(job), Some(named)) = (&reserved.job, named)
+                && job != named
+            {
+                return Err(not_the_named_job(conversation, named, job));
+            }
+            if let Some(job) = &reserved.job
+                && let Some(approval) = lock(&self.inner)
+                    .approvals
+                    .values()
+                    .find(|pending| pending.info.session == session && &pending.info.job == job)
+            {
+                return Err(awaits_approval(job, &approval.info.id));
+            }
+            let stopped = reserved.job.clone();
+            (
+                agent.take_over_reserved(reserved, session, size).await?,
+                stopped,
+            )
+        } else {
+            (agent.take_over(conversation, session, size).await?, None)
+        };
+        let note = stopped.map(|job| format!("Stopped {job} and took {conversation} over."));
         let page = takeover.page(&id, 0);
         {
             let mut takeovers = lock(&self.takeovers);
@@ -1143,7 +1227,7 @@ impl Workbench {
                         closed: None,
                     },
                 );
-                return Ok(page);
+                return Ok((page, note));
             }
         }
         // SCV began stopping while it started: it ends like the others.
@@ -1265,6 +1349,14 @@ impl Workbench {
         futures_util::future::join_all(held.iter().map(|held| held.takeover.end())).await;
     }
 
+    /// How many takeovers run.
+    fn running_takeovers(&self) -> usize {
+        lock(&self.takeovers)
+            .values()
+            .filter(|held| !held.takeover.is_finished())
+            .count()
+    }
+
     /// Sessions with a takeover still running, which count as in use.
     pub fn takeover_sessions(&self) -> HashSet<String> {
         lock(&self.takeovers)
@@ -1363,6 +1455,48 @@ impl Workbench {
 
 fn stopping() -> String {
     "SCV is stopping, so it takes no conversation over now".into()
+}
+
+fn at_cap() -> String {
+    format!("{MAX_TAKEOVERS} conversations are taken over already; end one first")
+}
+
+/// The refusal to stop `job`, which waits for the owner's answer to
+/// approval request `id`, for a takeover.
+fn awaits_approval(job: &str, id: &str) -> String {
+    format!(
+        "{job} waits for your approval ({id}); answer it first (`scv jobs approve` or `deny`). \
+         Taking its conversation over would withdraw the request, and a takeover never answers \
+         or withdraws an approval"
+    )
+}
+
+/// The refusal to stop `running`, which runs conversation `conversation`'s
+/// turn, for a takeover the owner was told stops `named`.
+fn not_the_named_job(conversation: &str, named: &str, running: &str) -> String {
+    format!(
+        "{conversation} is running {running}'s turn now, not {named}'s, so nothing was stopped; \
+         attach again to stop {running}"
+    )
+}
+
+/// `offer` as `attach` would answer it now, with what only the workbench
+/// knows: with `running` takeovers at the cap, none starts, and stopping a
+/// job that waits for the owner's answer to `approval` is refused.
+fn settle_offer(mut offer: AttachOffer, approval: Option<&str>, running: usize) -> AttachOffer {
+    if offer.interrupt
+        && let (Some(job), Some(id)) = (&offer.job, approval)
+    {
+        offer.detail = Some(awaits_approval(job, id));
+        offer.interrupt = false;
+    }
+    let starts = offer.state == AttachState::Ready || offer.interrupt;
+    if starts && running >= MAX_TAKEOVERS {
+        offer.state = AttachState::Full;
+        offer.detail = Some(at_cap());
+        offer.interrupt = false;
+    }
+    offer
 }
 
 fn not_attached() -> String {

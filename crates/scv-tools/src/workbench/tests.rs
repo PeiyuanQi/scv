@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use scv_core::{Tool as _, ToolContext, ToolError, ToolOutput, ToolRisk};
 use scv_protocol::JobOrigin;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 use super::*;
 use crate::delegate::{
     activity::{RunActivity, RunHeader, RunTransport},
     agent::{Accepts, AgentTool, Backend},
     background::ledger::{JobLedger, JobRecord},
+    conversation::{ConversationLimits, ConversationStore},
     records::ProcessIdentity,
 };
 
@@ -1199,6 +1200,37 @@ fn terminal_session(
     bench: &Bench,
     session: &str,
 ) -> (SessionHandle, Arc<BackgroundCapable>, PathBuf) {
+    let dir = bench.root.path();
+    let (launch, _, pid) = fake_terminal(bench, session);
+    let handle = bench.workbench.register_session(session, "TUI", dir);
+    let jobs = Arc::new(BackgroundJobs::new(4, None));
+    let agent = AgentTool::beside(
+        "codex",
+        Arc::new(Terminal { launch }),
+        Accepts {
+            session: true,
+            ..Accepts::default()
+        },
+        &[],
+    );
+    let tool = Arc::new(BackgroundCapable::plain(Arc::new(agent), Arc::clone(&jobs)));
+    tool.conversations.adopt("codex", dir, VENDOR).unwrap();
+    bench
+        .workbench
+        .attach(session, Arc::downgrade(&tool), Arc::downgrade(&jobs));
+    (handle, tool, pid)
+}
+
+/// The agent session the fake terminals' conversations resume.
+const VENDOR: &str = "0199a213-81c0-7800-8aa1-bbab2a035a53";
+
+/// How to open a fake Codex terminal for `session`, which records its PID
+/// and echoes each line typed; also returns the fake CLI and where it
+/// writes its PID.
+fn fake_terminal(
+    bench: &Bench,
+    session: &str,
+) -> (crate::delegate::takeover::TakeoverLaunch, PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = bench.root.path();
     let pid = dir.join(format!("{session}.pid"));
@@ -1212,8 +1244,6 @@ fn terminal_session(
     )
     .unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let handle = bench.workbench.register_session(session, "TUI", dir);
-    let jobs = Arc::new(BackgroundJobs::new(4, None));
     let launch = crate::delegate::takeover::launch(
         "codex",
         &cli.display().to_string(),
@@ -1223,23 +1253,7 @@ fn terminal_session(
         None,
     )
     .unwrap();
-    let agent = AgentTool::beside(
-        "codex",
-        Arc::new(Terminal { launch }),
-        Accepts {
-            session: true,
-            ..Accepts::default()
-        },
-        &[],
-    );
-    let tool = Arc::new(BackgroundCapable::plain(Arc::new(agent), Arc::clone(&jobs)));
-    tool.conversations
-        .adopt("codex", dir, "0199a213-81c0-7800-8aa1-bbab2a035a53")
-        .unwrap();
-    bench
-        .workbench
-        .attach(session, Arc::downgrade(&tool), Arc::downgrade(&jobs));
-    (handle, tool, pid)
+    (launch, cli, pid)
 }
 
 fn screen_of(page: &AttachPage) -> String {
@@ -1426,4 +1440,704 @@ async fn an_agent_whose_terminal_is_not_offered_is_refused_and_nothing_changes()
             .await
             .is_err()
     );
+}
+
+/// An agent whose conversations live in the session's own store, which can
+/// be taken over in a fake terminal and steered while a turn runs. Each
+/// turn records its prompt and runs until released; a stopped turn says so
+/// and then waits for a `stopping` permit before it lets its conversation
+/// go, so a test can act while the stop is under way. A turn whose prompt
+/// is [`HELD`] waits for a `starting` permit before it begins, as a queued
+/// job is between the turn ahead of it ending and its own beginning.
+struct Turns {
+    conversations: Arc<ConversationStore>,
+    launch: crate::delegate::takeover::TakeoverLaunch,
+    release: Arc<Semaphore>,
+    starting: Arc<Semaphore>,
+    stopping: Arc<Semaphore>,
+    stopped: Arc<Notify>,
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+const HELD: &str = "held";
+
+fn session_of(arguments: &Value) -> Option<String> {
+    arguments
+        .get("session")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+#[async_trait]
+impl Backend for Turns {
+    fn risk(&self, _arguments: &Value) -> Result<ToolRisk, ToolError> {
+        Ok(ToolRisk::Delegate)
+    }
+    fn approval_summary(&self, _arguments: &Value) -> Result<String, ToolError> {
+        Ok(String::new())
+    }
+    fn busy(&self, arguments: &Value) -> Result<bool, ToolError> {
+        Ok(session_of(arguments).is_some_and(|handle| self.conversations.is_busy(&handle)))
+    }
+    async fn wait_idle(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ToolError> {
+        match session_of(arguments) {
+            Some(handle) => self.conversations.wait_idle(&handle, cancellation).await,
+            None => Ok(()),
+        }
+    }
+    async fn steer(
+        &self,
+        arguments: Value,
+        _context: ToolContext,
+    ) -> Result<Option<ToolOutput>, ToolError> {
+        if !session_of(&arguments).is_some_and(|handle| self.conversations.is_busy(&handle)) {
+            return Ok(None);
+        }
+        lock(&self.prompts).push(format!("steered {}", arguments["prompt"]));
+        Ok(Some(ToolOutput::success(
+            json!({"status":"steered"}).to_string(),
+        )))
+    }
+    fn takeover(&self) -> Result<crate::delegate::takeover::TakeoverLaunch, String> {
+        Ok(self.launch.clone())
+    }
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let session = session_of(&arguments);
+        let cwd = session
+            .as_deref()
+            .and_then(|handle| self.conversations.cwd(handle))
+            .unwrap_or_else(|| context.workspace.clone());
+        let prompt = arguments["prompt"].as_str().unwrap_or_default().to_owned();
+        if prompt == HELD {
+            tokio::select! {
+                permit = self.starting.acquire() => permit.unwrap().forget(),
+                () = context.cancellation.cancelled() => {
+                    return Err(ToolError::cancelled("cancelled"));
+                }
+            }
+        }
+        let turn = self
+            .conversations
+            .begin("codex", session.as_deref(), &cwd, false)?;
+        lock(&self.prompts).push(prompt.clone());
+        tokio::select! {
+            permit = self.release.acquire() => {
+                permit.unwrap().forget();
+                let session = turn.finish(Some(VENDOR.into()), true);
+                Ok(ToolOutput::success(
+                    json!({"agent":"codex","status":"completed","reply":prompt,"session":session})
+                        .to_string(),
+                ))
+            }
+            () = context.cancellation.cancelled() => {
+                self.stopped.notify_one();
+                self.stopping.acquire().await.unwrap().forget();
+                drop(turn);
+                Err(ToolError::cancelled("cancelled"))
+            }
+        }
+    }
+}
+
+/// A live session offering [`Turns`] as `codex`, whose conversation
+/// `codex-1` has had a turn and can be taken over.
+struct TurnsSession {
+    _handle: SessionHandle,
+    tool: Arc<BackgroundCapable>,
+    release: Arc<Semaphore>,
+    starting: Arc<Semaphore>,
+    stopping: Arc<Semaphore>,
+    stopped: Arc<Notify>,
+    prompts: Arc<Mutex<Vec<String>>>,
+    cli: PathBuf,
+    pid: PathBuf,
+}
+
+fn turns_session(bench: &Bench, session: &str) -> TurnsSession {
+    let dir = bench.root.path();
+    let (launch, cli, pid) = fake_terminal(bench, session);
+    let conversations = Arc::new(ConversationStore::new(
+        ConversationLimits {
+            max: 8,
+            idle: Duration::from_secs(86400),
+        },
+        None,
+    ));
+    conversations.adopt("codex", dir, VENDOR).unwrap();
+    let (release, starting, stopping) = (
+        Arc::new(Semaphore::new(0)),
+        Arc::new(Semaphore::new(0)),
+        Arc::new(Semaphore::new(0)),
+    );
+    let (stopped, prompts) = (Arc::new(Notify::new()), Arc::new(Mutex::default()));
+    let agent = AgentTool::beside(
+        "codex",
+        Arc::new(Turns {
+            conversations: Arc::clone(&conversations),
+            launch,
+            release: Arc::clone(&release),
+            starting: Arc::clone(&starting),
+            stopping: Arc::clone(&stopping),
+            stopped: Arc::clone(&stopped),
+            prompts: Arc::clone(&prompts),
+        }),
+        Accepts {
+            session: true,
+            ..Accepts::default()
+        },
+        &[],
+    );
+    let jobs = Arc::new(
+        BackgroundJobs::new(4, None)
+            .with_ledger(JobLedger::new(&bench.layout.jobs(), session, "TUI", dir).unwrap()),
+    );
+    let tool = Arc::new(BackgroundCapable {
+        inner: Arc::new(agent),
+        jobs: Arc::clone(&jobs),
+        conversations,
+        reviews: None,
+        session: None,
+    });
+    let handle = bench.workbench.register_session(session, "TUI", dir);
+    bench
+        .workbench
+        .attach(session, Arc::downgrade(&tool), Arc::downgrade(&jobs));
+    TurnsSession {
+        _handle: handle,
+        tool,
+        release,
+        starting,
+        stopping,
+        stopped,
+        prompts,
+        cli,
+        pid,
+    }
+}
+
+impl TurnsSession {
+    /// Wait until the turns that ran, and the prompts steered, are exactly
+    /// `prompts`, in order.
+    async fn ran(&self, prompts: &[&str]) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while lock(&self.prompts).as_slice() != prompts {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("ran {:?}, not {prompts:?}", lock(&self.prompts)));
+    }
+}
+
+/// Wait until `job` of `session` is recorded `state`.
+async fn recorded(bench: &Bench, session: &str, job: &str, state: AgentState) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while ledger::load(&bench.layout.jobs(), session, job).map(|record| record.state)
+            != Some(state)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{job} was never recorded {state}"));
+}
+
+#[tokio::test]
+async fn an_interrupting_attach_holds_the_lane_before_it_stops_the_running_turn() {
+    let bench = bench();
+    let live = turns_session(&bench, "session-a");
+    let workbench = Arc::clone(&bench.workbench);
+    // job-1 runs a turn of codex-1, and job-2 was queued behind it.
+    let sent = workbench.send("session-a", "codex-1", "a", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-1".into()));
+    live.ran(&["a"]).await;
+    let sent = workbench.send("session-a", "codex-1", "b", SendMode::Queue);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-2".into()));
+    // Without interrupt, a busy conversation is refused as before.
+    let refused = workbench
+        .attach_terminal("session-a", "codex-1", None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "codex-1 has a turn running or waiting; attach once it is idle, or stop its jobs first"
+    );
+    let attaching = tokio::spawn({
+        let workbench = Arc::clone(&workbench);
+        async move {
+            workbench
+                .interrupt_and_attach("session-a", "codex-1", Some(60), Some(10), Some("job-1"))
+                .await
+        }
+    });
+    // job-1 is told to stop only once the lane is held: a prompt sent while
+    // its turn is still going neither steers that turn nor starts one of
+    // its own when the turn ends. It waits behind the takeover.
+    tokio::time::timeout(Duration::from_secs(10), live.stopped.notified())
+        .await
+        .expect("job-1 is stopped");
+    let sent = workbench.send("session-a", "codex-1", "c", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-3".into()));
+    let steered = workbench.send("session-a", "codex-1", "d", SendMode::Steer);
+    let refused = steered.await.unwrap_err();
+    assert!(refused.contains("cannot take a prompt"), "{refused}");
+    let snapshot = workbench.snapshot();
+    let job = snapshot.jobs.iter().find(|job| job.job == "job-2").unwrap();
+    assert_eq!(job.attach.as_ref().unwrap().state, AttachState::TakenOver);
+    live.stopping.add_permits(1);
+    let (page, note) = attaching.await.unwrap().unwrap();
+    assert_eq!(
+        note.as_deref(),
+        Some("Stopped job-1 and took codex-1 over.")
+    );
+    assert_eq!((page.cols, page.rows), (60, 10));
+    let pid = wait_for_pid(&live.pid).await;
+    // Nothing started a turn in between: not the prompt queued before the
+    // stop, and not the one sent during it.
+    assert_eq!(*lock(&live.prompts), ["a"]);
+    recorded(&bench, "session-a", "job-1", AgentState::Cancelled).await;
+    assert!(live.tool.conversations.is_busy("codex-1"));
+    // Once the takeover ends, they run in the order they were sent.
+    workbench
+        .end_takeover("session-a", "codex-1")
+        .await
+        .unwrap();
+    wait_gone(pid).await;
+    live.ran(&["a", "b"]).await;
+    live.release.add_permits(1);
+    live.ran(&["a", "b", "c"]).await;
+    live.release.add_permits(1);
+    recorded(&bench, "session-a", "job-3", AgentState::Completed).await;
+}
+
+#[tokio::test]
+async fn an_interrupting_attach_that_cannot_hold_the_lane_stops_nothing() {
+    let bench = bench();
+    let live = turns_session(&bench, "session-a");
+    let workbench = Arc::clone(&bench.workbench);
+    // The running turn is the model's own call, which only its session
+    // stops.
+    let call = tokio::spawn({
+        let tool = Arc::clone(&live.tool);
+        let context = ToolContext::new(bench.root.path().to_owned(), CancellationToken::new());
+        async move {
+            tool.execute(json!({"prompt":"model","session":"codex-1"}), context)
+                .await
+        }
+    });
+    live.ran(&["model"]).await;
+    let refused = workbench
+        .interrupt_and_attach("session-a", "codex-1", None, None, None)
+        .await
+        .unwrap_err();
+    assert!(refused.contains("no background job"), "{refused}");
+    // Nothing was told to stop, and nothing waits behind a takeover.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), live.stopped.notified())
+            .await
+            .is_err()
+    );
+    assert!(workbench.takeover_sessions().is_empty());
+    let sent = workbench.send("session-a", "codex-1", "steer", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Steered);
+    live.release.add_permits(1);
+    let output = call.await.unwrap().unwrap();
+    assert!(output.content.contains("completed"), "{}", output.content);
+
+    // A job waiting for the owner's approval is not stopped for a takeover,
+    // since that would withdraw the request.
+    let sent = workbench.send("session-a", "codex-1", "a", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-1".into()));
+    live.ran(&["model", "steered \"steer\"", "a"]).await;
+    workbench.watch();
+    let gate = workbench.attended_gate("session-a", Arc::new(Fixed(false)));
+    let asking = tokio::spawn(async move {
+        let request = ApprovalRequest {
+            call_id: "job-1".into(),
+            ..request()
+        };
+        gate.approve(request, CancellationToken::new()).await
+    });
+    let approval = waiting_approval(&workbench).await;
+    let refused = workbench
+        .interrupt_and_attach("session-a", "codex-1", None, None, None)
+        .await
+        .unwrap_err();
+    assert!(refused.contains("waits for your approval"), "{refused}");
+    let offer = workbench.snapshot().jobs[0].attach.clone().unwrap();
+    assert_eq!((offer.state, offer.interrupt), (AttachState::Busy, false));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), live.stopped.notified())
+            .await
+            .is_err()
+    );
+    assert!(!asking.is_finished());
+    workbench.approve(&approval, false).unwrap();
+    assert!(!asking.await.unwrap().unwrap());
+    live.release.add_permits(1);
+    recorded(&bench, "session-a", "job-1", AgentState::Completed).await;
+
+    // An agent whose terminal is never offered is refused before anything
+    // is held or stopped.
+    let other = live_for(&bench, "session-b", bench.root.path(), None);
+    other
+        .tool
+        .conversations
+        .adopt("codex", bench.root.path(), VENDOR)
+        .unwrap();
+    let sent = workbench.send("session-b", "codex-1", "x", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-b/job-1".into()));
+    let refused = workbench
+        .interrupt_and_attach("session-b", "codex-1", None, None, None)
+        .await
+        .unwrap_err();
+    assert!(refused.contains("no terminal of its own"), "{refused}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        other
+            .jobs
+            .live()
+            .iter()
+            .any(|job| job.id == "job-1" && job.running)
+    );
+    other.release.notify_waiters();
+    recorded(&bench, "session-b", "job-1", AgentState::Completed).await;
+}
+
+/// The one approval request waiting, once it is.
+async fn waiting_approval(workbench: &Workbench) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(approval) = workbench.snapshot().approvals.pop() {
+                break approval.id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_takeover_that_fails_after_the_stop_gives_the_lane_back() {
+    let bench = bench();
+    let live = turns_session(&bench, "session-a");
+    let workbench = &bench.workbench;
+    let sent = workbench.send("session-a", "codex-1", "a", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-1".into()));
+    live.ran(&["a"]).await;
+    let sent = workbench.send("session-a", "codex-1", "b", SendMode::Queue);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-2".into()));
+    // The terminal will not open, and the stop goes through at once.
+    std::fs::remove_file(&live.cli).unwrap();
+    live.stopping.add_permits(1);
+    let refused = workbench
+        .interrupt_and_attach("session-a", "codex-1", None, None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        refused.starts_with("Stopped job-1, but codex-1 could not be taken over: could not open"),
+        "{refused}"
+    );
+    // The lane is not left reserved: the prompt queued behind runs next.
+    live.ran(&["a", "b"]).await;
+    assert!(workbench.takeover_sessions().is_empty());
+    recorded(&bench, "session-a", "job-1", AgentState::Cancelled).await;
+    live.release.add_permits(1);
+    recorded(&bench, "session-a", "job-2", AgentState::Completed).await;
+    let offer = workbench.snapshot().jobs[0].attach.clone().unwrap();
+    assert_eq!(offer.state, AttachState::Ready);
+}
+
+#[tokio::test]
+async fn an_interrupting_attach_stops_no_job_but_the_one_the_owner_was_told_of() {
+    let bench = bench();
+    let live = turns_session(&bench, "session-a");
+    let workbench = &bench.workbench;
+    // The owner was told job-1 runs codex-1's turn, but by the time they
+    // confirm, it has ended and job-2, queued behind it, runs.
+    let sent = workbench.send("session-a", "codex-1", "a", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-1".into()));
+    live.ran(&["a"]).await;
+    let sent = workbench.send("session-a", "codex-1", "b", SendMode::Queue);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-2".into()));
+    live.release.add_permits(1);
+    live.ran(&["a", "b"]).await;
+    let refused = workbench
+        .interrupt_and_attach("session-a", "codex-1", None, None, Some("job-1"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "codex-1 is running job-2's turn now, not job-1's, so nothing was stopped; attach again \
+         to stop job-2"
+    );
+    // job-2 was not told to stop, and nothing waits behind a takeover: a
+    // prompt sent now still steers its turn.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), live.stopped.notified())
+            .await
+            .is_err()
+    );
+    assert!(workbench.takeover_sessions().is_empty());
+    let sent = workbench.send("session-a", "codex-1", "steer", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Steered);
+    live.release.add_permits(1);
+    recorded(&bench, "session-a", "job-2", AgentState::Completed).await;
+    // With no turn running, it is taken over and nothing is stopped.
+    let (_, note) = workbench
+        .interrupt_and_attach("session-a", "codex-1", None, None, Some("job-1"))
+        .await
+        .unwrap();
+    assert_eq!(note, None);
+    let pid = wait_for_pid(&live.pid).await;
+    workbench
+        .end_takeover("session-a", "codex-1")
+        .await
+        .unwrap();
+    wait_gone(pid).await;
+}
+
+#[tokio::test]
+async fn an_interrupting_attach_between_turns_stops_no_queued_prompt() {
+    let bench = bench();
+    let live = turns_session(&bench, "session-a");
+    let workbench = &bench.workbench;
+    let sent = workbench.send("session-a", "codex-1", "a", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-1".into()));
+    live.ran(&["a"]).await;
+    let sent = workbench.send("session-a", "codex-1", HELD, SendMode::Queue);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-2".into()));
+    // job-1's turn ends. job-2 is first in the lane now, but its turn has
+    // not begun: no turn runs, and job-2 is still a queued prompt.
+    live.release.add_permits(1);
+    recorded(&bench, "session-a", "job-1", AgentState::Completed).await;
+    assert!(!live.tool.conversations.is_busy("codex-1"));
+    let between = "codex-1 is between turns: job-2 is about to start the next one, or has just \
+                   ended its own, and only a running turn is stopped for a takeover; attach \
+                   again in a moment";
+    let snapshot = workbench.snapshot();
+    let job = snapshot.jobs.iter().find(|job| job.job == "job-2").unwrap();
+    assert_eq!(
+        job.attach,
+        Some(AttachOffer {
+            state: AttachState::Busy,
+            detail: Some(between.into()),
+            interrupt: false,
+            job: None,
+        })
+    );
+    let refused = workbench
+        .interrupt_and_attach("session-a", "codex-1", None, None, Some("job-2"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused, between);
+    // Nothing waits behind a takeover, and job-2 was not stopped: its
+    // prompt runs next.
+    assert!(workbench.takeover_sessions().is_empty());
+    live.starting.add_permits(1);
+    live.ran(&["a", HELD]).await;
+    // Once its turn runs, that turn is what an interrupt stops.
+    live.stopping.add_permits(1);
+    let (_, note) = workbench
+        .interrupt_and_attach("session-a", "codex-1", None, None, Some("job-2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        note.as_deref(),
+        Some("Stopped job-2 and took codex-1 over.")
+    );
+    let pid = wait_for_pid(&live.pid).await;
+    recorded(&bench, "session-a", "job-2", AgentState::Cancelled).await;
+    workbench
+        .end_takeover("session-a", "codex-1")
+        .await
+        .unwrap();
+    wait_gone(pid).await;
+}
+
+#[tokio::test]
+async fn keys_typed_into_a_takeover_never_answer_an_approval() {
+    let bench = bench();
+    let (_handle, _tool, pid_file) = terminal_session(&bench, "session-a");
+    let workbench = &bench.workbench;
+    workbench.watch();
+    let gate = workbench.attended_gate("session-a", Arc::new(Fixed(false)));
+    let asking =
+        tokio::spawn(async move { gate.approve(request(), CancellationToken::new()).await });
+    let approval = waiting_approval(workbench).await;
+    let page = workbench
+        .attach_terminal("session-a", "codex-1", None, None)
+        .await
+        .unwrap();
+    let pid = wait_for_pid(&pid_file).await;
+    // What would answer a prompt (y, Enter, n) and the dashboard's own
+    // approval chords (Ctrl+Y, Ctrl+N) go to the agent's terminal only.
+    for keys in ["y\r", "\x19", "\x0e", "n\r"] {
+        let typed = workbench.attach_io(&page.id, 0, keys, None, None).await;
+        assert!(typed.unwrap().note.is_none());
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let page = workbench
+                .attach_io(&page.id, 0, "", None, None)
+                .await
+                .unwrap();
+            if screen_of(&page).contains("typed y") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The request still waits for the owner's own answer.
+    assert!(!asking.is_finished());
+    let waiting: Vec<String> = workbench
+        .snapshot()
+        .approvals
+        .into_iter()
+        .map(|approval| approval.id)
+        .collect();
+    assert_eq!(waiting, std::slice::from_ref(&approval));
+    // Ending the takeover answers nothing either.
+    workbench
+        .end_takeover("session-a", "codex-1")
+        .await
+        .unwrap();
+    wait_gone(pid).await;
+    assert!(!asking.is_finished());
+    workbench.approve(&approval, false).unwrap();
+    assert!(!asking.await.unwrap().unwrap());
+}
+
+#[tokio::test]
+async fn the_snapshot_says_whether_each_conversation_can_be_taken_over_and_why_not() {
+    let bench = bench();
+    let workbench = &bench.workbench;
+    // An agent whose terminal is never offered.
+    let other = live_for(&bench, "session-b", bench.root.path(), None);
+    other
+        .tool
+        .conversations
+        .adopt("codex", bench.root.path(), VENDOR)
+        .unwrap();
+    let sent = workbench.send("session-b", "codex-1", "x", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-b/job-1".into()));
+    // One whose turn a background job runs.
+    let live = turns_session(&bench, "session-a");
+    let sent = workbench.send("session-a", "codex-1", "a", SendMode::Auto);
+    assert_eq!(sent.await.unwrap(), Sent::Job("session-a/job-1".into()));
+    live.ran(&["a"]).await;
+    let offer = |session: &str| {
+        workbench
+            .snapshot()
+            .jobs
+            .into_iter()
+            .find(|job| job.session == session)
+            .and_then(|job| job.attach)
+            .unwrap()
+    };
+    let ineligible = offer("session-b");
+    assert_eq!(ineligible.state, AttachState::Ineligible);
+    assert!(!ineligible.allowed() && !ineligible.interrupt);
+    assert!(
+        ineligible
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("no terminal of its own")),
+        "{ineligible:?}"
+    );
+    let busy = offer("session-a");
+    assert_eq!(
+        busy,
+        AttachOffer {
+            state: AttachState::Busy,
+            detail: Some(
+                "codex-1 has a turn running or waiting; attach once it is idle, or stop its jobs \
+                 first"
+                    .into()
+            ),
+            interrupt: true,
+            job: Some("job-1".into()),
+        }
+    );
+    assert!(!busy.allowed());
+    // A conversation whose first turn runs has no agent session to open.
+    let first = tokio::spawn({
+        let tool = Arc::clone(&live.tool);
+        let context = ToolContext::new(bench.root.path().to_owned(), CancellationToken::new());
+        async move { tool.execute(json!({"prompt":"new"}), context).await }
+    });
+    live.ran(&["a", "new"]).await;
+    let fresh = live.tool.attach_offer("codex-2").unwrap();
+    assert_eq!(fresh.state, AttachState::NoSession);
+    let refused = workbench
+        .interrupt_and_attach("session-a", "codex-2", None, None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        refused.contains("no session of the agent's own"),
+        "{refused}"
+    );
+    live.release.add_permits(2);
+    first.await.unwrap().unwrap();
+    recorded(&bench, "session-a", "job-1", AgentState::Completed).await;
+    // Idle, then taken over.
+    assert_eq!(offer("session-a").state, AttachState::Ready);
+    workbench
+        .attach_terminal("session-a", "codex-1", None, None)
+        .await
+        .unwrap();
+    let pid = wait_for_pid(&live.pid).await;
+    let taken = offer("session-a");
+    assert_eq!(taken.state, AttachState::TakenOver);
+    assert!(taken.allowed());
+    workbench.end_takeovers().await;
+    wait_gone(pid).await;
+    other.release.notify_waiters();
+}
+
+#[test]
+fn an_offer_that_would_start_a_takeover_is_refused_at_the_cap_or_behind_an_approval() {
+    let busy = AttachOffer {
+        state: AttachState::Busy,
+        detail: Some("codex-1 has a turn running or waiting".into()),
+        interrupt: true,
+        job: Some("job-1".into()),
+    };
+    assert_eq!(settle_offer(busy.clone(), None, MAX_TAKEOVERS - 1), busy);
+    let full = settle_offer(busy.clone(), None, MAX_TAKEOVERS);
+    assert_eq!((full.state, full.interrupt), (AttachState::Full, false));
+    assert_eq!(full.detail.as_deref(), Some(at_cap().as_str()));
+    let held = settle_offer(busy.clone(), Some("ap-1"), 0);
+    assert_eq!((held.state, held.interrupt), (AttachState::Busy, false));
+    assert!(held.detail.unwrap().contains("ap-1"));
+    let ready = AttachOffer {
+        state: AttachState::Ready,
+        detail: None,
+        interrupt: false,
+        job: None,
+    };
+    assert_eq!(settle_offer(ready.clone(), None, 0), ready);
+    assert_eq!(
+        settle_offer(ready, None, MAX_TAKEOVERS).state,
+        AttachState::Full
+    );
+    // Attaching to a takeover that runs starts none.
+    let taken = AttachOffer {
+        state: AttachState::TakenOver,
+        detail: None,
+        interrupt: false,
+        job: None,
+    };
+    assert_eq!(settle_offer(taken.clone(), None, MAX_TAKEOVERS), taken);
 }

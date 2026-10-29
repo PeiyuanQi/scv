@@ -133,7 +133,23 @@ waiting (stop its job first), is held by a reviewed job between its rounds,
 has no agent session yet, or belongs to an
 agent whose terminal may not be offered: only an agent whose terminal asks
 nothing SCV's approval gate decides can be taken over, which is Codex with
-`permissions = "full"`. Claude Code is always refused, because its terminal
+`permissions = "full"`. When a background job runs the conversation's turn,
+the first `Ctrl+O` only says which job a second stops, and a second within
+three seconds takes the conversation over after stopping that job, its
+line held for the takeover first so no queued prompt runs in between
+([interrupting a turn](tools.md#taking-a-conversation-over)); the note
+names the job it stopped. It stops only that job: when another job's turn
+runs by the second press, that press only names it, and when one starts
+before the daemon gets the request, nothing is stopped and the refusal
+names it. A snapshot that no longer offers to stop that job's turn, even
+for a moment (it waits for an approval, or eight takeovers run), forgets
+the first press, so the turn takes two presses again. An agent view says
+under its state whether its conversation can be taken over now and how, or
+why not, and the sidebar
+marks a job or conversation `[attach]`, `[taken over]`, `[stop+attach]`
+(`Ctrl+O` twice), or `[no attach]`; it marks nothing for an agent whose
+terminal is never offered, whose view says why. A daemon that predates
+these says nothing, and `Ctrl+O` asks once. Claude Code is always refused, because its terminal
 asks before some actions even with its own prompts off, and keys typed
 there would answer those prompts instead of the gate. Attaching is not a
 way to approve anything: approval requests go where they always go, and
@@ -441,7 +457,11 @@ detach reaching the agent (an approval chord typed into the terminal
 answers nothing), one read in flight, starting and ending a takeover on a
 connection of their own, falling back to the activity log on a
 refusal, a daemon without attach, a terminal that closes, or a lost
-connection, a closed view detaching, and `Ctrl+X` twice ending a takeover.
+connection, a closed view detaching, `Ctrl+X` twice ending a takeover,
+`Ctrl+O` twice stopping a job's turn (the first press sending nothing, and
+forgotten once a snapshot offers no stop of that job) and naming the job
+stopped, and the sidebar's and agent view's word on whether a conversation
+can be taken over.
 Integration tests cover a queue restored across a killed daemon and resumed,
 and a conversation taken over, typed into, detached, attached again, ended,
 and hung up by a daemon that was killed.

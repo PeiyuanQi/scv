@@ -67,8 +67,10 @@ waiting for you, idle, quiet for too long, or interrupted. Start jobs of
 your own, stop them, answer their approvals while you watch, and resume a
 job a restart cut off in the agent's own conversation; your queued prompts
 come back too. Take an idle Codex conversation over in its own terminal
-(`Ctrl+O`, or `scv jobs attach`), type into it, and detach while it keeps
-running. `scv jobs` does the same from the command line.
+(`Ctrl+O`, or `scv jobs attach`), or stop the job running its turn and take
+it over (`Ctrl+O` twice, or `--interrupt`), type into it, and detach while
+it keeps running. `scv jobs` does the same from the command line, and says
+of each job whether its conversation can be taken over, or why not.
 
 ### Private homes, private keys
 

@@ -2,8 +2,8 @@
 //! requests keys and commands send.
 
 use scv_protocol::{
-    AgentState, DaemonCommand, DaemonStatus, DelegationSummary, JobOrigin, SendMode,
-    WorkbenchApproval, WorkbenchJob, WorkbenchSession, WorkbenchSnapshot,
+    AgentState, AttachOffer, AttachState, DaemonCommand, DaemonStatus, DelegationSummary,
+    JobOrigin, SendMode, WorkbenchApproval, WorkbenchJob, WorkbenchSession, WorkbenchSnapshot,
 };
 use tokio::sync::mpsc;
 
@@ -46,6 +46,7 @@ fn snapshot() -> WorkbenchSnapshot {
             reviewed: false,
             resumable: false,
             resumed_as: None,
+            attach: None,
             created_unix_seconds: 1,
             updated_unix_seconds: 1,
         }],
@@ -1433,6 +1434,8 @@ async fn ctrl_o_attaches_and_every_key_but_detach_goes_to_the_agent() {
         conversation,
         cols,
         rows,
+        interrupt,
+        interrupt_job,
     } = command
     else {
         panic!("{command:?}");
@@ -1440,6 +1443,10 @@ async fn ctrl_o_attaches_and_every_key_but_detach_goes_to_the_agent() {
     assert_eq!(
         (session.as_str(), conversation.as_str()),
         ("chat-session", "codex-2")
+    );
+    assert!(
+        !interrupt && interrupt_job.is_none(),
+        "a plain Ctrl+O never stops a turn"
     );
     // The terminal takes the view's size.
     assert!(cols.is_some_and(|cols| cols > 40) && rows.is_some_and(|rows| rows > 10));
@@ -1503,6 +1510,278 @@ async fn ctrl_o_attaches_and_every_key_but_detach_goes_to_the_agent() {
     // Detached, the keys are the dashboard's and the view's again.
     let shown = screen(&ui, 120, 36);
     assert!(shown.contains("send to codex-2"), "{shown}");
+}
+
+/// Have the daemon say `offer` of job-3's conversation, with job-3 working
+/// and no approval waiting.
+fn offer_job_3(ui: &mut Ui, offer: AttachOffer) {
+    let snapshot = ui.workbench.snapshot.as_mut().unwrap();
+    snapshot.approvals.clear();
+    snapshot.jobs[0].state = AgentState::Working;
+    snapshot.jobs[0].detail = None;
+    snapshot.jobs[0].attach = Some(offer);
+}
+
+#[tokio::test]
+async fn ctrl_o_twice_stops_the_job_running_a_turn_and_takes_its_conversation_over() {
+    let Attachable {
+        mut ui,
+        mut takeover,
+        target,
+        ..
+    } = attachable().await;
+    offer_job_3(
+        &mut ui,
+        AttachOffer {
+            state: AttachState::Busy,
+            detail: Some("codex-2 has a turn running or waiting".into()),
+            interrupt: true,
+            job: Some("job-3".into()),
+        },
+    );
+    let shown = screen(&ui, 120, 36);
+    assert!(
+        shown.contains("job-3 runs its turn · Ctrl+O twice stops it"),
+        "{shown}"
+    );
+    assert!(shown.contains("job-3 codex [stop+attach]"), "{shown}");
+    // The first press only says what a second one stops.
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(takeover.try_recv().is_err());
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(
+        notice.contains("Press Ctrl+O again to stop job-3"),
+        "{notice}"
+    );
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let Request { tag, command } = takeover.try_recv().unwrap();
+    assert_eq!(tag, Tag::Attach(target.clone()));
+    // It names the job the first press did, which alone the daemon stops.
+    assert!(
+        matches!(&command, DaemonCommand::Attach { conversation, interrupt: true, interrupt_job: Some(job), .. } if conversation == "codex-2" && job == "job-3"),
+        "{command:?}"
+    );
+    // The view says which job's turn was stopped.
+    let mut status = attach_status(attach_page("at-1", 1, "codex> ready"));
+    status.workbench_note = Some("Stopped job-3 and took codex-2 over.".into());
+    let note = ui
+        .workbench
+        .terminal_answer(Answer::Status(Tag::Attach(target), status))
+        .unwrap();
+    assert!(
+        note.starts_with("Stopped job-3 and took codex-2 over. Attached to codex-2's terminal"),
+        "{note}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_ctrl_o_confirms_only_the_turn_the_first_one_named() {
+    let Attachable {
+        mut ui,
+        mut takeover,
+        target,
+        ..
+    } = attachable().await;
+    let stoppable = |job: &str| AttachOffer {
+        state: AttachState::Busy,
+        detail: Some("codex-2 has a turn running or waiting".into()),
+        interrupt: true,
+        job: Some(job.into()),
+    };
+    offer_job_3(&mut ui, stoppable("job-3"));
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(takeover.try_recv().is_err());
+    // Another job's turn runs by the second press: that press only names it.
+    offer_job_3(&mut ui, stoppable("job-4"));
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(takeover.try_recv().is_err());
+    let notice = &ui.workbench.notices.back().unwrap().text;
+    assert!(
+        notice.contains("Press Ctrl+O again to stop job-4"),
+        "{notice}"
+    );
+    // A press that stops nothing, refused, drops the confirmation.
+    offer_job_3(
+        &mut ui,
+        AttachOffer {
+            state: AttachState::Busy,
+            detail: Some("codex-2 is running a turn that is no background job".into()),
+            interrupt: false,
+            job: None,
+        },
+    );
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(matches!(
+        takeover.try_recv().unwrap().command,
+        DaemonCommand::Attach {
+            interrupt: false,
+            ..
+        }
+    ));
+    ui.workbench.terminal_answer(Answer::Refused(
+        Tag::Attach(target.clone()),
+        "codex-2 is running a turn that is no background job".into(),
+    ));
+    // So job-4's turn, back within the window, takes two presses again.
+    offer_job_3(&mut ui, stoppable("job-4"));
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(takeover.try_recv().is_err());
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    let command = takeover.try_recv().unwrap().command;
+    assert!(
+        matches!(&command, DaemonCommand::Attach { interrupt: true, interrupt_job: Some(job), .. } if job == "job-4"),
+        "{command:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_not_stoppable_for_a_moment_between_presses_takes_two_presses_again() {
+    let Attachable {
+        mut ui,
+        mut takeover,
+        target,
+        ..
+    } = attachable().await;
+    let stoppable = AttachOffer {
+        state: AttachState::Busy,
+        detail: Some("codex-2 has a turn running or waiting".into()),
+        interrupt: true,
+        job: Some("job-3".into()),
+    };
+    // Waiting for the owner's approval, or with eight takeovers running,
+    // job-3's turn is not offered to stop, though it is again in a moment.
+    let not_stoppable = [
+        AttachOffer {
+            state: AttachState::Busy,
+            detail: Some("job-3 waits for your approval (approval-1)".into()),
+            interrupt: false,
+            job: Some("job-3".into()),
+        },
+        AttachOffer {
+            state: AttachState::Full,
+            detail: Some("eight takeovers are running".into()),
+            interrupt: false,
+            job: Some("job-3".into()),
+        },
+    ];
+    for offer in not_stoppable {
+        offer_job_3(&mut ui, stoppable.clone());
+        ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            .await
+            .unwrap();
+        assert!(takeover.try_recv().is_err());
+        // No key is pressed while the snapshots say so.
+        for offer in [offer.clone(), stoppable.clone()] {
+            let mut next = ui.workbench.snapshot.clone().unwrap();
+            next.jobs[0].attach = Some(offer);
+            ui.workbench
+                .answer(Answer::Status(Tag::Snapshot, status(next)));
+        }
+        // The press within the window only names job-3 again.
+        ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            .await
+            .unwrap();
+        assert!(takeover.try_recv().is_err(), "{offer:?}");
+        let notice = &ui.workbench.notices.back().unwrap().text;
+        assert!(
+            notice.contains("Press Ctrl+O again to stop job-3"),
+            "{notice}"
+        );
+        ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            .await
+            .unwrap();
+        let command = takeover.try_recv().unwrap().command;
+        assert!(
+            matches!(&command, DaemonCommand::Attach { interrupt: true, interrupt_job: Some(job), .. } if job == "job-3"),
+            "{command:?}"
+        );
+        ui.workbench.terminal_answer(Answer::Refused(
+            Tag::Attach(target.clone()),
+            "job-3's turn ended before it was stopped".into(),
+        ));
+    }
+}
+
+#[tokio::test]
+async fn the_sidebar_and_agent_view_say_whether_a_conversation_can_be_taken_over() {
+    let Attachable {
+        mut ui,
+        mut takeover,
+        ..
+    } = attachable().await;
+    // Why not, in the daemon's words; the sidebar stays quiet about an
+    // agent whose terminal is never offered.
+    offer_job_3(
+        &mut ui,
+        AttachOffer {
+            state: AttachState::Ineligible,
+            detail: Some("claude cannot be taken over in its terminal".into()),
+            interrupt: false,
+            job: None,
+        },
+    );
+    let shown = screen(&ui, 120, 36);
+    assert!(
+        shown.contains("no attach: claude cannot be taken over in its terminal"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("[no attach]") && !shown.contains("[attach"),
+        "{shown}"
+    );
+    // A turn no job of the owner's runs: no second press stops it, so one
+    // press asks plainly and the daemon refuses with why.
+    offer_job_3(
+        &mut ui,
+        AttachOffer {
+            state: AttachState::Busy,
+            detail: Some("codex-2 is running a turn that is no background job".into()),
+            interrupt: false,
+            job: None,
+        },
+    );
+    let shown = screen(&ui, 120, 36);
+    assert!(shown.contains("job-3 codex [no attach]"), "{shown}");
+    assert!(
+        shown.contains("no attach: codex-2 is running a turn"),
+        "{shown}"
+    );
+    ui.key(key(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        .await
+        .unwrap();
+    assert!(matches!(
+        takeover.try_recv().unwrap().command,
+        DaemonCommand::Attach {
+            interrupt: false,
+            ..
+        }
+    ));
+    offer_job_3(
+        &mut ui,
+        AttachOffer {
+            state: AttachState::Ready,
+            detail: None,
+            interrupt: false,
+            job: None,
+        },
+    );
+    let shown = screen(&ui, 120, 36);
+    assert!(shown.contains("job-3 codex [attach]"), "{shown}");
+    assert!(shown.contains("attach: Ctrl+O takes it over"), "{shown}");
 }
 
 #[tokio::test]
@@ -1640,6 +1919,7 @@ async fn ctrl_x_twice_ends_a_takeover_the_view_follows() {
         last_activity_unix_seconds: 5,
         live: true,
         steerable: false,
+        attach: None,
     });
     ui.workbench
         .answer(Answer::Status(Tag::Snapshot, status(taken)));

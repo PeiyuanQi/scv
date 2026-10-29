@@ -295,8 +295,14 @@ pub(crate) enum JobsCommand {
         job: String,
         /// End the takeover instead: hang its terminal up, stop its
         /// process, and give the conversation back to SCV's turns.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "interrupt")]
         end: bool,
+        /// When a background job is running the conversation's turn, stop
+        /// that job first: the conversation is held for you before the job
+        /// is stopped, so no queued or newly sent prompt starts a turn in
+        /// between, and nothing is stopped when it cannot be held.
+        #[arg(long)]
+        interrupt: bool,
     },
 }
 

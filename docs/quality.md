@@ -289,15 +289,27 @@ Daemon and component changes require focused coverage for:
   credentials masked across wrapped rows and onto a UI's indented
   continuation, and nothing of the screen on disk or in the logs; reads
   that skip the process table scan; a planned restart not waiting for the
-  prompts queued behind a takeover; and, end to end, a SIGKILLed daemon's
-  terminal hung up and `scv jobs attach` driven in a pseudo-terminal;
+  prompts queued behind a takeover; interrupting a turn to take over (the
+  takeover's place reserved behind the running turn before its job is
+  stopped, so a prompt queued before or sent during the stop runs only
+  after the takeover and none steers the stopping turn; nothing reserved or
+  stopped behind a model's call, a job waiting for an approval, an agent
+  not offered, a job other than the one the owner was told of, or a queued
+  job first in line between turns, whose prompt still runs; the line
+  given back when the terminal fails to open after the stop); keys typed
+  into a takeover never answering an approval; each conversation's snapshot
+  answer and reasons, the cap included; and, end to end, a SIGKILLed
+  daemon's terminal hung up and `scv jobs attach` driven in a
+  pseudo-terminal;
 - the dashboard: key specifications and `[tui.keys]` conflicts, tabs, panes,
   sidebar grouping and actions, agent-view paging and sending, attaching
   (keys encoded as a terminal sends them, every key but detach reaching the
-  agent, starting and ending a takeover on a connection of their own, and
-  falling back to the activity view on a refusal, an older daemon, a closed
-  terminal, or a lost connection), notifications from snapshot changes, and
-  an older daemon without the workbench.
+  agent, starting and ending a takeover on a connection of their own,
+  `Ctrl+O` twice stopping a job's turn, the sidebar's and agent view's word
+  on taking a conversation over, and falling back to the activity view on a
+  refusal, an older daemon, a closed terminal, or a lost connection),
+  notifications from snapshot changes, and an older daemon without the
+  workbench.
 
 Mail changes require focused coverage for:
 

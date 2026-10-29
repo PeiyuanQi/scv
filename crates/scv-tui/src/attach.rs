@@ -301,9 +301,18 @@ pub(crate) fn encode_paste(text: &str, bracketed: bool) -> String {
 
 /// Attach this terminal to conversation `conversation` of `session`, taken
 /// over in its agent's own terminal, until `Ctrl+]` detaches or the
-/// terminal closes: `scv jobs attach`. Returns SCV's sentence about how it
-/// ended. The terminal is restored however it ends.
-pub async fn run_attach(socket: &Path, session: &str, conversation: &str) -> Result<String> {
+/// terminal closes: `scv jobs attach`. With `interrupt`, the background job
+/// running its turn is stopped first, once its lane is held for the
+/// takeover; given `interrupt_job`, only that job is. Returns SCV's
+/// sentence about how it ended, after the one naming the job it stopped.
+/// The terminal is restored however it ends.
+pub async fn run_attach(
+    socket: &Path,
+    session: &str,
+    conversation: &str,
+    interrupt: bool,
+    interrupt_job: Option<&str>,
+) -> Result<String> {
     let (requests, mut answers) = poller::spawn(socket.to_owned());
     let mut guard = TerminalGuard::enter()?;
     let size = guard.terminal.size()?;
@@ -322,11 +331,19 @@ pub async fn run_attach(socket: &Path, session: &str, conversation: &str) -> Res
             conversation: conversation.to_owned(),
             cols: Some(size.width),
             rows: Some(size.height.saturating_sub(1).max(1)),
+            interrupt,
+            interrupt_job: interrupt_job.map(str::to_owned),
         },
     );
-    let mut attached = match answers.recv().await {
+    let (mut attached, stopped) = match answers.recv().await {
         Some(Answer::Status(_, status)) => match status.attach {
-            Some(page) => Attached::new(page),
+            Some(page) => (
+                Attached::new(page),
+                status
+                    .workbench_note
+                    .map(|note| format!("{note} "))
+                    .unwrap_or_default(),
+            ),
             None => bail!("the daemon answered without a terminal"),
         },
         Some(Answer::Refused(_, message)) => bail!("{message}"),
@@ -357,7 +374,7 @@ pub async fn run_attach(socket: &Path, session: &str, conversation: &str) -> Res
                 Some(Answer::Status(_, status)) => match status.attach {
                     Some(page) if page.ended => {
                         return Ok(format!(
-                            "{conversation}'s terminal closed ({}).",
+                            "{stopped}{conversation}'s terminal closed ({}).",
                             page.exit.as_deref().unwrap_or("closed")
                         ));
                     }
@@ -390,8 +407,8 @@ pub async fn run_attach(socket: &Path, session: &str, conversation: &str) -> Res
                         })
                         .await;
                         return Ok(format!(
-                            "Detached from {conversation}; it keeps running in its terminal \
-                             (`scv jobs attach` again, or `--end` to end it)."
+                            "{stopped}Detached from {conversation}; it keeps running in its \
+                             terminal (`scv jobs attach` again, or `--end` to end it)."
                         ));
                     }
                     attached.type_key(key);

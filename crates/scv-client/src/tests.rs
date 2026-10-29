@@ -48,6 +48,8 @@ fn a_command_that_can_stop_an_account_outlasts_a_mail_actions_grace() {
             conversation: "codex-1".into(),
             cols: None,
             rows: None,
+            interrupt: true,
+            interrupt_job: Some("job-3".into()),
         }),
         Duration::from_secs(90)
     );

@@ -101,7 +101,8 @@ impl std::error::Error for ControlError {
 /// that may run `git` on worktrees (each command up to 30 seconds), wait
 /// for an agent to accept steering (up to 30 seconds), or stop a live
 /// agent server and run the project Rust preflight before it opens an
-/// agent's terminal (up to 28 seconds), gets 90.
+/// agent's terminal (up to 28 seconds, and up to 20 more first for the
+/// turn an interrupting attach stops to end), gets 90.
 pub fn control_timeout(command: &DaemonCommand) -> Duration {
     match command {
         DaemonCommand::Reload

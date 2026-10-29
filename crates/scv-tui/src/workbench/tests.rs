@@ -21,6 +21,7 @@ fn job(session: &str, name: &str, state: AgentState) -> WorkbenchJob {
         reviewed: false,
         resumable: state == AgentState::Interrupted,
         resumed_as: None,
+        attach: None,
         created_unix_seconds: 100,
         updated_unix_seconds: 100,
     }
@@ -43,6 +44,7 @@ fn run(handle: &str, session: &str, job: Option<&str>, started: u64) -> Workbenc
         last_activity_unix_seconds: started,
         live: true,
         steerable: false,
+        attach: None,
     }
 }
 

@@ -169,6 +169,7 @@ fn snapshots_round_trip_and_leave_out_what_is_empty() {
             reviewed: false,
             resumable: true,
             resumed_as: None,
+            attach: None,
             created_unix_seconds: 1,
             updated_unix_seconds: 2,
         }],
@@ -251,6 +252,8 @@ fn attach_actions_are_tagged_daemon_commands_with_optional_fields_left_out() {
         conversation: "codex-2".into(),
         cols: Some(120),
         rows: None,
+        interrupt: false,
+        interrupt_job: None,
     };
     assert_eq!(
         serde_json::to_string(&attach).unwrap(),
@@ -267,6 +270,44 @@ fn attach_actions_are_tagged_daemon_commands_with_optional_fields_left_out() {
             rows: None,
         }
     );
+    // `interrupt` is left off unless set, so an older daemon sees the
+    // attach it knows; one that predates it ignores it when set.
+    let interrupting = DaemonCommand::Attach {
+        session: "s".into(),
+        conversation: "codex-2".into(),
+        cols: None,
+        rows: None,
+        interrupt: true,
+        interrupt_job: None,
+    };
+    let wire = r#"{"action":"attach","session":"s","conversation":"codex-2","interrupt":true}"#;
+    assert_eq!(serde_json::to_string(&interrupting).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_str::<DaemonCommand>(wire).unwrap(),
+        interrupting
+    );
+    // The job the owner was told it stops goes with it when known.
+    let named = DaemonCommand::Attach {
+        session: "s".into(),
+        conversation: "codex-2".into(),
+        cols: None,
+        rows: None,
+        interrupt: true,
+        interrupt_job: Some("job-3".into()),
+    };
+    let wire = r#"{"action":"attach","session":"s","conversation":"codex-2","interrupt":true,"interrupt_job":"job-3"}"#;
+    assert_eq!(serde_json::to_string(&named).unwrap(), wire);
+    assert_eq!(serde_json::from_str::<DaemonCommand>(wire).unwrap(), named);
+    let plain: DaemonCommand =
+        serde_json::from_str(r#"{"action":"attach","session":"s","conversation":"codex-2"}"#)
+            .unwrap();
+    assert!(matches!(
+        plain,
+        DaemonCommand::Attach {
+            interrupt: false,
+            ..
+        }
+    ));
     for wire in [
         r#"{"action":"attach_detach","id":"at-1"}"#,
         r#"{"action":"attach_end","session":"s","conversation":"codex-2"}"#,
@@ -432,4 +473,57 @@ fn job_result_is_a_tagged_command_and_its_answer_is_additive() {
     }
     let older: OlderStatus = serde_json::from_value(wire).unwrap();
     assert_eq!(older.version, "0.4.6");
+}
+
+#[test]
+fn an_attach_offer_says_what_attach_would_do_and_leaves_defaults_off() {
+    let busy = AttachOffer {
+        state: AttachState::Busy,
+        detail: Some("codex-2 has a turn running or waiting".into()),
+        interrupt: true,
+        job: Some("job-3".into()),
+    };
+    let wire = serde_json::to_string(&busy).unwrap();
+    assert_eq!(
+        wire,
+        r#"{"state":"busy","detail":"codex-2 has a turn running or waiting","interrupt":true,"job":"job-3"}"#
+    );
+    assert_eq!(serde_json::from_str::<AttachOffer>(&wire).unwrap(), busy);
+    assert!(!busy.allowed());
+    let ready: AttachOffer = serde_json::from_str(r#"{"state":"ready"}"#).unwrap();
+    assert!(ready.allowed() && !ready.interrupt && ready.job.is_none());
+    assert_eq!(
+        serde_json::to_string(&ready).unwrap(),
+        r#"{"state":"ready"}"#
+    );
+    assert!(
+        serde_json::from_str::<AttachOffer>(r#"{"state":"taken_over"}"#)
+            .unwrap()
+            .allowed()
+    );
+    // A state a client does not know is not one it may attach in.
+    let later: AttachOffer = serde_json::from_str(r#"{"state":"paused","detail":"x"}"#).unwrap();
+    assert_eq!(later.state, AttachState::Unknown);
+    assert!(!later.allowed());
+    for state in [
+        AttachState::Ready,
+        AttachState::TakenOver,
+        AttachState::Busy,
+        AttachState::Ineligible,
+        AttachState::NoSession,
+        AttachState::Reviewed,
+        AttachState::Full,
+    ] {
+        assert_eq!(
+            serde_json::to_string(&state).unwrap(),
+            format!("\"{}\"", state.as_str())
+        );
+    }
+    // A job of an older daemon has no offer, and one without leaves it off.
+    let job: WorkbenchJob = serde_json::from_str(
+        r#"{"session":"s","job":"job-1","agent":"codex","task":"t","workspace":"/w","cwd":"/w","state":"working","started_by":"owner","created_unix_seconds":1,"updated_unix_seconds":1}"#,
+    )
+    .unwrap();
+    assert_eq!(job.attach, None);
+    assert!(!serde_json::to_string(&job).unwrap().contains("attach"));
 }

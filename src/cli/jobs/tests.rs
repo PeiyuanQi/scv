@@ -1,6 +1,6 @@
 //! Unit tests for `src/cli/jobs.rs`.
 
-use scv_protocol::{JobOrigin, WorkbenchJob};
+use scv_protocol::{AttachOffer, AttachState, JobOrigin, WorkbenchJob};
 
 use super::*;
 
@@ -21,6 +21,7 @@ fn job(session: &str, name: &str) -> WorkbenchJob {
         reviewed: false,
         resumable: false,
         resumed_as: None,
+        attach: None,
         created_unix_seconds: 1,
         updated_unix_seconds: 1,
     }
@@ -256,4 +257,51 @@ fn log_lines_are_one_line_each_and_say_what_happened() {
         ..event(RunEventKind::ApprovalRequested, "Run make")
     };
     assert_eq!(describe(&relayed), "? approval (x 2Jy): Run make");
+}
+
+#[test]
+fn a_jobs_line_says_whether_its_conversation_can_be_taken_over_and_how() {
+    let mut job = job("3f2a9c1e-aaaa", "job-3");
+    job.conversation = Some("codex-2".into());
+    let offer = |state, interrupt, detail: Option<&str>| AttachOffer {
+        state,
+        detail: detail.map(str::to_owned),
+        interrupt,
+        job: interrupt.then(|| "job-3".to_owned()),
+    };
+    assert_eq!(
+        attach_line(&job, &offer(AttachState::Ready, false, None)),
+        "attach: codex-2 is idle; `scv jobs attach 3f2a9c1e/job-3` takes it over"
+    );
+    assert_eq!(
+        attach_line(&job, &offer(AttachState::TakenOver, false, None)),
+        "attach: codex-2 is taken over; `scv jobs attach 3f2a9c1e/job-3` attaches, `--end` ends it"
+    );
+    assert_eq!(
+        attach_line(
+            &job,
+            &offer(AttachState::Busy, true, Some("codex-2 has a turn"))
+        ),
+        "attach: not while job-3 runs its turn; `scv jobs attach 3f2a9c1e/job-3 --interrupt` \
+         stops it and takes codex-2 over"
+    );
+    // Why not, in SCV's words, with nothing an agent wrote left to act on.
+    assert_eq!(
+        attach_line(
+            &job,
+            &offer(
+                AttachState::Ineligible,
+                false,
+                Some("claude cannot be taken over\x1b[2J in its terminal")
+            )
+        ),
+        "attach: no (ineligible): claude cannot be taken over [2J in its terminal"
+    );
+    assert_eq!(
+        attach_line(
+            &job,
+            &offer(AttachState::Busy, false, Some("codex-2 is running a turn"))
+        ),
+        "attach: no (busy): codex-2 is running a turn"
+    );
 }

@@ -112,7 +112,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.4.7` and exact workspace dependency pins.
+`0.4.8` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -176,7 +176,7 @@ What lives where in the largest crates:
 | | `delegate/adapters.rs`, `delegate/choice.rs`, `delegate/options.rs` | One descriptor per delegated agent CLI, how the `agent` tool describes each agent and names the others after a failure, and the model and effort values each ACP agent last offered (public as `scv_tools::agent_options`) |
 | | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, the per-conversation line busy calls wait in (`background/lane.rs`), and the durable job ledger (`background/ledger.rs`, public as `scv_tools::background::ledger`), multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
 | | `delegate/activity.rs`, `delegate/worktree.rs` | Each delegated run's activity log and state (public as `scv_tools::activity`), and the git worktrees jobs run in (public as `scv_tools::worktree`) |
-| | `workbench.rs` | The workbench: snapshots assembled from the records and live sessions, run logs, and the owner's actions (start, send, cancel, resume, dismiss, attended approvals, and attaching to a conversation taken over in its agent's terminal) |
+| | `workbench.rs` | The workbench: snapshots assembled from the records and live sessions (whether each conversation can be taken over now included), run logs, and the owner's actions (start, send, cancel, resume, dismiss, attended approvals, and attaching to a conversation taken over in its agent's terminal, after stopping the job running its turn once its line is held) |
 | | `delegate/takeover.rs`, `delegate/pty.rs` | The owner's takeover of a conversation in its agent's own terminal: which agents may be offered, the daemon-held pseudo-terminal the agent's interactive UI runs on, its screen (kept with the `vt100` parser, credentials masked), and its lifecycle |
 | | `delegate/review.rs` | Reviewed jobs: the builder and fresh-reviewer loop, reviewer routing, the landing confirmation, and its parts: the verdict and landing blocks (`blocks`), the live state every surface reads (`state`), SCV's prompt texts (`prompts`), and the journal (`journal`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |

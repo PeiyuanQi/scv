@@ -39,7 +39,8 @@ use scv_core::{
     ToolSpec,
 };
 use scv_protocol::{
-    AgentState, JobChange, JobOrigin, JobOutcome, JobReport, JobStatus, describe_reports,
+    AgentState, AttachOffer, AttachState, JobChange, JobOrigin, JobOutcome, JobReport, JobStatus,
+    describe_reports,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -47,7 +48,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use self::{
-    lane::{Lanes, Place},
+    lane::{Front, Lanes, Place, Unreserved},
     ledger::{JobLedger, JobRecord, NewJob},
 };
 use crate::{
@@ -55,7 +56,7 @@ use crate::{
     args::{Timeouts, bounded, parse_args, timeout_schema},
     delegate::{
         agent::{AGENT_TOOL, AgentTool, Offered},
-        conversation::{self, ConversationStore},
+        conversation::{self, ConversationStore, Obstacle},
         output::AgentReply,
         request::AgentArgs,
         review::{self, Record, ReviewedTool},
@@ -486,6 +487,13 @@ impl BackgroundJobs {
             (id, progress, done_tx, cancel, first)
         };
         self.persist(first);
+        // The owner can stop it to take its conversation over. A reviewed
+        // job's own place is not offered: stopping it ends a whole review.
+        if review.is_none()
+            && let Turn::Next(place) | Turn::Queued(place) = &turn
+        {
+            place.run_as(&id);
+        }
         let jobs = Arc::downgrade(self);
         let job = id.clone();
         let approvals = self.approvals.clone();
@@ -1675,8 +1683,11 @@ impl Tool for BackgroundCapable {
             };
         }
         let behavior = match agent.on_busy(&routed)? {
+            // A turn the owner's takeover is about to stop takes nothing.
             BusyBehavior::Steer => {
-                if let Some(output) = agent.backend.steer(routed, context.clone()).await? {
+                if !self.jobs.lanes.has_takeover(&handle)
+                    && let Some(output) = agent.backend.steer(routed, context.clone()).await?
+                {
                     return Ok(output);
                 }
                 agent.busy.fallback()
@@ -2013,6 +2024,7 @@ impl BackgroundCapable {
                 .map(OwnerCall::Job);
         }
         if mode != SendMode::Queue
+            && !self.jobs.lanes.has_takeover(&handle)
             && agent
                 .backend
                 .steer(routed.clone(), context.clone())
@@ -2072,26 +2084,238 @@ impl BackgroundCapable {
         session: &str,
         size: (u16, u16),
     ) -> Result<Arc<takeover::Takeover>, String> {
-        let agent = self.conversations.agent_of(handle).ok_or_else(|| {
-            format!("no conversation {handle} in this session; it ended, or it was forgotten after it sat idle")
-        })?;
+        let (agent, launch) = self.launch_for(handle)?;
+        let place = self.jobs.lanes.join_takeover(handle);
+        if place.ahead > 0 {
+            return Err(waiting(handle));
+        }
+        self.open_terminal(&agent, &launch, handle, place, session, size)
+            .await
+    }
+
+    /// Hold conversation `handle`'s lane for the owner's takeover right
+    /// behind its running turn, ahead of any prompt queued after it, and
+    /// stop nothing yet: [`Self::take_over_reserved`] stops the background
+    /// job running that turn. Refused, with why and with nothing held, as
+    /// [`Self::take_over`] refuses but for the running turn, when that turn
+    /// is no background job (a model's call, or a reviewed job's), and when
+    /// no turn runs but a job's call is first in the lane: one about to
+    /// start its turn (a queued prompt), or one whose turn just ended.
+    pub(crate) fn reserve_takeover(&self, handle: &str) -> Result<Reserved, String> {
+        let (agent, launch) = self.launch_for(handle)?;
+        let obstacles = self
+            .conversations
+            .obstacles(handle)
+            .ok_or_else(|| conversation::unknown_conversation(handle))?;
+        if let Some(obstacle) = obstacles
+            .into_iter()
+            .find(|obstacle| *obstacle != Obstacle::Running)
+        {
+            return Err(obstacle.refusal(handle));
+        }
+        let (place, job) = self
+            .jobs
+            .lanes
+            .reserve_takeover(handle)
+            .map_err(|why| match why {
+                Unreserved::TakenOver => Obstacle::TakenOver.refusal(handle),
+                Unreserved::NotAJob => not_a_job(handle),
+            })?;
+        // Seen with the place held, so the turn is that of the call ahead
+        // of it: no prompt queued behind can start one in between.
+        let running = self.conversations.is_busy(handle);
+        match &job {
+            // A turn that holds no place in the lane is no job's to stop.
+            None if running => return Err(not_a_job(handle)),
+            Some(job) if !running => return Err(between_turns(handle, job)),
+            _ => {}
+        }
+        Ok(Reserved {
+            handle: handle.to_owned(),
+            agent,
+            launch,
+            place,
+            job,
+        })
+    }
+
+    /// Take the conversation `reserved` holds the lane of over for the
+    /// owner: stop the background job running its turn, wait until that
+    /// turn has ended and the takeover is first in the lane, and open the
+    /// terminal. However it fails, the lane is let go and the conversation
+    /// runs its queued prompts as before.
+    pub(crate) async fn take_over_reserved(
+        &self,
+        reserved: Reserved,
+        session: &str,
+        size: (u16, u16),
+    ) -> Result<Arc<takeover::Takeover>, String> {
+        let Reserved {
+            handle,
+            agent,
+            launch,
+            place,
+            job,
+        } = reserved;
+        let Some(job) = job else {
+            return self
+                .open_terminal(&agent, &launch, &handle, place, session, size)
+                .await;
+        };
+        // One that finished meanwhile has let its turn go already.
+        let _ = self.jobs.cancel_for_owner(&job);
+        let never = CancellationToken::new();
+        let ended = tokio::time::timeout(INTERRUPT_WAIT, async {
+            place.wait_first(&never).await?;
+            self.conversations.wait_idle(&handle, &never).await
+        })
+        .await;
+        if ended.is_err() {
+            return Err(format!(
+                "Stopped {job}, but its turn had not ended after {} seconds, so {handle} was not \
+                 taken over; attach once it is idle",
+                INTERRUPT_WAIT.as_secs()
+            ));
+        }
+        self.open_terminal(&agent, &launch, &handle, place, session, size)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Stopped {job}, but {handle} could not be taken over: {error}. Its next \
+                     prompt runs as before"
+                )
+            })
+    }
+
+    /// Whether the owner could take conversation `handle` over in its
+    /// agent's own terminal now, as [`Self::take_over`] and
+    /// [`Self::reserve_takeover`] would decide; `None` when the session does
+    /// not have it. The workbench adds what only it knows: how many
+    /// takeovers run, and approvals waiting for the owner.
+    pub(crate) fn attach_offer(&self, handle: &str) -> Option<AttachOffer> {
+        let obstacles = self.conversations.obstacles(handle)?;
+        let offer = |state, detail: Option<String>| AttachOffer {
+            state,
+            detail,
+            interrupt: false,
+            job: None,
+        };
+        if let Err(why) = self.launch_for(handle) {
+            return Some(offer(AttachState::Ineligible, Some(why)));
+        }
+        if obstacles.contains(&Obstacle::TakenOver) || self.jobs.lanes.has_takeover(handle) {
+            return Some(offer(AttachState::TakenOver, None));
+        }
+        if let Some(obstacle) = obstacles
+            .iter()
+            .find(|obstacle| **obstacle != Obstacle::Running)
+        {
+            return Some(offer(obstacle.state(), Some(obstacle.refusal(handle))));
+        }
+        let running = obstacles.contains(&Obstacle::Running);
+        Some(match self.jobs.lanes.front(handle) {
+            None if !running => offer(AttachState::Ready, None),
+            None => offer(AttachState::Busy, Some(Obstacle::Running.refusal(handle))),
+            Some(Front::Job(job)) if running => AttachOffer {
+                interrupt: true,
+                job: Some(job),
+                ..offer(AttachState::Busy, Some(waiting(handle)))
+            },
+            Some(Front::Job(job)) => offer(AttachState::Busy, Some(between_turns(handle, &job))),
+            Some(Front::Call | Front::Takeover) => {
+                offer(AttachState::Busy, Some(not_a_job(handle)))
+            }
+        })
+    }
+
+    /// The agent of conversation `handle` and how its terminal opens, or
+    /// why it is never offered.
+    fn launch_for(&self, handle: &str) -> Result<(String, takeover::TakeoverLaunch), String> {
+        let agent = self
+            .conversations
+            .agent_of(handle)
+            .ok_or_else(|| conversation::unknown_conversation(handle))?;
         let offered = self
             .inner
             .find(&agent)
             .ok_or_else(|| format!("{agent} is not offered in this session"))?;
         let launch = offered.backend.takeover()?;
-        let place = self.jobs.lanes.join_takeover(handle);
-        if place.ahead > 0 {
-            return Err(format!(
-                "{handle} has a turn running or waiting; attach once it is idle, or stop its jobs first"
-            ));
-        }
+        Ok((agent, launch))
+    }
+
+    /// Hold conversation `handle`, whose lane `place` holds, stop what it
+    /// kept between turns, and open `launch`'s terminal on it.
+    async fn open_terminal(
+        &self,
+        agent: &str,
+        launch: &takeover::TakeoverLaunch,
+        handle: &str,
+        place: Place,
+        session: &str,
+        size: (u16, u16),
+    ) -> Result<Arc<takeover::Takeover>, String> {
         let mut hold = self.conversations.take_over(handle)?;
         if let Some(attachment) = hold.attachment.take() {
-            offered.backend.release(attachment).await;
+            match self.inner.find(agent) {
+                Some(offered) => offered.backend.release(attachment).await,
+                None => drop(attachment),
+            }
         }
-        takeover::start(&launch, hold, place, session, size).await
+        takeover::start(launch, hold, place, session, size).await
     }
+}
+
+/// The owner's takeover of a conversation whose lane is held right behind
+/// its running turn, which is not stopped yet.
+pub(crate) struct Reserved {
+    handle: String,
+    agent: String,
+    launch: takeover::TakeoverLaunch,
+    place: Place,
+    /// The background job running the conversation's turn, which taking
+    /// it over stops; `None` when it runs none.
+    pub(crate) job: Option<String>,
+}
+
+impl std::fmt::Debug for Reserved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Reserved")
+            .field("handle", &self.handle)
+            .field("job", &self.job)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How long the owner's interrupting takeover waits for the turn it
+/// stopped to end before it gives the conversation's lane back.
+const INTERRUPT_WAIT: Duration = Duration::from_secs(20);
+
+/// The refusal to take conversation `handle` over while calls are in its
+/// lane.
+fn waiting(handle: &str) -> String {
+    format!(
+        "{handle} has a turn running or waiting; attach once it is idle, or stop its jobs first"
+    )
+}
+
+/// The refusal to stop conversation `handle`'s running turn for a takeover
+/// when that turn is no background job.
+fn not_a_job(handle: &str) -> String {
+    format!(
+        "{handle} is running a turn that is no background job SCV can stop for you (a model's \
+         call in its session, or a reviewed job's round); attach once it is idle"
+    )
+}
+
+/// The refusal to stop `job`, first in conversation `handle`'s lane, for a
+/// takeover while no turn runs: its turn is about to start or just ended,
+/// and a prompt that waits is never stopped.
+fn between_turns(handle: &str, job: &str) -> String {
+    format!(
+        "{handle} is between turns: {job} is about to start the next one, or has just ended \
+         its own, and only a running turn is stopped for a takeover; attach again in a moment"
+    )
 }
 
 #[derive(Deserialize)]

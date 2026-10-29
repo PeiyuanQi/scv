@@ -907,6 +907,18 @@ pub enum DaemonCommand {
         /// The client's screen height for the terminal, in rows.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rows: Option<u16>,
+        /// When a background job runs the conversation's turn, hold the
+        /// conversation's lane for the takeover first, then stop that job,
+        /// and take the conversation over once its turn has ended. A daemon
+        /// that predates it ignores it and refuses a busy conversation.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interrupt: bool,
+        /// With `interrupt`, the job the owner was told it stops, such as
+        /// `job-3`: when another job runs the turn by then, nothing is
+        /// stopped and the takeover is refused. Without it, whichever job
+        /// runs the turn is stopped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interrupt_job: Option<String>,
     },
     /// Type into an attached terminal and read what changed on its screen.
     AttachIo {
