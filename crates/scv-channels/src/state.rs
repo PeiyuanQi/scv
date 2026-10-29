@@ -122,7 +122,8 @@ pub(crate) struct PendingDelivery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) notice_key: Option<String>,
     /// The working reaction on `message_id`, from its claim, taken off once
-    /// this reply is delivered or refused; see [`InFlight::reaction`].
+    /// this reply is delivered or refused, then optionally replaced with a
+    /// completion marker; see [`InFlight::reaction`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reaction: Option<String>,
 }
@@ -205,7 +206,8 @@ pub(crate) struct BridgeState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) recent_keys: Vec<RecentKey>,
     /// Working reactions whose replies are done with, oldest first, still
-    /// to come off; see [`InFlight::reaction`]. Older releases ignore it and
+    /// to be removed and optionally replaced with completion markers;
+    /// see [`InFlight::reaction`]. Older releases ignore it and
     /// leave them on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) removing: Vec<Reaction>,

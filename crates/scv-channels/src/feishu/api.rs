@@ -412,7 +412,7 @@ impl Api {
         classify(result)
     }
 
-    /// Add the bot's reaction `emoji_type`, such as `Typing`, to the message
+    /// Add the bot's reaction `emoji_type`, such as `OnIt` or `DONE`, to the message
     /// `message_id`, returning its reaction ID, which removes only it.
     pub(crate) async fn add_reaction(&self, message_id: &str, emoji_type: &str) -> Result<String> {
         let path = format!(

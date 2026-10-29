@@ -458,14 +458,18 @@ codes (99991400, 230020, 11232, 11233) retry with the same `uuid`; any other
 error code is a final refusal, logged by code only, and the reply is held as
 for WeChat.
 
-**Working reaction.** A claimed message gets the bot's `Typing` reaction (the
-catalog's "typing", for working on it) through
+**Working reaction.** A claimed message gets the bot's `OnIt` reaction (the
+catalog's "On it!") through
 `POST /open-apis/im/v1/messages/{message_id}/reactions` with
 `reaction_type.emoji_type`, on the message itself also in a thread. SCV keeps
 the `reaction_id` Feishu returns and removes only that reaction with
-`DELETE /open-apis/im/v1/messages/{message_id}/reactions/{reaction_id}`;
-Feishu holds one reaction of an emoji per operator on a message. A missing
-permission is code 99991672, which SCV logs as needing
+`DELETE /open-apis/im/v1/messages/{message_id}/reactions/{reaction_id}`
+once the reply is delivered or refused, then adds `DONE` ("Done") through
+the same POST endpoint. DONE stays on the message. The delete is attempted
+first because Feishu permits one reaction of each emoji type per operator,
+so adding DONE alone would leave both types visible. A failed or timed-out
+delete still permits the DONE attempt; a failed OnIt add queues neither.
+A missing permission is code 99991672, which SCV logs as needing
 `im:message.reactions:write`; any other code is logged by code only. See
 [Working reaction](#working-reaction).
 
@@ -674,10 +678,11 @@ method until `Retry-After` passes.
 ## Working reaction
 
 On Feishu and Slack, a message SCV takes on wears a reaction while SCV works
-on it: Feishu's `Typing` and Slack's `eyes` (see each contract above). WeChat
-shows none. A transport supplies the reaction through two optional
-`Transport` methods, `react` and `unreact`, which the bridge calls; WeChat and
-mail chats use neither.
+on it: Feishu's `OnIt` and Slack's `eyes` (see each contract above). Feishu
+replaces its working reaction with `DONE` when finished; Slack removes its
+working reaction. WeChat shows none. A transport supplies the reaction
+through optional `Transport` methods, `react`, `unreact`, and
+`complete_reaction`, which the bridge calls; WeChat and mail chats use none.
 
 The bridge adds the reaction once the message's claim is durable and before
 its turn is queued, so only claimed messages get one: never the bot's own or
@@ -689,30 +694,35 @@ is claimed like a turn and gets one. What removes it, Feishu's `reaction_id`
 or Slack's emoji name (Slack's message ID already names the conversation and
 `ts`), is saved with the claim (`in_flight[].reaction`) before the turn is
 queued, so the turn cannot end first, and moves into the reply that ends it
-(`pending[].reaction`). It comes off once that reply is delivered, its files
+(`pending[].reaction`). It is settled once that reply is delivered, its files
 included, or refused: the model's answer, the failure reply of a turn that
 failed or ran out of time, and the failure or restart reply that recovery
 writes for a claim an interrupted run left. The write that removes the reply
-queues the reaction to come off (`removing[]`), and a loop apart from
-delivery takes queued reactions off one at a time, oldest first, so a slow
-removal never holds up the next reply. Each stays queued until it was tried,
-so one a run left is tried on its next start.
+queues the reaction for completion (`removing[]`), and a loop apart from
+delivery removes each working reaction and then tries the transport's
+completion marker, one message at a time, oldest first. A slow reaction
+never holds up the next reply. Each stays queued until both operations were
+tried, so one a run left is tried on its next start. Only Feishu supplies a
+completion marker; its DONE reaction ID is never saved or removed.
 
-Adding and removing are best effort, and neither fails the account, the
-turn, or the reply. The turn waits at most 10 seconds for the add. An add
-that takes longer is seen through apart from the turn for up to 60 seconds
-more, since dropping it would not undo a reaction the platform already took:
-if it lands while the claim is still in flight, its reaction is saved with
-the claim as usual; if the turn already ended, it is taken off at once. A
-reaction whose ID cannot be saved with its claim, such as when the state
-cannot be written, is taken off at once too, and the turn goes on without
-one. Removing is bounded to 10 seconds. A failure, such as a missing
-permission, is logged without the token, secret, or the platform's text and
-changes nothing else: a reaction that was not added is never removed, and
-one that could not be removed stays, as does one whose add outlasted the
-extra wait or the run. State from a release before the reaction holds none,
-so its claims and replies remove nothing; such a release ignores the fields
-and leaves a reaction in place.
+Adding, removing, and marking completion are best effort; none fails the
+account, the turn, or the reply. The turn waits at most 10 seconds for the
+add. An add that takes longer is seen through apart from the turn for up to
+60 seconds more, since dropping it would not undo a reaction the platform
+already took. If it lands while the claim is still in flight, its reaction
+is saved with the claim as usual; if the turn already ended, it is removed
+and completion is marked at once. A reaction whose ID cannot be saved with
+its claim, such as when the state cannot be written, is taken off at once
+too. The turn goes on without one, without marking completion. Removing
+and marking completion are each bounded to 10 seconds; completion is tried
+even if removal fails or times out. A failure, such as a missing permission,
+is logged without the token, secret, or the platform's text and changes
+nothing else: a working reaction that was not added is never removed and
+gets no completion marker. One that could not be removed stays (possibly
+beside DONE), as does one whose add outlasted the extra wait or the run.
+State from a release before the reaction holds none, so its claims and
+replies remove nothing and get no completion marker; such a release ignores
+the fields and leaves a reaction in place.
 
 ## Media
 

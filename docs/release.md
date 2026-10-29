@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.5`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.5` pins.
+The current workspace release is `0.4.6`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.6` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -52,6 +52,14 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.6
+
+`0.4.6` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3.
+A claimed Feishu message gets `OnIt` ("On it!") while SCV works, replaced
+with `DONE` ("Done") after its reply is delivered or refused. Both removal
+and completion are best effort; DONE stays on the message. Slack keeps its
+existing `eyes` reaction and removal. See [working reactions](channels.md#working-reaction).
 
 ## Upgrading to 0.4.5
 

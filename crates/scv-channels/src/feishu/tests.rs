@@ -247,9 +247,11 @@ fn default_response(request: &Request, socket_url: &str) -> (u16, String) {
     } else if route.starts_with("/callback/ws/endpoint") {
         json!({"code": 0, "data": {"URL": socket_url, "ClientConfig": {"PingInterval": 90}}})
     } else if route.contains("/reactions") && request.method == "POST" {
-        json!({"code": 0, "data": {"reaction_id": "r-typing", "reaction_type": {"emoji_type": "Typing"}}})
+        let emoji = &request.body["reaction_type"]["emoji_type"];
+        let id = if emoji == "OnIt" { "r-onit" } else { "r-done" };
+        json!({"code": 0, "data": {"reaction_id": id, "reaction_type": {"emoji_type": emoji}}})
     } else if route.contains("/reactions/") && request.method == "DELETE" {
-        json!({"code": 0, "data": {"reaction_id": "r-typing"}})
+        json!({"code": 0, "data": {"reaction_id": "r-onit"}})
     } else if route.starts_with("/open-apis/im/v1/messages") && request.method == "GET" {
         json!({"code": 0, "data": {"items": [], "has_more": false}})
     } else if route.starts_with("/open-apis/im/v1/messages") {
@@ -617,27 +619,24 @@ async fn an_untrusted_socket_host_is_never_dialed() {
 }
 
 #[tokio::test]
-async fn the_working_reaction_is_typing_and_comes_off_by_its_own_id() {
+async fn the_working_reaction_is_on_it_and_comes_off_by_its_own_id() {
     let mut fake = Fake::start().await;
     let transport = fake.transport();
     // A message in a thread: the reaction goes on the message itself.
     let message = crate::Message::text("om_1", "ou_owner", "hi", "thread:om_1", None);
     assert_eq!(
         transport.react(&message).await.unwrap().as_deref(),
-        Some("r-typing")
+        Some("r-onit")
     );
     let added = fake
         .request("/open-apis/im/v1/messages/om_1/reactions")
         .await;
     assert_eq!(added.method, "POST");
     assert_eq!(added.authorization.as_deref(), Some("Bearer t-1"));
-    assert_eq!(
-        added.body,
-        json!({"reaction_type": {"emoji_type": "Typing"}})
-    );
-    transport.unreact("om_1", "r-typing").await.unwrap();
+    assert_eq!(added.body, json!({"reaction_type": {"emoji_type": "OnIt"}}));
+    transport.unreact("om_1", "r-onit").await.unwrap();
     let removed = fake
-        .request("/open-apis/im/v1/messages/om_1/reactions/r-typing")
+        .request("/open-apis/im/v1/messages/om_1/reactions/r-onit")
         .await;
     assert_eq!(removed.method, "DELETE");
     assert_eq!(removed.authorization.as_deref(), Some("Bearer t-1"));
@@ -656,12 +655,12 @@ async fn the_working_reaction_is_typing_and_comes_off_by_its_own_id() {
         "{error}"
     );
     fake.script(
-        "/open-apis/im/v1/messages/om_1/reactions/r-typing",
+        "/open-apis/im/v1/messages/om_1/reactions/r-onit",
         400,
         json!({"code": 231003, "msg": "message not found"}),
     );
     let refused = transport
-        .unreact("om_1", "r-typing")
+        .unreact("om_1", "r-onit")
         .await
         .unwrap_err()
         .to_string();
@@ -686,7 +685,36 @@ async fn the_working_reaction_is_typing_and_comes_off_by_its_own_id() {
 
 #[tokio::test]
 async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
+    caught_up_message_finishes_its_reaction(0, 0).await;
+}
+
+#[tokio::test]
+async fn a_failed_working_reaction_removal_still_adds_done_and_finishes_the_reply() {
+    caught_up_message_finishes_its_reaction(231003, 0).await;
+}
+
+#[tokio::test]
+async fn a_refused_done_reaction_does_not_fail_the_reply() {
+    caught_up_message_finishes_its_reaction(0, 99991672).await;
+}
+
+async fn caught_up_message_finishes_its_reaction(remove_code: i64, done_code: i64) {
     let mut fake = Fake::start().await;
+    fake.script(
+        "/open-apis/im/v1/messages/om_away/reactions",
+        200,
+        json!({"code": 0, "data": {"reaction_id": "r-onit"}}),
+    );
+    fake.script(
+        "/open-apis/im/v1/messages/om_away/reactions/r-onit",
+        200,
+        json!({"code": remove_code}),
+    );
+    fake.script(
+        "/open-apis/im/v1/messages/om_away/reactions",
+        200,
+        json!({"code": done_code, "data": {"reaction_id": "r-done"}}),
+    );
     let directory = tempfile::tempdir().unwrap();
     let store = credentials::Store::new(
         &scv_client::Layout::new(directory.path()),
@@ -747,13 +775,13 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
         |credentials| Ok(credentials == &account()),
     );
     let peer = async {
-        // The claimed message wears the working reaction until its reply is
-        // sent, which removes that reaction by its ID.
+        // The claimed message wears OnIt until its reply is sent. Only
+        // after deleting that exact reaction does the bridge add DONE.
         let added = fake
             .request("/open-apis/im/v1/messages/om_away/reactions")
             .await;
         assert_eq!(added.method, "POST");
-        assert_eq!(added.body["reaction_type"]["emoji_type"], "Typing");
+        assert_eq!(added.body["reaction_type"]["emoji_type"], "OnIt");
         let reply = fake
             .request("/open-apis/im/v1/messages/om_away/reply")
             .await;
@@ -761,14 +789,22 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
         assert_eq!(content["text"], crate::FAILURE_REPLY);
         assert_ne!(reply.body["uuid"].as_str().unwrap(), "");
         let removed = fake
-            .request("/open-apis/im/v1/messages/om_away/reactions/r-typing")
+            .request("/open-apis/im/v1/messages/om_away/reactions/r-onit")
             .await;
         assert_eq!(removed.method, "DELETE");
+        let completed = fake
+            .request("/open-apis/im/v1/messages/om_away/reactions")
+            .await;
+        assert_eq!(completed.method, "POST");
+        assert_eq!(completed.body["reaction_type"]["emoji_type"], "DONE");
         // The reply is delivered and remembered; the checkpoint moved.
         tokio::time::timeout(WAIT, async {
             loop {
                 let state = store.load_state("default").unwrap();
-                if state.pending.is_empty() && state.seen.iter().any(|id| id == "om_away") {
+                if state.pending.is_empty()
+                    && state.removing.is_empty()
+                    && state.seen.iter().any(|id| id == "om_away")
+                {
                     let checkpoint = Checkpoint::parse(&state.cursor);
                     assert_eq!(checkpoint.chats["oc_dm"].last_ms, last + 1_000);
                     return;
@@ -778,6 +814,10 @@ async fn full_bridge_answers_a_caught_up_message_and_saves_the_checkpoint() {
         })
         .await
         .unwrap();
+        // DONE's ID never enters the removal queue and nothing takes it off.
+        while let Ok(request) = fake.requests.try_recv() {
+            assert_ne!(request.method, "DELETE", "{}", request.route);
+        }
     };
     tokio::select! {
         result = run => panic!("the bridge stopped: {result:?}"),
@@ -1614,9 +1654,10 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
         })
         .await
         .unwrap();
-        // No reaction was added, so none was removed.
+        // No OnIt was added, so no removal or DONE add was queued.
         while let Ok(request) = fake.requests.try_recv() {
             assert_ne!(request.method, "DELETE", "{}", request.route);
+            assert!(!request.route.contains("/reactions"), "{}", request.route);
         }
     };
     tokio::select! {
