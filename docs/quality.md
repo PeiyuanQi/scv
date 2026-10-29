@@ -137,8 +137,11 @@ Daemon and component changes require focused coverage for:
   in flight and taken off once the turn ended; a reaction whose ID cannot
   be saved taken off, with the turn and the account going on; a slow
   removal never delaying the next reply; and state without a reaction
-  removing nothing. Feishu reacts with `Typing` and removes by
-  `reaction_id`, naming `im:message.reactions:write` on code 99991672;
+  removing nothing. Feishu reacts with `OnIt` ("On it!"), removes by
+  `reaction_id`, then adds `DONE` ("Done") even if removal fails or times
+  out; DONE stays, and its refusal never fails a reply. A failed OnIt add
+  queues neither removal nor DONE. Permission code 99991672 names
+  `im:message.reactions:write`;
   Slack reacts with `eyes`, `already_reacted` and `no_reaction` counting as
   success, and adding never asks `auth.test` itself;
 - polling and other senders continuing during a long owner turn, a

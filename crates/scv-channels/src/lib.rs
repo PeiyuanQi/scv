@@ -527,6 +527,15 @@ pub(crate) trait Transport: Send + Sync {
         let _ = (message_id, reaction);
         Ok(())
     }
+
+    /// Optionally mark completion on `message_id` after the bridge tried
+    /// removing its working reaction, even if removal failed or timed out.
+    /// Called only for a successfully added reaction whose turn ended;
+    /// unsaved reactions cleaned up during a turn do not mark completion.
+    async fn complete_reaction(&self, message_id: &str) -> Result<()> {
+        let _ = message_id;
+        Ok(())
+    }
 }
 
 /// What the bridge needs to run one account; a channel's `run` builds it
@@ -1296,11 +1305,10 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     }
 
     /// Save the working reaction that `added` put on `message_id` with the
-    /// message's claim, so its reply takes it off. A reaction that cannot
-    /// be saved there, because the turn already ended or the save fails, is
-    /// taken off at once: nothing else would. Neither fails the account or
-    /// the turn, which goes on without a reaction; a failed add is only
-    /// logged.
+    /// message's claim, so its reply settles it. A reaction whose save
+    /// fails is taken off at once; one whose turn already ended is settled
+    /// at once. Neither fails the account or the turn, which goes on
+    /// without a reaction; a failed add is only logged.
     async fn keep_reaction(&self, message_id: &str, added: Result<Option<String>>) {
         let reaction = match added {
             Ok(Some(reaction)) => reaction,
@@ -1326,9 +1334,12 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     error = %error,
                     "could not save the working reaction; taking it off again"
                 );
+                drop(state);
+                self.unreact(message_id, &reaction).await;
+                return;
             }
         }
-        self.unreact(message_id, &reaction).await;
+        self.complete_reaction(message_id, &reaction).await;
     }
 
     /// Take the working reaction `reaction` off the message `message_id`.
@@ -1348,11 +1359,30 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
         }
     }
 
-    /// Take off, oldest first, the working reactions whose replies are done
-    /// with, for the life of the run. Apart from delivery, so a slow removal
-    /// never holds up the next reply; each stays in the state until it was
-    /// tried, so one a run left is tried on the next start. Saving that it
-    /// was tried only logs a failure: the next save records it.
+    /// Remove the working reaction first, then try the transport's
+    /// completion marker regardless of removal's result. Both attempts are
+    /// bounded separately and failures only logged.
+    async fn complete_reaction(&self, message_id: &str, reaction: &str) {
+        self.unreact(message_id, reaction).await;
+        match tokio::time::timeout(
+            REACTION_TIMEOUT,
+            self.transport.complete_reaction(message_id),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "could not add the completion reaction");
+            }
+            Err(_) => tracing::warn!("timed out adding the completion reaction"),
+        }
+    }
+
+    /// Settle, oldest first, the working reactions whose replies are done
+    /// with, for the life of the run. Apart from delivery, so a slow
+    /// completion never holds up the next reply; each stays in the state
+    /// until it was tried, so one a run left is tried on the next start.
+    /// Saving that it was tried only logs a failure: the next save records it.
     async fn remove_reactions(&self) -> Infallible {
         loop {
             let next = self.state.lock().await.removing.first().cloned();
@@ -1360,12 +1390,13 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 self.removals.notified().await;
                 continue;
             };
-            self.unreact(&reaction.message_id, &reaction.reaction).await;
+            self.complete_reaction(&reaction.message_id, &reaction.reaction)
+                .await;
             let mut state = self.state.lock().await;
             // Only this loop takes reactions out, so the first is this one.
             state.removing.remove(0);
             if let Err(error) = self.save(&state).await {
-                tracing::warn!(error = %error, "could not save a removed working reaction");
+                tracing::warn!(error = %error, "could not save a completed working reaction");
             }
         }
     }

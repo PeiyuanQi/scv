@@ -471,6 +471,42 @@ async fn control(home: &Path, command: DaemonCommand) -> scv_protocol::DaemonSta
         .unwrap()
 }
 
+/// Job completion can precede the conversation becoming available for
+/// takeover. Wait for that observable precondition, failing any other error.
+async fn until_attached(
+    home: &Path,
+    job: &scv_protocol::WorkbenchJob,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> scv_protocol::AttachPage {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let result = scv_client::control(
+                &home.join("state/server.sock"),
+                DaemonCommand::Attach {
+                    session: job.session.clone(),
+                    conversation: job.conversation.clone().unwrap(),
+                    cols,
+                    rows,
+                },
+            )
+            .await;
+            match result {
+                Ok(status) => return status.attach.unwrap(),
+                Err(scv_client::ControlError::Server {
+                    code: scv_protocol::ErrorCode::WorkbenchError,
+                    message,
+                }) if message.contains("attach once it is idle") => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("could not attach the idle conversation: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("the conversation becomes available for takeover")
+}
+
 fn screen_text(page: &scv_protocol::AttachPage) -> String {
     page.lines
         .iter()
@@ -567,18 +603,7 @@ async fn the_owner_takes_a_conversation_over_in_its_agents_terminal_and_detaches
     .await;
     let conversation = job.conversation.clone().unwrap();
 
-    let attached = control(
-        &home,
-        DaemonCommand::Attach {
-            session: job.session.clone(),
-            conversation: conversation.clone(),
-            cols: Some(80),
-            rows: Some(24),
-        },
-    )
-    .await
-    .attach
-    .unwrap();
+    let attached = until_attached(&home, &job, Some(80), Some(24)).await;
     assert_eq!((attached.cols, attached.rows), (80, 24));
     let id = attached.id.clone();
     until_screen(
@@ -657,18 +682,7 @@ async fn the_owner_takes_a_conversation_over_in_its_agents_terminal_and_detaches
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(running(pid));
-    let again = control(
-        &home,
-        DaemonCommand::Attach {
-            session: job.session.clone(),
-            conversation: conversation.clone(),
-            cols: Some(100),
-            rows: Some(30),
-        },
-    )
-    .await
-    .attach
-    .unwrap();
+    let again = until_attached(&home, &job, Some(100), Some(30)).await;
     assert_ne!(again.id, id);
     assert!(screen_text(&again).contains("typed: hello"), "{again:?}");
     assert_eq!((again.cols, again.rows), (100, 30));
@@ -717,18 +731,7 @@ async fn the_owner_takes_a_conversation_over_in_its_agents_terminal_and_detaches
 
     // A daemon that dies takes its terminals with it: the kernel hangs
     // them up as their master side closes.
-    let attached = control(
-        &home,
-        DaemonCommand::Attach {
-            session: job.session.clone(),
-            conversation: conversation.clone(),
-            cols: None,
-            rows: None,
-        },
-    )
-    .await
-    .attach
-    .unwrap();
+    let attached = until_attached(&home, &job, None, None).await;
     until_screen(&home, &attached.id, "", "codex terminal on").await;
     let pid = terminal_pid(&home);
     assert!(running(pid));

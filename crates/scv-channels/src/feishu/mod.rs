@@ -127,9 +127,10 @@ const MAX_FORWARDED: usize = 50;
 const MAX_CONTEXT_BYTES: usize = 16 * 1024;
 /// Largest image Feishu accepts for sending; bigger ones go as files.
 const MAX_SEND_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
-/// The reaction on a message SCV is working on: the catalog's "typing",
-/// which reads as working on it.
-const WORKING_EMOJI: &str = "Typing";
+/// The reaction on a message SCV is working on: the catalog's "On it!".
+const WORKING_EMOJI: &str = "OnIt";
+/// The reaction left on a message once its turn finishes: "Done".
+const DONE_EMOJI: &str = "DONE";
 
 /// The Feishu transport of one account.
 pub(crate) struct OpenPlatform {
@@ -549,6 +550,15 @@ impl Transport for OpenPlatform {
 
     async fn unreact(&self, message_id: &str, reaction: &str) -> Result<()> {
         self.api.remove_reaction(message_id, reaction).await
+    }
+
+    /// The bridge has already tried removing the working reaction by ID.
+    /// DONE stays on the message; its reaction ID is deliberately not saved.
+    async fn complete_reaction(&self, message_id: &str) -> Result<()> {
+        self.api
+            .add_reaction(message_id, DONE_EMOJI)
+            .await
+            .map(drop)
     }
 }
 
