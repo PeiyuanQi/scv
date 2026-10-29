@@ -60,6 +60,9 @@ A claimed Feishu message gets `OnIt` ("On it!") while SCV works, replaced
 with `DONE` ("Done") after its reply is delivered or refused. Both removal
 and completion are best effort; DONE stays on the message. Slack keeps its
 existing `eyes` reaction and removal. See [working reactions](channels.md#working-reaction).
+Kimi Code's ACP server now starts as `kimi acp`, as Kimi Code CLI 2.4.0
+serves it, and `kimi` is also found in `~/.kimi-code/bin`; sign it in for SCV
+once with `scv agents login kimi` (see [signing in](tools.md#signing-in-delegated-agents)).
 
 ## Upgrading to 0.4.5
 

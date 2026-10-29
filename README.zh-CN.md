@@ -43,7 +43,7 @@ Codex 等），写好任务说明，作为后台任务交给它，完成后发�
 
 一个 `agent` 工具就能把工作委派给 Claude Code、Codex、Grok Build、
 DeepSeek Harness、pi、Gemini CLI、Qwen Code、OpenCode、GitHub Copilot CLI、
-Cursor CLI、Amp、Kimi CLI 或一个嵌套的 SCV。条件允许时，它们通过
+Cursor CLI、Amp、Kimi Code 或一个嵌套的 SCV。条件允许时，它们通过
 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）运行；每个任务也可以
 在它自己的 git worktree 里进行。
 由你的 `prefer` 列表和 `use_for` 备注决定谁做什么，每个智能体的默认模型和推理强度

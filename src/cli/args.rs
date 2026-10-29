@@ -132,7 +132,7 @@ pub(crate) enum Command {
     },
     /// Sign in the agent CLIs SCV delegates to (Claude Code, Codex, Grok
     /// Build, DeepSeek Harness, pi, Gemini CLI, Qwen Code, OpenCode, GitHub
-    /// Copilot CLI, Cursor CLI, Amp, Kimi CLI).
+    /// Copilot CLI, Cursor CLI, Amp, Kimi Code).
     ///
     /// Each agent keeps its own credentials in SCV's private agent home
     /// (`<SCV home>/agents/<agent>`), separate from your personal login.

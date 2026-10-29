@@ -668,25 +668,25 @@ rewriting the imported `$SCV_HOME/agents/codex/config.toml`. An inherited
 ### Agent transport
 
 `[agents.<name>] transport` chooses how SCV talks to Claude Code, Codex, Grok
-Build, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, or Kimi CLI, which
+Build, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, or Kimi Code, which
 also speak the Agent Client Protocol (ACP):
 
 - `"auto"` (default): the agent's ACP server when it resolves and `command` is
   the built-in one, otherwise one CLI process per turn. A custom `command`
   keeps one process per turn because the ACP server would not run it. Kimi
-  CLI has no verified one-process-per-turn mode, so for it `auto` requires
+  Code has no verified one-process-per-turn mode, so for it `auto` requires
   the ACP server like `"acp"`.
 - `"acp"`: only the ACP server; the agent is not offered while the server is
   missing. A startup error for pi, Copilot, Cursor, Amp, and `scv`, which
   have none.
 - `"resume"`: always one CLI process per turn, continued through the CLI's own
-  resume where it has one. A startup error for Kimi CLI.
+  resume where it has one. A startup error for Kimi Code.
 
 The ACP servers are `claude-agent-acp` (npm
 `@agentclientprotocol/claude-agent-acp`), `codex-acp` (npm
 `@agentclientprotocol/codex-acp`), `grok agent stdio`, `dsh --profile acp`,
 `gemini --experimental-acp`, `qwen --experimental-acp`, `opencode acp`, and
-`kimi --acp`; see [the ACP transport](tools.md#agent-client-protocol-transport).
+`kimi acp`; see [the ACP transport](tools.md#agent-client-protocol-transport).
 
 ```toml
 [agents.codex]

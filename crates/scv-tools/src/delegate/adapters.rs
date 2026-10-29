@@ -943,7 +943,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         name: "kimi",
         family: "kimi",
         auth: AgentAuth::None,
-        product: "Kimi CLI",
+        product: "Kimi Code",
         offers: "Moonshot AI's coding agent on Kimi models; it reads, edits, and runs code in a project",
         command: "kimi",
         args: &[],
@@ -956,10 +956,10 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         removed_environment: &["KIMI_*", "MOONSHOT_*"],
         full_permission_args: &[],
         full_permission_environment: &[],
-        search_dirs: &[],
+        search_dirs: &[".kimi-code/bin"],
         login: Login::Interactive {
             args: &[],
-            hint: "sign in with its own command (/setup or /login), then /exit",
+            hint: "run /login, then /exit (`-- login` runs `kimi login` instead: a device code, with `--region mainland-cn` or `--region global`)",
         },
         status: Status::Unchecked,
         status_summary: StatusSummary::ExitStatus,
@@ -972,11 +972,11 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         conversation_files: None,
         credential_files: &[],
         transport: Transport::Process,
-        // Native: `kimi --acp`. Its one-prompt mode is not verified, so it
+        // Native: `kimi acp`. Its one-prompt mode is not verified, so it
         // runs over ACP only.
         acp: Some(AcpLaunch {
             command: "kimi",
-            args: &["--acp"],
+            args: &["acp"],
             full_args: &[],
             full_mode: None,
             full_environment: &[],

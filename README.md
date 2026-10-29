@@ -45,7 +45,7 @@ own: SCV answers inside the thread, on a session of its own.
 
 One `agent` tool delegates to Claude Code, Codex, Grok Build, DeepSeek Harness,
 pi, Gemini CLI, Qwen Code, OpenCode, GitHub Copilot CLI, Cursor CLI, Amp, Kimi
-CLI, or a nested SCV, over the [Agent Client Protocol](https://agentclientprotocol.com)
+Code, or a nested SCV, over the [Agent Client Protocol](https://agentclientprotocol.com)
 where available, each job optionally in a git worktree of its own. Your `prefer` list and `use_for` notes pick who does what,
 each agent's default model and effort (and a separate effort for hard tasks)
 set how, and `agent_wait`, `agent_status`, and `agent_cancel` manage

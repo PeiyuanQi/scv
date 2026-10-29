@@ -228,11 +228,11 @@ API-key billing) and claude-ai (the owner's Claude subscription), plus Codex
 (`codex`),
 Grok Build (`grok`), DeepSeek Harness (`dsh`), pi (`pi`), Gemini CLI
 (`gemini`), Qwen Code (`qwen`), OpenCode (`opencode`), GitHub Copilot CLI
-(`copilot`), Cursor CLI (`cursor`), Amp (`amp`), and Kimi CLI (`kimi`), plus
+(`copilot`), Cursor CLI (`cursor`), Amp (`amp`), and Kimi Code (`kimi`), plus
 a nested SCV (`scv`, see [Nested SCV](#nested-scv-scv)). Claude Code, Codex,
-Grok Build, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, and Kimi CLI
+Grok Build, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, and Kimi Code
 run over the [Agent Client Protocol](#agent-client-protocol-transport) when
-its server is installed; Kimi CLI runs only that way. Devin is not an agent
+its server is installed; Kimi Code runs only that way. Devin is not an agent
 SCV can run: it is a hosted service with no local CLI or ACP server, so there
 is nothing to launch in the workspace, and naming it fails like any agent the
 session does not offer. Each is one descriptor in `scv_tools::adapters` holding its default
@@ -305,7 +305,7 @@ the line names the kind of model name its CLI expects. For example:
 | `copilot` | GitHub Copilot CLI: GitHub's coding agent; knows GitHub |
 | `cursor` | Cursor CLI: Cursor's coding agent |
 | `amp` | Amp: Sourcegraph's coding agent; can search the web |
-| `kimi` | Kimi CLI: Moonshot AI's coding agent on Kimi models |
+| `kimi` | Kimi Code: Moonshot AI's coding agent on Kimi models |
 | `scv` | SCV: a nested session for a self-contained sub-task kept out of this context, or work in another project |
 
 The user steers the choice in their own configuration (projects cannot set
@@ -487,7 +487,8 @@ whose prompt is a flag value, such as `grok -p`), appends the prompt as one
 argument, and starts it directly in the workspace or the selected `cwd`. A
 prompt cannot start with `-`, so it is never read as a flag.
 The executable is looked up in the user's per-user install directories
-(`~/.local/bin`, plus `~/.grok/bin` for Grok) before `PATH`, the order a login
+(`~/.local/bin`, plus the agent's own, such as `~/.grok/bin` for Grok or
+`~/.kimi-code/bin` for Kimi Code) before `PATH`, the order a login
 shell uses, because the user service's `PATH` omits them; the daemon therefore
 runs the same install the user's shell does.
 Native adapters receive an instance-private `HOME`, `SCV_HOME`, and XDG
@@ -598,7 +599,7 @@ The default invocation contracts are:
 | `cursor` | `cursor-agent -p [--force] --output-format stream-json [--resume <chat-id>] [--model <model>] <prompt>` |
 | `amp` | `amp [--dangerously-allow-all] --stream-json -x <prompt>` |
 
-Kimi CLI runs only over ACP (`kimi --acp`). Grok's `-p` and pi's `-p` run one
+Kimi Code runs only over ACP (`kimi acp`). Grok's `-p` and pi's `-p` run one
 prompt and exit. DeepSeek Harness run once
 per turn takes its model and effort from its profile, so it takes neither
 `model` nor `effort` then; over ACP (the default once `dsh` is installed) it
@@ -1808,7 +1809,7 @@ work.
 ### Agent Client Protocol transport
 
 Claude Code, Codex, Grok Build, DeepSeek Harness, Gemini CLI, Qwen Code,
-OpenCode, and Kimi CLI also speak the
+OpenCode, and Kimi Code also speak the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP, version 1):
 JSON-RPC 2.0 over stdio, one long-running server per conversation. SCV
 prefers it when the server is installed, because it relays the agent's own
@@ -1824,15 +1825,15 @@ permission requests and reports progress as it happens:
 | `gemini` | `gemini --experimental-acp` | built in |
 | `qwen` | `qwen --experimental-acp` | built in (a Gemini CLI fork) |
 | `opencode` | `opencode acp` | built in |
-| `kimi` | `kimi --acp` | built in |
+| `kimi` | `kimi acp` | built in (Kimi Code CLI 2.4.0) |
 
 pi has only a community adapter and stays on one process per turn; Copilot,
 Cursor, and Amp have no ACP server SCV has verified and do the same; and the
-`scv` agent speaks SCV's own protocol. Kimi CLI's one-prompt mode is not
+`scv` agent speaks SCV's own protocol. Kimi Code's one-prompt mode is not
 verified, so it runs over ACP only: `auto` then requires its server like
 `acp`, and `transport = "resume"` is a configuration error. `[agents.<name>] transport`
 chooses: `auto` (the default) uses the ACP server when it resolves (on `PATH`
-or in `~/.local/bin`) and the agent's `command` is the built-in one, and
+or in a per-user install directory) and the agent's `command` is the built-in one, and
 otherwise one CLI process per turn; `acp` requires the server and offers the
 agent only when it is installed; `resume` always uses one process per turn. A
 custom `command` points SCV at a specific CLI, which the ACP server would not
@@ -1959,7 +1960,8 @@ scv agents login opencode                # opencode auth login
 scv agents login copilot                 # opens Copilot CLI: run /login, then /exit
 scv agents login cursor                  # cursor-agent login
 scv agents login amp                     # amp login
-scv agents login kimi                    # opens Kimi CLI: /setup or /login, then /exit
+scv agents login kimi                    # opens Kimi Code: run /login, then /exit
+scv agents login kimi -- login           # or kimi login: a device code; add --region mainland-cn|global
 scv agents status                        # every agent's sign-in state
 scv agents check                         # does each one work as SCV runs it?
 scv agents logout claude                 # removes only the API key file

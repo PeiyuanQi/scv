@@ -1154,5 +1154,5 @@ fn an_agent_that_runs_over_acp_only_cannot_be_set_to_one_process_per_turn() {
     let kimi = config.adapters().remove("kimi").unwrap();
     let launch = kimi.acp.unwrap();
     assert!(launch.required);
-    assert_eq!(launch.args, ["--acp"]);
+    assert_eq!(launch.args, ["acp"]);
 }

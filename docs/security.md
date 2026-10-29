@@ -128,8 +128,9 @@ development work, equivalent to the owner running those agents unprompted in a t
 
 A session offers only agents whose executable resolves. SCV looks in the
 user's per-user install directories (`~/.local/bin`; `~/.grok/bin` for
-Grok, `~/.opencode/bin` for OpenCode, `~/.amp/bin` for Amp, and
-`~/.npm-global/bin` for the agents npm installs) before `PATH`, as a login
+Grok, `~/.opencode/bin` for OpenCode, `~/.amp/bin` for Amp,
+`~/.kimi-code/bin` for Kimi Code, and `~/.npm-global/bin` for the agents npm
+installs) before `PATH`, as a login
 shell does; anything able to write those
 directories can already run code as the user.
 

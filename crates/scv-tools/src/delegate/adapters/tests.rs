@@ -227,8 +227,11 @@ fn the_added_agents_fail_safe_where_their_integration_is_unverified() {
     for name in ["copilot", "cursor", "amp"] {
         assert!(acp(name).is_none(), "{name} has no verified ACP server");
     }
-    // Kimi CLI runs over ACP only.
+    // Kimi Code runs over ACP only, as `kimi acp`, and installs under
+    // `~/.kimi-code/bin`.
     assert!(!adapter("kimi").unwrap().cli_turns);
+    assert_eq!(acp_args(&acp("kimi").unwrap(), true), ["acp"]);
+    assert_eq!(adapter("kimi").unwrap().search_dirs, [".kimi-code/bin"]);
     assert!(
         ADAPTERS
             .iter()
