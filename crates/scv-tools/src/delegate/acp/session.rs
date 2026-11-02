@@ -19,9 +19,11 @@ use crate::{
     args::bounded,
     delegate::{
         activity::{RunActivity, RunHeader, RunTransport},
+        adapters,
         agent::AGENT_TOOL,
         conversation::TurnGuard,
         live::{LiveChild, LiveSpec},
+        mode,
         options::{self, AgentOptions, EFFORT_OPTIONS, Listed, SelectValue},
         output::{AgentResult, AgentUsage, RunStatus, add_sign_in_hint},
         progress::redact,
@@ -34,9 +36,13 @@ use crate::{
 
 use super::{
     AcpAgentTool, CallError, Incoming, Interrupt, Progress, Rpc, choose_option,
-    describe_permission, describe_rpc_error,
+    describe_permission, describe_rpc_error, permission_command,
 };
 use crate::sync::lock;
+
+/// Claude Code's own plan mode, which it leaves for the mode it entered it
+/// from, so a session may move to it and back after the check.
+const CLAUDE_PLAN_MODE: &str = "plan";
 
 /// The ACP major version SCV speaks.
 pub(super) const PROTOCOL_VERSION: u64 = 1;
@@ -59,6 +65,114 @@ pub(super) struct AcpChild {
     pub(super) steerable: bool,
     /// Steering requests sent into its running prompt turn.
     pub(super) steering: Steering,
+    /// The session mode SCV checked against the policy, for an agent with a
+    /// full mode; `None` for one it cannot verify.
+    pub(super) verified_mode: Option<String>,
+}
+
+/// The session mode an ACP agent reports: `modes.currentModeId` (else the
+/// `mode` config option's `currentValue`) when the session opens, then every
+/// `current_mode_update`, plus any `session/set_config_option` answer or
+/// `config_option_update` listing the `mode` option, whichever reader receives
+/// it. Once the policy's check passed, the session holds the modes it may be in,
+/// and the first move outside them is kept. Boxed, so the [`Rpc`] a failed
+/// handshake hands back stays small.
+#[derive(Debug, Default)]
+pub(super) struct ModeWatch(Box<StdMutex<ModeState>>);
+
+#[derive(Debug, Default)]
+struct ModeState {
+    /// The mode it last reported.
+    current: Option<String>,
+    /// How many reports arrived since the session opened.
+    reports: u64,
+    /// The modes the check allows, empty until it passed.
+    allowed: Vec<String>,
+    /// The first mode it moved to outside them.
+    left: Option<String>,
+}
+
+impl ModeState {
+    fn report(&mut self, mode: &str) {
+        self.current = Some(mode.to_owned());
+        if !self.allowed.is_empty()
+            && self.left.is_none()
+            && !self.allowed.iter().any(|allowed| allowed == mode)
+        {
+            self.left = Some(mode.to_owned());
+        }
+    }
+}
+
+impl ModeWatch {
+    /// Note `params` of a `session/update`, when it reports the mode.
+    pub(super) fn update(&self, params: &Value) {
+        let Some(update) = params.get("update") else {
+            return;
+        };
+        let mode = match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("current_mode_update") => update
+                .get("currentModeId")
+                .or_else(|| update.get("modeId"))
+                .and_then(Value::as_str),
+            Some("config_option_update") => configured_mode(update),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            self.reported(mode);
+        }
+    }
+
+    /// Note the mode an answer's `configOptions` lists, if any.
+    fn answered(&self, result: &Value) {
+        if let Some(mode) = configured_mode(result) {
+            self.reported(mode);
+        }
+    }
+
+    fn reported(&self, mode: &str) {
+        let mut state = lock(&self.0);
+        state.reports += 1;
+        state.report(mode);
+    }
+
+    /// Note the mode a session reports when it opens.
+    pub(super) fn opened(&self, session: &Value) {
+        if let Some(mode) = session
+            .pointer("/modes/currentModeId")
+            .and_then(Value::as_str)
+            .or_else(|| configured_mode(session))
+        {
+            lock(&self.0).report(mode);
+        }
+    }
+
+    /// The mode it last reported, if any.
+    pub(super) fn current(&self) -> Option<String> {
+        lock(&self.0).current.clone()
+    }
+
+    fn reports(&self) -> u64 {
+        lock(&self.0).reports
+    }
+
+    /// The mode it last reported, if a report arrived after `reports`.
+    fn reported_since(&self, reports: u64) -> Option<String> {
+        let state = lock(&self.0);
+        (state.reports > reports)
+            .then(|| state.current.clone())
+            .flatten()
+    }
+
+    /// From now on, a move to a mode outside `allowed` fails the call.
+    fn hold(&self, allowed: Vec<String>) {
+        lock(&self.0).allowed = allowed;
+    }
+
+    /// The first mode it moved to outside the ones the check allows.
+    pub(super) fn left(&self) -> Option<String> {
+        lock(&self.0).left.clone()
+    }
 }
 
 /// Steering requests sent into a prompt turn, whose answers only that
@@ -181,11 +295,24 @@ impl Drop for SteeringTurn<'_> {
 }
 
 impl AcpChild {
+    /// Remember the options and any mode a config option answer reports.
     pub(super) fn remember_options(&self, result: &Value) {
+        self.rpc.mode.answered(result);
         if let Some(options) = parse_config_options(result) {
             *lock(&self.options) = options;
         }
     }
+}
+
+/// The `currentValue` of the `mode` option among `value`'s `configOptions`.
+fn configured_mode(value: &Value) -> Option<&str> {
+    value
+        .get("configOptions")?
+        .as_array()?
+        .iter()
+        .find(|option| option.get("id").and_then(Value::as_str) == Some("mode"))?
+        .get("currentValue")?
+        .as_str()
 }
 
 pub(super) fn parse_config_options(result: &Value) -> Option<HashMap<String, Vec<SelectValue>>> {
@@ -225,6 +352,9 @@ pub(super) enum TurnEnd {
     },
     /// The agent exited or broke the protocol.
     Lost(String),
+    /// The session moved to a permission mode the policy's check does not
+    /// allow; the turn was cancelled.
+    ModeChanged(String),
 }
 
 impl AcpAgentTool {
@@ -326,6 +456,7 @@ impl AcpAgentTool {
         let rpc = Rpc {
             live,
             next_id: AtomicU64::new(1),
+            mode: ModeWatch::default(),
         };
         match self.handshake(rpc, cwd, load, deadline, cancellation).await {
             Ok(child) => Ok(child),
@@ -374,7 +505,10 @@ impl AcpAgentTool {
         let mut session_params = json!({"cwd": cwd, "mcpServers": []});
         if let AgentAuthPlan::Claude { settings, .. } = &self.auth {
             session_params["_meta"] = json!({
-                "claudeCode": {"options": {"settings": settings}}
+                "claudeCode": {"options": {
+                    "settings": settings,
+                    "disallowedTools": adapters::CLAUDE_DENY_RULES,
+                }}
             });
         }
         let method = if let Some(saved) = load {
@@ -424,7 +558,10 @@ impl AcpAgentTool {
         if let Some(activity) = rpc.live.activity() {
             activity.set_vendor(&session_id);
         }
-        let child = AcpChild {
+        // What the session reports now outranks any update a loaded
+        // session replayed.
+        rpc.mode.opened(&session);
+        let mut child = AcpChild {
             rpc,
             session_id,
             options: StdMutex::new(parse_config_options(&session).unwrap_or_default()),
@@ -433,13 +570,16 @@ impl AcpAgentTool {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             steering: Steering::default(),
+            verified_mode: None,
         };
-        if let Some(mode) = &self.launch.full_mode
-            && let Err(error) = self
-                .select_mode(&child, &session, mode, deadline, cancellation)
+        if let Some(full_mode) = self.launch.full_mode.clone() {
+            match self
+                .check_mode(&child, &session, &full_mode, deadline, cancellation)
                 .await
-        {
-            return Err((child.rpc, error));
+            {
+                Ok(confirmed) => child.verified_mode = Some(confirmed),
+                Err(error) => return Err((child.rpc, error)),
+            }
         }
         if let Some(activity) = child.rpc.live.activity() {
             activity.set_steerable(child.steerable);
@@ -466,9 +606,58 @@ impl AcpAgentTool {
         });
     }
 
-    /// Select the session mode that grants full permissions: through
-    /// `session/set_mode` when the session lists it among its modes,
-    /// otherwise through a `mode` config option.
+    /// What the policy expects of the session mode of this agent, whose
+    /// full mode is `full_mode`.
+    pub(super) fn expected_mode(&self, full_mode: &str) -> mode::Expected {
+        mode::Expected {
+            agent: self.name.clone(),
+            policy: self.policy.clone(),
+            full_mode: full_mode.to_owned(),
+            full: self.full,
+        }
+    }
+
+    /// Check the session's mode against the policy before any prompt:
+    /// under `auto`, select `full_mode` and confirm the agent reported
+    /// taking it; otherwise, the mode the session opened in must not be
+    /// `full_mode`. A missing report fails like a mismatch.
+    /// From then on the session may move only back and forth to Claude's
+    /// own `plan` mode. Returns the mode confirmed.
+    pub(super) async fn check_mode(
+        &self,
+        child: &AcpChild,
+        session: &Value,
+        full_mode: &str,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+    ) -> Result<String, String> {
+        let expected = self.expected_mode(full_mode);
+        let confirmed = if self.full {
+            self.select_mode(child, session, full_mode, deadline, cancellation)
+                .await?
+        } else {
+            child.rpc.mode.current()
+        }
+        .ok_or_else(|| expected.missing())?;
+        if !expected.accepts(&confirmed) {
+            return Err(expected.mismatch(&confirmed));
+        }
+        let mut allowed = vec![confirmed.clone()];
+        if matches!(self.auth, AgentAuthPlan::Claude { .. }) {
+            allowed.push(CLAUDE_PLAN_MODE.to_owned());
+        }
+        child.rpc.mode.hold(allowed);
+        Ok(confirmed)
+    }
+
+    /// Select the session mode that grants full permissions: through a
+    /// `mode` config option when the session offers one, whose answer lists
+    /// the mode the agent is in, otherwise through `session/set_mode` when
+    /// the session lists it among its modes. An answer of `{}` says nothing:
+    /// `claude-agent-acp` answers so even when it picks a different mode,
+    /// and `codex-acp` answers so and reports nothing. Returns the mode the
+    /// agent reported during the call, in that answer or in an update, and
+    /// `None` when it reported none.
     pub(super) async fn select_mode(
         &self,
         child: &AcpChild,
@@ -476,7 +665,7 @@ impl AcpAgentTool {
         mode: &str,
         deadline: Instant,
         cancellation: &CancellationToken,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let listed = session
             .pointer("/modes/availableModes")
             .and_then(Value::as_array)
@@ -485,17 +674,8 @@ impl AcpAgentTool {
                     .iter()
                     .any(|entry| entry.get("id").and_then(Value::as_str) == Some(mode))
             });
-        let result = if listed {
-            child
-                .rpc
-                .call(
-                    "session/set_mode",
-                    json!({"sessionId": child.session_id, "modeId": mode}),
-                    deadline,
-                    cancellation,
-                )
-                .await
-        } else if lock(&child.options)
+        let reports = child.rpc.mode.reports();
+        let result = if lock(&child.options)
             .get("mode")
             .is_some_and(|values| values.iter().any(|value| value.value == mode))
         {
@@ -508,17 +688,27 @@ impl AcpAgentTool {
                     cancellation,
                 )
                 .await
+        } else if listed {
+            child
+                .rpc
+                .call(
+                    "session/set_mode",
+                    json!({"sessionId": child.session_id, "modeId": mode}),
+                    deadline,
+                    cancellation,
+                )
+                .await
         } else {
             return Err(format!(
-                "permissions = \"full\" needs the {} ACP session mode {mode:?}, which this \
-                 agent does not offer",
-                self.name
+                "policy mode {} needs the {} ACP session mode {mode:?}, which this agent does not \
+                 offer",
+                self.policy, self.name
             ));
         };
         match result {
             Ok(result) => {
                 child.remember_options(&result);
-                Ok(())
+                Ok(child.rpc.mode.reported_since(reports))
             }
             Err(error) => Err(self.call_error(&child.rpc, "set mode", error).await),
         }
@@ -652,6 +842,11 @@ impl AcpAgentTool {
         context: &ToolContext,
         deadline: Option<Instant>,
     ) -> TurnEnd {
+        // A move to another mode since the check fails the call before the
+        // agent gets the prompt.
+        if let Some(left) = child.rpc.mode.left() {
+            return TurnEnd::ModeChanged(left);
+        }
         // Handing over the prompt is part of starting the turn, which stays
         // bounded without a main deadline.
         let prompt_id = match child
@@ -725,6 +920,11 @@ impl AcpAgentTool {
                     if method == "session/update" {
                         progress.update(&params, &mut reply, &context.progress, activity);
                     }
+                    if let Some(left) = child.rpc.mode.left() {
+                        progress.lines.flush(&context.progress);
+                        cancel_prompt(child, &prompt_id).await;
+                        return TurnEnd::ModeChanged(left);
+                    }
                 }
                 Incoming::Request { id, method, params } => {
                     if method != "session/request_permission" {
@@ -743,6 +943,7 @@ impl AcpAgentTool {
                         risk,
                         cwd.to_owned(),
                         summary,
+                        permission_command(&params),
                         context.cancellation.child_token(),
                         Some(process::approval_deadline(deadline)),
                     );
@@ -785,6 +986,23 @@ impl AcpAgentTool {
         }
     }
 
+    /// What a result says about the mode of a turn on `child`: the mode
+    /// SCV verified, or `unverified` with the mode it reports, if any, for
+    /// an agent with a switch but no full mode to check.
+    pub(super) fn mode_status(&self, child: &AcpChild) -> Option<String> {
+        match &child.verified_mode {
+            Some(verified) => Some(mode::verified(verified)),
+            None => mode::unverified(
+                if self.mode_switch {
+                    mode::Check::Unverified
+                } else {
+                    mode::Check::NotApplicable
+                },
+                child.rpc.mode.current().as_deref(),
+            ),
+        }
+    }
+
     pub(super) fn result(
         &self,
         status: RunStatus,
@@ -792,6 +1010,7 @@ impl AcpAgentTool {
         usage: Option<AgentUsage>,
         error: Option<String>,
         conversation: Option<(&str, u32)>,
+        mode: Option<String>,
     ) -> ToolOutput {
         let reply = match &error {
             Some(error) if reply.is_empty() => error.clone(),
@@ -805,6 +1024,7 @@ impl AcpAgentTool {
             usage,
             truncated: cut,
             session: None,
+            mode,
         };
         let (content, truncated) =
             result.to_json(&self.name, conversation, None, "", self.output_limit);

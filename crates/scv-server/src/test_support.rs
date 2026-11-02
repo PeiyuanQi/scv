@@ -32,3 +32,18 @@ pub(crate) fn test_instance(home: impl Into<std::path::PathBuf>) -> Instance {
         overrides: ConfigOverrides::default(),
     }
 }
+
+/// Shell lines for a fake Codex: the rollout `turn_context` real Codex
+/// writes under `$CODEX_HOME/sessions/` for thread `thread`, recording the
+/// mode its arguments asked for, which SCV's mode check reads.
+pub(crate) fn codex_rollout(thread: &str) -> String {
+    format!(
+        r#"mode='"approval_policy":"on-request","sandbox_policy":{{"type":"workspace-write"}}'
+for arg in "$@"; do
+  [ "$arg" = --dangerously-bypass-approvals-and-sandbox ] && mode='"approval_policy":"never","sandbox_policy":{{"type":"danger-full-access"}}'
+done
+mkdir -p "$CODEX_HOME/sessions/2026/10/30"
+echo "{{\"type\":\"turn_context\",\"payload\":{{$mode}}}}" >> "$CODEX_HOME/sessions/2026/10/30/rollout-2026-10-30T00-00-00-{thread}.jsonl"
+"#
+    )
+}

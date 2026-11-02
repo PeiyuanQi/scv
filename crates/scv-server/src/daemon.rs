@@ -74,6 +74,7 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
     for warning in instance.claude_warnings() {
         tracing::warn!("{warning}");
     }
+    instance.log_policy();
     // Nothing reads an older release's files; say so once rather than let
     // them look like live configuration.
     if let Ok(strays) = layout.strays() {
@@ -119,7 +120,6 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
         Arc::clone(&hub),
     )?));
     let registry = instance_delegations(layout);
-    let hosts = crate::workbench::Hosts::new(instance.clone(), Arc::clone(&registry));
     // Descendants a delegated agent leaves behind reparent to the daemon, not init.
     if !delegations::become_child_subreaper() {
         tracing::debug!("SCV daemon is not a child subreaper on this platform");
@@ -144,6 +144,12 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
         Arc::clone(&registry),
         restarter.notifier().clone(),
         cancellation.clone(),
+    );
+    // Every daemon session asks the owner through it.
+    let hosts = crate::workbench::Hosts::new(
+        instance.clone(),
+        Arc::clone(&registry),
+        Some(Arc::clone(&confirmer)),
     );
     {
         let mut components = components.lock().await;

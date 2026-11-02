@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use scv_client::Layout;
 
 use super::{
-    Config, ConfigOverrides, ProviderConfig,
+    Config, ConfigOverrides, Deprecated, ProviderConfig, legacy,
     validate::{validate_project_keys, validate_project_not_weaker},
 };
 
@@ -106,6 +106,7 @@ impl Config {
             &toml::to_string(&Self::default()).context("serialize default configuration")?,
         )?;
 
+        let mut deprecated = Vec::new();
         let user_path = layout.config();
         if user_path.is_file() {
             #[cfg(unix)]
@@ -115,7 +116,10 @@ impl Config {
                     bail!("user configuration is readable by group or others; run chmod 600");
                 }
             }
-            merge(&mut value, read_layer(&user_path)?);
+            merge(
+                &mut value,
+                read_migrated(&user_path, USER_LAYER, &mut deprecated)?,
+            );
         }
         let user_baseline: Self = value
             .clone()
@@ -135,7 +139,8 @@ impl Config {
                     if !canonical_project.starts_with(workspace) {
                         bail!("project configuration escaped workspace");
                     }
-                    let project = read_layer(&canonical_project)?;
+                    let project =
+                        read_migrated(&canonical_project, PROJECT_LAYER, &mut deprecated)?;
                     validate_project_keys(&project)?;
                     let mut candidate_value = value.clone();
                     merge(&mut candidate_value, project);
@@ -157,7 +162,7 @@ impl Config {
                     bail!("explicit configuration is readable by group or others; run chmod 600");
                 }
             }
-            let explicit = read_layer(path)?;
+            let explicit = read_migrated(path, EXPLICIT_LAYER, &mut deprecated)?;
             if explicit.get("channels").is_some() {
                 bail!(
                     "{} cannot set [channels]; channel accounts belong in the instance's config.toml",
@@ -187,8 +192,8 @@ impl Config {
         if let Some(base_url) = overrides.base_url {
             config.provider.base_url = base_url;
         }
-        if let Some(policy) = overrides.approval_policy {
-            config.tools.approval_policy = policy;
+        if let Some(mode) = overrides.mode {
+            config.policy.mode = mode;
         }
         if config.skills.user_dir == std::path::Path::new("~/.scv/skills") {
             config.skills.user_dir = layout.skills();
@@ -198,6 +203,7 @@ impl Config {
             config.history.archive_dir = Some(expand_home(archive));
         }
         config.instance_home = instance_home;
+        config.deprecated = deprecated;
         config.validate()?;
         Ok(config)
     }
@@ -217,6 +223,7 @@ impl Config {
                 settings.insert(key, (value.clone(), origin.to_owned()));
             });
         };
+        let mut deprecated = Vec::new();
         let defaults: toml::Value = toml::from_str(
             &toml::to_string(&Self::default()).context("serialize default configuration")?,
         )?;
@@ -224,8 +231,8 @@ impl Config {
         let mut merged = defaults;
         let user = Some(layout.config()).filter(|path| path.is_file());
         if let Some(path) = &user {
-            let layer = read_layer(path)?;
-            apply(&layer, "config.toml");
+            let layer = read_migrated(path, USER_LAYER, &mut deprecated)?;
+            apply(&layer, USER_LAYER);
             merge(&mut merged, layer);
         }
         if let Some(workspace) = workspace {
@@ -234,14 +241,14 @@ impl Config {
                 .as_ref()
                 .and_then(|path| std::fs::canonicalize(path).ok());
             if project.is_file() && std::fs::canonicalize(&project).ok() != user_file {
-                let layer = read_layer(&project)?;
-                apply(&layer, "project .scv/config.toml");
+                let layer = read_migrated(&project, PROJECT_LAYER, &mut deprecated)?;
+                apply(&layer, PROJECT_LAYER);
                 merge(&mut merged, layer);
             }
         }
         if let Some(path) = &overrides.config_file {
-            let layer = read_layer(path)?;
-            apply(&layer, "SCV_CONFIG");
+            let layer = read_migrated(path, EXPLICIT_LAYER, &mut deprecated)?;
+            apply(&layer, EXPLICIT_LAYER);
             merge(&mut merged, layer);
         }
         // Environment and flags change the provider in effect: a named
@@ -288,11 +295,10 @@ impl Config {
                 set(format!("{prefix}.{field}"), value.clone(), flag);
             }
         }
-        if let Some(policy) = overrides.approval_policy {
-            let value = toml::Value::try_from(policy).context("serialize approval policy")?;
+        if let Some(mode) = overrides.mode {
             settings.insert(
-                "tools.approval_policy".into(),
-                (value, "--approval-policy flag".into()),
+                "policy.mode".into(),
+                (mode.as_str().into(), "--policy flag".into()),
             );
         }
         Ok(settings
@@ -304,11 +310,34 @@ impl Config {
                 } else {
                     value.to_string()
                 },
+                // The line in effect for this key, when it was a deprecated one.
+                note: deprecated
+                    .iter()
+                    .rev()
+                    .find(|old: &&Deprecated| old.replacement == key && old.origin == origin)
+                    .map(Deprecated::note),
                 key,
                 origin,
             })
             .collect())
     }
+}
+
+/// How `scv config show` and the deprecation warnings name each layer.
+const USER_LAYER: &str = "config.toml";
+const PROJECT_LAYER: &str = "project .scv/config.toml";
+const EXPLICIT_LAYER: &str = "SCV_CONFIG";
+
+/// [`read_layer`], with its deprecated keys read as their replacements and
+/// added to `deprecated`.
+fn read_migrated(
+    path: &std::path::Path,
+    origin: &str,
+    deprecated: &mut Vec<Deprecated>,
+) -> Result<toml::Value> {
+    let mut layer = read_layer(path)?;
+    deprecated.extend(legacy::migrate(&mut layer, origin)?);
+    Ok(layer)
 }
 
 pub(super) fn ensure_private_dir(path: &std::path::Path) -> Result<()> {
@@ -371,13 +400,16 @@ pub(super) fn merge(base: &mut toml::Value, overlay: toml::Value) {
 /// A configuration value in effect and the layer that set it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Setting {
-    /// Dotted key, such as `tools.approval_policy`.
+    /// Dotted key, such as `policy.mode`.
     pub key: String,
     /// The value as TOML, or `<hidden>` for a secret.
     pub value: String,
     /// `default`, `config.toml`, `project .scv/config.toml`, `SCV_CONFIG`,
     /// `env <VARIABLE>`, or `--<name> flag`.
     pub origin: String,
+    /// Set by a deprecated key read as this one: which, and whether it pins
+    /// the old default.
+    pub note: Option<String>,
 }
 
 /// Call `visit` with every leaf of `value` under its dotted key.

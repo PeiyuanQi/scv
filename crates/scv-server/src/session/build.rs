@@ -20,8 +20,9 @@ use uuid::Uuid;
 
 use super::{Session, SessionClient, reload};
 use crate::{
-    approval::{PolicyFirstGate, UnattendedGate},
+    approval::{OwnerQuestions, PolicyFirstGate, UnattendedGate},
     config::{Config, ConfigOverrides},
+    confirm::Confirmer,
     prompt::{PromptContext, SkillListings, build_system_prompt, skills::discover_skills},
 };
 
@@ -57,6 +58,10 @@ pub(crate) fn offered_adapters(config: &Config) -> HashMap<String, scv_tools::Ag
 /// so a session with tools then offers `chat_attach`. One that names its
 /// chat log starts with the log's open episode and, with tools, offers
 /// `chat_history` and `chat_keep`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "what the daemon and the client each bring"
+)]
 pub(crate) async fn build_session(
     layout: &Layout,
     cwd: &str,
@@ -64,9 +69,14 @@ pub(crate) async fn build_session(
     delegation_depth: u32,
     registry: &Arc<DelegationRegistry>,
     workbench: Option<&Arc<Workbench>>,
+    confirmer: Option<Arc<Confirmer>>,
     client: SessionClient,
 ) -> Result<(Session, Option<mpsc::UnboundedReceiver<()>>)> {
     let id = Uuid::new_v4().to_string();
+    let owner = OwnerQuestions {
+        confirmer,
+        session: id.clone(),
+    };
     let workspace = std::fs::canonicalize(cwd).with_context(|| format!("resolve cwd {cwd}"))?;
     if !workspace.is_dir() {
         return Err(anyhow!("cwd is not a directory"));
@@ -112,8 +122,9 @@ pub(crate) async fn build_session(
     let (background, finished) = if !no_tools && config.agent.max_background > 0 {
         let (finished_tx, finished_rx) = mpsc::unbounded_channel();
         let unattended: Arc<dyn ApprovalGate> = Arc::new(UnattendedGate {
-            policy: config.tools.approval_policy,
+            policy: config.policy(),
             client_approves_all: client.auto_approve,
+            owner: owner.clone(),
         });
         // While the owner watches the workbench, a background request the
         // foreground would have asked a person about, and the session would
@@ -121,8 +132,9 @@ pub(crate) async fn build_session(
         // decides on its own is never put to the owner.
         let gate: Arc<dyn ApprovalGate> = match workbench {
             Some(workbench) => Arc::new(PolicyFirstGate {
-                policy: config.tools.approval_policy,
+                policy: config.policy(),
                 attended: workbench.attended_gate(&id, unattended),
+                owner: owner.clone(),
             }),
             None => unattended,
         };
@@ -238,6 +250,8 @@ pub(crate) async fn build_session(
             tools: !no_tools,
             label: client.label,
             workbench: registration,
+            owner,
+            owner_at_client: client.owner_at_client,
         },
         finished,
     ))

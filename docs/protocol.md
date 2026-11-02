@@ -332,6 +332,15 @@ could carry their requests, get the same answer (see
 [Background jobs](tools.md#background-jobs)). It grants nothing the client
 could not grant itself. Both fields are additive and keep protocol version 3.
 
+A request only the owner may answer, such as a direct `cargo publish` (see
+[policy](configuration.md#policy)), is never answered by `auto_approve`.
+Only the TUI, a client that initializes as `scv-tui` with no `channel`, gets
+it as `approval.requested` for its own turns, its `summary` starting with
+why, because the person at the TUI is the owner. For every other client, and
+for background jobs, the daemon asks the owner in chat as `confirm_ask` does
+(see [channels](channels.md#questions-to-the-owner)), and a stdio server,
+which cannot ask, denies it.
+
 `chat` names the chat log of the conversation the session answers, as
 `channel`, `account`, and `conversation` (a digest of the conversation), each
 at most 64 ASCII letters, digits, `-`, or `_`; anything else is refused with

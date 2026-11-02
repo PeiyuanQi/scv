@@ -13,7 +13,11 @@ pub struct ApprovalRequest {
     pub name: String,
     pub risk: ToolRisk,
     pub cwd: PathBuf,
+    /// What the call will do, for the person deciding: display text only.
     pub summary: String,
+    /// The exact command the call runs, such as a `bash` call's script or a
+    /// relayed agent's shell command, which the policy's command gates match.
+    pub command: Option<String>,
 }
 
 #[async_trait]

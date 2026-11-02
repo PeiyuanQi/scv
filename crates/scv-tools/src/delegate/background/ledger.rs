@@ -83,6 +83,10 @@ pub struct JobRecord {
     pub reply: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What SCV knew of the permission mode the agent ran in: `verified
+    /// <mode>`, or `unverified` for an agent that reports none SCV reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// The result reached the model or the client.
     #[serde(default)]
     pub reported: bool,
@@ -186,6 +190,7 @@ impl JobLedger {
             worktree: None,
             reply: None,
             error: None,
+            mode: None,
             reported: false,
             interrupted: None,
             resumed_as: None,
@@ -548,6 +553,7 @@ pub(crate) fn finish(record: &mut JobRecord, state: AgentState, result: &Value, 
     let text = |key: &str| result.get(key).and_then(Value::as_str).map(str::to_owned);
     record.reply = text("reply").map(|reply| bounded(&reply, MAX_REPLY_BYTES));
     record.error = text("error").map(|error| bounded(&error, MAX_REPLY_BYTES));
+    record.mode = text("mode").map(|mode| bounded(&mode, 200));
     if let Some(conversation) = text("session") {
         record.conversation = Some(conversation);
     }

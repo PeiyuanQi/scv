@@ -10,6 +10,7 @@ pub(crate) mod confirm;
 pub(crate) mod daemon;
 pub(crate) mod jobs;
 pub(crate) mod mail;
+pub(crate) mod policy;
 pub(crate) mod project;
 pub(crate) mod prompt;
 pub(crate) mod service;
@@ -34,10 +35,10 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf, layout: Layout) -> Result<()> {
         model: cli.model.clone(),
         provider: cli.provider.clone(),
         base_url: cli.base_url.clone(),
-        approval_policy: cli.approval_policy.map(|value| {
+        policy: cli.policy.map(|value| {
             value
                 .to_possible_value()
-                .expect("every ApprovalArg has a value name")
+                .expect("every PolicyArg has a value name")
                 .get_name()
                 .to_owned()
         }),
@@ -46,7 +47,7 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf, layout: Layout) -> Result<()> {
         provider: cli.provider.clone(),
         model: cli.model.clone(),
         base_url: cli.base_url.clone(),
-        approval_policy: cli.approval_policy.map(Into::into),
+        mode: cli.policy.map(Into::into),
         no_tools: false,
         config_file: cli
             .config_path
@@ -54,7 +55,7 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf, layout: Layout) -> Result<()> {
             .map(|path| common::absolute_path(path, &cwd)),
     };
     let flags = service::Flags {
-        approval_policy: cli.approval_policy,
+        policy: cli.policy,
         provider: cli.provider.as_deref(),
         model: cli.model.as_deref(),
         base_url: cli.base_url.as_deref(),
@@ -115,6 +116,7 @@ pub(crate) async fn run(cli: Cli, cwd: PathBuf, layout: Layout) -> Result<()> {
         Command::Confirm { timeout, question } => {
             confirm::confirm(&layout, question, timeout).await
         }
+        Command::Policy { command } => policy::run(&layout, &overrides, &cwd, command).await,
         Command::Update { index_url } => update::update_cli(&layout, &overrides, &cwd, index_url),
         Command::Channels { command } => channels::channels(&layout, command).await,
         Command::Mail { command } => mail::mail(&layout, command).await,

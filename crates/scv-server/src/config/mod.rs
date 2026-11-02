@@ -1,16 +1,19 @@
 //! SCV's configuration: the schema of `config.toml` ([`schema`]), how the
-//! layers are read and merged ([`load`]), what each value must satisfy and
+//! layers are read and merged ([`load`]) after their deprecated keys are
+//! read as their replacements ([`legacy`]), what each value must satisfy and
 //! what a project may change ([`validate`]), and the settings the runtime,
 //! tools, and provider are built from ([`runtime`]).
 //!
 //! The `scv` command line reads it too: `scv config show` lists every
 //! [`Setting`] with its origin, and `scv agents` finds the agent homes.
 
+mod legacy;
 mod load;
 mod runtime;
 mod schema;
 mod validate;
 
+pub use legacy::Deprecated;
 pub use load::{Setting, read_layer};
 pub use schema::*;
 
@@ -89,6 +92,36 @@ impl Config {
 impl Instance {
     pub(crate) fn claude_warnings(&self) -> Vec<String> {
         claude_warnings_for_layout(&self.layout)
+    }
+
+    /// Log the policy mode in effect for the user's configuration and this
+    /// process's flags, each agent with a mode of its own, and a warning for
+    /// each deprecated key, naming the line that replaces it.
+    pub(crate) fn log_policy(&self) {
+        let config = match Config::load_user(&self.layout, self.overrides.clone()) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!("Cannot read the policy mode: {error:#}");
+                return;
+            }
+        };
+        let agents: Vec<String> = config
+            .agent_modes()
+            .into_iter()
+            .map(|(agent, mode)| format!("{agent} {mode}"))
+            .collect();
+        if agents.is_empty() {
+            tracing::info!("Policy mode {}", config.policy_mode());
+        } else {
+            tracing::info!(
+                "Policy mode {}; agents with their own: {}",
+                config.policy_mode(),
+                agents.join(", ")
+            );
+        }
+        for deprecated in config.deprecated() {
+            tracing::warn!("{}", deprecated.warning());
+        }
     }
 }
 

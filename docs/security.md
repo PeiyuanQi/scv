@@ -40,8 +40,10 @@ interactive starts ask whether to continue and non-interactive starts fail.
 path resolution, directory creation, file opening, and rename remain confined
 under that root even if symlinks are changed concurrently. Both reject absolute
 paths and parent traversal. Lexically secret-like read paths such as `.env`,
-private keys, and credential files require approval, but this heuristic is not
-a confidentiality boundary. Writes use a capability-contained temporary file
+private keys, and credential files have filesystem risk rather than read-only
+risk, so every policy mode but `auto` asks about or denies such a read, but
+this heuristic is not a confidentiality boundary. Writes use a
+capability-contained temporary file
 plus an atomic install in the destination directory and may require an expected
 SHA-256 when replacing a file. The hash detects stale content observed before
 the write; it does not lock out an external concurrent writer. Both tools cap
@@ -49,15 +51,17 @@ output or input according to configuration.
 
 `bash` runs the configured command through `/bin/bash -lc` with the session
 workspace as its current directory. It inherits the SCV process environment,
-runs with the user's full permissions, and is not sandboxed. It requires
-approval under the default policy, has a wall-clock timeout, and bounds combined
-stdout/stderr. A call may choose its timeout only up to the configured
-`tools.max_timeout_seconds` ceiling, which project configuration can lower but
-not raise. SCV starts it in a new process group; cancellation or timeout
-sends a group-wide termination signal and ends with `KILL` if any member
-remains. Cancellation permits up to two seconds of graceful cleanup; reaching
-the execution deadline kills immediately. Descendants and retained output pipes
-cannot extend the call without bound.
+runs with the user's full permissions, and is not sandboxed. Every policy mode
+but `auto` asks before running it or denies it, and the
+[command gates](#approval-behavior) apply under every mode. It has a
+wall-clock timeout and bounds combined stdout/stderr. A call may choose its
+timeout only up to the configured `tools.max_timeout_seconds` ceiling, which
+project configuration can lower but not raise. SCV starts it in a new
+process group; cancellation or timeout sends a group-wide termination signal
+and ends with `KILL` if any member remains. Cancellation permits up to two
+seconds of graceful cleanup; reaching the execution deadline kills
+immediately. Descendants and retained output pipes cannot extend the call
+without bound.
 
 The `agent` tool launches only the configured adapter of the agent a call
 names, and only one the session offers; it checks the call's options against
@@ -67,7 +71,8 @@ prompt as one argument, uses the workspace or a directory inside it as current
 directory, applies the same output bounds and the call's timeout (which only a
 background call may drop, with `no_timeout`, and only when the owner sets
 `tools.allow_no_timeout`), kills the process group on cancellation, and
-requires approval. A per-call `cwd` is resolved with symlinks
+has delegate risk, which every policy mode but `auto` asks about or denies.
+A per-call `cwd` is resolved with symlinks
 followed at launch and must remain an existing directory under the canonical
 workspace; `..`, absolute paths elsewhere, and links pointing outside are
 refused. The nested agent loads that directory's own instructions (such as
@@ -116,15 +121,48 @@ pi session. The delegated CLI still has the user's operating system
 permissions and may implement its own tools and approvals, but it cannot
 silently reuse the user's normal agent state.
 
-`[agents.<name>] permissions = "full"` is the user's explicit opt-in to hand
-a delegated CLI its own full-autonomy switches (for example Claude Code's
+Under `[policy] mode = "auto"`, the default, SCV hands every delegated CLI
+its own full-autonomy switches (for example Claude Code's
 `--permission-mode bypassPermissions` or Codex's
 `--dangerously-bypass-approvals-and-sandbox`), turning off that CLI's approval
-prompts and sandbox and enabling web search where the CLI gates it. It is off
-by default, only user-level configuration can set it, and every approval
-summary for such an agent states `FULL PERMISSIONS`. Combined with a channel's
-owner tools, it lets the owner's WeChat or Feishu account run unattended
-development work, equivalent to the owner running those agents unprompted in a terminal.
+prompts and sandbox and enabling web search where the CLI gates it. A
+stricter mode, for every agent or for one through `[agents.<name>] mode`,
+starts the agent without them, so its own configuration decides what it
+asks. Only user-level configuration can set `[agents]`, and a project layer
+can only make `[policy] mode` stricter (see [Policy](configuration.md#policy)).
+Every approval summary for an agent started in its full mode states
+`FULL PERMISSIONS` and the policy mode. Combined with a channel's owner
+tools, the default lets the owner's WeChat or Feishu account run unattended
+development work, equivalent to the owner running those agents unprompted in
+a terminal.
+
+SCV checks the permission mode an agent reports against the one the policy
+expects, and fails closed. Under `auto` the agent must report its full mode.
+Under any other mode a report of the full mode is a mismatch too, which
+catches an agent home that turned its own prompts off, such as an imported
+Codex `config.toml` with `approval_policy = "never"` and
+`sandbox_mode = "danger-full-access"`. A mismatch, or a missing report from
+an agent that should send one, stops the run: SCV kills the CLI's process or
+cancels the ACP turn and closes the session, and the call fails naming the
+expected and reported modes. Claude Code's CLI reports its mode in its first
+event, before any tool runs, so a managed
+`permissions.disableBypassPermissionsMode` that downgrades the session shows
+there. Over ACP, Claude Code and Codex report theirs before SCV sends the
+prompt, and a later move to another mode fails the call (Claude's own `plan`
+mode excepted). Codex's CLI records its mode only in its rollout file, which
+SCV reads shortly after the turn starts, so its first command may run before
+the check. Grok Build, DeepSeek Harness, Gemini CLI, Qwen Code, Copilot,
+Cursor, and Amp report nothing SCV reads: they still run, and their approval
+summary, result, job record, and `scv agents check` say the mode is
+unverified (see [Permission modes](tools.md#permission-modes)).
+
+Every Claude Code run also gets deny rules (`--disallowedTools`, or
+`_meta.claudeCode.options.disallowedTools` over ACP) for the plain spellings
+of force-pushing `main` and for `cargo publish`. Its `bypassPermissions` mode
+approves every tool call except explicit deny rules, so these hold inside
+the agent, where SCV sees nothing in full mode. Like SCV's own
+[command gates](#approval-behavior), a prefix rule matches the plain
+spelling, not a script or `bash -c` that hides it.
 
 A session offers only agents whose executable resolves. SCV looks in the
 user's per-user install directories (`~/.local/bin`; `~/.grok/bin` for
@@ -172,8 +210,8 @@ A [reviewed job](tools.md#reviewed-jobs)'s reviewer is told it may read,
 fetch, build, and run checks but must not edit source, commit, land, push,
 publish, deploy, or message anyone. Like the cleanup above, that rule is
 cooperative: the reviewer is a delegated agent like any other, running as
-the user and, with `permissions = "full"`, without its CLI's own prompts, so
-SCV neither enforces nor detects the rule and claims no read-only isolation.
+the user and, under `auto`, without its CLI's own prompts, so SCV neither
+enforces nor detects the rule and claims no read-only isolation.
 "Fresh" means a fresh conversation: a reviewer of the builder's own agent
 shares that agent's private home and memory, and is labelled so. Both roles'
 output is untrusted. Verdicts and landing reports are parsed only from their
@@ -183,7 +221,9 @@ reviewer's check of it, labelled as such. Text quoted from one role to the
 other is bounded and marked untrusted, but prompt injection through a reply
 or the files cannot be ruled out. The single approval of a reviewed call
 names every reviewer launch it may make, and approval or a landing never
-grants a publish, which still asks the owner. Review journals are private
+grants a publish: that still takes the owner's request, and the command gates
+and the publish limit still apply ([Approval behavior](#approval-behavior)).
+Review journals are private
 files under `state/reviews`, created without following symlinks.
 
 Delegation depth is bounded by `agent.max_delegation_depth`, and at any depth
@@ -195,8 +235,9 @@ daemon decides when, refuses a binary that does not answer `scv build-info`,
 and keeps the previous binary for a rollback. It gives a delegated agent
 nothing it could not already do as the user (such as `systemctl --user
 restart`); it exists so a chat-driven release restarts after its report.
-`scv confirm`, which only asks the owner a question in chat and manages
-nothing, is allowed at any depth too (see
+`scv confirm` and `scv policy check publish`, which only ask the owner a
+question in chat (the latter only past the publish limit) and manage
+nothing, are allowed at any depth too (see
 [Supervised remote bridge](#supervised-remote-bridge)). Conversation handles belong to one SCV session and are checked
 against it, so the model cannot reach another session's conversation or pass a
 CLI session ID of its choosing; a continued conversation keeps its original
@@ -222,20 +263,28 @@ below.) The agent's own
 approval gate (labelled `[claude-1 acp]`) with a risk derived from the ACP tool
 kind in the same way as SCV's own tools: reads are read-only unless they touch
 a secret-like path, edits are file-system work, commands are processes, and
-fetches are network. Under the default `on-risk` policy a relayed read is
-therefore approved without asking, like SCV's own `read`. A denial selects the
-agent's reject option, and a relay without a gate rejects. `permissions =
-"full"` still turns the agent's own prompts off, through its own session mode
-or flag, so nothing is relayed then. Progress lines carry tool titles, never
-tool output or the agent's thoughts, and are redacted.
+fetches are network. The policy decides them as it decides SCV's own calls:
+under `on-risk` a relayed read is approved without asking, like SCV's own
+`read`, and under every mode the command of a relayed `execute` request
+passes the [command gates](#approval-behavior). A request a gate puts to the
+owner is never satisfied by `auto_approve` or a chat bridge's blanket
+approval. A denial selects the agent's reject option, and a relay without a
+gate rejects. Under `auto` an agent with a full-autonomy switch has its own
+prompts off, through its own session mode or flag, so it relays nothing;
+OpenCode and Kimi Code, which have no such switch, relay what their own
+configuration asks. Progress lines carry tool titles, never tool output or
+the agent's thoughts, and are redacted.
 
 A nested SCV (the `scv` agent) is a delegated agent like the others and adds no
 new trust: it runs as the user, unsandboxed, in its private home, one
-delegation level deeper. Its tools are still gated by approval, and each of
-its `approval.requested` events is relayed to the calling session's own
-approval gate (labelled `[scv-1 depth N]`, with the nested tool's name and
-risk), so the policy and user deciding the parent's side effects also decide
-the nested ones; a relay without a gate denies. `scv agents import scv`
+delegation level deeper. It runs with `--policy on-risk`, so its tools are
+still gated by approval, and each of its `approval.requested` events is
+relayed to the calling session's own approval gate (labelled
+`[scv-1 depth N]`, with the nested tool's name and risk), so the policy and
+user deciding the parent's side effects also decide the nested ones; a relay
+without a gate denies. Its own command gates apply first, and a request they
+put to the owner is denied there, since a stdio server has no daemon to ask
+through. `scv agents import scv`
 stores a copy of SCV's provider key in the nested SCV's `config.toml`
 (mode `0600`), because delegated agents never inherit key variables. The
 nested SCV has no parent daemon socket, and its protocol lines are bounded
@@ -244,26 +293,31 @@ by its frame limit.
 A background job (`background: true`) is the same delegated run, detached from
 the turn that started it. It has no turn to ask a person through, so each
 approval request its agent relays gets the answer the session gives without
-asking anyone: the approval policy's own decision (read-only requests under
-`on-risk` or `never`), else an approval when the client declared
-`auto_approve` in `session.start`, else a denial. A job therefore never gets
-more than the same request would get in the foreground: in the TUI its other
-requests are denied and it acts within the agent's own permissions (a step
-that needs approval fails), while an owner chat session, whose bridge already
-approves every request, grants its jobs the same. `auto_approve` is the
-client's own statement about how it answers, so it grants nothing that client
-could not already grant. While the owner watches the workbench (a TUI
-dashboard is open), a request the approval policy would put to a person, and
-that answer would deny, waits up to two minutes for the owner instead; the
-owner is the person the TUI would have asked in the foreground, so this too
-grants nothing more. What the policy decides on its own is never put to the
-owner (`never` still denies side effects outright), and an unanswered
-request is denied as before. `agent_cancel` stops a job at the model's request and
-has process risk. Jobs belong to their session and are cancelled, with their
-processes, when it closes; the job ledger then records them as interrupted. The turn the server starts to report a finished job has the session's
-own tools and approval policy, like any turn; its prompt quotes the job's
-bounded reply, which is untrusted delegated-agent output. Over WeChat or Feishu
-the report goes only to the owner's direct chat, as an unprompted message.
+asking anyone: the policy's own decision (every request under `auto`,
+read-only requests under `on-risk` or `read-only`, and the command gates'
+denials), else an approval when the client declared `auto_approve` in
+`session.start`, else a denial. A job therefore never gets more than the
+same request would get in the foreground: under a mode that asks, in the TUI
+its other requests are denied and it acts within the agent's own permissions
+(a step that needs approval fails), while an owner chat session, whose bridge
+already approves every request, grants its jobs the same. `auto_approve` is
+the client's own statement about how it answers, so it grants nothing that
+client could not already grant, and it never satisfies a request a command
+gate puts to the owner: that one is asked in chat, attended or not, as
+[Approval behavior](#approval-behavior) describes. While the owner watches
+the workbench (a TUI dashboard is open), a request the policy would put to a
+person, and that answer would deny, waits up to two minutes for the owner
+instead; the owner is the person the TUI would have asked in the foreground,
+so this too grants nothing more. What the policy decides on its own is never
+put to the owner (`read-only` still denies side effects outright), and an
+unanswered request is denied as before. `agent_cancel` stops a job at the
+model's request and has process risk. Jobs belong to their session and are
+cancelled, with their processes, when it closes; the job ledger then records
+them as interrupted. The turn the server starts to report a finished job has
+the session's own tools and approval policy, like any turn; its prompt
+quotes the job's bounded reply, which is untrusted delegated-agent output.
+Over WeChat or Feishu the report goes only to the owner's direct chat, as an
+unprompted message.
 A report turn that failed after a tool ran is never run again, so its side
 effects are not repeated. When the server gives up on the model and reports
 jobs directly (`background.reported`), the chat message is SCV's own, so on
@@ -300,15 +354,16 @@ and no second socket) and no token: the daemon's socket, mode 0600 in a
 open it. It drives the workbench only, never `session.start`. A client
 that opens a session of its own answers that session's approval requests
 itself; a job started through the workbench runs in the daemon's workbench
-session instead, whose gate decides by the policy first and sends what the
-policy would put to a person to the owner (while watching) or to the
-unattended answer, a denial, with `client_approves_all` off, never to the
-script. Automation never asks for the workbench with `watch: true`, so it
-never holds a relayed request as if the owner were watching. `approve` and
+session instead, whose gate decides by the policy first, asks the owner in
+chat what only the owner may answer, and sends what the policy would put to
+a person to the owner (while watching) or to the unattended answer, a
+denial, with `client_approves_all` off, never to the script. Automation
+never asks for the workbench with `watch: true`, so it never holds a
+relayed request as if the owner were watching. `approve` and
 `deny` stay text-only, one request at a time, and no command or flag
 approves on its own. Starting a job is the owner's own action, as before,
 so it needs no approval for its launch: a script that runs `scv jobs start
---agent codex …` for an agent configured with `permissions = "full"`
+--agent codex …` for an agent whose policy mode is `auto` (the default)
 starts exactly what the owner would by typing that command, with that
 agent's full permissions. That grants no new authority: same-user code can
 already speak the socket protocol and send `workbench_start`, or
@@ -325,22 +380,23 @@ own interactive UI on a conversation's session in a pseudo-terminal the
 daemon holds, and is the owner's own action like the others above. It is
 not a way around the approval gate. A terminal is offered only where it
 asks nothing the gate decides: an agent whose adapter declares an
-interactive resume with switches that turn every prompt off, configured
-with `permissions = "full"`, whose delegated runs relay no approval either
-(Codex). An agent whose terminal would ask what its delegated runs relay to
-the gate is refused: Codex with its own prompts on, and Claude Code always,
-since it asks before deleting files or publishing even with its prompts
-off. Keys typed into a terminal reach only the agent's terminal, never an
-approval; the requests other runs relay still wait in the workbench, and
-the agent in its terminal can do exactly what its delegated runs can, with
-the same permissions it was configured with. It runs as a delegated run of
-the same agent: the same private home, the same environment with every
-inherited credential, endpoint, and state-location variable removed, the
-same delegation tags (so `scv jobs` refuses to act inside it), recorded,
-stopped with its process group, and swept with its tagged descendants when
-it ends, the daemon stops, or the daemon dies (the kernel hangs up a
-terminal whose master side closes, and the next daemon stops what is left
-as an orphan). No other agent's home, token, or environment is involved,
+interactive resume with switches that turn every prompt off, whose policy
+mode is `auto` (the default), under which its delegated runs relay no
+approval either (Codex). An agent whose terminal would ask what its
+delegated runs relay to the gate is refused: Codex under a stricter mode,
+and Claude Code always, since it asks before deleting files or publishing
+even with its prompts off. Keys typed into a terminal reach only the agent's
+terminal, never an approval; the requests other runs relay still wait in
+the workbench, and the agent in its terminal can do exactly what its
+delegated runs can, with the same permissions it was configured with. It
+runs as a delegated run of the same agent: the same private home, the same
+environment with every inherited credential, endpoint, and state-location
+variable removed, the same delegation tags (so `scv jobs` refuses to act
+inside it), recorded, stopped with its process group, and swept with its
+tagged descendants when it ends, the daemon stops, or the daemon dies (the
+kernel hangs up a terminal whose master side closes, and the next daemon
+stops what is left as an orphan). No other agent's home, token, or
+environment is involved,
 and the terminal is the only descriptor of SCV's the agent gets (on Linux
 each one SCV opens for it is created closed on exec, so no other process
 SCV starts inherits the terminal and could read or type into it); the
@@ -472,9 +528,10 @@ it. See [Claude Code billing](configuration.md#claude-code-billing).
 
 `web_fetch` sends a GET request to a URL the model chooses, so the URL can
 carry anything the model has read, such as a secret that a prompt-injected
-page told it to send. Fetches therefore need approval unless the URL is HTTPS
-on a host in `web.auto_approve_domains`, a user-only list of documentation and
-registry hosts where a GET cannot publish data. The default list is `docs.rs`,
+page told it to send. Fetches therefore have network risk, which every policy
+mode but `auto` asks about or denies, unless the URL is HTTPS on a host in
+`web.auto_approve_domains`, a user-only list of documentation and registry
+hosts where a GET cannot publish data. The default list is `docs.rs`,
 `crates.io`, `doc.rust-lang.org`, `docs.python.org`, `pypi.org`, and
 `developer.mozilla.org`. A redirect cannot leave that list without failing the
 call.
@@ -501,8 +558,74 @@ summary. Approval is per call. A denial is returned to the model as a failed
 tool result. Cancellation denies and terminates pending work.
 
 The server, not the TUI, decides whether approval is required. This prevents a
-custom client from bypassing policy. `never` means deny side effects; it does
-not mean silently execute them.
+custom client from bypassing policy. `[policy] mode` decides SCV's own tool
+calls and the requests delegated agents relay to it: `auto`, the default,
+approves them; `on-risk` approves read-only requests and asks about the
+rest; `always` asks about every call; and `read-only` approves read-only
+requests and denies the rest. `read-only` means deny side effects; it does
+not mean silently execute them. Asking means the client's prompt, or for a
+background job the client's blanket answer and then the owner's workbench
+(see [Delegated runs](#delegated-runs)), else a denial. See
+[Policy](configuration.md#policy).
+
+Two built-in command gates decide first, under every mode. They match the
+exact command a call runs: a `bash` call's command, or the
+`rawInput.command` of an `execute` permission request an ACP agent relays.
+A `git push` that forces `main` (`-f`, `--force`, `--force-with-lease`, or a
+`+` refspec, with `main` or `refs/heads/main` as the destination, also
+behind wrappers such as `env`, `sudo`, or `host.sh`) is denied without
+asking anyone. A direct `cargo publish` needs the owner's yes. The gates
+read the plain spelling only, not a script or a `bash -c` that hides it:
+they are a guardrail against mistakes, not a security boundary.
+
+No blanket answer satisfies a request only the owner may answer: not a chat
+bridge's approval of every request in an owner session, not `auto_approve`
+for a background job, and not a script. In the TUI, where the person at the
+terminal is the owner, it is the usual prompt, with the gate's reason before
+the summary. Everywhere else (chat sessions, background jobs even while the
+owner watches the workbench, and any other client) it is a yes-or-no
+question to the owner in chat, asked the way `scv confirm` asks (see
+[Supervised remote bridge](#supervised-remote-bridge)), in the chat that
+started the session, else the `[notify]` owner chat. Only an explicit yes
+within 30 minutes allows it; no answer, a cancelled wait, or a question that
+could not be asked is a no. A stdio server, with no daemon to ask through,
+denies it.
+
+Publishing to crates.io asks nothing within a daily limit.
+`scv policy check publish --version <v> <crate>...`, which `feature-flow`'s
+publish script runs before its first `cargo publish`, counts each crate's
+versions crates.io lists as created in the last 24 hours, yanked ones
+included, and checks the whole release at once, so a release that would
+cross the line partway never starts. Within
+`[policy] publish_crate_versions_per_day` (20, crates.io's own limit) it
+says go; past it, or when a count cannot be read, it asks the owner as
+`scv confirm` does, and no answer in time is no. A crate already at
+crates.io's limit stops the release unasked, whatever the configured
+limit, so a yes cannot leave it half-published. A project layer can lower
+the limit but not raise it. crates.io's own limit holds even against an
+agent that skips the script.
+
+Residual risks of the default policy:
+
+- In full mode an agent relays nothing, so SCV sees none of its commands.
+  Claude Code's deny rules hold inside it; for every other agent the gates
+  are instructions it is trusted to follow (the workspace's `AGENTS.md`,
+  `feature-flow`, and the delegating brief), apart from the publish script.
+  An agent that ignores them can force-push or run `cargo publish` directly
+  as the user. The hard stops are then outside SCV: crates.io's limit, and
+  GitHub branch protection, which SCV does not configure.
+- A runaway agent can publish up to 20 versions of each crate in 24 hours,
+  and a version can be yanked but never deleted.
+- `auto` removes the TUI's per-call prompt, which could catch a command
+  injected by a fetched page, a file, or an issue. Reading secret-like files
+  and `web_fetch` to any host are both allowed, and together they can send a
+  secret out. `mode = "on-risk"` restores asking.
+- Grok Build, DeepSeek Harness, Gemini CLI, Qwen Code, Copilot, Cursor, and
+  Amp run unverified, so a stricter mode for one of them is a request SCV
+  cannot confirm.
+- The Codex check reads a file internal to Codex after the turn starts. A
+  Codex update that changes its format makes every Codex run fail closed
+  until the adapter is updated.
 
 ## Network and protocol
 
@@ -586,7 +709,8 @@ and the bridge denies any approval request, so remote messages do not authorize
 filesystem, shell, or delegated-agent tools. An account's `remote_tools =
 "owner"` setting, changeable only through local CLI or daemon control, grants
 the authenticated account owner full tools with every approval request
-auto-approved. That
+auto-approved, except one a [command gate](#approval-behavior) puts to the
+owner, which is asked as a question in chat. That
 makes the owner's chat account equivalent to local shell access as the daemon
 user: anyone who can
 send messages from it can read and change files, run commands, and launch
@@ -653,23 +777,26 @@ block goes out exactly as written and can look the same. The channel prompt
 asks the model for plain text without code blocks, which keeps its answers
 looking different in practice, not by guarantee.
 
-A question to the owner (`scv confirm`, asked by the feature flow before it
-publishes to crates.io) likewise goes only to an account owner's direct chat:
-the one that started the asking delegation, or the notify target. Its text is
+A question to the owner (`scv confirm`; `scv policy check publish` past the
+publish limit; or a request a [command gate](#approval-behavior) puts to the
+owner) likewise goes only to an account owner's direct chat: the one that
+started the asking delegation or session, or the notify target. Its text is
 the asker's, any local process of the user through the trusted socket,
-including a delegated agent whose words may repeat untrusted content, so it is
-bounded to 4 KiB and followed by SCV's own "Reply yes or no" line. Only the
-owner's own direct message answers, and only an exact yes or no word sent
-after the question reached the chat, by the platform's own message time; a
-question still waiting in the outbox, an earlier message replayed late,
-casual replies such as `ok`, other senders, group messages (the owner's
-included), messages with files, and any other words never answer, and a
-question gets at most one answer. The answer
+including a delegated agent whose words may repeat untrusted content (a
+gate's question is SCV's reason followed by the request's summary, which
+quotes the agent's command), so it is bounded to 4 KiB and followed by SCV's
+own "Reply yes or no" line. Only the owner's own direct message answers, and
+only an exact yes or no word sent after the question reached the chat, by
+the platform's own message time; a question still waiting in the outbox, an
+earlier message replayed late, casual replies such as `ok`, other senders,
+group messages (the owner's included), messages with files, and any other
+words never answer, and a question gets at most one answer. The answer
 starts no turn and reaches no model: it only lets the asker go ahead or stop,
 granting nothing else, and no answer, a withdrawn question, a daemon restart,
-or an answer lost in storing all mean the asker does not go ahead. The
-question is a safeguard the asker chooses to use, not a boundary: a delegated
-agent running as the user could still publish without asking.
+or an answer lost in storing all mean the asker does not go ahead. Asked by
+`scv confirm` or the publish check, the question is a safeguard the asker
+chooses to use, not a boundary: a delegated agent running as the user could
+still publish without asking, up to crates.io's own limit.
 
 Feishu text turns `<at user_id=…>` into mentions, including `@all`, so SCV
 breaks every `<at` in outgoing text with a zero-width space: model output, which

@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 
-use super::{AgentTransport, ApprovalPolicy, Config, WebSearchMode};
+use super::{AgentTransport, Config, PolicyMode, WebSearchMode};
 
 /// A day: long enough for any delegated job, short enough that deadline
 /// arithmetic never overflows.
@@ -21,12 +21,14 @@ const MAX_EPISODE_GAP_MINUTES: u64 = 365 * 24 * 60;
 /// The most `[tui.keys]` bindings.
 const MAX_KEY_BINDINGS: usize = 64;
 
-impl ApprovalPolicy {
-    fn strictness(self) -> u8 {
+impl PolicyMode {
+    /// How strict the mode is: a project layer may only raise it.
+    pub(super) fn strictness(self) -> u8 {
         match self {
+            Self::Auto => 0,
             Self::OnRisk => 1,
             Self::Always => 2,
-            Self::Never => 3,
+            Self::ReadOnly => 3,
         }
     }
 }
@@ -40,7 +42,7 @@ pub(super) struct Limit {
 }
 
 /// How many numeric limits [`Config::limits`] lists.
-const LIMITS: usize = 36;
+const LIMITS: usize = 37;
 
 impl Config {
     /// Every numeric limit, each named once, so validation and the project
@@ -138,6 +140,10 @@ impl Config {
             positive("web.fetch_timeout_seconds", self.web.fetch_timeout_seconds),
             limit("web.max_redirects", self.web.max_redirects),
             positive("web.max_search_results", self.web.max_search_results),
+            limit(
+                "policy.publish_crate_versions_per_day",
+                self.policy.publish_crate_versions_per_day,
+            ),
         ]
     }
 }
@@ -738,8 +744,11 @@ pub(super) fn validate_project_not_weaker(user: &Config, project: &Config) -> Re
     {
         bail!("project configuration cannot lower context reserves");
     }
-    if project.tools.approval_policy.strictness() < user.tools.approval_policy.strictness() {
-        bail!("project configuration cannot weaken tools.approval_policy");
+    if project.policy.mode.strictness() < user.policy.mode.strictness() {
+        bail!(
+            "project configuration cannot weaken policy.mode (strictness runs auto < on-risk < \
+             always < read-only)"
+        );
     }
     if project.tools.allow_no_timeout && !user.tools.allow_no_timeout {
         bail!("project configuration cannot enable tools.allow_no_timeout");

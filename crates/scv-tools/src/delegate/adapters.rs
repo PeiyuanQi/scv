@@ -107,15 +107,17 @@ pub enum Transport {
 pub struct AcpLaunch {
     /// The ACP server executable: the agent itself or its official adapter.
     pub command: &'static str,
-    /// Its arguments; a `{full}` entry is replaced by `full_args` for
-    /// `permissions = "full"` and dropped otherwise.
+    /// Its arguments; a `{full}` entry is replaced by `full_args` under
+    /// policy mode `auto` and dropped otherwise.
     pub(crate) args: &'static [&'static str],
     pub(crate) full_args: &'static [&'static str],
-    /// The ACP session mode selected for `permissions = "full"`, for agents
-    /// whose permission level is a session mode.
+    /// The ACP session mode that grants full permissions, for agents whose
+    /// permission level is a session mode. SCV selects it under `auto` and
+    /// checks the mode the session reports against it under every policy
+    /// mode.
     pub full_mode: Option<&'static str>,
-    /// Environment for the ACP server under `permissions = "full"`, for
-    /// settings the server reads only from its environment.
+    /// Environment for the ACP server under `auto`, for settings the server
+    /// reads only from its environment.
     pub full_environment: &'static [(&'static str, &'static str)],
     /// The server takes `model` and `effort` as session config options even
     /// though the CLI run once per turn takes neither as an argument, as
@@ -124,7 +126,7 @@ pub struct AcpLaunch {
     pub session_options: bool,
 }
 
-/// Expand `launch.args` for the configured permission level.
+/// Expand `launch.args` for the policy mode: `full` under `auto`.
 pub fn acp_args(launch: &AcpLaunch, full: bool) -> Vec<String> {
     let mut args = Vec::with_capacity(launch.args.len() + launch.full_args.len());
     for arg in launch.args {
@@ -151,11 +153,10 @@ pub enum Takeover {
     /// the text says which, for the refusal.
     Refused(&'static str),
     /// `args` (with `{session}` replaced) open the CLI's interactive UI on
-    /// the conversation's own session, and `full_args`, its
-    /// `permissions = "full"` switches, turn every approval prompt off. The
-    /// takeover is offered only under `permissions = "full"`: with its
-    /// prompts on, the CLI asks in its terminal what it relays to SCV's gate
-    /// when SCV runs it.
+    /// the conversation's own session, and `full_args`, its full-autonomy
+    /// switches, turn every approval prompt off. The takeover is offered
+    /// only under policy mode `auto`: with its prompts on, the CLI asks in
+    /// its terminal what it relays to SCV's gate when SCV runs it.
     Supported {
         args: &'static [&'static str],
         full_args: &'static [&'static str],
@@ -263,6 +264,46 @@ pub enum KeyStore {
     Scv { config: &'static str },
 }
 
+/// How a CLI run once per turn reports the permission mode it runs in, for
+/// SCV to check against the policy before it trusts the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeReport {
+    /// Claude Code's stream-json `system`/`init` event carries
+    /// `permissionMode`, in the same event as `apiKeySource`.
+    ClaudeInit,
+    /// `codex exec --json` reports no mode. The rollout file under the agent
+    /// home's `sessions/` records a `turn_context` with its `approval_policy`
+    /// and `sandbox_policy`, read shortly after the turn starts.
+    CodexRollout,
+    /// Nothing SCV reads: the mode is unverified, or the agent has no
+    /// full-autonomy switch to verify.
+    None,
+}
+
+/// Claude Code deny rules SCV passes to every run (`--disallowedTools`, or
+/// `_meta.claudeCode.options.disallowedTools` over ACP): force-pushing
+/// `main` in each spelling its prefix patterns can express, and a direct
+/// `cargo publish`. Its `bypassPermissions` mode approves every tool call
+/// except explicit deny rules. A prefix pattern matches the plain spelling,
+/// not a script or `bash -c` that hides it.
+pub const CLAUDE_DENY_RULES: &[&str] = &[
+    "Bash(git push --force origin main:*)",
+    "Bash(git push -f origin main:*)",
+    "Bash(git push --force-with-lease origin main:*)",
+    "Bash(git push --force origin HEAD:main:*)",
+    "Bash(git push -f origin HEAD:main:*)",
+    "Bash(git push --force-with-lease origin HEAD:main:*)",
+    "Bash(git push origin --force main:*)",
+    "Bash(git push origin -f main:*)",
+    "Bash(git push origin --force-with-lease main:*)",
+    "Bash(git push origin main --force:*)",
+    "Bash(git push origin main -f:*)",
+    "Bash(git push origin main --force-with-lease:*)",
+    "Bash(git push origin +main:*)",
+    "Bash(git push origin +HEAD:main:*)",
+    "Bash(cargo publish:*)",
+];
+
 /// Which billing identity a Claude Code agent is pinned to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentAuth {
@@ -301,13 +342,15 @@ pub struct AdapterDescriptor {
     /// Credential, endpoint, and state-location variables no delegated agent
     /// inherits. A trailing `*` matches a prefix.
     pub(crate) removed_environment: &'static [&'static str],
-    /// Added after `args` when `[agents.<name>] permissions = "full"`: the
-    /// CLI's own switches that turn off its approval prompts and sandbox and
+    /// Added after `args` when the agent's policy mode is `auto`: the CLI's
+    /// own switches that turn off its approval prompts and sandbox and
     /// enable web search where the CLI gates it. Empty when the CLI has no
     /// permission system of its own.
     pub full_permission_args: &'static [&'static str],
-    /// Variables set for `permissions = "full"`, for CLIs configured that way.
+    /// Variables set under `auto`, for CLIs configured that way.
     pub full_permission_environment: &'static [(&'static str, &'static str)],
+    /// How its CLI reports the permission mode it runs in.
+    pub mode_report: ModeReport,
     /// Per-user install directories searched before `PATH`, relative to the
     /// user's home, as a login shell orders them. A user service's `PATH`
     /// omits them, so without this the daemon would miss or pick a different
@@ -339,6 +382,21 @@ pub struct AdapterDescriptor {
     pub cli_turns: bool,
     /// Whether the owner can take a conversation over in its terminal.
     pub takeover: Takeover,
+}
+
+impl AdapterDescriptor {
+    /// Whether it has a full-autonomy switch of its own: arguments or
+    /// variables on its CLI or its ACP server, or an ACP session mode. One
+    /// without (pi, OpenCode, Kimi Code, a nested SCV) has no mode to verify.
+    pub fn mode_switch(&self) -> bool {
+        !self.full_permission_args.is_empty()
+            || !self.full_permission_environment.is_empty()
+            || self.acp.is_some_and(|launch| {
+                launch.full_mode.is_some()
+                    || !launch.full_args.is_empty()
+                    || !launch.full_environment.is_empty()
+            })
+    }
 }
 
 /// Directories every adapter searches before `PATH`, relative to the user's home.
@@ -407,6 +465,7 @@ const CLAUDE_BASE: AdapterDescriptor = AdapterDescriptor {
     ],
     full_permission_args: &["--permission-mode", "bypassPermissions"],
     full_permission_environment: &[],
+    mode_report: ModeReport::ClaudeInit,
     search_dirs: &[],
     login: Login::Command(&[]),
     status: Status::Stored(CLAUDE_KEY_STORE),
@@ -507,6 +566,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             "web_search=\"live\"",
         ],
         full_permission_environment: &[],
+        mode_report: ModeReport::CodexRollout,
         search_dirs: &[],
         login: Login::Command(&["login"]),
         status: Status::Command(&["login", "status"]),
@@ -571,6 +631,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Web search is on unless `--disable-web-search` is passed.
         full_permission_args: &["--always-approve"],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[".grok/bin"],
         login: Login::Command(&["login"]),
         status: Status::Stored(KeyStore::Grok {
@@ -617,6 +678,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Bypasses its file sandbox and sets its approval policy to `never`.
         full_permission_args: &[],
         full_permission_environment: &[("DSH_PERMISSION_MODE", "danger-full-access")],
+        mode_report: ModeReport::None,
         search_dirs: &[],
         login: Login::ApiKey(DSH_STORE),
         status: Status::Stored(DSH_STORE),
@@ -628,7 +690,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         conversation_files: None,
         credential_files: &[".dsh/.credentials.yaml"],
         transport: Transport::Process,
-        // Native: the shipped `acp` profile. `permissions = "full"` is the
+        // Native: the shipped `acp` profile. Its full mode is the
         // `DSH_PERMISSION_MODE` variable above. Its sessions offer `model`
         // (every configured provider's models, as `["provider","model"]`)
         // and `reasoning_effort`, which the headless profile cannot take.
@@ -661,6 +723,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // pi has no approval prompts or sandbox, and no built-in web search.
         full_permission_args: &[],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[],
         login: Login::Interactive {
             args: &[],
@@ -712,6 +775,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // YOLO mode approves every tool call without asking.
         full_permission_args: &["--yolo"],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[".npm-global/bin"],
         login: Login::Interactive {
             args: &[],
@@ -759,6 +823,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         removed_environment: &["QWEN_*", "DASHSCOPE_*"],
         full_permission_args: &["--yolo"],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[".npm-global/bin"],
         login: Login::Interactive {
             args: &[],
@@ -806,6 +871,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Its permissions are configuration, not a switch.
         full_permission_args: &[],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[".opencode/bin", ".npm-global/bin"],
         login: Login::Command(&["auth", "login"]),
         status: Status::Unchecked,
@@ -846,6 +912,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Without it, a prompt run denies every tool that needs approval.
         full_permission_args: &["--allow-all-tools"],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[".npm-global/bin"],
         login: Login::Interactive {
             args: &[],
@@ -886,6 +953,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Runs commands without asking.
         full_permission_args: &["--force"],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[],
         login: Login::Command(&["login"]),
         status: Status::Unchecked,
@@ -924,6 +992,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         removed_environment: &["AMP_*"],
         full_permission_args: &["--dangerously-allow-all"],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[".amp/bin", ".npm-global/bin"],
         login: Login::Command(&["login"]),
         status: Status::Unchecked,
@@ -956,6 +1025,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         removed_environment: &["KIMI_*", "MOONSHOT_*"],
         full_permission_args: &[],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         search_dirs: &[".kimi-code/bin"],
         login: Login::Interactive {
             args: &[],
@@ -992,7 +1062,9 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         product: "SCV",
         offers: "a nested SCV session with its own context and tools; suited to a self-contained sub-task kept out of this conversation's context, or work in another project",
         command: "scv",
-        args: &["server", "--stdio"],
+        // Every request that is not read-only is relayed to the parent's
+        // gate, whose policy decides.
+        args: &["server", "--stdio", "--policy", "on-risk"],
         prompt_args: &[],
         // A model is chosen per conversation through `session.start`.
         model_args: &[],
@@ -1006,6 +1078,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         // Its tool approvals are relayed to the calling session instead.
         full_permission_args: &[],
         full_permission_environment: &[],
+        mode_report: ModeReport::None,
         // Where `cargo install` puts `scv`; a user service's PATH omits it.
         search_dirs: &[".cargo/bin"],
         login: Login::Import,

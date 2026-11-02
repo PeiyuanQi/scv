@@ -119,6 +119,11 @@ fn fixture(capacity: usize) -> Fixture {
             tools: true,
             label: "test".into(),
             workbench: None,
+            owner: crate::approval::OwnerQuestions {
+                confirmer: None,
+                session: "s".into(),
+            },
+            owner_at_client: false,
         }),
         activity: None,
         // A turn of the session runs.

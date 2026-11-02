@@ -567,10 +567,16 @@ fn agent_defaults_are_shown_and_checked_with_the_hard_task_effort_named() {
         stdout.contains("with your configured model grok-4.7 and effort medium: \"ok\"\n"),
         "{stdout}"
     );
+    // Under the default policy, auto, Grok runs with its switch, which it
+    // reports nowhere SCV reads.
+    assert!(
+        stdout.contains("  mode      unverified (policy mode auto)\n"),
+        "{stdout}"
+    );
     // The call ran with the defaults; the hard-task effort is only named.
     let args = std::fs::read_to_string(home.path().join("grok-args")).unwrap();
     assert!(
-        args.starts_with("-m grok-4.7 --reasoning-effort medium -p "),
+        args.starts_with("--always-approve -m grok-4.7 --reasoning-effort medium -p "),
         "{args}"
     );
 }

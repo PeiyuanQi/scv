@@ -283,6 +283,7 @@ fn replies_are_bounded_on_character_boundaries() {
         usage: None,
         truncated: false,
         session: None,
+        mode: None,
     };
     let (json, truncated) = result.to_json("claude", None, Some(0), "", 3);
     assert!(truncated);

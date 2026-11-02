@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use scv_protocol::{DEFAULT_CONFIRM_SECONDS, MAX_CONFIRM_SECONDS, Purpose, RemoteTools, Senders};
 use std::path::PathBuf;
 
-use super::common::ApprovalArg;
+use super::common::PolicyArg;
 
 #[derive(Parser)]
 #[command(name = "scv", version, about = "SCV — Search, Construct, Verify")]
@@ -21,8 +21,9 @@ pub(crate) struct Cli {
     pub(crate) provider: Option<String>,
     #[arg(long, global = true)]
     pub(crate) base_url: Option<String>,
-    #[arg(long, global = true, value_enum)]
-    pub(crate) approval_policy: Option<ApprovalArg>,
+    /// `[policy] mode` for this run; `--approval-policy` is its old name.
+    #[arg(long, global = true, alias = "approval-policy", value_enum)]
+    pub(crate) policy: Option<PolicyArg>,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -102,6 +103,11 @@ pub(crate) enum Command {
         timeout: u64,
         /// The question, as the owner reads it.
         question: String,
+    },
+    /// Apply SCV's policy to a step a script is about to take.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
     },
     /// Run the authoritative server.
     Server {
@@ -368,6 +374,35 @@ pub(crate) enum ProjectCommand {
         task: Option<String>,
         #[arg(long)]
         run: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PolicyCommand {
+    /// Decide whether a step may go ahead.
+    Check {
+        #[command(subcommand)]
+        step: PolicyStep,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PolicyStep {
+    /// Publishing crates to crates.io: no question unless a crate would pass
+    /// `[policy] publish_crate_versions_per_day` versions in the last 24
+    /// hours, counted on crates.io with yanked versions. Past it, or when a
+    /// count cannot be fetched, the owner is asked in chat as `scv confirm`
+    /// asks (waiting `SCV_CONFIRM_TIMEOUT` seconds, default 1800). A crate
+    /// already at crates.io's own limit of 20 is a no without a question.
+    /// Exit status: 0 go; 1 no, or no answer in time; 2 could not decide or
+    /// ask.
+    Publish {
+        /// The version every crate is about to be published at.
+        #[arg(long)]
+        version: String,
+        /// The crates about to be published, the whole release at once.
+        #[arg(required = true, value_name = "CRATE")]
+        crates: Vec<String>,
     },
 }
 

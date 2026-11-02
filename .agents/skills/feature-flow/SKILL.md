@@ -23,16 +23,18 @@ stage 0.
   keys, `gh` login, rustup toolchain, crates.io token, or daemon socket. Run
   your own `git`, `gh`, `cargo`, `scv`, and `systemctl` commands as
   `scripts/host.sh <command...>`, which restores the real home. Outside SCV it
-  passes straight through. SCV also sets `SCV_PARENT`, which is how
-  `publish.sh` knows to ask the owner in chat before publishing (stage 6).
+  passes straight through. SCV also sets `SCV_PARENT`, which names the work
+  you run inside, so a question to the owner (stage 6) goes to the chat that
+  started it.
 - **SCV delegating this flow:** call the `agent` tool with agent `codex` or
   `claude` and `cwd` set to this repository (`scv` in a `~/projects`
   workspace) so the agent loads this skill and `AGENTS.md`. The agent default
   of `tools.agent_timeout_seconds` (3600) covers a normal landing (gates, CI, and publishing take 20-50
   minutes); pass a larger `timeout_seconds`, up to `tools.max_timeout_seconds`
-  (14400), when CI reruns are likely, and remember that publishing waits up
-  to 30 minutes for the owner's yes. The agent needs `permissions = "full"`
-  in its `[agents.<name>]` user config to run commands and edit files unprompted.
+  (14400), when CI reruns are likely, and remember that publishing past the
+  daily limit waits up to 30 minutes for the owner's yes. Under the default
+  `[policy] mode = "auto"`, the agent runs commands and edits files
+  unprompted.
 - **Secrets:** never print `~/.scv/config.toml`, `~/.scv/credentials/`,
   the sign-in files under `~/.scv/agents/` (such as `codex/auth.json`), or
   `~/.cargo/credentials.toml`. `scv config show` reports all of them with
@@ -66,9 +68,10 @@ stage 0.
   the change. Commit the manifest and lockfile together.
 - **Repo-only change** (skills, CI, unpackaged docs): no bump and no release.
   Stop after stage 5.
-- **Batch small fixes:** crates.io accepts at most 20 new versions of a crate
-  per 24 hours. Merge small fixes to `main` as they land, without a bump, and
-  publish them together in one release, keeping under 20 versions a day.
+- **Batch small fixes.** crates.io accepts at most 20 new versions of a crate
+  per 24 hours, and publishing past `[policy] publish_crate_versions_per_day`
+  (20) asks the owner (stage 6). Merge small fixes to `main` as they land,
+  without a bump, and publish them together in one release.
 
 ## 3. Gates
 
@@ -163,25 +166,30 @@ shared version. It publishes `scv-core`, `scv-protocol`, `scv-client`,
 and `scv-cli` in that order, and skips any crate already on
 crates.io, so a partial run can be resumed. It needs the `cargo login` token in the real home.
 
-**Delegated by SCV** (`SCV_PARENT` is set): publishing cannot be undone, so
-before its first `cargo publish` the script asks the owner with
-`scripts/host.sh scv confirm`, naming the version, the crates it will
-publish, and the `origin/main` commit. The question goes to the chat that
-started the work (or, for work started elsewhere, the `[notify]` owner chat),
-and the script publishes only when the owner answers yes; no, no answer
-within 30 minutes (`SCV_CONFIRM_TIMEOUT` seconds), or a question that could
-not be asked stops it with nothing published. Run it with a tool timeout
-longer than that wait (in the background if your shell tool caps foreground
-commands, as Claude Code's does at 10 minutes); if the command is killed, the
-daemon withdraws the question after a minute and tells the chat. Report a no
-or an unasked question to the owner instead of retrying on your own, and never
-run `cargo publish` directly to get around it. `--check` never asks, and a
-run from a terminal without `SCV_PARENT` does not ask either.
+Publishing cannot be undone, so before its first `cargo publish` the script
+puts the whole release through SCV's publish rule with
+`scripts/host.sh scv policy check publish --version <version> <crate>...`.
+Within the limit it publishes without a question: no crate may pass
+`[policy] publish_crate_versions_per_day` (20) versions in the last 24 hours,
+counted from crates.io's own version list, yanked versions included. Past
+it, or when a count cannot be fetched, the owner is asked in chat (the chat
+that started the work, or else the `[notify]` owner chat), and the script
+publishes only on yes; no, no answer within 30 minutes
+(`SCV_CONFIRM_TIMEOUT` seconds), or a question that could not be asked stops
+it with nothing published. A crate already at crates.io's own limit of 20
+stops it with nothing published and no question, since crates.io would
+refuse that crate after the ones before it. Run the script with a tool
+timeout longer than that wait (in the background if your shell tool caps
+foreground commands, as Claude Code's does at 10 minutes); if the command is
+killed, the daemon withdraws the question after a minute and tells the chat.
+Report a no or an unasked question to the owner instead of retrying on your
+own, and never run `cargo publish` directly to get around it. `--check` never
+asks.
 
-The first release that includes `scv confirm` (0.3.0) must be published from
-a terminal; later releases can be published from chat. Until that release is
-installed, the `scv` and daemon a chat-delegated agent runs cannot ask, so the
-script stops with nothing published and says so; there is no way around it.
+An installed `scv` without `scv policy` cannot apply the rule. The script then
+falls back to asking the owner with `scv confirm` before every publish by an
+agent SCV delegated to (`SCV_PARENT` is set), so the first release that
+carries the rule is not published unasked; a run from a terminal does not ask.
 
 ## 7. Install and restart
 

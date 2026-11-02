@@ -1,7 +1,8 @@
 //! `scv agents check`: call each installed agent the way SCV's `agent` tool
 //! does, and report its version, how SCV reaches it, the models and efforts
-//! it offers, whether a short call with the user's configured model and
-//! effort works, and whether it lists the user's hard-task effort.
+//! it offers, the permission mode it reported (or that it is unverified),
+//! whether a short call with the user's configured model and effort works,
+//! and whether it lists the user's hard-task effort.
 
 use std::{
     path::Path,
@@ -117,6 +118,8 @@ pub(crate) async fn check(
         };
         let options_file = adapter.options_file.clone();
         let model_hint = adapter.model_hint.clone();
+        let policy = adapter.policy.clone();
+        let mode_switch = adapter.mode_switch;
         let started = Instant::now();
         let result = scv_tools::call_agent(
             name,
@@ -157,6 +160,17 @@ pub(crate) async fn check(
                 );
             } else {
                 println!("  hard task effort {effort}");
+            }
+        }
+        // What SCV knew of the mode the agent ran in.
+        if let Ok(value) = &result {
+            match value["mode"].as_str() {
+                Some(mode) => println!("  mode      {} (policy mode {policy})", excerpt(mode)),
+                None if !mode_switch => println!(
+                    "  mode      not applicable: it has no full-autonomy switch (policy mode \
+                     {policy})"
+                ),
+                None => {}
             }
         }
         match result {

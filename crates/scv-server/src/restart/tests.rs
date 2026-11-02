@@ -818,7 +818,7 @@ async fn a_restart_waits_for_a_workbench_sessions_jobs() {
     .unwrap();
     let instance = crate::test_support::test_instance(&path);
     let registry = Arc::new(DelegationRegistry::new(&instance.layout));
-    let hosts = crate::workbench::Hosts::new(instance, Arc::clone(&registry));
+    let hosts = crate::workbench::Hosts::new(instance, Arc::clone(&registry), None);
     let workspace = tempfile::tempdir().unwrap();
     let workspace_path = std::fs::canonicalize(workspace.path()).unwrap();
     crate::workbench::control(
@@ -860,15 +860,19 @@ async fn a_restart_does_not_wait_for_prompts_queued_behind_a_takeover() {
     let agent = path.join("fake-codex");
     std::fs::write(
         &agent,
-        concat!(
-            "#!/bin/sh\n",
-            "case \"$1\" in\n",
-            "  resume) echo \"codex terminal on $2\"; while read -r line; do :; done ;;\n",
-            "  *)\n",
-            "    echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
-            "    echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
-            "    ;;\n",
-            "esac\n",
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "case \"$1\" in\n",
+                "  resume) echo \"codex terminal on $2\"; while read -r line; do :; done ;;\n",
+                "  *)\n",
+                "{rollout}",
+                "    echo '{{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}}'\n",
+                "    echo '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
+                "    ;;\n",
+                "esac\n",
+            ),
+            rollout = crate::test_support::codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a53"),
         ),
     )
     .unwrap();
@@ -876,7 +880,7 @@ async fn a_restart_does_not_wait_for_prompts_queued_behind_a_takeover() {
     std::fs::write(
         path.join("config.toml"),
         format!(
-            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\npermissions = \"full\"\n",
+            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\nmode = \"auto\"\n",
             agent.display()
         ),
     )
@@ -888,7 +892,7 @@ async fn a_restart_does_not_wait_for_prompts_queued_behind_a_takeover() {
     .unwrap();
     let instance = crate::test_support::test_instance(&path);
     let registry = Arc::new(DelegationRegistry::new(&instance.layout));
-    let hosts = crate::workbench::Hosts::new(instance, Arc::clone(&registry));
+    let hosts = crate::workbench::Hosts::new(instance, Arc::clone(&registry), None);
     let workspace = tempfile::tempdir().unwrap();
     let workspace_path = std::fs::canonicalize(workspace.path()).unwrap();
     let act = |command| crate::workbench::control(&hosts, command);

@@ -19,6 +19,8 @@ use crate::{
     },
 };
 
+use super::ModeWatch;
+
 /// JSON-RPC "method not found".
 pub(super) const METHOD_NOT_FOUND: i64 = -32601;
 
@@ -27,6 +29,9 @@ pub(super) const METHOD_NOT_FOUND: i64 = -32601;
 pub(super) struct Rpc {
     pub(super) live: Arc<LiveChild>,
     pub(super) next_id: AtomicU64,
+    /// The session mode the agent reports in its `current_mode_update`
+    /// notifications, whichever reader receives them.
+    pub(super) mode: ModeWatch,
 }
 
 /// One message from the agent.
@@ -159,7 +164,12 @@ impl Rpc {
         let params = message.remove("params").unwrap_or(Value::Null);
         Ok(match (message.remove("id"), method) {
             (Some(id), Some(method)) => Incoming::Request { id, method, params },
-            (None, Some(method)) => Incoming::Notification { method, params },
+            (None, Some(method)) => {
+                if method == "session/update" {
+                    self.mode.update(&params);
+                }
+                Incoming::Notification { method, params }
+            }
             (Some(id), None) => Incoming::Response {
                 id,
                 outcome: match message.remove("error") {

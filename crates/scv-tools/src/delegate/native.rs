@@ -7,6 +7,7 @@ use std::{
     io::Read as _,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -19,9 +20,10 @@ use crate::{
     args::{Timeouts, bounded, parse_args, validate_process_args},
     delegate::{
         activity::{RunHeader, RunTransport},
-        adapters::{self, OutputFormat, Resume},
+        adapters::{self, ModeReport, OutputFormat, Resume},
         agent::{Accepts, Backend},
         conversation::{self, ConversationStore},
+        mode,
         output::{self, AgentStream, RunExit, STDERR_TAIL_BYTES, TailBuffer, add_sign_in_hint},
         records::{self, DelegationGuard, DelegationRegistry},
         request::{
@@ -31,6 +33,12 @@ use crate::{
     },
     process::{ProcessSpec, child_pid, drain_output, spawn_process, supervise},
 };
+
+/// How long after a Codex thread starts its rollout may take to record the
+/// turn's mode before the run stops unverified.
+const ROLLOUT_WAIT: Duration = Duration::from_secs(30);
+/// How often the rollout is read meanwhile.
+const ROLLOUT_POLL: Duration = Duration::from_millis(200);
 
 /// An agent run as one CLI process per turn.
 pub(crate) struct NativeAgentTool {
@@ -43,6 +51,11 @@ pub(crate) struct NativeAgentTool {
     args: Vec<String>,
     prompt_args: Vec<String>,
     full_permission_args: Option<Vec<String>>,
+    /// The policy mode in effect for this agent, such as `auto`.
+    policy: String,
+    mode_report: ModeReport,
+    /// It has a full-autonomy switch, so a mode to verify.
+    mode_switch: bool,
     model_args: Vec<String>,
     effort_args: Vec<String>,
     environment: Vec<(OsString, OsString)>,
@@ -108,6 +121,14 @@ impl NativeAgentTool {
             command.push(serde_json::to_string(settings).map_err(|error| {
                 ToolError::failed(format!("encode Claude Code settings: {error}"))
             })?);
+            // The output format's arguments always follow, so the rule list
+            // ends before the prompt.
+            command.push("--disallowedTools".into());
+            command.extend(
+                adapters::CLAUDE_DENY_RULES
+                    .iter()
+                    .map(|rule| (*rule).to_owned()),
+            );
         }
         command.extend(self.full_permission_args.iter().flatten().cloned());
         command.extend(self.output.args().iter().map(|arg| (*arg).to_owned()));
@@ -163,6 +184,9 @@ impl NativeAgentTool {
             args: config.args,
             prompt_args: config.prompt_args,
             full_permission_args: config.full_permission_args,
+            policy: config.policy,
+            mode_report: config.mode_report,
+            mode_switch: config.mode_switch,
             model_args: config.model_args,
             effort_args: config.effort_args,
             environment: config.environment,
@@ -183,6 +207,32 @@ impl NativeAgentTool {
     pub(crate) fn with_worktrees(mut self, root: Option<PathBuf>) -> Self {
         self.worktrees = root;
         self
+    }
+
+    /// When SCV verifies this agent's mode.
+    fn mode_check(&self) -> mode::Check {
+        match self.mode_report {
+            ModeReport::ClaudeInit => mode::Check::BeforeTools,
+            ModeReport::CodexRollout => mode::Check::AfterStart,
+            ModeReport::None if self.mode_switch => mode::Check::Unverified,
+            ModeReport::None => mode::Check::NotApplicable,
+        }
+    }
+
+    /// What the policy expects of the mode this agent's run reports, when
+    /// it reports one.
+    fn expected_mode(&self) -> Option<mode::Expected> {
+        let full_mode = match self.mode_report {
+            ModeReport::ClaudeInit => mode::CLAUDE_FULL_MODE,
+            ModeReport::CodexRollout => mode::CODEX_FULL_MODE,
+            ModeReport::None => return None,
+        };
+        Some(mode::Expected {
+            agent: self.name.clone(),
+            policy: self.policy.clone(),
+            full_mode: full_mode.to_owned(),
+            full: self.full_permission_args.is_some(),
+        })
     }
 
     /// Arguments that name per-run files or IDs, placed after the fixed and
@@ -265,13 +315,12 @@ impl Backend for NativeAgentTool {
         } else {
             format!("for up to {} seconds", timeout.as_secs())
         };
-        let permissions = if self.full_permission_args.is_some() {
-            " FULL PERMISSIONS (permissions = \"full\"): the agent's own approval prompts \
-             and sandbox are off, so it edits files, runs commands, and uses the network \
-             without asking."
-        } else {
-            ""
-        };
+        let permissions = mode::summary(
+            &self.policy,
+            self.full_permission_args.is_some(),
+            self.mode_check(),
+            false,
+        );
         Ok(format!(
             "Launch {executable} with args {command_args:?} and prompt {:?}{conversation} in {directory} {duration}. The nested agent has your user permissions.{permissions}",
             bounded(&args.prompt, 2000),
@@ -401,7 +450,7 @@ impl Backend for NativeAgentTool {
         }
         let fixed_len = self.args.len()
             + if matches!(self.auth, AgentAuthPlan::Claude { .. }) {
-                2
+                3 + adapters::CLAUDE_DENY_RULES.len()
             } else {
                 0
             }
@@ -464,6 +513,16 @@ impl Backend for NativeAgentTool {
             .as_ref()
             .map(|delegation| Arc::clone(&delegation.registry))
             .zip(pending);
+        let expected = self.expected_mode();
+        let rollout = match (&self.home, self.mode_report) {
+            (Some(home), ModeReport::CodexRollout) => Some(Rollout::new(
+                home,
+                turn.as_ref()
+                    .and_then(|turn| turn.vendor.as_deref())
+                    .filter(|_| continuing),
+            )),
+            _ => None,
+        };
         let run = execute_agent_process(
             ProcessSpec {
                 executable: executable.as_os_str().to_owned(),
@@ -481,8 +540,10 @@ impl Backend for NativeAgentTool {
                     AgentAuthPlan::None => adapters::AgentAuth::None,
                 })
                 .with_progress(context.progress)
-                .with_activity(activity.clone()),
+                .with_activity(activity.clone())
+                .with_mode(expected),
             registration,
+            rollout,
             context.cancellation,
         )
         .await;
@@ -506,6 +567,9 @@ impl Backend for NativeAgentTool {
         };
         let killed = run.exit == RunExit::Killed;
         let mut result = run.stream.finish(run.exit, fallback);
+        if self.mode_report == ModeReport::None {
+            result.mode = mode::unverified(self.mode_check(), None);
+        }
         // A failed CLI's stderr is its own diagnostics, never the reply.
         let stderr = run.stderr_tail.trim();
         if result.status == output::RunStatus::Failed
@@ -564,13 +628,98 @@ struct AgentRun {
     stderr_tail: String,
 }
 
+/// Where a Codex run's rollout records the mode of its turn.
+#[derive(Clone)]
+struct Rollout {
+    home: PathBuf,
+    /// A continued thread and its rollout's length before this turn: only
+    /// what the turn appends after it counts.
+    resumed: Option<(String, u64)>,
+}
+
+impl Rollout {
+    fn new(home: &Path, resumed: Option<&str>) -> Self {
+        Self {
+            home: home.to_owned(),
+            resumed: resumed.map(|thread| {
+                let length = mode::codex_rollout(home, thread)
+                    .and_then(|file| std::fs::metadata(file).ok())
+                    .map_or(0, |metadata| metadata.len());
+                (thread.to_owned(), length)
+            }),
+        }
+    }
+
+    /// The thread whose rollout records this turn: the one the run named,
+    /// else the one it resumes, which a resumed turn need not name again.
+    fn thread(&self, stream: &AgentStream) -> Option<String> {
+        stream
+            .session()
+            .or(self.resumed.as_ref().map(|(thread, _)| thread.as_str()))
+            .map(str::to_owned)
+    }
+
+    /// The mode this turn of thread `thread` recorded, once it has.
+    fn read(&self, thread: &str) -> Option<String> {
+        let file = mode::codex_rollout(&self.home, thread)?;
+        let offset = match &self.resumed {
+            Some((resumed, length)) if resumed == thread => *length,
+            _ => 0,
+        };
+        mode::codex_turn_mode(&file, offset)
+    }
+
+    /// Check the turn's mode once the thread has started, stopping the run
+    /// on a mismatch or when nothing is recorded in [`ROLLOUT_WAIT`].
+    async fn watch(self, stream: Arc<Mutex<AgentStream>>) {
+        let mut deadline = None;
+        loop {
+            tokio::time::sleep(ROLLOUT_POLL).await;
+            let thread = {
+                let stream = stream.lock().await;
+                if stream.mode_settled() {
+                    return;
+                }
+                self.thread(&stream)
+            };
+            let Some(thread) = thread else {
+                continue;
+            };
+            let deadline =
+                *deadline.get_or_insert_with(|| tokio::time::Instant::now() + ROLLOUT_WAIT);
+            let reported = self.read(&thread);
+            let mut stream = stream.lock().await;
+            match reported {
+                Some(reported) => return stream.check_mode(&reported),
+                None if tokio::time::Instant::now() >= deadline => {
+                    return stream.reject_missing_mode();
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Read the turn's mode once more after the run ended, for a turn too
+    /// short for [`watch`](Self::watch).
+    async fn settle(&self, stream: &Mutex<AgentStream>) {
+        let mut stream = stream.lock().await;
+        if stream.mode_settled() {
+            return;
+        }
+        if let Some(reported) = self.thread(&stream).and_then(|thread| self.read(&thread)) {
+            stream.check_mode(&reported);
+        }
+    }
+}
+
 /// Run a native agent: stdout is parsed as it arrives rather than buffered,
 /// stderr keeps only its tail, and the run is recorded in the delegation
-/// registry while it lasts.
+/// registry while it lasts. `rollout` checks a Codex turn's mode meanwhile.
 async fn execute_agent_process(
     mut spec: ProcessSpec,
     stream: AgentStream,
     registration: Option<(Arc<DelegationRegistry>, records::PendingDelegation)>,
+    rollout: Option<Rollout>,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentRun, ToolError> {
     let project = crate::project_environment::resolve(
@@ -597,9 +746,13 @@ async fn execute_agent_process(
     let guard: Option<DelegationGuard> =
         registration.and_then(|(registry, pending)| registry.register(pending, pid as u32).ok());
     // Cancelled from the stdout parser when Claude's init event names a
-    // credential source other than the pinned one.
+    // credential source other than the pinned one, or when the run reports
+    // a permission mode the policy does not expect.
     let halt = stream.halt_token();
     let stdout = Arc::new(Mutex::new(stream));
+    let watch = rollout
+        .clone()
+        .map(|rollout| tokio::spawn(rollout.watch(Arc::clone(&stdout))));
     let stderr = Arc::new(Mutex::new(TailBuffer::new(STDERR_TAIL_BYTES)));
     let stdout_task = child
         .stdout
@@ -620,6 +773,13 @@ async fn execute_agent_process(
     )
     .await;
     records::untrack_spawned(pid as u32);
+    if let Some(watch) = watch {
+        watch.abort();
+        let _ = watch.await;
+    }
+    if let Some(rollout) = &rollout {
+        rollout.settle(&stdout).await;
+    }
     let killed = guard.as_ref().is_some_and(DelegationGuard::was_killed);
     if let Some(guard) = guard {
         guard.finish().await;

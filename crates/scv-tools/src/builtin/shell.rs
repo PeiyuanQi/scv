@@ -70,6 +70,12 @@ impl Tool for BashTool {
         ))
     }
 
+    fn approval_command(&self, arguments: &Value) -> Option<String> {
+        parse_args::<BashArgs>(arguments)
+            .ok()
+            .map(|args| args.command)
+    }
+
     async fn execute(
         &self,
         arguments: Value,

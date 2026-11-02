@@ -12,7 +12,7 @@ use scv_tools::{
     web::{SearchBackend, WebToolsConfig},
 };
 
-use super::{AgentPermissions, AgentTransport, Config, WebSearchMode, load::ensure_private_dir};
+use super::{AgentTransport, Config, PolicyMode, WebSearchMode, load::ensure_private_dir};
 
 impl Config {
     pub(crate) fn core_agent(&self, system_prompt: String) -> CoreAgentConfig {
@@ -170,7 +170,8 @@ impl Config {
                     };
                     environment.push((OsString::from(variable), path.into()));
                 }
-                let full = config.permissions == AgentPermissions::Full;
+                let mode = self.agent_mode(name);
+                let full = mode == PolicyMode::Auto;
                 environment.extend(
                     descriptor
                         .fixed_environment
@@ -187,7 +188,12 @@ impl Config {
                     name.clone(),
                     AgentAdapterConfig {
                         command: config.command.clone(),
-                        args: config.args.clone(),
+                        args: if descriptor.transport == scv_tools::adapters::Transport::ScvProtocol
+                        {
+                            nested_scv_args(&config.args)
+                        } else {
+                            config.args.clone()
+                        },
                         prompt_args: config.prompt_args.clone(),
                         full_permission_args: full.then(|| {
                             descriptor
@@ -196,6 +202,9 @@ impl Config {
                                 .map(|arg| (*arg).to_owned())
                                 .collect()
                         }),
+                        policy: mode.as_str().into(),
+                        mode_report: descriptor.mode_report,
+                        mode_switch: descriptor.mode_switch(),
                         model_args: config.model_args.clone(),
                         effort_args: config.effort_args.clone(),
                         model_hint: descriptor.model_hint.into(),
@@ -237,7 +246,7 @@ impl Config {
                             scv_tools::AcpAgentLaunch {
                                 command: launch.command.to_owned(),
                                 args: scv_tools::adapters::acp_args(&launch, full),
-                                full_mode: launch.full_mode.filter(|_| full).map(str::to_owned),
+                                full_mode: launch.full_mode.map(str::to_owned),
                                 environment: launch
                                     .full_environment
                                     .iter()
@@ -271,6 +280,49 @@ impl Config {
             .collect()
     }
 
+    /// The policy SCV's own tools and the requests relayed to it are
+    /// decided by.
+    pub(crate) fn policy(&self) -> crate::approval::Policy {
+        crate::approval::Policy {
+            mode: self.policy.mode,
+        }
+    }
+
+    /// `[policy] mode` in effect.
+    pub fn policy_mode(&self) -> PolicyMode {
+        self.policy.mode
+    }
+
+    /// The mode delegated agent `name` starts in: its own `[agents.<name>]
+    /// mode`, else `[policy] mode`.
+    pub fn agent_mode(&self, name: &str) -> PolicyMode {
+        self.agents
+            .0
+            .get(name)
+            .and_then(|agent| agent.mode)
+            .unwrap_or(self.policy.mode)
+    }
+
+    /// The agents with a mode of their own, and that mode.
+    pub fn agent_modes(&self) -> Vec<(String, PolicyMode)> {
+        self.agents
+            .0
+            .iter()
+            .filter_map(|(name, agent)| Some((name.clone(), agent.mode?)))
+            .collect()
+    }
+
+    /// `[policy] publish_crate_versions_per_day`: versions of one crate that
+    /// may reach crates.io in any 24 hours before publishing asks the owner.
+    pub fn publish_crate_versions_per_day(&self) -> u64 {
+        self.policy.publish_crate_versions_per_day
+    }
+
+    /// The deprecated keys the layers set, each read as its replacement.
+    pub fn deprecated(&self) -> &[super::Deprecated] {
+        &self.deprecated
+    }
+
     /// The paths under this instance's home. It does not know whether the
     /// instance is the default one, so take the service unit name from the
     /// `Layout` the process resolved instead.
@@ -291,4 +343,36 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// A nested SCV's `args` with its policy at least `on-risk`, so every request
+/// that is not read-only is relayed to the parent's gate, whatever `[agents.scv]
+/// args` say: any `--policy` (or `--approval-policy`) is dropped, and the
+/// stricter of `on-risk` and the one dropped is appended.
+fn nested_scv_args(args: &[String]) -> Vec<String> {
+    let mut kept = Vec::with_capacity(args.len() + 2);
+    let mut mode = PolicyMode::OnRisk;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let value = match arg.split_once('=') {
+            Some(("--policy" | "--approval-policy", value)) => value,
+            _ if matches!(arg.as_str(), "--policy" | "--approval-policy") => {
+                args.next().map_or("", String::as_str)
+            }
+            _ => {
+                kept.push(arg.clone());
+                continue;
+            }
+        };
+        let named = match value {
+            "always" => PolicyMode::Always,
+            "read-only" | "never" => PolicyMode::ReadOnly,
+            _ => PolicyMode::OnRisk,
+        };
+        if named.strictness() > mode.strictness() {
+            mode = named;
+        }
+    }
+    kept.extend(["--policy".to_owned(), mode.as_str().to_owned()]);
+    kept
 }

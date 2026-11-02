@@ -65,6 +65,9 @@ async fn a_killed_scv_process_leaves_nothing_after_the_next_reconcile() {
             "fake-model",
             "--base-url",
             &format!("http://{address}/v1"),
+            // The delegation asks the client first.
+            "--policy",
+            "on-risk",
             "server",
             "--stdio",
         ])

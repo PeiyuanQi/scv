@@ -32,7 +32,9 @@ pub(crate) async fn confirm(layout: &Layout, question: String, timeout: u64) -> 
     }
 }
 
-async fn ask(layout: &Layout, question: String, timeout: u64) -> i32 {
+/// Ask `question`, waiting up to `timeout` seconds, and return the exit
+/// status its answer means; `scv policy check publish` asks this way too.
+pub(super) async fn ask(layout: &Layout, question: String, timeout: u64) -> i32 {
     let parent = std::env::var(scv_tools::delegation::PARENT_VARIABLE)
         .ok()
         .filter(|chain| !chain.trim().is_empty());

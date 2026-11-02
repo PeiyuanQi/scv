@@ -62,6 +62,25 @@ pub(super) fn describe_permission(params: &Value, label: &str) -> (ToolRisk, Str
     (risk, summary)
 }
 
+/// The exact command a permission request would run, for the policy's
+/// command gates: an `execute` call's `rawInput.command`, as a string or as
+/// the words of an argument list.
+pub(super) fn permission_command(params: &Value) -> Option<String> {
+    let call = params.get("toolCall")?;
+    if call.get("kind").and_then(Value::as_str) != Some("execute") {
+        return None;
+    }
+    match call.pointer("/rawInput/command")? {
+        Value::String(command) => Some(command.clone()),
+        Value::Array(words) => words
+            .iter()
+            .map(|word| word.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+            .map(|words| words.join(" ")),
+        _ => None,
+    }
+}
+
 /// The permission outcome for SCV's decision: allow or reject once, falling
 /// back to the "always" option, and cancelling when the agent offers neither.
 pub(super) fn choose_option(options: Option<&Value>, approved: bool) -> Value {

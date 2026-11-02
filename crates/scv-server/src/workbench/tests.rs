@@ -14,12 +14,15 @@ fn instance_with_fake_codex() -> (tempfile::TempDir, Instance) {
     let agent = path.join("fake-codex");
     std::fs::write(
         &agent,
-        concat!(
-            "#!/bin/sh\n",
-            "echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
-            "echo '{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"cargo test\"}}'\n",
-            "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"landed 0.9.9\"}}'\n",
-            "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+        format!(
+            "#!/bin/sh\n{}{}",
+            crate::test_support::codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a53"),
+            concat!(
+                "echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
+                "echo '{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"cargo test\"}}'\n",
+                "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"landed 0.9.9\"}}'\n",
+                "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+            ),
         ),
     )
     .unwrap();
@@ -46,7 +49,7 @@ fn instance_with_fake_codex() -> (tempfile::TempDir, Instance) {
 
 fn hosts(instance: &Instance) -> Arc<Hosts> {
     let registry = Arc::new(DelegationRegistry::new(&instance.layout));
-    Hosts::new(instance.clone(), registry)
+    Hosts::new(instance.clone(), registry, None)
 }
 
 async fn snapshot(hosts: &Arc<Hosts>) -> scv_protocol::WorkbenchSnapshot {
@@ -280,7 +283,7 @@ async fn the_snapshot_lists_queues_kept_from_sessions_that_stopped() {
     assert_eq!(snapshot.restorable[0].id, "old-session");
 }
 
-/// An instance whose Codex, with `permissions = "full"`, answers each turn
+/// An instance whose Codex, in policy mode `auto`, answers each turn
 /// at once (one whose prompt says `slow` after 30 seconds) and opens an
 /// interactive terminal for `resume <thread>`.
 fn instance_with_terminal_codex() -> (tempfile::TempDir, Instance) {
@@ -288,27 +291,31 @@ fn instance_with_terminal_codex() -> (tempfile::TempDir, Instance) {
     let agent = instance.layout.home().join("fake-codex");
     std::fs::write(
         &agent,
-        concat!(
-            "#!/bin/sh\n",
-            "case \"$1\" in\n",
-            "  resume)\n",
-            "    echo \"codex terminal on $2\"\n",
-            "    while IFS= read -r line; do echo \"typed: $line\"; done\n",
-            "    ;;\n",
-            "  *)\n",
-            "    echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
-            "    case \"$*\" in *slow*) sleep 30 ;; esac\n",
-            "    echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"done\"}}'\n",
-            "    echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
-            "    ;;\n",
-            "esac\n",
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "case \"$1\" in\n",
+                "  resume)\n",
+                "    echo \"codex terminal on $2\"\n",
+                "    while IFS= read -r line; do echo \"typed: $line\"; done\n",
+                "    ;;\n",
+                "  *)\n",
+                "{rollout}",
+                "    echo '{{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}}'\n",
+                "    case \"$*\" in *slow*) sleep 30 ;; esac\n",
+                "    echo '{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"done\"}}}}'\n",
+                "    echo '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
+                "    ;;\n",
+                "esac\n",
+            ),
+            rollout = crate::test_support::codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a53"),
         ),
     )
     .unwrap();
     std::fs::write(
         instance.layout.home().join("config.toml"),
         format!(
-            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\npermissions = \"full\"\n",
+            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\nmode = \"auto\"\n",
             agent.display().to_string()
         ),
     )

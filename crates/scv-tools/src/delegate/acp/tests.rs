@@ -70,6 +70,9 @@ fn adapter(full: bool) -> AgentAdapterConfig {
         args: Vec::new(),
         prompt_args: Vec::new(),
         full_permission_args: full.then(Vec::new),
+        policy: if full { "auto" } else { "on-risk" }.into(),
+        mode_report: crate::adapters::ModeReport::None,
+        mode_switch: false,
         model_args: Vec::new(),
         effort_args: Vec::new(),
         model_hint: "Model ID.".into(),
@@ -786,6 +789,7 @@ async fn full_permissions_select_the_mode_and_calls_choose_offered_options() {
         .await
         .unwrap();
     assert_eq!(json(&output)["status"], "completed");
+    assert_eq!(json(&output)["mode"], "verified bypassPermissions");
     let calls = calls(dir.path());
     assert!(calls.contains("mode=bypassPermissions"), "{calls}");
     assert!(calls.contains("model=m2"), "{calls}");
@@ -811,6 +815,106 @@ async fn full_permissions_select_the_mode_and_calls_choose_offered_options() {
         value["session"], "claude-1",
         "a bad model keeps the session"
     );
+}
+
+#[tokio::test]
+async fn full_permissions_take_only_the_mode_the_agent_reports() {
+    let run = |mode: &'static str| async move {
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_agent(dir.path(), mode);
+        let tool = acp_tool(
+            &script,
+            store(Duration::from_secs(60)),
+            None,
+            Some("bypassPermissions"),
+        );
+        let output = tool
+            .execute(json!({"prompt":"recall"}), context(dir.path(), None))
+            .await
+            .unwrap();
+        (json(&output), calls(dir.path()))
+    };
+    // A mode offered as a config option is set through it, and the answer
+    // lists the mode taken, as codex-acp's does.
+    let (value, calls) = run("codex").await;
+    assert_eq!(value["status"], "completed", "{value}");
+    assert_eq!(value["mode"], "verified bypassPermissions");
+    assert!(calls.contains("mode=bypassPermissions"), "{calls}");
+    // An answer of {} with no report is not taken as the mode asked for.
+    let (value, _) = run("silent").await;
+    assert_eq!(value["status"], "failed", "{value}");
+    assert!(
+        value["reply"]
+            .as_str()
+            .unwrap()
+            .contains("claude did not report its permission mode"),
+        "{value}"
+    );
+    assert!(!value["reply"].as_str().unwrap().contains("the word is"));
+    // A reported downgrade stops the run before the prompt.
+    let (value, _) = run("downgrade").await;
+    assert_eq!(value["status"], "failed", "{value}");
+    assert!(
+        value["reply"]
+            .as_str()
+            .unwrap()
+            .contains("claude reported permission mode default"),
+        "{value}"
+    );
+    assert!(!value["reply"].as_str().unwrap().contains("the word is"));
+}
+
+#[tokio::test]
+async fn config_option_answers_cannot_change_the_verified_mode() {
+    let mut results = Vec::new();
+    for (full, policy, confirmed, reported) in [
+        (true, "auto", "agent-full-access", "default"),
+        (false, "on-risk", "default", "agent-full-access"),
+    ] {
+        for (argument, option, chosen) in [
+            ("model", "model", "m2"),
+            ("effort", "reasoning_effort", "high"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let script = fake_agent(dir.path(), &format!("config-{option}-{reported}"));
+            let mut tool = acp_tool(
+                &script,
+                store(Duration::from_secs(60)),
+                None,
+                Some("agent-full-access"),
+            );
+            tool.full = full;
+            tool.policy = policy.into();
+            let mut args = json!({"prompt": "hello"});
+            args[argument] = json!(chosen);
+            let output = tool.execute(args, context(dir.path(), None)).await.unwrap();
+            results.push((
+                json(&output),
+                calls(dir.path()),
+                policy,
+                confirmed,
+                reported,
+                option,
+                chosen,
+            ));
+            drop(tool);
+            wait_gone(pid(dir.path())).await;
+        }
+    }
+    // Exercise both policies and both option answers before checking results.
+    for (value, calls, policy, confirmed, reported, option, chosen) in results {
+        assert_eq!(value["status"], "failed", "{policy} {option}: {value}");
+        let reply = value["reply"].as_str().unwrap();
+        assert!(
+            reply.contains(&format!("from permission mode {confirmed} to {reported}")),
+            "{value}"
+        );
+        assert!(reply.contains(&format!("policy mode {policy}")), "{value}");
+        assert!(calls.contains(&format!("{option}={chosen}")), "{calls}");
+        assert!(!calls.contains("session/prompt"), "{calls}");
+        assert!(value.get("session").is_none(), "{value}");
+        assert!(value.get("mode").is_none(), "{value}");
+    }
 }
 
 #[tokio::test]

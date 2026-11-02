@@ -92,11 +92,15 @@ pub(crate) fn render(
                 .iter()
                 .filter(|setting| all || setting.origin != "default")
             {
-                writeln!(
+                write!(
                     out,
                     "  {} = {}  [{}]",
                     setting.key, setting.value, setting.origin
                 )?;
+                match &setting.note {
+                    Some(note) => writeln!(out, "  ({note})")?,
+                    None => writeln!(out)?,
+                }
             }
             if hidden > 0 {
                 writeln!(
@@ -133,6 +137,17 @@ pub(crate) fn render(
                 "  In effect: {name}, model {:?}{effort} at {:?} ({} API), key from {key}",
                 provider.model, provider.base_url, provider.wire_api
             )?;
+            let agents: Vec<String> = config
+                .agent_modes()
+                .into_iter()
+                .map(|(agent, mode)| format!("{agent} {mode}"))
+                .collect();
+            let agents = if agents.is_empty() {
+                String::new()
+            } else {
+                format!("; agents with their own: {}", agents.join(", "))
+            };
+            writeln!(out, "  Policy mode {}{agents}", config.policy_mode())?;
         }
         Err(error) => writeln!(out, "  Invalid: {}", safe_error(&error))?,
     }

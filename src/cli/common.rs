@@ -1,4 +1,4 @@
-//! What both binaries share: the `--approval-policy` values and the instance
+//! What both binaries share: the `--policy` values and the instance
 //! selection that must happen before the async runtime starts.
 //!
 //! `src/bin/scv-server.rs` includes this file with `#[path]`, so it depends on
@@ -6,22 +6,28 @@
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use scv_server::config::ApprovalPolicy;
+use scv_server::config::PolicyMode;
 use std::path::{Path, PathBuf};
 
+/// `--policy` (or its alias `--approval-policy`): `[policy] mode`.
 #[derive(Clone, Copy, ValueEnum)]
-pub(crate) enum ApprovalArg {
+pub(crate) enum PolicyArg {
+    Auto,
     OnRisk,
     Always,
-    Never,
+    // `never` was its name before `[policy]` replaced `approval_policy`; a
+    // unit written with it keeps working.
+    #[value(alias = "never")]
+    ReadOnly,
 }
 
-impl From<ApprovalArg> for ApprovalPolicy {
-    fn from(value: ApprovalArg) -> Self {
+impl From<PolicyArg> for PolicyMode {
+    fn from(value: PolicyArg) -> Self {
         match value {
-            ApprovalArg::OnRisk => Self::OnRisk,
-            ApprovalArg::Always => Self::Always,
-            ApprovalArg::Never => Self::Never,
+            PolicyArg::Auto => Self::Auto,
+            PolicyArg::OnRisk => Self::OnRisk,
+            PolicyArg::Always => Self::Always,
+            PolicyArg::ReadOnly => Self::ReadOnly,
         }
     }
 }

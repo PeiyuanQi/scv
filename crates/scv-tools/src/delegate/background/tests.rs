@@ -1000,6 +1000,7 @@ impl Backend for AskingAgent {
                 ToolRisk::Process,
                 context.workspace.clone(),
                 "cargo test",
+                Some("cargo test".into()),
                 context.cancellation.clone(),
             )
             .await

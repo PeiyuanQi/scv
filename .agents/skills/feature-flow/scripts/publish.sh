@@ -3,13 +3,18 @@
 # order. Crates already on crates.io are skipped, so an interrupted run can be
 # repeated. `--check` only reports which crates still need publishing.
 #
-# Publishing cannot be undone. Run by an agent SCV delegated to (SCV_PARENT is
-# set), it first asks the owner yes or no in chat (`scv confirm`, in the chat
-# that started the work) and publishes only on yes. SCV_CONFIRM_TIMEOUT sets
-# how many seconds no answer waits before it counts as no (default 1800).
-# There is no way around the question: an `scv` too old to ask (before 0.3.0)
-# stops the run, so the first release with `scv confirm` is published from a
-# terminal.
+# Publishing cannot be undone. Before the first `cargo publish`, the whole
+# release goes through SCV's publish rule (`scv policy check publish`): no
+# question unless a crate would pass `[policy] publish_crate_versions_per_day`
+# (20) versions in the last 24 hours on crates.io. Past it, or when a count
+# cannot be fetched, it asks the owner yes or no in chat (the chat that
+# started the work, or the `[notify]` owner chat) and publishes only on yes.
+# A crate already at crates.io's own limit of 20 stops the release unasked.
+# SCV_CONFIRM_TIMEOUT sets how many seconds no answer waits before it counts
+# as no (default 1800). An installed `scv` without `scv policy` falls back to
+# asking with `scv confirm` whenever an agent SCV delegated to (SCV_PARENT is
+# set) publishes, so the first release that carries the rule is not published
+# unasked.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -73,16 +78,37 @@ if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
   exit 1
 fi
 
-# An agent SCV delegated to publishes only on the owner's yes in chat.
-if [ -n "${SCV_PARENT:-}" ]; then
+# The publish rule decides; past the daily limit it asks the owner.
+if "$here/host.sh" scv policy --help >/dev/null 2>&1; then
+  set +e
+  "$here/host.sh" scv policy check publish --version "$version" "${pending[@]}"
+  answer=$?
+  set -e
+  case $answer in
+    0) ;;
+    1)
+      echo "publish.sh: the publish rule or the owner said no; nothing was published" >&2
+      exit 1
+      ;;
+    *)
+      cat >&2 <<EOF
+publish.sh: the publish rule could not decide or could not ask the owner
+(scv policy exited $answer, for the reason above); nothing was published. Tell
+the owner why. Do not publish around the rule.
+EOF
+      exit 1
+      ;;
+  esac
+elif [ -n "${SCV_PARENT:-}" ]; then
+  # An `scv` that predates the rule: an agent SCV delegated to publishes only
+  # on the owner's yes in chat.
   if ! "$here/host.sh" scv confirm --help >/dev/null 2>&1; then
     installed=$("$here/host.sh" scv --version 2>/dev/null || echo "scv of an unknown version")
     cat >&2 <<EOF
 publish.sh: the installed $installed cannot ask the owner in chat: \`scv confirm\`
-arrived in 0.3.0, so nothing was published. The first release that includes
-\`scv confirm\` (0.3.0) must be published from a terminal: run
-scripts/publish.sh there, outside SCV. Later releases can be published from
-chat. Tell the owner; do not publish around the question.
+arrived in 0.3.0, so nothing was published. Publish this release from a
+terminal: run scripts/publish.sh there, outside SCV. Tell the owner; do not
+publish around the question.
 EOF
     exit 1
   fi

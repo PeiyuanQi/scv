@@ -149,12 +149,211 @@ fn project_may_tighten_but_not_weaken_limits() {
     let user = Config::default();
     let mut tighter = user.clone();
     tighter.tools.output_limit_bytes /= 2;
-    tighter.tools.approval_policy = ApprovalPolicy::Always;
+    tighter.policy.mode = PolicyMode::Always;
+    tighter.policy.publish_crate_versions_per_day = 5;
     assert!(validate_project_not_weaker(&user, &tighter).is_ok());
 
     let mut weaker = user.clone();
     weaker.tools.output_limit_bytes *= 2;
     assert!(validate_project_not_weaker(&user, &weaker).is_err());
+
+    // The mode only moves toward read-only, and the publish limit only down.
+    let mut asking = user.clone();
+    asking.policy.mode = PolicyMode::OnRisk;
+    let mut auto = asking.clone();
+    auto.policy.mode = PolicyMode::Auto;
+    let error = validate_project_not_weaker(&asking, &auto).unwrap_err();
+    assert!(
+        error.to_string().contains("cannot weaken policy.mode"),
+        "{error}"
+    );
+    let mut publishes_more = user.clone();
+    publishes_more.policy.publish_crate_versions_per_day = 21;
+    let error = validate_project_not_weaker(&user, &publishes_more).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot raise policy.publish_crate_versions_per_day"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_policy_defaults_to_auto_with_crates_ios_own_publish_limit() {
+    let config = Config::default();
+    assert_eq!(config.policy_mode(), PolicyMode::Auto);
+    assert_eq!(config.publish_crate_versions_per_day(), 20);
+    assert_eq!(config.agent_modes(), []);
+    let mut zero = Config::default();
+    zero.policy.publish_crate_versions_per_day = 0;
+    zero.validate().unwrap();
+}
+
+/// Write `text` to `path` as a private configuration file.
+fn write_private(path: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// The configuration a user file holding `text` loads as.
+fn load_user_file(text: &str) -> anyhow::Result<Config> {
+    let home = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path());
+    write_private(&layout.config(), text);
+    Config::load_user(&layout, ConfigOverrides::default())
+}
+
+#[test]
+fn deprecated_keys_are_read_with_their_meaning_kept() {
+    for (old, mode, pins) in [
+        ("on-risk", PolicyMode::OnRisk, true),
+        ("always", PolicyMode::Always, false),
+        ("never", PolicyMode::ReadOnly, false),
+    ] {
+        let config = load_user_file(&format!("[tools]\napproval_policy = \"{old}\"\n")).unwrap();
+        assert_eq!(config.policy_mode(), mode, "{old}");
+        let [deprecated] = config.deprecated() else {
+            panic!("{old}: {:?}", config.deprecated());
+        };
+        assert_eq!(deprecated.pins_old_default, pins, "{old}");
+        let warning = deprecated.warning();
+        assert!(
+            warning.contains(&format!("read as [policy] mode = \"{mode}\"")),
+            "{warning}"
+        );
+    }
+    // `full` is now the default; `default` keeps that agent starting with
+    // no switches.
+    let config = load_user_file(
+        "[agents.claude]\npermissions = \"default\"\n\n[agents.codex]\nmode = \"auto\"\n\n\
+         [agents.dsh]\npermissions = \"full\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.agent_mode("claude"), PolicyMode::OnRisk);
+    assert_eq!(config.agent_mode("codex"), PolicyMode::Auto);
+    assert_eq!(config.agent_mode("dsh"), PolicyMode::Auto);
+    // An agent with nothing set follows the policy, now auto.
+    assert_eq!(config.agent_mode("grok"), PolicyMode::Auto);
+    let adapters = config.adapters();
+    assert_eq!(adapters["claude"].full_permission_args, None);
+    assert_eq!(adapters["claude"].policy, "on-risk");
+    assert!(adapters["codex"].full_permission_args.is_some());
+    assert_eq!(
+        adapters["grok"].full_permission_args.as_deref(),
+        Some(&["--always-approve".to_owned()][..])
+    );
+    let notes: Vec<String> = config.deprecated().iter().map(Deprecated::note).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("permissions = \"default\"; pins the old default")),
+        "{notes:?}"
+    );
+    assert!(
+        config
+            .deprecated()
+            .iter()
+            .any(|old| old.warning().contains("can be deleted"))
+    );
+}
+
+#[test]
+fn an_old_key_and_its_new_key_in_one_layer_are_refused() {
+    let both =
+        load_user_file("[tools]\napproval_policy = \"always\"\n\n[policy]\nmode = \"auto\"\n")
+            .unwrap_err();
+    assert!(
+        format!("{both:#}").contains("sets both tools.approval_policy and policy.mode"),
+        "{both:#}"
+    );
+    let both =
+        load_user_file("[agents.grok]\npermissions = \"full\"\nmode = \"auto\"\n").unwrap_err();
+    assert!(
+        format!("{both:#}").contains("sets both agents.grok.permissions and agents.grok.mode"),
+        "{both:#}"
+    );
+    let bad = load_user_file("[tools]\napproval_policy = \"auto\"\n").unwrap_err();
+    assert!(
+        format!("{bad:#}").contains("tools.approval_policy (deprecated) must be"),
+        "{bad:#}"
+    );
+    let bad = load_user_file("[agents.claude]\npermissions = \"yolo\"\n").unwrap_err();
+    assert!(
+        format!("{bad:#}").contains("agents.claude.permissions (deprecated) must be"),
+        "{bad:#}"
+    );
+    // In different layers the later one wins as usual: the project may
+    // only make it stricter.
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path());
+    write_private(&layout.config(), "[policy]\nmode = \"on-risk\"\n");
+    std::fs::create_dir_all(workspace.path().join(".scv")).unwrap();
+    std::fs::write(
+        workspace.path().join(".scv/config.toml"),
+        "[tools]\napproval_policy = \"never\"\n",
+    )
+    .unwrap();
+    let config = Config::load(&layout, workspace.path(), ConfigOverrides::default()).unwrap();
+    assert_eq!(config.policy_mode(), PolicyMode::ReadOnly);
+    std::fs::write(
+        workspace.path().join(".scv/config.toml"),
+        "[policy]\nmode = \"auto\"\n",
+    )
+    .unwrap();
+    assert!(Config::load(&layout, workspace.path(), ConfigOverrides::default()).is_err());
+}
+
+#[test]
+fn config_show_marks_a_line_that_pins_the_old_default() {
+    let home = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path());
+    write_private(
+        &layout.config(),
+        "[tools]\napproval_policy = \"on-risk\"\n\n[agents.claude]\npermissions = \"default\"\n",
+    );
+    let settings =
+        Config::settings_with_origins(&layout, None, &ConfigOverrides::default()).unwrap();
+    let setting = |key: &str| settings.iter().find(|setting| setting.key == key).unwrap();
+    let mode = setting("policy.mode");
+    assert_eq!(mode.value, "\"on-risk\"");
+    assert_eq!(mode.origin, "config.toml");
+    let note = mode.note.as_deref().unwrap();
+    assert!(
+        note.contains("tools.approval_policy = \"on-risk\""),
+        "{note}"
+    );
+    assert!(
+        note.contains("pins the old default; delete it for auto"),
+        "{note}"
+    );
+    let claude = setting("agents.claude.mode").note.as_deref().unwrap();
+    assert!(claude.contains("pins the old default"), "{claude}");
+    assert!(
+        settings
+            .iter()
+            .all(|setting| setting.key != "tools.approval_policy")
+    );
+    // The flag sets the mode, under its new name.
+    let flagged = Config::settings_with_origins(
+        &layout,
+        None,
+        &ConfigOverrides {
+            mode: Some(PolicyMode::Always),
+            ..ConfigOverrides::default()
+        },
+    )
+    .unwrap();
+    let mode = flagged
+        .iter()
+        .find(|setting| setting.key == "policy.mode")
+        .unwrap();
+    assert_eq!(
+        (mode.value.as_str(), mode.origin.as_str()),
+        ("\"always\"", "--policy flag")
+    );
 }
 
 #[test]
@@ -703,21 +902,18 @@ fn adapters_are_bound_to_the_instance_home() {
 
 #[test]
 fn full_codex_over_acp_keeps_live_web_search() {
-    let codex_acp = |permissions: &str| {
+    let codex_acp = |mode: &str| {
         let mut value: toml::Value =
             toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
         merge(
             &mut value,
-            toml::from_str(&format!(
-                "[agents.codex]\npermissions = \"{permissions}\"\n"
-            ))
-            .unwrap(),
+            toml::from_str(&format!("[agents.codex]\nmode = \"{mode}\"\n")).unwrap(),
         );
         let config: Config = value.try_into().unwrap();
         config.validate().unwrap();
         config.adapters()["codex"].acp.clone().unwrap()
     };
-    let full = codex_acp("full");
+    let full = codex_acp("auto");
     assert_eq!(full.full_mode.as_deref(), Some("agent-full-access"));
     let [(variable, value)] = full.environment.as_slice() else {
         panic!("expected one ACP variable: {:?}", full.environment);
@@ -725,10 +921,13 @@ fn full_codex_over_acp_keeps_live_web_search() {
     assert_eq!(variable, "CODEX_CONFIG");
     let overrides: serde_json::Value = serde_json::from_str(value.to_str().unwrap()).unwrap();
     assert_eq!(overrides, serde_json::json!({"web_search": "live"}));
+    let asking = codex_acp("on-risk");
     assert!(
-        codex_acp("default").environment.is_empty(),
-        "default permissions leave web search to the Codex config"
+        asking.environment.is_empty(),
+        "on-risk leaves web search to the Codex config"
     );
+    // Checked against under every mode, selected only under auto.
+    assert_eq!(asking.full_mode.as_deref(), Some("agent-full-access"));
     assert!(
         scv_tools::adapters::is_removed_agent_variable(std::ffi::OsStr::new("CODEX_CONFIG")),
         "an inherited CODEX_CONFIG never reaches a delegated Codex"
@@ -741,17 +940,26 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
     let launch = |adapters: &HashMap<String, scv_tools::AgentAdapterConfig>, agent: &str| {
         adapters[agent].acp.clone()
     };
-    for agent in ["claude", "codex", "grok", "dsh"] {
+    for (agent, full_mode) in [
+        ("claude", Some("bypassPermissions")),
+        ("codex", Some("agent-full-access")),
+        ("grok", None),
+        ("dsh", None),
+    ] {
         let acp = launch(&defaults, agent).unwrap();
         assert!(!acp.required, "{agent}: auto falls back to resume");
-        assert_eq!(acp.full_mode, None, "{agent}: no full mode by default");
+        assert_eq!(acp.full_mode.as_deref(), full_mode, "{agent}");
     }
     assert_eq!(
         launch(&defaults, "claude").unwrap().command,
         "claude-agent-acp"
     );
     assert_eq!(launch(&defaults, "codex").unwrap().command, "codex-acp");
-    assert_eq!(launch(&defaults, "grok").unwrap().args, ["agent", "stdio"]);
+    // Under the default auto, Grok's server starts with its switch.
+    assert_eq!(
+        launch(&defaults, "grok").unwrap().args,
+        ["agent", "--always-approve", "stdio"]
+    );
     assert_eq!(launch(&defaults, "dsh").unwrap().args, ["--profile", "acp"]);
     // Only DeepSeek Harness's server takes model and effort that its CLI
     // does not; the others take them where their CLI does.
@@ -770,9 +978,9 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
     merge(
         &mut value,
         toml::from_str(
-            "[agents.claude]\npermissions = \"full\"\ntransport = \"acp\"\n\n\
+            "[agents.claude]\ntransport = \"acp\"\n\n\
                  [agents.codex]\ntransport = \"resume\"\n\n\
-                 [agents.grok]\npermissions = \"full\"\n",
+                 [agents.grok]\nmode = \"on-risk\"\n",
         )
         .unwrap(),
     );
@@ -801,10 +1009,7 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
         "a custom command keeps one process per turn"
     );
     assert!(launch(&custom, "codex").is_some(), "custom args keep ACP");
-    assert_eq!(
-        launch(&adapters, "grok").unwrap().args,
-        ["agent", "--always-approve", "stdio"]
-    );
+    assert_eq!(launch(&adapters, "grok").unwrap().args, ["agent", "stdio"]);
 
     let mut pi: toml::Value =
         toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
@@ -826,27 +1031,36 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
 }
 
 #[test]
-fn full_permissions_are_opt_in_per_agent_and_combine_with_args() {
-    let defaults = Config::default().adapters();
-    for adapter in defaults.values() {
-        assert_eq!(adapter.full_permission_args, None);
-    }
+fn full_permissions_are_the_default_and_a_stricter_mode_turns_them_off() {
     let mut value: toml::Value =
         toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
     merge(
-            &mut value,
-            toml::from_str(
-                "[agents.claude]\npermissions = \"full\"\n\n\
-                 [agents.codex]\nargs = [\"exec\", \"--skip-git-repo-check\"]\npermissions = \"full\"\n\n\
-                 [agents.grok]\npermissions = \"full\"\n\n\
-                 [agents.dsh]\npermissions = \"full\"\n\n\
-                 [agents.pi]\npermissions = \"full\"\n",
-            )
-            .unwrap(),
-        );
+        &mut value,
+        toml::from_str("[agents.codex]\nargs = [\"exec\", \"--skip-git-repo-check\"]\n").unwrap(),
+    );
     let config: Config = value.try_into().unwrap();
     config.validate().unwrap();
     let adapters = config.adapters();
+    for adapter in adapters.values() {
+        assert!(adapter.full_permission_args.is_some());
+        assert_eq!(adapter.policy, "auto");
+    }
+    assert_eq!(
+        adapters["claude"].mode_report,
+        scv_tools::adapters::ModeReport::ClaudeInit
+    );
+    assert_eq!(
+        adapters["codex"].mode_report,
+        scv_tools::adapters::ModeReport::CodexRollout
+    );
+    assert!(adapters["grok"].mode_switch);
+    assert!(!adapters["pi"].mode_switch);
+    assert!(!adapters["scv"].mode_switch);
+    // The nested SCV relays every request that is not read-only.
+    assert_eq!(
+        adapters["scv"].args,
+        ["server", "--stdio", "--policy", "on-risk"]
+    );
     let full = |agent: &str| adapters[agent].full_permission_args.clone().unwrap();
     assert_eq!(full("claude"), ["--permission-mode", "bypassPermissions"]);
     assert_eq!(
@@ -864,22 +1078,88 @@ fn full_permissions_are_opt_in_per_agent_and_combine_with_args() {
         OsString::from("DSH_PERMISSION_MODE"),
         OsString::from("danger-full-access")
     )));
+    // pi has no permission system: `auto` adds nothing.
+    assert_eq!(full("pi"), [] as [String; 0]);
+
+    // A stricter policy starts every agent without its switches, and one
+    // agent's own mode outranks it.
+    let mut value: toml::Value =
+        toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+    merge(
+        &mut value,
+        toml::from_str("[policy]\nmode = \"always\"\n\n[agents.grok]\nmode = \"auto\"\n").unwrap(),
+    );
+    let config: Config = value.try_into().unwrap();
+    config.validate().unwrap();
+    let adapters = config.adapters();
+    assert_eq!(adapters["claude"].full_permission_args, None);
+    assert_eq!(adapters["claude"].policy, "always");
     assert!(
-        !defaults["dsh"]
+        !adapters["dsh"]
             .environment
             .iter()
             .any(|(variable, _)| variable == "DSH_PERMISSION_MODE")
     );
-    // pi has no permission system: `full` is accepted and adds nothing.
-    assert_eq!(full("pi"), [] as [String; 0]);
+    assert_eq!(full_args(&adapters, "grok"), ["--always-approve"]);
+    assert_eq!(
+        config.agent_modes(),
+        [("grok".to_owned(), PolicyMode::Auto)]
+    );
 
     let mut invalid: toml::Value =
         toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
     merge(
         &mut invalid,
-        toml::from_str("[agents.claude]\npermissions = \"yolo\"\n").unwrap(),
+        toml::from_str("[agents.claude]\nmode = \"yolo\"\n").unwrap(),
     );
     assert!(invalid.try_into::<Config>().is_err());
+}
+
+#[test]
+fn configured_nested_scv_args_keep_its_policy_at_least_on_risk() {
+    let nested = |args: &str| {
+        let mut value: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        merge(
+            &mut value,
+            toml::from_str(&format!("[agents.scv]\nargs = {args}\n")).unwrap(),
+        );
+        let config: Config = value.try_into().unwrap();
+        config.validate().unwrap();
+        config.adapters()["scv"].args.clone()
+    };
+    // The schema sample before `[policy]` printed these.
+    assert_eq!(
+        nested(r#"["server", "--stdio"]"#),
+        ["server", "--stdio", "--policy", "on-risk"]
+    );
+    for weaker in [
+        r#"["server", "--stdio", "--policy", "auto"]"#,
+        r#"["--policy=auto", "server", "--stdio"]"#,
+        r#"["server", "--approval-policy", "auto", "--stdio"]"#,
+    ] {
+        assert_eq!(
+            nested(weaker),
+            ["server", "--stdio", "--policy", "on-risk"],
+            "{weaker}"
+        );
+    }
+    // A stricter one stays.
+    assert_eq!(
+        nested(r#"["server", "--stdio", "--policy", "always"]"#),
+        ["server", "--stdio", "--policy", "always"]
+    );
+    assert_eq!(
+        nested(r#"["server", "--approval-policy=never", "--stdio"]"#),
+        ["server", "--stdio", "--policy", "read-only"]
+    );
+}
+
+fn full_args(
+    adapters: &HashMap<String, scv_tools::AgentAdapterConfig>,
+    agent: &str,
+) -> Vec<String> {
+    adapters[agent].full_permission_args.clone().unwrap()
 }
 
 #[test]
@@ -989,21 +1269,17 @@ fn configuration_loads_from_the_layout_it_is_given() {
     let instance = Instance {
         layout: layout.clone(),
         overrides: ConfigOverrides {
-            approval_policy: Some(ApprovalPolicy::Never),
+            mode: Some(PolicyMode::ReadOnly),
             ..overrides
         },
     };
-    let default_policy = ToolConfig::default().approval_policy;
+    let default_mode = PolicyConfig::default().mode;
     let config = instance.load_user().unwrap();
     assert_eq!(config.tools.command_timeout_seconds, 300);
-    assert_eq!(config.tools.approval_policy, default_policy);
+    assert_eq!(config.policy.mode, default_mode);
     assert_eq!(
-        instance
-            .load(workspace.path())
-            .unwrap()
-            .tools
-            .approval_policy,
-        default_policy
+        instance.load(workspace.path()).unwrap().policy.mode,
+        default_mode
     );
 }
 

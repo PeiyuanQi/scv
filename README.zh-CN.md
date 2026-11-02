@@ -75,13 +75,16 @@ Cursor CLI、Amp、Kimi Code 或一个嵌套的 SCV。条件允许时，它们�
 
 `scv restart --when-idle` 会等到发起更新的那项工作汇报完毕、且没有仍在运行的后台任务，再重启到新版本。
 看门狗会检查新版本启动后聊天账号是否都已连接；在配置结构允许的情况下，
-如果没有连接成功就自动回滚。SCV 正是这样在聊天中发布自己的新版本的，
-发布前会先征得你的同意。
+如果没有连接成功就自动回滚。SCV 正是这样在聊天中发布自己的新版本的；
+只有当一次发布会超出每个 crate 每天的版本数上限时，它才会先征得你的同意。
 
 ### 一切由你掌控
 
-审批由服务端而不是客户端执行：默认情况下，读取操作直接运行，而写文件、
-执行 shell 命令和调用智能体都会先询问你。文件工具只能在工作区内操作，
+审批由服务端而不是客户端按同一套策略执行。默认（`auto`）情况下，工具和智能体
+直接运行、不询问你，每个被委派的智能体都以它自己的完全自主模式启动；如果一次运行
+报告的模式不是策略选定的模式，SCV 会停止它。SCV 会拒绝强制推送 `main`，直接运行
+`cargo publish` 之前会先问你。`mode = "on-risk"` 可以恢复询问：读取操作直接运行，
+而写文件、执行 shell 命令和调用智能体都会先询问你。文件工具只能在工作区内操作，
 命令和智能体都有超时（仅当你允许时，后台智能体任务才可不设超时）和输出上限。在你给自己的账号开放工具之前，聊天中不能使用任何工具。
 
 ### 原生、小巧、可扩展
@@ -186,7 +189,8 @@ SCV  [文件] checkout-timezone.diff
 
 Codex 工作时，SCV 自己回答了简单的问题；Codex 汇报后，SCV 不用你催就转告了结果，
 还把 diff 作为文件发了过来。在执行无法撤销的步骤之前，工作流程也可以用
-`scv confirm` 在聊天里问你是或否；SCV 自己的发布流程在发布前就是这样问的。
+`scv confirm` 在聊天里问你是或否；当一次发布会超出每个 crate 每天的版本数上限时，
+SCV 自己的发布流程就是这样问的。
 
 ## 工作原理
 
@@ -227,8 +231,9 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-your-key"
 # reasoning_effort = "high"   # 推理模型适用：SCV 自身模型的推理强度
 
-[tools]
-approval_policy = "on-risk"   # 读取直接运行；写入、shell 和智能体先询问
+[policy]
+mode = "auto"                 # 默认：工具和智能体直接运行，不询问
+# mode = "on-risk"            # 读取直接运行；写入、shell 和智能体先询问
 
 [agent]
 prefer = ["codex", "claude"]  # 委派工作时优先交给谁
@@ -252,8 +257,9 @@ owner = ["feishu:default"]    # 主动通知发往哪里
 
 ## 安全
 
-SCV **不是沙箱**：你批准的命令和被委派的智能体以你的用户权限运行。请在有版本控制的
-工作区里工作，看清楚你批准的内容，运行不可信的代码时请使用容器。SCV 还处于 1.0
+SCV **不是沙箱**：命令和被委派的智能体以你的用户权限运行，而且默认不会先询问你。
+请在有版本控制的工作区里工作；想看清楚你批准的内容时，把 `[policy]` 切换为
+`on-risk`；运行不可信的代码时请使用容器。SCV 还处于 1.0
 之前，协议和配置仍可能变化。参见
 [安全模型](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md)（英文），
 并按 [SECURITY.md](https://github.com/PeiyuanQi/scv/blob/main/SECURITY.md)
@@ -268,7 +274,7 @@ SCV **不是沙箱**：你批准的命令和被委派的智能体以你的用户
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | crate 划分、智能体循环、计划重启，以及从哪里开始读代码 |
 | [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | 飞书/Lark、微信和 Slack：登录、媒体、后台汇报、向主人提问 |
 | [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | 内置工具、被委派的智能体及其模型和检查、ACP、后台任务、worktree、工作台、智能体登录 |
-| [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | 实例目录结构、所有设置、模型提供方、守护进程和通知 |
+| [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | 实例目录结构、所有设置、审批策略、模型提供方、守护进程和通知 |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | 信任边界、审批、远程工具和委派运行 |
 | [Context management](https://github.com/PeiyuanQi/scv/blob/main/docs/context-management.md) | token 预算和确定性压缩 |
 | [Protocol](https://github.com/PeiyuanQi/scv/blob/main/docs/protocol.md) | 面向客户端的 JSONL 协议 |

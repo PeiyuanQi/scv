@@ -7,7 +7,10 @@
 //! and `session/new`; every turn is a `session/prompt` on that session.
 //! `session/update` notifications become progress, the agent's
 //! `session/request_permission` goes through the calling session's approval
-//! gate, and a cancelled or timed-out call sends `session/cancel`. SCV offers
+//! gate, and a cancelled or timed-out call sends `session/cancel`. The
+//! session's mode, from `session/new` and every `current_mode_update`, is
+//! checked against the one the policy expects before the prompt is sent,
+//! and a later move to another mode fails the call. SCV offers
 //! no client file-system or terminal capabilities, so every other request the
 //! agent makes is refused as an unknown method. A server that advertises
 //! `_meta.steering.supported` can take a further prompt into its running
@@ -22,10 +25,10 @@ mod tool;
 pub(crate) use tool::AcpAgentTool;
 // The submodules share one namespace through `use super::*`.
 use {
-    permission::{choose_option, describe_permission},
+    permission::{choose_option, describe_permission, permission_command},
     progress::Progress,
     rpc::{CallError, Incoming, Interrupt, Rpc, describe_rpc_error},
-    session::{AcpChild, Steered, TurnEnd},
+    session::{AcpChild, ModeWatch, Steered, TurnEnd},
 };
 
 #[cfg(test)]

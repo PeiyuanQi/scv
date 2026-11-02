@@ -77,12 +77,15 @@ fn home_with_fake_codex_and(extra: &str) -> (tempfile::TempDir, std::path::PathB
     let agent = home_path.join("fake-codex");
     std::fs::write(
         &agent,
-        concat!(
-            "#!/bin/sh\n",
-            "echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
-            "sleep 1\n",
-            "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"landed 0.9.9\"}}'\n",
-            "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+        format!(
+            "#!/bin/sh\n{}{}",
+            crate::support::codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a53"),
+            concat!(
+                "echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
+                "sleep 1\n",
+                "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"landed 0.9.9\"}}'\n",
+                "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+            ),
         ),
     )
     .unwrap();

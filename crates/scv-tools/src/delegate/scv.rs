@@ -645,6 +645,7 @@ impl ScvAgentTool {
                         ToolRisk::parse(&risk).unwrap_or(ToolRisk::Delegate),
                         PathBuf::from(cwd),
                         summary,
+                        None,
                         context.cancellation.child_token(),
                         Some(approval_deadline(deadline)),
                     );
@@ -1142,6 +1143,8 @@ fn result(
         usage,
         truncated: cut,
         session: None,
+        // The parent's policy decides every request it relays.
+        mode: None,
     };
     let (content, truncated) = result.to_json(AGENT, conversation, None, "", limit);
     ToolOutput {

@@ -22,6 +22,9 @@ pub struct Config {
     pub(crate) agent: AgentConfig,
     pub(crate) session: SessionConfig,
     pub(crate) context: ContextConfigFile,
+    /// `[policy]`: what runs without a person, for SCV's own tools and every
+    /// delegated agent.
+    pub(crate) policy: PolicyConfig,
     pub(crate) tools: ToolConfig,
     pub(crate) protocol: ProtocolConfig,
     pub(crate) tui: TuiConfig,
@@ -39,6 +42,9 @@ pub struct Config {
     /// The process-owned root: see [`Layout`] for what it holds.
     #[serde(skip)]
     pub(crate) instance_home: PathBuf,
+    /// The deprecated keys the layers set, each read as its replacement.
+    #[serde(skip)]
+    pub(crate) deprecated: Vec<super::Deprecated>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,18 +228,67 @@ impl From<&ContextConfigFile> for ContextConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// What runs without a person: `[policy] mode`, or one agent's
+/// `[agents.<name>] mode`. Strictness runs `auto` < `on-risk` < `always` <
+/// `read-only`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
-pub enum ApprovalPolicy {
+pub enum PolicyMode {
+    /// SCV's own tools and the requests relayed to it are approved, `agent`
+    /// calls included, and every delegated agent starts in its full mode.
+    #[default]
+    Auto,
+    /// Read-only calls are approved and the rest ask; delegated agents start
+    /// with no switches, so their own configuration decides.
     OnRisk,
+    /// Every call asks; delegated agents start with no switches.
     Always,
-    Never,
+    /// Everything but read-only calls is denied, `agent` calls included.
+    ReadOnly,
+}
+
+impl PolicyMode {
+    /// The mode as configuration writes it, such as `on-risk`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::OnRisk => "on-risk",
+            Self::Always => "always",
+            Self::ReadOnly => "read-only",
+        }
+    }
+}
+
+impl std::fmt::Display for PolicyMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// `[policy]`: one policy for SCV's own tools, the requests relayed to it,
+/// and how delegated agents start. The gates in `approval.rs` apply on top
+/// of every mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PolicyConfig {
+    pub(crate) mode: PolicyMode,
+    /// Versions of one crate that may reach crates.io in any 24 hours before
+    /// publishing asks the owner. At 20 it is crates.io's own limit.
+    pub(crate) publish_crate_versions_per_day: u64,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            mode: PolicyMode::Auto,
+            publish_crate_versions_per_day: 20,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ToolConfig {
-    pub(crate) approval_policy: ApprovalPolicy,
     /// Let background `agent` calls set `no_timeout` and run with no main
     /// deadline. Off unless the owner turns it on.
     pub(crate) allow_no_timeout: bool,
@@ -251,7 +306,6 @@ pub(crate) struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
-            approval_policy: ApprovalPolicy::OnRisk,
             allow_no_timeout: false,
             command_timeout_seconds: 600,
             agent_timeout_seconds: 3600,
@@ -418,8 +472,10 @@ impl Default for WebConfig {
 pub(crate) struct AdapterConfig {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
-    /// `full` adds the CLI's own switches for unprompted, unsandboxed work.
-    pub(crate) permissions: AgentPermissions,
+    /// This agent's policy mode instead of `[policy] mode`: under `auto` it
+    /// starts with its CLI's own switches for unprompted, unsandboxed work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mode: Option<PolicyMode>,
     /// Placed immediately before the prompt (`grok -p <prompt>`).
     pub(crate) prompt_args: Vec<String>,
     /// Appended when a call selects a model; `{model}` is substituted.
@@ -482,18 +538,6 @@ pub(crate) enum AgentTransport {
     Resume,
 }
 
-/// How much a delegated CLI may do without its own prompts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum AgentPermissions {
-    /// Add nothing: the CLI's own configuration decides.
-    #[default]
-    Default,
-    /// Add the CLI's full-autonomy switches: no approval prompts, no sandbox,
-    /// and web search where the CLI gates it. An explicit user opt-in.
-    Full,
-}
-
 /// `[agents.<name>]` for every adapter in [`scv_tools::adapters::ADAPTERS`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -511,7 +555,7 @@ impl Default for AgentsConfig {
                         AdapterConfig {
                             command: adapter.command.into(),
                             args: strings(adapter.args),
-                            permissions: AgentPermissions::Default,
+                            mode: None,
                             prompt_args: strings(adapter.prompt_args),
                             model_args: strings(adapter.model_args),
                             effort_args: strings(adapter.effort_args),
@@ -538,7 +582,8 @@ pub struct ConfigOverrides {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub approval_policy: Option<ApprovalPolicy>,
+    /// `--policy` (or its alias `--approval-policy`): `[policy] mode`.
+    pub mode: Option<PolicyMode>,
     pub no_tools: bool,
     /// An explicit configuration layer (`--config`, or `SCV_CONFIG` as the
     /// process received it), applied after the user and project files.

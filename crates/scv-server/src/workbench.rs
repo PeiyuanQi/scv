@@ -27,8 +27,9 @@ use scv_tools::{
 use tokio::sync::Mutex;
 
 use crate::{
-    approval::{PolicyFirstGate, UnattendedGate},
+    approval::{OwnerQuestions, PolicyFirstGate, UnattendedGate},
     config::{ConfigOverrides, Instance},
+    confirm::Confirmer,
     session::{build::offered_adapters, persist},
 };
 
@@ -45,6 +46,9 @@ pub(crate) struct Hosts {
     instance: Instance,
     registry: Arc<DelegationRegistry>,
     workbench: Arc<Workbench>,
+    /// Asks the owner in chat, for every daemon session's requests only the
+    /// owner may answer.
+    confirmer: Option<Arc<Confirmer>>,
     hosts: Mutex<HashMap<PathBuf, Host>>,
 }
 
@@ -62,14 +66,24 @@ struct Host {
 }
 
 impl Hosts {
-    pub(crate) fn new(instance: Instance, registry: Arc<DelegationRegistry>) -> Arc<Self> {
+    pub(crate) fn new(
+        instance: Instance,
+        registry: Arc<DelegationRegistry>,
+        confirmer: Option<Arc<Confirmer>>,
+    ) -> Arc<Self> {
         let workbench = Workbench::new(&instance.layout, Arc::clone(&registry));
         Arc::new(Self {
             instance,
             registry,
             workbench,
+            confirmer,
             hosts: Mutex::default(),
         })
+    }
+
+    /// Where the daemon's sessions ask the owner in chat.
+    pub(crate) fn confirmer(&self) -> Option<Arc<Confirmer>> {
+        self.confirmer.clone()
     }
 
     /// The daemon's workbench.
@@ -111,7 +125,7 @@ impl Hosts {
             layout,
             workspace,
             ConfigOverrides {
-                approval_policy: self.instance.overrides.approval_policy,
+                mode: self.instance.overrides.mode,
                 config_file: self.instance.overrides.config_file.clone(),
                 ..ConfigOverrides::default()
             },
@@ -126,13 +140,19 @@ impl Hosts {
         // decides on its own stands, and while the owner watches, a request
         // it would put to a person waits for the owner instead of being
         // denied.
+        let owner = OwnerQuestions {
+            confirmer: self.confirmer.clone(),
+            session: session.clone(),
+        };
         let unattended: Arc<dyn ApprovalGate> = Arc::new(UnattendedGate {
-            policy: config.tools.approval_policy,
+            policy: config.policy(),
             client_approves_all: false,
+            owner: owner.clone(),
         });
         let gate: Arc<dyn ApprovalGate> = Arc::new(PolicyFirstGate {
-            policy: config.tools.approval_policy,
+            policy: config.policy(),
             attended: self.workbench.attended_gate(&session, unattended),
+            owner,
         });
         let mut jobs = BackgroundJobs::new(config.agent.max_background, None).with_approvals(gate);
         if let Some(ledger) = ledger::JobLedger::new(&layout.jobs(), &session, LABEL, workspace) {

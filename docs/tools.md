@@ -15,9 +15,10 @@ cancellation token, workspace root, timeout, and output limits from the server.
 optional byte values. The result reports the selected content, total byte
 length, and whether it was truncated. The selected byte range must be UTF-8 or
 the tool returns a clear error. Workspace reads are read-only risk;
-lexically secret-like paths are elevated to filesystem risk and require
-approval. This name heuristic improves visibility but is not a confidentiality
-boundary; an OS sandbox is still required for isolation.
+lexically secret-like paths are elevated to filesystem risk, which every
+policy mode but `auto` asks about or denies. This name heuristic improves
+visibility but is not a confidentiality boundary; an OS sandbox is still
+required for isolation.
 
 ## `write`
 
@@ -184,11 +185,12 @@ target are checked the same way.
 
 An HTTPS URL whose host is in `web.auto_approve_domains` has `read_only`
 risk, so it runs without approval under `on-risk` and is allowed under
-`never`. A redirect from such a fetch may lead only to another listed HTTPS
-host; otherwise the call fails and names the target, which the model can then
-request on its own. Every other URL has `network` risk and needs approval,
-because the URL itself can carry data the model has read to a host that a
-prompt-injected page chose. The approval summary shows the full URL.
+`read-only`. A redirect from such a fetch may lead only to another listed
+HTTPS host; otherwise the call fails and names the target, which the model
+can then request on its own. Every other URL has `network` risk, which every
+policy mode but `auto` asks about or denies, because the URL itself can
+carry data the model has read to a host that a prompt-injected page chose.
+The approval summary shows the full URL.
 
 ## `web_search`
 
@@ -587,7 +589,7 @@ The default invocation contracts are:
 
 | Agent | Invocation |
 | --- | --- |
-| `claude`, `claude-ai` | `claude -p --settings <json> [--permission-mode bypassPermissions] --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
+| `claude`, `claude-ai` | `claude -p --settings <json> --disallowedTools <rules> [--permission-mode bypassPermissions] --output-format stream-json --verbose --session-id <uuid> [--model <model>] [--effort <effort>] <prompt>` |
 | `codex` | `codex exec --json -o <file> [-m <model>] [-c model_reasoning_effort="<effort>"] <prompt>` |
 | `grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
 | `dsh` | `dsh --profile headless <prompt>` |
@@ -605,8 +607,11 @@ per turn takes its model and effort from its profile, so it takes neither
 `model` nor `effort` then; over ACP (the default once `dsh` is installed) it
 takes both (see [Agent Client Protocol transport](#agent-client-protocol-transport)).
 For both Claude agents, `--settings <json>` is always inserted after the fixed
-arguments. The JSON differs by billing identity and contains no secret.
-`permissions = "full"` switches follow it, before the output format arguments.
+arguments, followed by `--disallowedTools` and SCV's deny rules (see
+[Permission modes](#permission-modes)). The JSON differs by billing identity
+and contains no secret. Under policy mode `auto` the full-autonomy switches
+follow. The output format arguments always come next, so the rule list ends
+before the prompt.
 
 Tool-enabled sessions that offer agents also list the built-in `delegating`
 skill, and the system prompt tells the model to read it before its first
@@ -709,7 +714,7 @@ structured stream with no JSON at all falls back to its text. The tool result
 is one object:
 
 ```json
-{"agent":"codex","status":"completed","reply":"…","usage":{"input_tokens":11257,"output_tokens":5},"exit_code":0,"stderr_tail":"…","truncated":false}
+{"agent":"codex","status":"completed","reply":"…","usage":{"input_tokens":11257,"output_tokens":5},"exit_code":0,"stderr_tail":"…","truncated":false,"mode":"verified approval_policy never, sandbox danger-full-access"}
 ```
 
 `status` is `completed`, `failed` (non-zero exit or a reported error),
@@ -724,7 +729,13 @@ never the model's reply: Claude Code's result of a failed run, Codex's
 run's closing output, and the stderr tail. A failure whose `error` reads like
 a missing sign-in gains a `hint` (see below), and a `declined` result carries
 a `note` for the calling model. A turn of a conversation (next section) also
-carries `"session"` and `"turn"`.
+carries `"session"` and `"turn"`. For an agent with a full-autonomy switch,
+`mode` says what SCV knew of the permission mode the run had:
+`verified <mode>`, `unverified` when the agent reports none SCV reads, or
+`unverified (it reports <mode>)` for an ACP agent whose reported mode SCV
+has nothing to compare with. A run SCV stopped because its mode did not
+match is `failed`, with an `error` naming the expected and reported modes
+and no `mode` (see [Permission modes](#permission-modes)).
 
 ### Progress
 
@@ -896,25 +907,33 @@ nested agent relays (over ACP or from a nested SCV) gets the answer the
 session would give without asking anyone, and never more than the same
 request would get in the foreground:
 
-1. what `tools.approval_policy` decides on its own: `on-risk` approves
-   read-only requests, `never` approves read-only requests and denies the rest;
-2. otherwise, when the client declared in `session.start` that it approves
+1. the built-in command gates (see
+   [Approval behavior](security.md#approval-behavior)): a `git push` that
+   forces `main` is denied, and a direct `cargo publish` is put to the owner
+   and never reaches the steps below;
+2. otherwise what `[policy] mode` decides on its own: `auto` approves every
+   request, `on-risk` approves read-only requests, and `read-only` approves
+   read-only requests and denies the rest;
+3. otherwise, when the client declared in `session.start` that it approves
    every request unasked (`auto_approve`, which a chat bridge sets for its
    owner's session), that approval;
-3. otherwise a denial.
+4. otherwise a denial.
 
-So a WeChat, Feishu, or Slack owner's background agents get the approvals the owner's
-foreground turns get, while in the TUI, which asks a person, a background
-job's non-read-only requests are denied and it relies on the agent's own
-permissions, such as `permissions = "full"`, unless the owner is watching the
+A request put to the owner is a yes-or-no question in chat, asked as
+`scv confirm` asks, in the chat that started the session or else the
+`[notify]` owner chat; only an explicit yes within 30 minutes allows it, and
+neither `auto_approve` nor the workbench answers it. So a WeChat, Feishu, or
+Slack owner's background agents get the approvals the owner's foreground
+turns get, while in the TUI, which asks a person, a background job's
+non-read-only requests are denied under `on-risk` or `always` and it relies
+on the agent's own configuration, unless the owner is watching the
 [workbench](#the-workbench): then a request the policy would put to a person
 waits up to two minutes for the owner's answer instead. Jobs belong to their
-session:
-closing it (a TUI or `scv exec` exiting, an idle channel conversation ending)
-cancels every job still running and kills its processes, and the
-[job ledger](#the-workbench) records each as interrupted. A channel
-conversation stays open while its jobs run, and a full channel session table
-never closes it to make room.
+session: closing it (a TUI or `scv exec` exiting, an idle channel
+conversation ending) cancels every job still running and kills its
+processes, and the [job ledger](#the-workbench) records each as
+interrupted. A channel conversation stays open while its jobs run, and a
+full channel session table never closes it to make room.
 
 ### Busy conversations
 
@@ -1339,9 +1358,10 @@ anything already landed.
   as bounded data and quoted to the other role marked as untrusted. A
   builder's report can still try to mislead its reviewer, who is told to
   check claims against the files and history.
-- Approval grants nothing more: publishing still asks through `scv
-  confirm`, and both roles' nested approvals get the session's unattended
-  answer like any job's.
+- Approval grants nothing more: publishing still goes through the command
+  gates and the publish limit
+  ([Approval behavior](security.md#approval-behavior)), and both roles'
+  nested approvals get the session's unattended answer like any job's.
 - SCV never extends the rounds. More rounds, or a fix after a failed
   confirmation, is a new reviewed call the user asks for.
 
@@ -1424,24 +1444,6 @@ session's own depth is below `agent.max_delegation_depth` (default 2), and a
 delegated run may not start, stop, restart, update, or run a daemon, or manage
 channels. This is cooperative: see [Delegated runs](security.md#delegated-runs).
 
-By default SCV adds nothing to an agent's own permission settings, and in
-print mode Claude Code, for example, refuses Bash, Edit, and Write without a
-permission mode. `[agents.<name>] permissions = "full"` is the user's explicit
-opt-in to the CLI's own full-autonomy switches, placed after the fixed
-arguments: `--permission-mode bypassPermissions` for Claude Code (which also
-allows WebSearch and WebFetch), `--dangerously-bypass-approvals-and-sandbox -c
-web_search="live"` for Codex (`codex exec` has no `--search` flag), and
-`--always-approve` for Grok (web search is on by default); DeepSeek Harness
-gets `DSH_PERMISSION_MODE=danger-full-access`, Gemini CLI and Qwen Code get
-`--yolo`, Copilot `--allow-all-tools`, Cursor `--force`, and Amp
-`--dangerously-allow-all`, while pi, which has no approval prompts, sandbox,
-or built-in web search, and OpenCode and Kimi, whose permissions are their own
-configuration, get nothing. OpenCode's own defaults ask for nothing (they
-allow edits and commands), so like pi it acts unprompted either way unless
-its configuration in the private home says `ask`. The approval summary
-then states `FULL PERMISSIONS`. See
-[Agent permissions](configuration.md#agent-permissions).
-
 Before approval, SCV resolves the executable through the server environment
 and displays its absolute path, full argument vector, bounded prompt, requested
 directory, timeout, and delegate-risk warning; the approval request also
@@ -1465,6 +1467,88 @@ set its variables where unset. With the workspace inside the user's home, a
 Google. `GH_TOKEN` and `GITHUB_TOKEN` are not removed for any agent, although
 Copilot also reads them: they are how `gh` and git hosting tools sign in,
 which every coding agent runs as part of its work.
+
+### Permission modes
+
+`[policy] mode` decides how each delegated agent starts, and
+`[agents.<name>] mode` decides it for one agent (see
+[Policy](configuration.md#policy)). Under `auto`, the default, SCV adds the
+CLI's own full-autonomy switches after the fixed arguments:
+`--permission-mode bypassPermissions` for Claude Code (which also allows
+WebSearch and WebFetch), `--dangerously-bypass-approvals-and-sandbox -c
+web_search="live"` for Codex (`codex exec` has no `--search` flag), and
+`--always-approve` for Grok (web search is on by default); DeepSeek Harness
+gets `DSH_PERMISSION_MODE=danger-full-access`, Gemini CLI and Qwen Code get
+`--yolo`, Copilot `--allow-all-tools`, Cursor `--force`, and Amp
+`--dangerously-allow-all`, while pi, which has no approval prompts, sandbox,
+or built-in web search, and OpenCode and Kimi, whose permissions are their
+own configuration, get nothing. OpenCode's own defaults ask for nothing
+(they allow edits and commands), so like pi it acts unprompted either way
+unless its configuration in the private home says `ask`. Under `on-risk`,
+`always`, or `read-only` SCV adds nothing, and the agent's own
+configuration decides what it asks; in print mode Claude Code, for example,
+then refuses Bash, Edit, and Write. What an agent relays to SCV is a
+request of the `agent` tool, so `[policy] mode` decides it, whatever the
+agent's own mode.
+
+SCV checks the permission mode the agent reports against the one its policy
+mode expects, and fails closed. Under `auto` the agent must report its full
+mode. Under any other mode a report of the full mode is a mismatch too,
+which catches an agent home that turned its own prompts off, such as an
+imported Codex `config.toml` with `approval_policy = "never"` and
+`sandbox_mode = "danger-full-access"`. A mismatch, or no report from an
+agent that should send one, stops the run: SCV kills the CLI's process
+group, or cancels the ACP turn and closes the session, and the call fails
+naming the expected and reported modes, as in `claude reported permission
+mode default, but policy mode auto expects bypassPermissions; the run was
+stopped`. An agent that reports nothing SCV reads still runs.
+
+| Agent | What reports the mode | Checked |
+| --- | --- | --- |
+| `claude`, `claude-ai` (CLI) | `permissionMode` in the stream-json `system`/`init` event, beside `apiKeySource`; the full mode is `bypassPermissions`. A managed `permissions.disableBypassPermissionsMode` that downgrades the session shows here. | before any tool runs |
+| `claude`, `claude-ai` (ACP) | under `auto`, the mode the agent reports after SCV sets its `mode` config option to `bypassPermissions`, since `claude-agent-acp` answers `session/set_mode` with `{}` even when it picks another mode; otherwise the `modes.currentModeId` of `session/new` | before the prompt is sent |
+| `codex` (CLI) | the `turn_context` its rollout file under the agent home's `sessions/` records; the full mode is `approval_policy never, sandbox danger-full-access`. SCV reads it from `thread.started` on, for up to 30 seconds, and once more when the run ends. The format is internal to Codex. | shortly after the turn starts, not before its first command |
+| `codex` (ACP) | `modes.currentModeId`, and under `auto` the answer to setting its `mode` config option, since `codex-acp` answers `session/set_mode` with `{}` and reports nothing; the full mode is `agent-full-access` | before the prompt is sent |
+| `grok`, `dsh`, `gemini`, `qwen`, `copilot`, `cursor`, `amp` | nothing SCV reads | unverified |
+| `pi`, `opencode`, `kimi` | nothing: they have no full-autonomy switch | not applicable |
+| `scv` (nested) | nothing: its adapter runs `scv server --stdio --policy on-risk`, and configured `[agents.scv] args` keep a `--policy` at least that strict, so every request that is not read-only reaches the parent's gate | the parent's policy decides |
+
+Over ACP, a report of another mode after the check cancels
+the turn, closes the session, and fails the call; Claude's own `plan` mode
+is the one exception, since Claude returns from it to the mode it left. For
+an ACP agent with a switch but no session mode to compare (Grok Build,
+DeepSeek Harness, Gemini CLI, Qwen Code), SCV keeps the mode the session
+reports, if any, without checking it. The result's `mode` (see
+[Results](#results)), the job record's `mode`, and `scv agents check` say
+what SCV knew: `verified <mode>`, `unverified`, or
+`unverified (it reports <mode>)`.
+
+The approval summary names the policy mode and the check. Under `auto`,
+Claude Code's CLI gets `FULL PERMISSIONS (policy mode auto; SCV verifies
+the mode it reports before any tool runs): the agent's own approval prompts
+and sandbox are off, so it edits files, runs commands, and uses the network
+without asking.` The part after `;` is `SCV verifies the mode it reports
+shortly after its turn starts` for Codex's CLI, `SCV verifies the mode it
+reports before sending the prompt` over ACP, `mode unverified: it reports
+none SCV can read` for an unverified agent, and absent for an agent without
+a switch. Under a stricter mode it says, for example, `Policy mode on-risk;
+SCV verifies the mode it reports before any tool runs. It starts without
+its full-autonomy switches, so its own configuration decides what it
+asks.`; over ACP the last sentence is `Its own permission requests come
+back here for approval.`, and for a CLI without a switch, `It has no
+full-autonomy switch, so its own configuration decides what it asks.`
+
+Every Claude Code run, under any mode, also gets deny rules:
+`--disallowedTools` and SCV's rules after `--settings`, or
+`_meta.claudeCode.options.disallowedTools` beside `settings` in ACP's
+`session/new`. They deny `Bash(cargo publish:*)` and each spelling of
+force-pushing `main` that Claude Code's prefix patterns can express, such
+as `Bash(git push --force origin main:*)` and
+`Bash(git push origin +main:*)`. Claude Code's `bypassPermissions` mode
+approves every tool call except explicit deny rules, so they hold in full
+mode, where SCV sees none of the agent's commands. A prefix rule matches
+the plain spelling only, not a script or `bash -c` that hides it. SCV
+relies on no such rule for Codex.
 
 ### The workbench
 
@@ -1518,10 +1602,11 @@ agents and nested SCVs) are ever `awaiting_input`.
 queued job's turn begins, when it ends, and when its result is reported:
 agent, task, the prompt (up to 16 KiB) and other arguments, workspace, who
 started it (the model, or the owner), its conversation, worktree, state,
-and bounded reply or error. A job whose session closes unfinished is
-recorded `interrupted` then; one whose process died is found by the daemon
-at startup and every 60 seconds. Finished jobs are kept seven days. A
-session that comes back under its ID numbers its jobs, and its
+bounded reply or error, and the result's permission `mode` (see
+[Permission modes](#permission-modes)). A job whose session closes
+unfinished is recorded `interrupted` then; one whose process died is found
+by the daemon at startup and every 60 seconds. Finished jobs are kept seven
+days. A session that comes back under its ID numbers its jobs, and its
 conversations, after the ones its records and its runs name (a run's log
 can outlive the records of the jobs it served), so a job ID or handle never
 comes to mean another job or conversation; and the workbench shows a job's
@@ -1595,11 +1680,14 @@ watches (a dashboard has asked for the workbench in the last 15 seconds), a
 request the approval policy would put to a person in the foreground, and the
 unattended answer would deny, waits up to two minutes for the owner instead,
 listed with its ID, risk, summary, and deadline; with no answer it is denied
-as before. What the policy decides on its own is never held: `never` denies
-side effects outright, and a request the session approves unasked goes on.
-The owner's answer is the one the TUI would have asked for in the
-foreground, so nothing gets more than it would there. A request held near
-the job's own deadline can end the job by its timeout rather than a denial.
+as before. What the policy decides on its own is never held: `auto`
+approves, `read-only` denies side effects outright, and a request the
+session approves unasked goes on. Nor is a request a command gate puts to
+the owner: it is asked in chat ([Background jobs](#background-jobs)), even
+while the owner watches. The owner's answer is the one the TUI would have
+asked for in the foreground, so nothing gets more than it would there. A
+request held near the job's own deadline can end the job by its timeout
+rather than a denial.
 
 ```sh
 scv jobs                                  # unfinished jobs, live runs, approvals, restorable queues
@@ -1722,8 +1810,8 @@ screen and types into it.
 
 **What runs.** The agent's own CLI, found as its delegated runs find it,
 with the arguments its adapter declares for resuming a session
-interactively (Codex: `codex resume <thread>` with its `permissions =
-"full"` switches, `--dangerously-bypass-approvals-and-sandbox -c
+interactively (Codex: `codex resume <thread>` with its full-autonomy
+switches, `--dangerously-bypass-approvals-and-sandbox -c
 web_search="live"`), in the conversation's directory (its worktree, when it
 has one), with exactly the environment its delegated runs get: its private
 home and state variables, every inherited credential, endpoint, and
@@ -1742,11 +1830,11 @@ it (elsewhere the flag is set right after opening).
 
 **Who can be taken over.** Only an agent whose terminal asks nothing SCV's
 approval gate decides, so a key typed into it never answers an approval:
-the adapter declares an interactive resume whose `permissions = "full"`
-switches turn every prompt off, and the agent is configured with
-`permissions = "full"`, under which its delegated runs relay no approval
-either. That is Codex. With its own prompts on, Codex asks in its terminal
-what its delegated runs relay to the gate, so it is refused; Claude Code is
+the adapter declares an interactive resume whose full-autonomy switches
+turn every prompt off, and the agent's policy mode is `auto` (the default),
+under which its delegated runs relay no approval either. That is Codex.
+Under a stricter mode, Codex asks in its terminal what its delegated runs
+relay to the gate, so it is refused; Claude Code is
 refused always, because its terminal still asks before some actions with
 its prompts off (deleting files, publishing), which its ACP runs relay to
 the gate; agents without a verified interactive resume, and nested SCVs,
@@ -1889,9 +1977,17 @@ initialize (v3) → session.start {cwd, delegation_depth: parent + 1} → turn.s
   never becomes progress.
 - Its `approval.requested` goes through the calling session's approval gate
   with the summary prefixed `[scv-1 depth N]`, keeping the nested tool's name
-  and risk, and the answer returns as `approval.resolve`. The session's policy
-  and its user (or a WeChat owner's auto-approval) therefore decide every
-  nested side effect; with no approval gate the request is denied.
+  and risk, and the answer returns as `approval.resolve`. The adapter starts
+  it as `scv server --stdio --policy on-risk`, so every request that is not
+  read-only is relayed, whatever the nested home's own configuration says.
+  Configured `[agents.scv] args` cannot weaken it: SCV drops any `--policy`
+  (or `--approval-policy`) in them and appends the stricter of `on-risk` and
+  the one dropped.
+  The session's policy and its user (or a WeChat owner's auto-approval)
+  therefore decide every nested side effect; with no approval gate the
+  request is denied. The nested SCV's own command gates apply first, and a
+  request they put to the owner is denied there, since a stdio server has
+  no daemon to ask through.
 - The result is `{"agent":"scv","status","reply","usage","session","turn"}`.
   A call that is cancelled or times out sends `turn.cancel`; a turn that
   settles within 2 seconds leaves the conversation usable (a timed-out turn is
@@ -1973,8 +2069,11 @@ run, so `auto` keeps it; custom `args` do not matter.
 ```text
 initialize {protocolVersion: 1, no fs or terminal capabilities}
   → session/new {cwd, mcpServers: [], and for claude and claude-ai
-       _meta.claudeCode.options.settings: <pinned settings object>}
-  → [set mode for permissions = "full"]
+       _meta.claudeCode.options.settings: <pinned settings object>,
+       _meta.claudeCode.options.disallowedTools: <deny rules>}
+  → [the full mode under policy mode auto: session/set_config_option on
+       the mode option, else session/set_mode]
+  → [check the mode the session reports, for claude, claude-ai, and codex]
   → [session/set_config_option for model/effort] → session/prompt per call
 ```
 
@@ -2019,25 +2118,40 @@ nowhere. Between turns SCV sends no steering request.
   (<kind>)`, whose handle names the agent. The risk follows SCV's own tools: `read`, `search`, and `think`
   are read-only unless a location looks secret-like, edits, deletes, and moves
   are file-system work, `execute` is a process, `fetch` is network, and
-  anything else is delegation. An approval selects the agent's allow-once
-  option, a denial its reject-once option (each falls back to the "always"
-  variant), and a request with neither is cancelled. With no approval gate
-  every request is rejected. SCV offers no client file-system or terminal
-  capabilities, so any `fs/*`, `terminal/*`, or other request is answered with
-  JSON-RPC "method not found".
-- `permissions = "full"` maps onto each agent's own switch: Claude's
+  anything else is delegation. The command of an `execute` request
+  (`rawInput.command`, a string or an argument list joined with spaces) is
+  what the [command gates](security.md#approval-behavior) match. An approval
+  selects the agent's allow-once option, a denial its reject-once option
+  (each falls back to the "always" variant), and a request with neither is
+  cancelled. With no approval gate every request is rejected. SCV offers no
+  client file-system or terminal capabilities, so any `fs/*`, `terminal/*`,
+  or other request is answered with JSON-RPC "method not found".
+- Policy mode `auto` maps onto each agent's own switch: Claude's
   `bypassPermissions` and Codex's `agent-full-access` session modes (selected
-  with `session/set_mode` in every new session), `grok agent --always-approve
+  in every new session), `grok agent --always-approve
   stdio`, DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`, and
   `--yolo` before `--experimental-acp` for Gemini CLI and Qwen Code. OpenCode
   and Kimi have no such switch: their permissions are their own
   configuration, and what it has them ask is relayed (OpenCode's defaults
-  ask nothing). A
-  permission request that still arrives is relayed as usual. `codex-acp` takes
-  no `-c` overrides, so for Codex `"full"` also sets
-  `CODEX_CONFIG={"web_search":"live"}` on the ACP server, its JSON form of
-  them, keeping live web search as in resume mode without rewriting the
-  private `config.toml`.
+  ask nothing). A permission request that still arrives is relayed as usual,
+  and `[policy] mode` decides it. `codex-acp` takes no `-c` overrides, so
+  under `auto` SCV also sets `CODEX_CONFIG={"web_search":"live"}` on the ACP
+  server, its JSON form of them, keeping live web search as in resume mode
+  without rewriting the private `config.toml`.
+- For Claude Code and Codex, SCV checks the session's mode before the first
+  prompt. Under `auto` it selects the full mode through the session's `mode`
+  config option when it offers one, else `session/set_mode`, and takes only
+  a mode the agent reports during the call: the option's `currentValue` in
+  the answer, a `current_mode_update`, or a `config_option_update` listing
+  the `mode` option. The `{}` that answers `session/set_mode` is not a
+  report: `claude-agent-acp` gives it even when it picks another mode, and
+  `codex-acp` gives it and reports nothing. The reported mode must be the
+  full one. Under any other mode, the mode the session opened in
+  (`modes.currentModeId`, else the `mode` option's `currentValue`) must not
+  be the full one. A session that reports no mode fails like a mismatch. A
+  mismatch fails the call and closes the session, and so does a later
+  report of another mode, except Claude's own `plan` mode (see
+  [Permission modes](#permission-modes)).
 - The result has the CLI adapters' shape. `stopReason` `end_turn` completes
   the call; `cancelled` ends it as cancelled; `refusal` ends it as `declined`;
   any other reason completes it with an `(stopped early: …)` note. A JSON-RPC
@@ -2256,6 +2370,11 @@ turn per agent. It reads only the user's configuration and prints, per agent:
 - the user's `hard_task_effort`, if set, which the call does not use. When
   the saved efforts lack it, the line says so and names the setting. Efforts
   depend on the model, so this is a warning and does not fail the check;
+- the permission mode the call below ran in, as its result's `mode` gives it
+  (`verified <mode>`, `unverified`, or `unverified (it reports <mode>)`),
+  with the agent's policy mode, or that the agent has no full-autonomy
+  switch (see [Permission modes](#permission-modes)). A call SCV stopped
+  for its mode fails, and its error names both modes;
 - one `agent` call, made through the same tool and backend a session uses,
   from the current directory, in the foreground. It sends `SCV is checking
   that it can reach you. Reply with exactly: ok` with the user's configured
@@ -2284,6 +2403,7 @@ claude (Claude Code (API key))
   models    opus[1m], claude-fable-5-1[1m], sonnet, haiku
   efforts   low, medium, high, xhigh, max
   hard task effort max
+  mode      verified bypassPermissions (policy mode auto)
   call      ok in 3.7s with your configured model opus[1m] and effort xhigh: "ok"
 ```
 
@@ -2336,8 +2456,11 @@ reading, sanitizing, and invalidating the saved file. A fake `dsh` covers
 `scv agents check` end to end, both a passing call and a signed-out one.
 Canned Gemini CLI, Cursor, and Amp event streams cover their replies,
 sessions, and progress lines; the adapter table's tests cover each new
-agent's arguments, removed variables, and that Kimi runs over ACP only. The
-workbench's unit tests cover activity logs (paging, truncation, scrubbing
+agent's arguments, removed variables, and that Kimi runs over ACP only.
+Unit tests cover which reported modes each policy mode accepts, the
+approval summaries, and reading the latest turn's mode from a Codex
+rollout.
+The workbench's unit tests cover activity logs (paging, truncation, scrubbing
 relayed lines, a run's end after its turn's, quiet and orphaned runs), the
 job ledger (records, interruption, pruning, numbering, dismissal), snapshots
 and the conversations they show, owner start, send, cancel, and resume (once,

@@ -703,6 +703,7 @@ impl Connection {
         let label = session_label(request.channel.as_deref(), &self.client_name);
         let client = SessionClient {
             label,
+            owner_at_client: self.client_name == TUI_CLIENT && request.channel.is_none(),
             channel: request.channel,
             auto_approve: request.auto_approve.unwrap_or(false),
             chat,
@@ -712,7 +713,7 @@ impl Connection {
             provider: request.provider.or_else(|| defaults.provider.clone()),
             model: request.model.or_else(|| defaults.model.clone()),
             base_url: request.base_url.or_else(|| defaults.base_url.clone()),
-            approval_policy: defaults.approval_policy,
+            mode: defaults.mode,
             no_tools,
             config_file: defaults.config_file.clone(),
         };
@@ -723,6 +724,7 @@ impl Connection {
             request.delegation_depth.unwrap_or(0),
             &self.registry,
             self.hosts.as_ref().map(|hosts| hosts.workbench()),
+            self.hosts.as_ref().and_then(|hosts| hosts.confirmer()),
             client,
         )
         .await;
@@ -1520,6 +1522,9 @@ impl Connection {
     }
 }
 
+/// The name the terminal UI connects with, as `initialize` gives it.
+const TUI_CLIENT: &str = "scv-tui";
+
 /// Who a session serves, as the job ledger and the workbench name it: its
 /// chat channel, or else the program that connected.
 fn session_label(channel: Option<&str>, client: &str) -> String {
@@ -1527,7 +1532,7 @@ fn session_label(channel: Option<&str>, client: &str) -> String {
         return channel.to_owned();
     }
     match client {
-        "scv-tui" => "TUI".into(),
+        TUI_CLIENT => "TUI".into(),
         "scv-exec" => "scv exec".into(),
         "scv-agent" => "nested SCV".into(),
         "" => "client".into(),

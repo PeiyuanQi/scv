@@ -89,15 +89,20 @@ back and no background job is still running, then restarts into the new
 release. A watchdog checks that the new
 version comes up with its chat accounts connected and, where the config layout
 allows, rolls back if it does not. That is how SCV ships its own releases from
-chat, asking you before it publishes.
+chat, asking you first only when a release would pass its daily limit of
+versions per crate.
 
 ### You stay in charge
 
-The server, not the client, enforces approvals: by default reads run, while
-writes, shell commands, and agents ask first. File tools stay in the workspace,
-commands and agents have timeouts (a background agent job may run without one
-only if you allow it) and output caps, and chat stays tool-free until you grant
-tools to your own account.
+The server, not the client, enforces one approval policy. By default
+(`auto`), tools and agents run without asking, each delegated agent starts in
+its own full-autonomy mode, and SCV stops a run that reports a mode the policy
+did not choose. SCV denies a force-push to `main` and asks you before a direct
+`cargo publish`. `mode = "on-risk"` brings the questions back: reads run,
+while writes, shell commands, and agents ask first. File tools stay in the
+workspace, commands and agents have timeouts (a background agent job may run
+without one only if you allow it) and output caps, and chat stays tool-free
+until you grant tools to your own account.
 
 ### Native, small, extensible
 
@@ -227,7 +232,8 @@ SCV  [file] checkout-timezone.diff
 SCV answers the quick question itself while Codex works, relays Codex's report
 without being asked, and sends the diff as a file. Before a step that cannot be
 undone, work can also ask you yes or no in the chat with `scv confirm`; SCV's
-own release flow asks this way before it publishes.
+own release flow asks this way when a release would pass its daily limit of
+versions per crate.
 
 ## How it works
 
@@ -270,8 +276,9 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-your-key"
 # reasoning_effort = "high"   # with a reasoning model: how hard SCV's own model thinks
 
-[tools]
-approval_policy = "on-risk"   # reads run; writes, shell, and agents ask first
+[policy]
+mode = "auto"                 # the default: tools and agents run without asking
+# mode = "on-risk"            # reads run; writes, shell, and agents ask first
 
 [agent]
 prefer = ["codex", "claude"]  # who gets delegated work first
@@ -300,8 +307,9 @@ secrets hidden. The full schema and trust rules are in
 
 ## Safety
 
-SCV is **not a sandbox**: approved commands and delegated agents run with your
-user's permissions. Work in version-controlled workspaces, read what you
+SCV is **not a sandbox**: commands and delegated agents run with your user's
+permissions, and by default without asking you. Work in version-controlled
+workspaces, switch `[policy]` to `on-risk` when you want to read what you
 approve, and use a container for untrusted code. SCV is pre-1.0, so its
 protocol and configuration may still change. See the
 [security model](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md),
@@ -315,7 +323,7 @@ and report vulnerabilities as
 | [Architecture](https://github.com/PeiyuanQi/scv/blob/main/docs/architecture.md) | Crates, the agent loop, planned restarts, and where to start reading the code |
 | [Channels](https://github.com/PeiyuanQi/scv/blob/main/docs/channels.md) | Feishu/Lark, WeChat, and Slack: sign-in, media, background reports, questions to the owner; mail triage reported to a mail chat, and mail actions the owner approves there |
 | [Tools](https://github.com/PeiyuanQi/scv/blob/main/docs/tools.md) | Built-in tools, delegated agents, their models and checks, ACP, background jobs, worktrees, the workbench, and agent sign-ins |
-| [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | Instance layout, every setting, providers, the daemon, and notices |
+| [Configuration](https://github.com/PeiyuanQi/scv/blob/main/docs/configuration.md) | Instance layout, every setting, the approval policy, providers, the daemon, and notices |
 | [Security](https://github.com/PeiyuanQi/scv/blob/main/docs/security.md) | Trust boundaries, approvals, remote tools, and delegated runs |
 | [Context management](https://github.com/PeiyuanQi/scv/blob/main/docs/context-management.md) | The token budget and deterministic compaction |
 | [Protocol](https://github.com/PeiyuanQi/scv/blob/main/docs/protocol.md) | The JSONL protocol for clients |

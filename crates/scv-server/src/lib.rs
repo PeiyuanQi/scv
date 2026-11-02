@@ -23,6 +23,7 @@ mod events;
 mod outbound;
 mod project;
 mod prompt;
+pub mod publish;
 mod restart;
 mod session;
 #[cfg(test)]

@@ -226,6 +226,7 @@ impl AgentRuntime {
                             risk,
                             cwd: self.workspace.clone(),
                             summary,
+                            command: tool.approval_command(&call.arguments),
                         },
                         cancellation.child_token(),
                     )

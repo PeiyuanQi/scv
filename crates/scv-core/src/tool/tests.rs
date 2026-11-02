@@ -40,6 +40,7 @@ async fn tool_approvals_carry_the_call_and_deny_without_a_gate() {
             ToolRisk::Process,
             PathBuf::from("/w"),
             "Run it",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -55,6 +56,7 @@ async fn tool_approvals_carry_the_call_and_deny_without_a_gate() {
                 ToolRisk::Process,
                 PathBuf::from("/w"),
                 "[scv-1 depth 1] Run it",
+                Some("make".into()),
                 CancellationToken::new(),
             )
             .await
@@ -63,6 +65,7 @@ async fn tool_approvals_carry_the_call_and_deny_without_a_gate() {
     let requests = gate.0.lock().unwrap();
     assert_eq!(requests[0].call_id, "call-7");
     assert_eq!(requests[0].summary, "[scv-1 depth 1] Run it");
+    assert_eq!(requests[0].command.as_deref(), Some("make"));
 }
 
 /// Waits for a person who never answers, and withdraws its request once the
@@ -96,6 +99,7 @@ async fn an_approval_wait_past_its_deadline_is_withdrawn_and_reported_as_a_limit
             ToolRisk::Process,
             PathBuf::from("/w"),
             "Run it",
+            None,
             cancellation.clone(),
             Some(Instant::now() + Duration::from_millis(20)),
         )
@@ -120,6 +124,7 @@ async fn an_approval_wait_returns_the_decision_or_the_gates_cancellation() {
                 ToolRisk::Process,
                 PathBuf::from("/w"),
                 "Run it",
+                None,
                 CancellationToken::new(),
                 deadline,
             )
@@ -137,6 +142,7 @@ async fn an_approval_wait_returns_the_decision_or_the_gates_cancellation() {
             ToolRisk::Process,
             PathBuf::from("/w"),
             "Run it",
+            None,
             cancellation,
             Some(Instant::now() + Duration::from_secs(60)),
         )

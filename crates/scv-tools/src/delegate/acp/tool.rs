@@ -18,6 +18,7 @@ use crate::{
     delegate::{
         agent::{Accepts, Backend},
         conversation::{Attachment, ConversationStore},
+        mode,
         options::{self, AgentOptions, Choice, Listed},
         output::RunStatus,
         progress::redact,
@@ -43,8 +44,12 @@ pub(crate) struct AcpAgentTool {
     pub(super) resolved: Option<PathBuf>,
     pub(super) environment: Vec<(OsString, OsString)>,
     pub(super) auth: AgentAuthPlan,
-    /// `permissions = "full"`.
+    /// Its policy mode is `auto`, so it starts in its full mode.
     pub(super) full: bool,
+    /// The policy mode in effect for it, such as `auto`.
+    pub(super) policy: String,
+    /// It has a full-autonomy switch, so a mode to verify.
+    pub(super) mode_switch: bool,
     /// `model` and `effort` as the adapter offers them, and always
     /// `session`, since an ACP session continues.
     accepts: Accepts,
@@ -104,6 +109,8 @@ impl AcpAgentTool {
             environment: adapter.environment.clone(),
             auth: adapter.auth.clone(),
             full: adapter.full_permission_args.is_some(),
+            policy: adapter.policy.clone(),
+            mode_switch: adapter.mode_switch,
             accepts: Accepts {
                 model: !adapter.model_args.is_empty() || session_options,
                 effort: !adapter.effort_args.is_empty() || session_options,
@@ -275,13 +282,14 @@ impl Backend for AcpAgentTool {
             |session| format!("ACP conversation {session}"),
         );
         let timeout = self.timeouts.resolve(args.timeout_seconds)?;
-        let permissions = if self.full {
-            " FULL PERMISSIONS (permissions = \"full\"): the agent's own approval prompts \
-             and sandbox are off, so it edits files, runs commands, and uses the network \
-             without asking."
+        let check = if self.launch.full_mode.is_some() {
+            mode::Check::BeforePrompt
+        } else if self.mode_switch {
+            mode::Check::Unverified
         } else {
-            " Its own permission requests come back here for approval."
+            mode::Check::NotApplicable
         };
+        let permissions = mode::summary(&self.policy, self.full, check, true);
         Ok(format!(
             "Send prompt {:?} to {conversation} in {directory} {}. The nested agent has your \
              user permissions.{permissions}",
@@ -476,6 +484,7 @@ impl Backend for AcpAgentTool {
                         None,
                         Some(error),
                         None,
+                        None,
                     ));
                 }
             },
@@ -511,6 +520,7 @@ impl Backend for AcpAgentTool {
                 None,
                 Some(error),
                 kept.as_deref().map(|_| (handle.as_str(), number)),
+                self.mode_status(&child),
             ));
         }
         let handle = turn.handle.clone();
@@ -567,6 +577,7 @@ impl Backend for AcpAgentTool {
                             "{detail}; the agent did not stop in time and was shut down"
                         )),
                         None,
+                        self.mode_status(&child),
                     ));
                 }
                 (RunStatus::Timeout, reply, None, Some(detail))
@@ -602,6 +613,29 @@ impl Backend for AcpAgentTool {
                     None,
                     Some(detail),
                     None,
+                    None,
+                ));
+            }
+            TurnEnd::ModeChanged(left) => {
+                // A session in a mode nobody chose takes no further turn.
+                let confirmed = child.verified_mode.as_deref().unwrap_or("unknown");
+                let detail = format!(
+                    "{} moved its session from permission mode {confirmed} to {}, which policy \
+                     mode {} does not allow; the run was stopped",
+                    self.name,
+                    bounded(&left, 80),
+                    self.policy
+                );
+                ended(RunStatus::Failed, Some(&detail));
+                child.rpc.live.close().await;
+                turn.forget();
+                return Ok(self.result(
+                    RunStatus::Failed,
+                    (String::new(), false),
+                    None,
+                    Some(detail),
+                    None,
+                    None,
                 ));
             }
         };
@@ -620,6 +654,7 @@ impl Backend for AcpAgentTool {
             conversation
                 .as_ref()
                 .map(|(handle, turn)| (handle.as_str(), *turn)),
+            self.mode_status(&child),
         ))
     }
 }

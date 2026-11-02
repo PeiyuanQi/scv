@@ -131,14 +131,15 @@ impl ToolApprovals {
     }
 
     /// Ask the session's gate to approve a nested agent's tool call. The
-    /// request carries this tool call's ID; `name`, `risk`, and `summary`
-    /// describe the nested call.
+    /// request carries this tool call's ID; `name`, `risk`, `summary`, and
+    /// the exact `command`, when the nested call runs one, describe it.
     pub async fn request(
         &self,
         name: impl Into<String>,
         risk: ToolRisk,
         cwd: PathBuf,
         summary: impl Into<String>,
+        command: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<bool, AgentError> {
         let Some(gate) = &self.gate else {
@@ -151,6 +152,7 @@ impl ToolApprovals {
                 risk,
                 cwd,
                 summary: summary.into(),
+                command,
             },
             cancellation,
         )
@@ -162,16 +164,21 @@ impl ToolApprovals {
     /// to withdraw the request it is showing, and the result is
     /// [`AgentError::ToolLimit`]. Cancellation itself is the gate's to
     /// observe, so it always cleans up after itself.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the request's fields and its wait"
+    )]
     pub async fn request_until(
         &self,
         name: impl Into<String>,
         risk: ToolRisk,
         cwd: PathBuf,
         summary: impl Into<String>,
+        command: Option<String>,
         cancellation: CancellationToken,
         deadline: Option<Instant>,
     ) -> Result<bool, AgentError> {
-        let request = self.request(name, risk, cwd, summary, cancellation.clone());
+        let request = self.request(name, risk, cwd, summary, command, cancellation.clone());
         let Some(deadline) = deadline else {
             return request.await;
         };
@@ -369,6 +376,11 @@ pub trait Tool: Send + Sync {
     fn risk(&self, arguments: &Value) -> Result<ToolRisk, ToolError>;
     /// One line describing this call for a person approving it.
     fn approval_summary(&self, arguments: &Value) -> Result<String, ToolError>;
+    /// The exact command this call runs, for the approval policy's command
+    /// gates; `None` (the default) for a tool that runs no command.
+    fn approval_command(&self, _arguments: &Value) -> Option<String> {
+        None
+    }
     /// Run an approved call. Honour `context.cancellation`.
     async fn execute(
         &self,

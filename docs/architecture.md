@@ -76,11 +76,14 @@ SCV provides:
   thread in it, from which a new session carries on the open episode and which the
   model can search, with the files the owner keeps and a free-disk-space
   floor;
-- interactive approval for tools with filesystem, shell, subprocess, or
-  network side effects;
+- one approval policy (`[policy] mode`, `auto` by default) for SCV's own
+  tools and the agents it delegates to: interactive approval for side
+  effects under `on-risk` or `always`, built-in command gates in every mode,
+  and a check of the permission mode each delegated agent reports;
 - planned restarts into a newly installed release, with a binary rollback;
-- yes/no questions to the owner in chat before irreversible steps, such as
-  publishing SCV to crates.io (`scv confirm`);
+- yes/no questions to the owner in chat before irreversible steps
+  (`scv confirm`), for requests only the owner may answer, and for
+  publishing SCV past the daily publish limit (`scv policy check publish`);
 - Linux and macOS source builds and release archives.
 
 The current release does not include dynamic library loading, OS-level
@@ -104,7 +107,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, event serialization, kept session queues, the workbench's daemon side (its own sessions for the owner's jobs and its control actions), and the optional durable project ledger/orchestrator. |
 | `scv-tui` | Terminal state, the dashboard (tabs, panes, sidebar, agent views, notifications, key bindings), rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), `slack` (tokens entered by hand, Socket Mode events with catch-up from conversation history, sending, files both ways, and its credentials), and `email` (mail triage and approval-gated actions: IMAP, the Gmail API, Microsoft Graph, and SMTP). |
-| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), `scv mail` (`mail.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). |
+| root `scv-cli` package | Installable `scv` and `scv-server` binaries. `src/main.rs` selects the instance and starts the runtime; each command group lives in `src/cli/`, including the administration only the command line does: signing agents in, importing their setups, and checking them (`agents/`), `scv config show` (`config/overview.rs`), `scv mail` (`mail.rs`), the systemd unit (`service.rs`), and terminal prompts (`prompt.rs`). `scv policy check publish` (`policy.rs`) counts each crate's recent versions on crates.io with the root package's `reqwest` and applies `scv-server`'s publish rule. |
 
 The integration dependency chain is
 `server -> channels -> client -> protocol`.
@@ -159,12 +162,13 @@ What lives where in the largest crates:
 | | `outbound.rs` | The byte- and frame-bounded outbound queue and event encoding |
 | | `session/` | A session (`mod.rs`), building one (`build.rs`), starting a chat session with its log's open episode (`reload.rs`), its turn queue (`queue.rs`), a TUI session's kept queue (`persist.rs`), and running a turn (`turn.rs`) |
 | | `prompt/` | The system prompt (`mod.rs`) and skill discovery (`skills.rs`), with the built-in skills from `skills/<name>/SKILL.md` |
-| | `approval.rs`, `events.rs` | Approval gates, and `CoreEvent` to `ServerEvent` |
-| | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
+| | `approval.rs`, `events.rs` | The policy's decision (`decide`: the built-in command gates, then the mode), the approval gates, and the questions only the owner may answer (`OwnerQuestions`); and `CoreEvent` to `ServerEvent` |
+| | `config/` | The schema (`schema.rs`), layered loading (`load.rs`), the deprecated `[tools] approval_policy` and `[agents.<name>] permissions` read as their `[policy]` replacements, with warnings and the `scv config show` notes (`legacy.rs`), validation and the limits table (`validate.rs`), and runtime settings (`runtime.rs`) |
 | | `components.rs` | `Component`, `HealthReporter`, `Supervisor`, and the channel accounts they run |
 | | `project.rs` | The owner-created append-only project event ledger, reducer, task/run evidence, and supervised heartbeat reconciler |
 | | `restart.rs` | [Planned restarts](#planned-restarts), the watchdog, and the notifier that finds the owner's chat |
-| | `confirm.rs` | [Questions to the owner](#questions-to-the-owner) (`scv confirm`) |
+| | `confirm.rs` | [Questions to the owner](#questions-to-the-owner) (`scv confirm`, `scv policy check publish`, and the gates' requests only the owner may answer, through `Confirmer::ask_owner`) |
+| | `publish.rs` | The publish rule `scv policy check publish` applies: the rolling 24-hour count, the limit, and the owner's question |
 | | `attachments.rs` | Files attached to a turn, such as chat media |
 | | `disk.rs` | The free-space floor for the chat log, chat media, and kept files |
 | `scv-tools` | `registry.rs`, `config.rs`, `args.rs` | `builtin_registry`, how an agent is reached (`reach`) and one call to it for `scv agents check` (`call_agent`), the tools' settings, and the argument helpers every tool shares |
@@ -180,6 +184,7 @@ What lives where in the largest crates:
 | | `delegate/takeover.rs`, `delegate/pty.rs` | The owner's takeover of a conversation in its agent's own terminal: which agents may be offered, the daemon-held pseudo-terminal the agent's interactive UI runs on, its screen (kept with the `vt100` parser, credentials masked), and its lifecycle |
 | | `delegate/review.rs` | Reviewed jobs: the builder and fresh-reviewer loop, reviewer routing, the landing confirmation, and its parts: the verdict and landing blocks (`blocks`), the live state every surface reads (`state`), SCV's prompt texts (`prompts`), and the journal (`journal`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
+| | `delegate/mode.rs` | The permission mode the policy expects of a delegated agent, reading it from a Codex run's rollout, the approval summary's sentence about it, and the result's `mode` |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
 | | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
@@ -191,7 +196,7 @@ What lives where in the largest crates:
 | | `slack/` | The Slack transport with its catch-up (`mod.rs`) and its Web API client, including files (`api.rs`); Socket Mode framing and liveness (`socket.rs`); parsing events and history, and the catch-up checkpoint (`inbound.rs`); tokens entered by hand and the installation they belong to (`credentials.rs`) |
 | | `email/` | The email channel and its run (`mod.rs`); which adapter an account uses, loading a writer only when `mail.actions` is on (`provider.rs`); the provider-neutral mailbox interface (`source.rs`) and effects of one approved action (`effects.rs`); IMAP reading and, per approval, writing (`imap/`, including `writer.rs`); the Gmail API and Microsoft Graph (`gmail.rs`, `graph.rs`) over the guarded HTTP client (`api.rs`) and OAuth grants (`oauth.rs`); SMTP submission (`smtp/`); decoding and cleaning mail text (`parse.rs`, `clean.rs`); rules, the token ladder, and triage turns (`rules.rs`, `worker.rs`, `triage.rs`, `model.rs`); composing a draft (`compose.rs`, `prepare.rs`, `message.rs`, `preview.rs`); the account's state and its single writer, including the action state machine (`ledger.rs`, `ledger/actions.rs`); action content bound by a digest (`content.rs`) and the audit log (`audit.rs`); the executor (`executor.rs`) and what it may do (`authority.rs`); notification planning, rendering, and delivery (`plan.rs`, `render.rs`, `notify.rs`); retention (`janitor.rs`); settings and credentials (`settings.rs`, `credentials.rs`) |
 | `scv-core` | `message.rs`, `tool.rs` | History messages; the `Tool` trait, its context and output, and `ToolRegistry` |
-| | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` |
+| | `provider.rs`, `event.rs`, `approval.rs` | The `Provider` trait, the events a turn reports, and the `ApprovalGate` with its `ApprovalRequest`, whose `command` is the exact command a call runs (`Tool::approval_command`), which the command gates match |
 | | `progress.rs` | Bounded, paced tool progress lines |
 | | `context.rs`, `history.rs` | Choosing the history that fits the context window, and trimming stored history |
 | | `runtime.rs` | `AgentRuntime` and its turn loop |
@@ -273,12 +278,14 @@ processes never outlive the daemon's sessions; what survives a restart is
 their record, from which the owner resumes an interrupted job in the agent's
 own conversation.
 
-The managed daemon is started as a user-level systemd service and defaults to
-the `on-risk` approval policy. `scv start --allow-sudo` may authenticate the
-current user's existing sudo policy before the service starts, but SCV does not
-modify sudoers or elevate the daemon itself. A start without verified sudo
-authorization is confirmed interactively, or rejected when no terminal is
-available.
+The managed daemon is started as a user-level systemd service and runs under
+`[policy] mode`, `auto` unless the configuration or `scv start --policy`
+says otherwise (see [policy](configuration.md#policy)); a unit written with
+the old `--approval-policy` keeps working. `scv start --allow-sudo` may
+authenticate the current user's existing sudo policy before the service
+starts, but SCV does not modify sudoers or elevate the daemon itself. A start
+without verified sudo authorization is confirmed interactively, or rejected
+when no terminal is available.
 
 `scv update` installs the latest CLI from the configured Cargo index and
 restarts an active user daemon through systemd; a release landed through the
@@ -371,9 +378,11 @@ the daemon's own delegations the caller runs inside, and its session.
 
 ## Questions to the owner
 
-`scv-server::confirm` asks the owner yes or no before a step that cannot be
-undone; the feature-flow `publish.sh` asks before publishing SCV to crates.io
-when SCV delegated the flow.
+`scv-server::confirm` asks the owner yes or no: for `scv confirm` before a
+step that cannot be undone, for `scv policy check publish` when a release
+would pass the daily publish limit (the feature-flow `publish.sh` runs it
+before publishing SCV to crates.io), and for the approval gates' requests
+only the owner may answer.
 
 1. `scv confirm [--timeout SECS] QUESTION` sends `confirm_ask` with the
    caller's `SCV_PARENT` chain. The daemon finds the chat as a planned restart
@@ -404,6 +413,27 @@ when SCV delegated the flow.
    delivered fails without a word to the chat. `scv confirm` exits 0 on yes,
    1 on no or no answer, and 2 when nothing could be asked or the answer was
    not learned.
+
+`scv policy check publish` counts each pending crate's versions that
+crates.io lists as created in the last 24 hours, then decides with
+`scv-server::publish`: within `[policy] publish_crate_versions_per_day` it
+exits 0 without a question, and past it, or with a count it could not
+fetch, it asks with `confirm_ask` as `scv confirm` does and exits the same
+way. A crate already at crates.io's own limit of 20 makes it exit 1 without
+asking, whatever the configured limit, since crates.io would refuse that
+crate after the ones before it were published.
+
+The approval gates (`ProtocolApprovalGate`, `UnattendedGate`, and
+`PolicyFirstGate` in `approval.rs`) ask in process, through
+`Confirmer::ask_owner`, when `decide` returns `AskOwner`. Such a question is
+keyed by the daemon session whose call asks rather than by an `SCV_PARENT`
+chain, and goes to the chat that session answers, or else to the owner chat
+as above. The gate follows it as the CLI does; a question that cannot be
+asked, a cancelled call, or no yes by the deadline denies the request. A
+TUI chat's own turn is the exception: its usual approval prompt, with the
+gate's reason first, asks the owner at the terminal. A client's blanket
+answer (`auto_approve`) never satisfies `AskOwner`, and a stdio server,
+which has no `Confirmer`, denies it.
 
 Questions live in memory only: a restart drops them, and the waiting CLI,
 finding the question unknown or the daemon gone, exits 2.
@@ -499,6 +529,20 @@ the session's approval
 gate through `ToolContext.approvals`, which carries the running call's ID, so a
 nested agent's approval requests are decided like the session's own.
 
+The server resolves each delegated agent's policy mode (`[agents.<name>]
+mode`, else `[policy] mode`) into its adapter settings: under `auto` the
+agent starts with its full-autonomy switches. `delegate/mode.rs` holds what
+the agent must then report. The CLI backend reads Claude Code's
+`permissionMode` from the init event that carries `apiKeySource`
+(`delegate/output.rs`) and a Codex run's mode from its rollout file after
+`thread.started` (`delegate/native.rs`); the ACP backend checks the mode its
+session reports and watches its mode reports for the session's life
+(`delegate/acp/session.rs`). A mismatch, or no report from an agent that
+should send one, stops the run, and the result's `mode`, which the job
+ledger keeps, says `verified <mode>` or `unverified`. A nested SCV runs with
+`--policy on-risk`, or a stricter one its configured `args` name, so its
+requests that are not read-only reach the parent's gate.
+
 Background delegations live in `scv_tools::background`. Each session owns one
 `BackgroundJobs` store, shared by its tools and dropped with the session,
 which cancels the jobs still running. When `agent.max_background` is positive
@@ -507,7 +551,8 @@ the registry wraps the `agent` tool in `BackgroundCapable`: a call with
 tool's `execute` in a detached task with
 its own cancellation token, a buffered progress sink, and the session's
 unattended approval gate (the policy's own decision, else the client's
-declared `auto_approve`, else a denial), and returns a job handle;
+declared `auto_approve`, else a denial; a request only the owner may answer
+goes to the owner in chat instead), and returns a job handle;
 `agent_wait` and `agent_status` read the store and `agent_cancel` cancels one
 job's token. The store records a `JobChange` under the call's ID
 (`ToolContext.call_id`) when a call starts a job and when a call first shows

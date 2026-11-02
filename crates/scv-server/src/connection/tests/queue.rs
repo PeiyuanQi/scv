@@ -98,6 +98,11 @@ fn fixture(prompts: &[&str]) -> Fixture {
             tools: false,
             label: "TUI".into(),
             workbench: None,
+            owner: crate::approval::OwnerQuestions {
+                confirmer: None,
+                session: "s".into(),
+            },
+            owner_at_client: true,
         }),
         activity: None,
         active: None,

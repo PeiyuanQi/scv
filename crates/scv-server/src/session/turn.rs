@@ -106,11 +106,13 @@ impl TurnStarter {
             acted: Arc::clone(&acted),
         });
         let gate: Arc<dyn ApprovalGate> = Arc::new(ProtocolApprovalGate {
-            policy: current.config.tools.approval_policy,
+            policy: current.config.policy(),
             broker: Arc::clone(&self.approvals),
             meta,
             output: self.output.clone(),
             workbench: current.workbench.clone(),
+            owner_at_client: current.owner_at_client,
+            owner: current.owner.clone(),
         });
         let runtime = Arc::clone(&current.runtime);
         let history = Arc::clone(&current.history);

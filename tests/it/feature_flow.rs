@@ -1,8 +1,10 @@
 //! The feature-flow skill's `publish.sh`, run against a local git remote
 //! with fake `curl`, `scv`, and `cargo`, so nothing reaches crates.io, a
-//! daemon, or the network: an agent SCV delegated to asks the owner before
-//! its first `cargo publish` and stops unless the answer is yes, explaining
-//! what to do when the installed `scv` is too old to ask.
+//! daemon, or the network: the whole release goes through
+//! `scv policy check publish` before the first `cargo publish` and stops
+//! unless it says go. An installed `scv` without the rule makes an agent SCV
+//! delegated to ask the owner with `scv confirm` instead, and one too old to
+//! ask says what to do.
 
 use std::{
     os::unix::fs::PermissionsExt as _,
@@ -13,6 +15,17 @@ use std::{
 const CRATES: &str = "scv-core, scv-protocol, scv-client, scv-provider-openai, scv-tools, \
                       scv-channels, scv-server, scv-tui, scv-cli";
 
+/// What the installed `scv` offers `publish.sh`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Scv {
+    /// 0.2.1: neither `policy` nor `confirm`.
+    TooOld,
+    /// `confirm`, but not yet `policy`.
+    Confirm,
+    /// `policy check publish`.
+    Policy,
+}
+
 struct Checkout {
     root: tempfile::TempDir,
 }
@@ -20,15 +33,15 @@ struct Checkout {
 impl Checkout {
     /// A clone at `origin/main` of a repository whose workspace version is
     /// 9.9.9, beside a bin directory of fakes: `curl` reports every crate
-    /// unpublished, `scv` records its arguments and exits with `answer`,
-    /// and `cargo` records each call.
+    /// unpublished, `scv` (with `scv policy`) records its arguments and
+    /// exits with `answer`, and `cargo` records each call.
     fn new(answer: i32) -> Self {
-        Self::with_scv(answer, true)
+        Self::with_scv(answer, Scv::Policy)
     }
 
-    /// [`Checkout::new`], with an `scv` that has `confirm` only when
-    /// `confirms`; one without it is 0.2.1, which refuses the subcommand.
-    fn with_scv(answer: i32, confirms: bool) -> Self {
+    /// [`Checkout::new`], with an `scv` that offers what `scv` says; one
+    /// without a subcommand refuses it.
+    fn with_scv(answer: i32, scv: Scv) -> Self {
         let root = tempfile::tempdir().unwrap();
         let checkout = Self { root };
         let bin = checkout.path("bin");
@@ -41,13 +54,11 @@ impl Checkout {
                 "scv",
                 format!(
                     "if [ \"$1\" = --version ]; then echo 'scv 0.2.1'; exit 0; fi\n\
+                     if [ \"$1\" = policy ] && [ \"$2\" = --help ]; then {}; fi\n\
                      if [ \"$1\" = confirm ] && [ \"$2\" = --help ]; then {}; fi\n\
                      printf '%s\\n' \"$@\" > '{}/scv'\nexit {answer}\n",
-                    if confirms {
-                        "exit 0"
-                    } else {
-                        "echo \"error: unrecognized subcommand 'confirm'\" >&2; exit 2"
-                    },
+                    offers(scv >= Scv::Policy, "policy"),
+                    offers(scv >= Scv::Confirm, "confirm"),
                     log.display()
                 ),
             ),
@@ -128,11 +139,74 @@ impl Checkout {
     }
 }
 
+/// How a fake `scv` answers `<subcommand> --help`.
+fn offers(offered: bool, subcommand: &str) -> String {
+    if offered {
+        "exit 0".into()
+    } else {
+        format!("echo \"error: unrecognized subcommand '{subcommand}'\" >&2; exit 2")
+    }
+}
+
 const PARENT: &str = "0a1b2c3d/session/codex-3f9a2c";
 
+/// The `scv policy check publish` call for the whole release.
+fn policy_check() -> String {
+    format!(
+        "policy\ncheck\npublish\n--version\n9.9.9\n{}\n",
+        CRATES.replace(", ", "\n")
+    )
+}
+
 #[test]
-fn a_delegated_publish_asks_the_owner_first_and_publishes_on_yes() {
-    let checkout = Checkout::new(0);
+fn a_publish_goes_through_the_publish_rule_first_and_publishes_on_go() {
+    for parent in [Some(PARENT), None] {
+        let checkout = Checkout::new(0);
+        let output = checkout.publish(&[], parent);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            checkout.logged("scv").unwrap(),
+            policy_check(),
+            "{parent:?}"
+        );
+        let published = checkout.logged("cargo").unwrap();
+        assert_eq!(published.lines().count(), 9, "{published}");
+        assert_eq!(
+            published.lines().next(),
+            Some("publish --locked -p scv-core")
+        );
+    }
+}
+
+#[test]
+fn a_publish_stops_unless_the_publish_rule_says_go() {
+    for (answer, why) in [
+        (1, "the publish rule or the owner said no"),
+        (2, "could not decide or could not ask the owner"),
+    ] {
+        let checkout = Checkout::new(answer);
+        let output = checkout.publish(&[], Some(PARENT));
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(why), "{stderr}");
+        assert!(stderr.contains("nothing was published"), "{stderr}");
+        assert_eq!(checkout.logged("scv").unwrap(), policy_check());
+        assert_eq!(checkout.logged("cargo"), None, "nothing was published");
+    }
+}
+
+#[test]
+fn a_check_never_asks() {
+    let checkout = Checkout::new(1);
+    let output = checkout.publish(&["--check"], Some(PARENT));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(checkout.logged("scv"), None);
+    assert_eq!(checkout.logged("cargo"), None);
+}
+
+#[test]
+fn without_the_rule_a_delegated_publish_asks_the_owner_first_and_publishes_on_yes() {
+    let checkout = Checkout::with_scv(0, Scv::Confirm);
     let output = checkout.publish(&[], Some(PARENT));
     assert!(output.status.success(), "{output:?}");
     let head = checkout.git(&["log", "-1", "--format=%h"]);
@@ -154,13 +228,13 @@ fn a_delegated_publish_asks_the_owner_first_and_publishes_on_yes() {
 }
 
 #[test]
-fn a_delegated_publish_stops_unless_the_owner_says_yes() {
+fn without_the_rule_a_delegated_publish_stops_unless_the_owner_says_yes() {
     for (answer, why) in [
         (1, "did not say yes"),
         (2, "could not ask the owner"),
         (2, "If the running daemon is too old to ask"),
     ] {
-        let checkout = Checkout::new(answer);
+        let checkout = Checkout::with_scv(answer, Scv::Confirm);
         let output = checkout.publish(&[], Some(PARENT));
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -172,12 +246,8 @@ fn a_delegated_publish_stops_unless_the_owner_says_yes() {
 }
 
 #[test]
-fn a_terminal_publish_and_a_check_never_ask() {
-    let checkout = Checkout::new(1);
-    let output = checkout.publish(&["--check"], Some(PARENT));
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(checkout.logged("scv"), None);
-    assert_eq!(checkout.logged("cargo"), None);
+fn without_the_rule_a_terminal_publish_does_not_ask() {
+    let checkout = Checkout::with_scv(1, Scv::Confirm);
     let output = checkout.publish(&[], None);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(checkout.logged("scv"), None);
@@ -186,15 +256,14 @@ fn a_terminal_publish_and_a_check_never_ask() {
 
 #[test]
 fn a_delegated_publish_with_an_scv_too_old_to_ask_says_to_publish_from_a_terminal() {
-    let checkout = Checkout::with_scv(0, false);
+    let checkout = Checkout::with_scv(0, Scv::TooOld);
     let output = checkout.publish(&[], Some(PARENT));
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     for why in [
         "the installed scv 0.2.1 cannot ask the owner in chat",
         "nothing was published",
-        "(0.3.0) must be published from a terminal",
-        "Later releases can be published from",
+        "Publish this release from a\nterminal",
     ] {
         assert!(stderr.contains(why), "{why:?} in {stderr}");
     }

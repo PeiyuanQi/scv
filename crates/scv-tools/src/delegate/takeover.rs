@@ -19,8 +19,8 @@
 //! decides, so a key typed into it can never answer an approval: the
 //! adapter must declare the CLI's interactive resume and the switches under
 //! which it never asks ([`adapters::Takeover`]), and the agent must run
-//! with `permissions = "full"`, where SCV's own runs of it relay no
-//! approval either.
+//! under policy mode `auto`, where SCV's own runs of it relay no approval
+//! either.
 //!
 //! The daemon keeps the screen itself (with the `vt100` parser): it reads
 //! the terminal whether or not anyone watches, so the agent never blocks on
@@ -91,7 +91,7 @@ pub(crate) struct TakeoverLaunch {
 }
 
 /// Whether agent `name`, run as `command` (searched in `search_dirs`) with
-/// `environment` and, with `full`, `permissions = "full"`, can be taken over
+/// `environment` and, with `full`, its policy mode `auto`, can be taken over
 /// in its terminal; the error says why not, for the owner.
 pub(crate) fn launch(
     name: &str,
@@ -123,9 +123,9 @@ pub(crate) fn launch(
     };
     if !full {
         return Err(format!(
-            "{name} asks for approval in its own terminal unless [agents.{name}] permissions = \
-             \"full\": SCV relays those requests to its approval gate when it runs {name}, so a \
-             terminal whose keys would answer them is not offered"
+            "{name} asks for approval in its own terminal unless its policy mode is auto \
+             ([policy] mode, or [agents.{name}] mode): SCV relays those requests to its approval \
+             gate when it runs {name}, so a terminal whose keys would answer them is not offered"
         ));
     }
     let executable = adapters::resolve_agent_executable(command, search_dirs).ok_or_else(|| {

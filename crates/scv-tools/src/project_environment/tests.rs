@@ -385,7 +385,8 @@ async fn native_launch_receives_project_tools_and_keeps_private_home() {
     let config = crate::AgentAdapterConfig {
         command: "/bin/sh".into(),
         args: vec!["-c".into(), "rustc --version; cargo --version; printf '%s\\n' \"$HOME\" \"$CODEX_HOME\" \"$CARGO_HOME\"".into()],
-        prompt_args: Vec::new(), full_permission_args: None, model_args: Vec::new(),
+        prompt_args: Vec::new(), full_permission_args: None, policy: "on-risk".into(),
+        mode_report: crate::adapters::ModeReport::None, mode_switch: false, model_args: Vec::new(),
         effort_args: Vec::new(), model_hint: String::new(), environment: fixture.launch_environment(),
         search_dirs: Vec::new(), output: OutputFormat::Text, resume: Resume::Unsupported,
         home: None, auth: crate::AgentAuthPlan::None, transport: Transport::Process, acp: None, use_for: None,

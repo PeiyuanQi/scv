@@ -54,18 +54,21 @@ async fn delegated_agent_events_arrive_as_bounded_tool_progress() {
     let agent = home_path.join("fake-codex");
     std::fs::write(
         &agent,
-        concat!(
-            "#!/bin/sh\n",
-            "echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
-            "echo '{\"type\":\"item.started\",\"item\":{\"id\":\"i1\",\"type\":\"command_execution\",\"command\":\"/bin/bash -lc '\"'\"'cargo test'\"'\"'\",\"aggregated_output\":\"\",\"exit_code\":null}}'\n",
-            "sleep 0.7\n",
-            "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"command_execution\",\"command\":\"cargo test\",\"aggregated_output\":\"PRIVATE TOOL OUTPUT\",\"exit_code\":0}}'\n",
-            "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i2\",\"type\":\"file_change\",\"changes\":[{\"path\":\"/w/crates/core/src/lib.rs\",\"kind\":\"update\"}]}}'\n",
-            "sleep 0.7\n",
-            "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i3\",\"type\":\"web_search\",\"query\":\"curl -H Authorization: Bearer abc123\"}}'\n",
-            "sleep 0.7\n",
-            "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i4\",\"type\":\"agent_message\",\"text\":\"finished\"}}'\n",
-            "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+        format!(
+            "#!/bin/sh\n{}{}",
+            crate::support::codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a53"),
+            concat!(
+                "echo '{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}'\n",
+                "echo '{\"type\":\"item.started\",\"item\":{\"id\":\"i1\",\"type\":\"command_execution\",\"command\":\"/bin/bash -lc '\"'\"'cargo test'\"'\"'\",\"aggregated_output\":\"\",\"exit_code\":null}}'\n",
+                "sleep 0.7\n",
+                "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"command_execution\",\"command\":\"cargo test\",\"aggregated_output\":\"PRIVATE TOOL OUTPUT\",\"exit_code\":0}}'\n",
+                "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i2\",\"type\":\"file_change\",\"changes\":[{\"path\":\"/w/crates/core/src/lib.rs\",\"kind\":\"update\"}]}}'\n",
+                "sleep 0.7\n",
+                "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i3\",\"type\":\"web_search\",\"query\":\"curl -H Authorization: Bearer abc123\"}}'\n",
+                "sleep 0.7\n",
+                "echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"i4\",\"type\":\"agent_message\",\"text\":\"finished\"}}'\n",
+                "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+    ),
         ),
     )
     .unwrap();

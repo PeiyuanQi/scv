@@ -26,6 +26,8 @@
 //!   its agent's own terminal.
 //! - [`output`] and [`progress`]: reading a run's output into one bounded
 //!   result, and its progress into short lines.
+//! - [`mode`]: the permission mode the policy expects of an agent, and how
+//!   SCV checks the one it reports.
 
 pub(crate) mod acp;
 pub mod activity;
@@ -36,6 +38,7 @@ pub mod choice;
 pub mod claude_auth;
 pub mod conversation;
 pub(crate) mod live;
+pub(crate) mod mode;
 pub(crate) mod native;
 pub mod options;
 pub(crate) mod output;

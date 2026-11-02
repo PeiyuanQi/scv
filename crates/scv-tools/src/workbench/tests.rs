@@ -56,6 +56,7 @@ fn record(session: &str, job: &str, state: AgentState, owner: ProcessIdentity) -
         worktree: None,
         reply: None,
         error: None,
+        mode: None,
         reported: false,
         interrupted: None,
         resumed_as: None,
@@ -381,6 +382,7 @@ fn request() -> ApprovalRequest {
         risk: scv_core::ToolRisk::Process,
         cwd: PathBuf::from("/w"),
         summary: "[codex-1 acp] Run make deploy (execute)".into(),
+        command: Some("make deploy".into()),
     }
 }
 

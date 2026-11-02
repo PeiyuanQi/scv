@@ -144,7 +144,7 @@ fn only_an_agent_whose_terminal_never_asks_is_offered() {
     );
     // With its own prompts on, its terminal would ask what SCV's gate decides.
     let asks = launch("codex", &codex, &[], false, &[], None).unwrap_err();
-    assert!(asks.contains("permissions = \"full\""), "{asks}");
+    assert!(asks.contains("policy mode is auto"), "{asks}");
     assert!(asks.contains("approval gate"), "{asks}");
     for claude in ["claude", "claude-ai"] {
         let refused = launch(claude, &codex, &[], true, &[], None).unwrap_err();

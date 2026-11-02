@@ -31,6 +31,9 @@ fn uninstalled_agents_are_not_offered() {
         args: Vec::new(),
         prompt_args: Vec::new(),
         full_permission_args: None,
+        policy: "on-risk".into(),
+        mode_report: crate::adapters::ModeReport::None,
+        mode_switch: false,
         model_args: Vec::new(),
         effort_args: Vec::new(),
         model_hint: String::new(),
@@ -87,6 +90,9 @@ fn agents_are_not_offered_at_the_delegation_depth_limit() {
         args: Vec::new(),
         prompt_args: Vec::new(),
         full_permission_args: None,
+        policy: "on-risk".into(),
+        mode_report: crate::adapters::ModeReport::None,
+        mode_switch: false,
         model_args: Vec::new(),
         effort_args: Vec::new(),
         model_hint: String::new(),
@@ -152,6 +158,9 @@ fn installed(model_args: bool) -> AgentAdapterConfig {
         args: Vec::new(),
         prompt_args: Vec::new(),
         full_permission_args: None,
+        policy: "on-risk".into(),
+        mode_report: crate::adapters::ModeReport::None,
+        mode_switch: false,
         model_args: if model_args {
             vec!["--model".into(), "{model}".into()]
         } else {

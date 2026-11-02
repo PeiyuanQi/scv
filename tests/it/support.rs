@@ -1,5 +1,6 @@
 //! Helpers shared by the black-box tests: instance isolation, private
-//! files, a scripted Responses provider, and process inspection.
+//! files, a scripted Responses provider, a fake Codex's rollout, and process
+//! inspection.
 
 use std::{io::BufRead, os::unix::fs::PermissionsExt as _, path::Path};
 
@@ -57,6 +58,21 @@ pub(crate) fn write_private(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// Shell lines for a fake Codex: the rollout `turn_context` real Codex
+/// writes under `$CODEX_HOME/sessions/` for thread `thread`, recording the
+/// mode its arguments asked for, which SCV's mode check reads.
+pub(crate) fn codex_rollout(thread: &str) -> String {
+    format!(
+        r#"mode='"approval_policy":"on-request","sandbox_policy":{{"type":"workspace-write"}}'
+for arg in "$@"; do
+  [ "$arg" = --dangerously-bypass-approvals-and-sandbox ] && mode='"approval_policy":"never","sandbox_policy":{{"type":"danger-full-access"}}'
+done
+mkdir -p "$CODEX_HOME/sessions/2026/10/30"
+echo "{{\"type\":\"turn_context\",\"payload\":{{$mode}}}}" >> "$CODEX_HOME/sessions/2026/10/30/rollout-2026-10-30T00-00-00-{thread}.jsonl"
+"#
+    )
 }
 
 /// A Responses event stream in which the model calls tool `name` once, as

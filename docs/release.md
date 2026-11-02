@@ -95,8 +95,9 @@ It adds taking a delegated conversation over in its agent's own terminal
 ([takeover](tools.md#taking-a-conversation-over)): `Ctrl+O` in a TUI agent
 view, `scv jobs attach`, and the additive `attach`, `attach_io`,
 `attach_detach`, and `attach_end` `daemon.control` actions with
-`daemon.status.attach`. Only Codex with `permissions = "full"` is offered;
-other agents are refused with why. A `0.4.4` daemon answers the new actions
+`daemon.status.attach`. Only Codex in its full mode is offered
+(`permissions = "full"` then; policy mode `auto`, the default, now); other
+agents are refused with why. A `0.4.4` daemon answers the new actions
 with `invalid_json`, and a `0.4.5` TUI then keeps its activity views; a
 `0.4.4` TUI never sends them. A takeover's terminal stops with the daemon,
 like every delegated process. The daemon depends on the `vt100` crate to
@@ -737,10 +738,18 @@ below. It lands each change on `origin/main` as one squashed commit, through a
 publishes, installs the release, and restarts the local daemon. Its scripts
 cover the steps that are easy to get wrong:
 
-- `publish.sh`: a resumable publish in dependency order; run by an agent SCV
-  delegated to, it first asks the owner yes or no in chat (`scv confirm`)
-  and publishes only on yes. An installed `scv` older than 0.3.0 cannot ask,
-  so the release that introduces `scv confirm` is published from a terminal;
+- `publish.sh`: a resumable publish in dependency order. Before the first
+  `cargo publish` it checks the whole release with
+  `scv policy check publish`, which counts each crate's versions on
+  crates.io in the last 24 hours: within
+  `[policy] publish_crate_versions_per_day` (20) it publishes without a
+  question; past it, or when a count cannot be fetched, it asks the owner
+  yes or no in chat and publishes only on yes (see
+  [questions to the owner](channels.md#questions-to-the-owner)). A crate
+  already at crates.io's own limit stops it with nothing published and no
+  question. When the installed `scv` predates `scv policy`, a run by an
+  agent SCV delegated to asks with `scv confirm` instead, so the first
+  release that carries the rule is not published unasked;
 - `deploy.sh`: keep the running binary as `<binary>.prev`, install, and ask
   the daemon to restart when idle (`scv restart --when-idle`), which checks
   and, on failure, rolls back the release; from a terminal it then waits for

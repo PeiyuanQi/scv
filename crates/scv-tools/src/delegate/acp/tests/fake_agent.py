@@ -1,5 +1,6 @@
 import json, os, subprocess, sys
 DIR, MODE = sys.argv[1], sys.argv[2]
+FULL_MODE = "agent-full-access" if MODE.startswith("config-") else "bypassPermissions"
 open(os.path.join(DIR, "pid"), "w").write(str(os.getpid()))
 def log(line):
     with open(os.path.join(DIR, "calls"), "a") as f:
@@ -20,6 +21,8 @@ if MODE == "grouped":
                    {"group": "deepseek-official", "options": [{"value": "[\"deepseek-official\",\"deepseek-v4-flash\"]"}]},
                    {"group": "xubao", "options": [{"value": "[\"xubao\",\"glm-5.3\"]"}]}]},
                {"id": "reasoning_effort", "currentValue": "high", "options": [{"value": "off"}, {"value": "low"}, {"value": "high"}, {"value": "max"}]}]
+def with_mode(mode):
+    return OPTIONS + [{"id": "mode", "currentValue": mode, "options": [{"value": "default"}, {"value": FULL_MODE}]}]
 memory, pending, refusals, sessions = "", None, [], 0
 # In "strict" mode a cancelled turn ends only once its permission request
 # is answered, as an agent may insist; a lost answer leaves it hanging.
@@ -72,15 +75,29 @@ for line in sys.stdin:
         if MODE == "auth":
             send({"id": rid, "error": {"code": -32000, "message": "Authentication required"}})
             continue
+        # "codex" also offers the mode as a config option, as codex-acp does.
         send({"id": rid, "result": {"sessionId": "s%d" % sessions,
-              "modes": {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Default"}, {"id": "bypassPermissions", "name": "Bypass"}]},
-              "configOptions": OPTIONS}})
+              "modes": {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Default"}, {"id": FULL_MODE, "name": "Full"}]},
+              "configOptions": with_mode("default") if MODE == "codex" or MODE.startswith("config-") else OPTIONS}})
     elif method == "session/set_mode":
         log("mode=" + params["modeId"])
+        # Like claude-agent-acp, the answer is {} whatever happened: the
+        # mode taken is reported in an update, unless the agent is "silent"
+        # or "codex" (codex-acp reports nothing), and "downgrade" takes
+        # another one.
+        if MODE == "downgrade":
+            update(params["sessionId"], {"sessionUpdate": "current_mode_update", "currentModeId": "default"})
+        elif MODE not in ("silent", "codex"):
+            update(params["sessionId"], {"sessionUpdate": "config_option_update", "configOptions": with_mode(params["modeId"])})
         send({"id": rid, "result": {}})
     elif method == "session/set_config_option":
         log(params["configId"] + "=" + params["value"])
-        send({"id": rid, "result": {"configOptions": OPTIONS}})
+        options = with_mode(params["value"]) if params["configId"] == "mode" else OPTIONS
+        if MODE.startswith("config-"):
+            _, option, reported = MODE.split("-", 2)
+            if params["configId"] == option:
+                options = with_mode(reported)
+        send({"id": rid, "result": {"configOptions": options}})
     elif method == "session/cancel":
         log("cancel")
         cancel_seen = True
@@ -94,6 +111,7 @@ for line in sys.stdin:
             pending = None
         send({"id": rid, "result": {"accepted": not text.startswith("refuse")}})
     elif method == "session/prompt":
+        log("session/prompt")
         session, text = params["sessionId"], params["prompt"][0]["text"]
         if text.startswith("remember "):
             memory = text.split(" ", 1)[1]

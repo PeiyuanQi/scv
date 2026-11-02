@@ -44,9 +44,9 @@ seven places:
 
 ```text
 ~/.scv/
-├── config.toml        settings you edit: provider and key, limits, tools,
-│                      [agents.<name>], [channels.<channel>.<account>], and
-│                      [notify]
+├── config.toml        settings you edit: provider and key, policy, limits,
+│                      tools, [agents.<name>], [channels.<channel>.<account>],
+│                      and [notify]
 ├── credentials/       sign-ins SCV writes itself (0700)
 │   ├── wechat/<account>.json
 │   ├── feishu/<account>.json
@@ -145,8 +145,12 @@ no release reads; see [release notes](release.md#upgrading-to-020).
   origin is `config.toml`, `project .scv/config.toml`, `SCV_CONFIG`,
   `env SCV_MODEL` (and the other variables below), or a `--flag`; `--all`
   adds the defaults. Keys named `api_key`, `*_api_key`, `*secret*`,
-  `*password*`, and every provider header show `<hidden>`;
-- the provider in effect and where its key comes from;
+  `*password*`, and every provider header show `<hidden>`. A setting read
+  from a deprecated key names that key (see
+  [Migrating from `approval_policy` and `permissions`](#migrating-from-approval_policy-and-permissions));
+- the provider in effect and where its key comes from, and below it the
+  policy mode in effect, as `Policy mode auto`, followed by
+  `; agents with their own: claude on-risk` when an agent has its own mode;
 - each channel account's settings and credential file, or why they are
   invalid;
 - each agent's credential files and, for an imported setup, whether its source
@@ -215,8 +219,11 @@ safety_margin_tokens = 2048
 bytes_per_token = 3
 summary_max_chars = 6000
 
+[policy]
+mode = "auto"                 # auto, on-risk, always, or read-only
+publish_crate_versions_per_day = 20
+
 [tools]
-approval_policy = "on-risk"
 command_timeout_seconds = 600
 agent_timeout_seconds = 3600
 max_timeout_seconds = 14400
@@ -276,9 +283,9 @@ min_free_percent = 20
 [agents.claude]
 command = "claude"
 args = ["-p"]
-permissions = "default"
 model_args = ["--model", "{model}"]
 effort_args = ["--effort", "{effort}"]
+# mode = "on-risk"          # this agent's own policy mode
 # use_for = "coding"
 # model = "opus[1m]"        # a value `scv agents check claude` lists
 # effort = "xhigh"
@@ -290,7 +297,6 @@ effort_args = ["--effort", "{effort}"]
 [agents.claude-ai]
 command = "claude"
 args = ["-p"]
-permissions = "default"
 model_args = ["--model", "{model}"]
 effort_args = ["--effort", "{effort}"]
 # Subscription credentials remain owned by Claude Code.
@@ -356,7 +362,7 @@ command = "kimi"
 
 [agents.scv]
 command = "scv"
-args = ["server", "--stdio"]
+args = ["server", "--stdio", "--policy", "on-risk"] # --policy stays on-risk or stricter
 
 [channels.wechat.default]
 enabled = true
@@ -367,7 +373,7 @@ remote_tools = "none"                     # or "owner"
 
 Every table also accepts `prompt_args` (default `[]` except Grok, Gemini CLI,
 Qwen Code, Copilot, and Amp),
-`permissions` (default `"default"`; see [Agent permissions](#agent-permissions)),
+`mode` (default: `[policy] mode`; see [Policy](#policy)),
 `transport` (default `"auto"`; see [Agent transport](#agent-transport)), and
 `use_for`, an optional one-line note (at most 500 bytes) on when to choose that
 agent, added to its tool description; optional `model` and `effort`, which an
@@ -414,9 +420,9 @@ including the `--flag=value` form. Startup fails with:
 [agents.<name>] <field> must not contain <flag>: SCV pins Claude Code's credentials and routing itself
 ```
 
-A custom `command` is still allowed and still gets the pins. `"full"`
-permissions apply to both Claude agents the same way; see
-[Agent permissions](#agent-permissions).
+A custom `command` is still allowed and still gets the pins. The policy mode
+and SCV's deny rules apply to both Claude agents the same way; see
+[Policy](#policy).
 
 SCV does not move homes or rewrite config on upgrade. When the user config
 has an `[agents.claude]` table and no `[agents.claude-ai]` table, and
@@ -458,11 +464,12 @@ executable, or fixed arguments. A native-agent approval shows the resolved
 absolute executable, the complete fixed argument vector, the workspace, and
 the bounded prompt argument before launch.
 
-Project configuration may lower context, size, output, and timeout limits; make
-approval policy stricter; set `skills.project_dir` within the workspace; turn
-`skills.scan_projects`, `tools.allow_no_timeout`, `web.enabled`, or
-`web.search` off; and append project instructions. Attempts to weaken a limit
-or set a user-only key are startup errors rather than ignored fields.
+Project configuration may lower context, size, output, timeout, and publish
+limits; make `[policy] mode` stricter; set `skills.project_dir` within the
+workspace; turn `skills.scan_projects`, `tools.allow_no_timeout`,
+`web.enabled`, or `web.search` off; and append project instructions.
+Attempts to weaken a limit or set a user-only key are startup errors rather
+than ignored fields.
 
 ### Tool timeouts
 
@@ -610,20 +617,101 @@ apply and is a startup error. Project configuration cannot set it, and
 effort is separate: the `agent` tool's `effort` argument or
 `[agents.<name>] effort` (see [Choosing an agent](tools.md#choosing-an-agent)).
 
-### Agent permissions
+### Policy
 
-`[agents.<name>] permissions` sets how much a delegated CLI may do without its
-own prompts:
+`[policy]` decides what runs without a person: SCV's own tool calls, the
+requests delegated agents relay to SCV, and how each delegated agent starts.
 
-- `"default"` adds nothing; the CLI's own configuration decides. This is the
-  built-in value, so no install bypasses an agent's safeguards unless its user
-  asks. An agent whose own defaults ask nothing acts unprompted either way:
-  pi, which has no approval prompts, and OpenCode, which allows edits and
-  commands unless its configuration (in the private home) says `ask`.
-- `"full"` adds the CLI's own full-autonomy switches after `args`, so the agent
-  can research, edit files, run commands, and use the network without asking:
+```toml
+[policy]
+mode = "auto"                         # auto (default), on-risk, always, or read-only
+publish_crate_versions_per_day = 20   # see "Publishing" below
 
-| Agent | `"full"` adds | Web search |
+[agents.grok]
+mode = "on-risk"                      # optional: this agent only
+```
+
+| `mode` | SCV's own tools, and requests relayed to SCV | A delegated agent starts |
+| --- | --- | --- |
+| `auto` (default) | approved, `agent` calls included | in its full mode, with the switches below |
+| `on-risk` | read-only calls approved; the rest asks | with no switches; its own configuration decides |
+| `always` | every call asks | with no switches |
+| `read-only` | everything but read-only calls denied | never, because `agent` calls are delegate risk |
+
+Approval policies are:
+
+- `auto` (default): approve every call, including secret-like reads,
+  `write`, `bash`, other `web_fetch` URLs, and every `agent` call;
+- `on-risk`: approve ordinary `read` calls, `web_search`, and `web_fetch` of
+  auto-approved hosts; prompt for secret-like reads, `write`, `bash`, other
+  `web_fetch` URLs, and every `agent` call;
+- `always`: prompt for every tool;
+- `read-only`: deny tools whose declared risk is not read-only.
+
+The [command gates](#command-gates) apply on top of every mode. Requests
+relayed to SCV are an ACP agent's `session/request_permission` requests and a
+nested SCV's approval requests. They reach SCV's gate as the `agent` tool's
+requests, so `[policy] mode` decides them.
+
+`[agents.<name>] mode`, with the same values, is that agent's mode instead of
+`[policy] mode`. It decides how the agent starts and what the
+[mode check](#mode-check) expects of it. The `agent` call that runs it and
+the requests it relays to SCV are still decided by `[policy] mode`.
+
+Strictness runs `auto` < `on-risk` < `always` < `read-only`. A project layer
+(`.scv/config.toml`) may only move `[policy] mode` toward `read-only`, and
+may lower `publish_crate_versions_per_day` but never raise it; `0` makes
+every publish ask. It cannot set `[agents]`, so an agent's own mode comes
+from the user layers only. The daemon logs the mode in effect at startup, as
+`scv config show` prints it.
+
+The global flag `--policy auto|on-risk|always|read-only` sets the mode for
+one invocation; `scv config show` names its origin `--policy flag`. For a
+managed daemon, pass it to `scv start`, which writes it into the service
+unit: `scv --policy always start --workspace /path/to/workspace`.
+
+#### Command gates
+
+Two built-in command gates decide before the mode, under every mode:
+
+- a `git push` that forces `main` is denied: a force option (`-f`,
+  `--force`, or `--force-with-lease`) or a `+` refspec, with `main` or
+  `refs/heads/main` as the destination;
+- a direct `cargo publish` needs the owner's yes. The counted path is
+  [`scv policy check publish`](#publishing).
+
+They match the exact command of a `bash` call, or of an ACP agent's relayed
+`execute` request (its `rawInput.command`), in its plain spelling only: a
+script or a `bash -c` that hides the command is not caught. They are a
+guardrail against mistakes, not a security boundary; see
+[security](security.md).
+
+The owner's yes is asked where the owner is. In the TUI it is the usual
+prompt, with the reason first. Everywhere else (chat sessions, background
+jobs, and scripts) it is a yes or no question in chat through the same path
+as `scv confirm`: the chat the work came from, or else the `[notify]` owner
+chat. No answer within 30 minutes counts as no. A client's blanket approval
+(`auto_approve`, as the chat bridges declare it) never answers it, and a
+stdio server (`scv server --stdio`), which cannot ask, denies it.
+
+Claude Code also gets deny rules on every run, whatever its mode:
+`--disallowedTools` with the spellings of a force-push to `main` that its
+prefix patterns can express, and `Bash(cargo publish:*)`; over ACP they go
+in `_meta.claudeCode.options.disallowedTools`. Its `bypassPermissions` mode
+still honors them. An agent in its full mode relays nothing, so for every
+other agent SCV's gates see none of its own commands.
+
+#### Full-autonomy switches
+
+Under `auto`, a delegated agent starts with its CLI's own full-autonomy
+switches after `args`, so it can research, edit files, run commands, and use
+the network without asking. Under any other mode it starts with none of
+them, and the CLI's own configuration decides. An agent whose own defaults
+ask nothing acts unprompted either way: pi, which has no approval prompts,
+and OpenCode, which allows edits and commands unless its configuration (in
+the private home) says `ask`.
+
+| Agent | Under `auto` adds | Web search |
 | --- | --- | --- |
 | `claude`, `claude-ai` | `--permission-mode bypassPermissions` | WebSearch and WebFetch, unprompted |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox -c web_search="live"` | native `web_search` tool (if the provider supports it) |
@@ -636,22 +724,15 @@ own prompts:
 | `cursor` | `--force` | the CLI's own, if any |
 | `amp` | `--dangerously-allow-all` | the CLI's own |
 
-```toml
-[agents.claude]
-permissions = "full"
+Every approval summary for an agent started this way says
+`FULL PERMISSIONS`, with the policy mode and whether SCV verifies the mode
+the agent reports. Only the user layers can set `[agents]`; see
+[security](security.md).
 
-[agents.codex]
-args = ["exec", "--skip-git-repo-check"]
-permissions = "full"
-```
-
-Every approval summary for such an agent says `FULL PERMISSIONS`. Only the
-user layers can set `[agents]`; see [security](security.md).
-
-Over the Agent Client Protocol, `"full"` selects the agent's own equivalent
+Over the Agent Client Protocol, `auto` selects the agent's own equivalent
 instead:
 
-| Agent | `"full"` over ACP | Web search |
+| Agent | Under `auto` over ACP | Web search |
 | --- | --- | --- |
 | `claude`, `claude-ai` | `bypassPermissions` session mode | WebSearch and WebFetch, unprompted |
 | `codex` | `agent-full-access` session mode and `CODEX_CONFIG={"web_search":"live"}` | native `web_search` tool (if the provider supports it) |
@@ -664,6 +745,91 @@ instead:
 merged into every session, so SCV sets it on the ACP server rather than
 rewriting the imported `$SCV_HOME/agents/codex/config.toml`. An inherited
 `CODEX_CONFIG` is removed from every delegated agent's environment.
+
+Taking a Codex conversation over in its terminal needs its full mode, so it
+is offered only when Codex's mode is `auto`; see
+[Taking a conversation over](tools.md#taking-a-conversation-over).
+
+#### Mode check
+
+SCV compares the permission mode a delegated agent reports with the mode its
+policy expects. Under `auto` the agent must report its full mode. Under any
+other mode, a report of its full mode is a mismatch too, which catches an
+agent home that turned its own prompts off, such as an imported Codex
+`config.toml` with `approval_policy = "never"` and
+`sandbox_mode = "danger-full-access"`. A mismatch, or a missing report from
+an agent that should send one, stops the run: SCV kills the process or
+cancels the ACP turn, and the call fails naming the expected and reported
+modes. An agent that reports nothing SCV reads still runs, and its approval
+summary, its result's `mode` field, its job record, and `scv agents check`
+say `unverified`.
+
+| Agent | What reports the mode | Checked |
+| --- | --- | --- |
+| `claude`, `claude-ai` (CLI) | the stream-json `system`/`init` event's `permissionMode`; full is `bypassPermissions` | before any tool runs |
+| `claude`, `claude-ai` (ACP) | the `modes` of `session/new`, then the mode the agent reports; under `auto` SCV sets the `mode` config option to `bypassPermissions` and takes the mode its answer lists, since `claude-agent-acp` answers `session/set_mode` with `{}` whatever mode it picks | before the prompt is sent |
+| `codex` (CLI) | the rollout file under the agent home's `sessions/`, whose `turn_context` records `approval_policy` and `sandbox_policy`; full is `approval_policy never, sandbox danger-full-access` | shortly after the turn starts: read for up to 30 seconds after `thread.started`, and once more when the run ends; not before its first command |
+| `codex` (ACP) | `modes.currentModeId`, then the answer to setting the `mode` config option (`codex-acp` answers `session/set_mode` with `{}` and reports nothing); full is `agent-full-access` | before the prompt is sent |
+| `grok`, `dsh`, `copilot`, `gemini`, `qwen`, `cursor`, `amp` | nothing SCV reads | unverified |
+| `pi`, `opencode`, `kimi` | nothing: no switch to verify | not applicable |
+| `scv` (nested) | nothing: its `args` run it with `--policy on-risk`, so every request that is not read-only is relayed to the parent's gate; in configured `[agents.scv] args` SCV replaces any `--policy` with the stricter of `on-risk` and the one given | the parent's policy decides |
+
+Over ACP, only a mode the agent reports counts, never an answer of `{}`
+alone, and a report of another mode after the check passed fails the call.
+Claude's own `plan` mode, which returns to the mode it left, is the one
+exception. The Codex rollout format is internal to Codex: a Codex
+release that changes it makes every Codex CLI run fail the check until SCV's
+Codex adapter is updated.
+
+#### Publishing
+
+`scv policy check publish --version <version> <crate>...` applies SCV's
+publish rule for a script about to publish crates to crates.io;
+`feature-flow`'s `publish.sh` runs it before its first `cargo publish`.
+Publishing needs no question unless a crate would pass
+`publish_crate_versions_per_day` versions in the last 24 hours. SCV counts
+the way crates.io limits, over a rolling 24 hours: the versions crates.io
+lists for the crate, yanked versions included. A count that cannot be
+fetched counts as over. The command checks the whole release at once, before
+anything is published, so a release that would cross the line partway never
+starts.
+
+Over the line, it asks the owner in chat as `scv confirm` does and waits
+`SCV_CONFIRM_TIMEOUT` seconds (default 1800). It exits 0 to go, 1 on no or
+no answer in time, and 2 when it could not decide or ask. At 20, the
+default, the line is crates.io's own limit, which crates.io enforces
+whatever the owner answers. A crate already at 20 therefore blocks the
+release without a question, whatever the configured number, and the
+command exits 1 with nothing published. A number above 20 acts as 20; a
+lower number is where a yes can publish.
+
+#### Migrating from `approval_policy` and `permissions`
+
+`[policy] mode` replaced `[tools] approval_policy` and
+`[agents.<name>] permissions`. A configuration that sets none of them runs
+under `auto`. The old keys are read with their meaning kept:
+
+- `[tools] approval_policy` is read as `[policy] mode`: `on-risk` and
+  `always` as themselves, and `never` as `read-only`. An explicit line is
+  honored even when it equals the old default, `on-risk`.
+- `[agents.<name>] permissions = "full"` is read as `mode = "auto"`, and
+  `"default"` as `mode = "on-risk"`, so that agent keeps starting with no
+  switches.
+
+Both are deprecated aliases, accepted until a later breaking release removes
+them, and each logs a startup warning that names the line replacing it. A
+layer that sets an old key and its new key, or an invalid old value, is a
+startup error. `scv config show` marks a setting an old key set:
+
+```text
+  policy.mode = "on-risk"  [config.toml]  (set as deprecated tools.approval_policy = "on-risk"; pins the old default; delete it for auto)
+```
+
+The "pins the old default" part appears for the two old defaults,
+`approval_policy = "on-risk"` and `permissions = "default"`.
+`--approval-policy` is an alias of `--policy`, and `never` of `read-only`,
+so a service unit written with `--approval-policy` keeps working; `scv start`
+writes `--policy`.
 
 ### Agent transport
 
@@ -771,18 +937,6 @@ overhead to fit its protocol frame limit, tool arguments to fit provider
 responses, and all count/byte limits to be positive. SCV fails startup with the
 conflicting key names instead of silently clamping values.
 
-Approval policies are:
-
-- `on-risk` (default): approve ordinary `read` calls, `web_search`, and
-  `web_fetch` of auto-approved hosts; prompt for secret-like reads, `write`,
-  `bash`, other `web_fetch` URLs, and every `agent` call;
-- `always`: prompt for every tool;
-- `never`: deny tools whose declared risk is not read-only.
-
-The daemon uses `on-risk` when no policy is supplied. Set the policy explicitly
-for a managed daemon with a global flag, for example
-`scv --approval-policy always start --workspace /path/to/workspace`.
-
 Starting or restarting the daemon also checks whether the current user has
 usable sudo authorization. An interactive start without it asks whether to
 continue; `--allow-sudo` invokes sudo authentication first. That option only
@@ -822,8 +976,10 @@ for two minutes. A notice about an account never goes through that account.
 Without a list, notices go to the chat the owner last wrote from, and with no
 such chat only to the log. Updates asked for from a chat are answered in that
 chat, falling back to this list when it does not connect in time. A question
-to the owner (`scv confirm`) asked by work that did not start in a chat goes
-to the same owner chat, on the first listed account connected right then (see
+to the owner (`scv confirm`, `scv policy check publish` past its limit, or a
+[command gate](#command-gates) waiting for the owner's yes) asked by work
+that did not start in a chat goes to the same owner chat, on the first listed
+account connected right then (see
 [channels](channels.md#questions-to-the-owner)). Project configuration cannot
 set `[notify]`.
 
@@ -864,6 +1020,8 @@ SCV reads:
 - `SCV_BASE_URL`;
 - `SCV_API_KEY_ENV` (the name of the credential variable, not its value);
 - `SCV_CARGO_INDEX_URL` for the update registry;
+- `SCV_CONFIRM_TIMEOUT` for how many seconds `scv policy check publish`
+  waits for the owner's answer (default 1800; see [Publishing](#publishing));
 - the credential variable named by `provider.api_key_env`;
 - `RUST_LOG` for diagnostics. The daemon (`scv run`) and `scv server` log to
   stderr, default level `warn`; the generated user service sets `info` and

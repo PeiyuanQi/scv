@@ -132,8 +132,9 @@ until the takeover ends, and a call that does not wait fails saying so.
 waiting (stop its job first), is held by a reviewed job between its rounds,
 has no agent session yet, or belongs to an
 agent whose terminal may not be offered: only an agent whose terminal asks
-nothing SCV's approval gate decides can be taken over, which is Codex with
-`permissions = "full"`. When a background job runs the conversation's turn,
+nothing SCV's approval gate decides can be taken over, which is Codex under
+policy mode `auto`, the default (see [policy](configuration.md#policy)).
+When a background job runs the conversation's turn,
 the first `Ctrl+O` only says which job a second stops, and a second within
 three seconds takes the conversation over after stopping that job, its
 line held for the takeover first so no queued prompt runs in between
@@ -376,17 +377,26 @@ height and preserve the underlying transcript and composer state.
 
 ## Approval and failure behavior
 
+Under the default policy mode `auto` a chat's calls run unasked, apart from
+the built-in command gates; under `on-risk` or `always`, a call the policy
+leaves to a person is an approval overlay (see
+[policy](configuration.md#policy)).
 An approval overlay shows the tool, risk, workspace, full bounded summary, and
 the exact available decisions. `y` allows once; `n` or `Esc` denies; other
 keys, `Enter` included, do nothing.
 Input meant for the composer cannot leak into an approval decision. The TUI
 emits a terminal bell when an approval arrives while terminal focus is lost.
+A request only the owner may answer, such as a direct `cargo publish`, comes
+in every mode as the same overlay, its summary starting with why, since the
+person at the TUI is the owner.
 
 A background job's approval is not a chat overlay: it waits in the sidebar
 under "Waiting for you" and in the job's agent view, and rings the bell.
 While a dashboard is open the daemon holds such a request for the owner (up
 to two minutes) instead of denying it at once; see
-[attended approvals](tools.md#the-workbench).
+[attended approvals](tools.md#the-workbench). A background job's request
+only the owner may answer is asked in chat instead, as
+[`scv confirm`](channels.md#questions-to-the-owner) asks.
 
 Configuration, provider, protocol, and tool errors appear as concise transcript
 entries with a remediation hint when one is known. Normal interaction never
@@ -404,11 +414,14 @@ unavailable.
 `scv exec [--yes] PROMPT` runs one prompt without the TUI, for scripts and
 quick questions. It starts a private `scv server --stdio` for a session in the
 current directory, so it needs no running daemon, and passes on the global
-`--model`, `--provider`, `--base-url`, and `--approval-policy` flags. The answer
-streams to stdout; tool progress, approval requests, and failures go to
-stderr. The approval policy decides first, so under `on-risk` reads run
-unasked; every request that would ask a person is denied unless `--yes`
-approves it for this run. A cancelled or failed turn makes the command fail.
+`--model`, `--provider`, `--base-url`, and `--policy` flags (`--policy`
+accepts its old name, `--approval-policy`, and `never` for `read-only`). The
+answer streams to stdout; tool progress, approval requests, and failures go
+to stderr. The policy decides first, so under `auto` calls run unasked and
+under `on-risk` reads do; every request that would ask a person is denied
+unless `--yes` approves it for this run. A request only the owner may answer,
+such as a direct `cargo publish`, is denied, `--yes` or not, because a stdio
+server cannot ask in chat. A cancelled or failed turn makes the command fail.
 When the turn starts background jobs, `scv exec` stays open until each one has
 been reported, and prints the report, waiting through a failed report turn the
 server will try again. When the server reports jobs directly because the model

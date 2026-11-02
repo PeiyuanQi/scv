@@ -19,6 +19,13 @@ base_url = "http://localhost:11434/v1"
 api_key = "local"
 timeout_seconds = 600
 
+# What runs without asking. "auto", the default, approves SCV's tools and
+# starts each delegated agent in its own full-autonomy mode; a force-push to
+# main is still denied and a direct cargo publish still asks you. "on-risk"
+# runs reads and asks before writes, shell commands, and agents.
+# [policy]
+# mode = "on-risk"
+
 # Chat accounts, one table each. `scv channels run|stop|logout` edit only
 # their own table and keep the rest of this file; you may edit them too.
 # [channels.wechat.default]

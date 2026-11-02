@@ -32,7 +32,8 @@ pub struct LaunchOptions {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub base_url: Option<String>,
-    pub approval_policy: Option<String>,
+    /// `--policy`: the server's `[policy] mode`.
+    pub policy: Option<String>,
 }
 
 pub(crate) struct SessionInfo {
@@ -131,8 +132,8 @@ impl Client {
         if let Some(base_url) = &options.base_url {
             command.args(["--base-url", base_url]);
         }
-        if let Some(policy) = &options.approval_policy {
-            command.args(["--approval-policy", policy]);
+        if let Some(policy) = &options.policy {
+            command.args(["--policy", policy]);
         }
         command
             .args(["server", "--stdio"])

@@ -22,7 +22,7 @@ use scv_protocol::{Attachment, QueueEntry};
 use scv_tools::background::BackgroundJobs;
 use tokio::sync::Mutex;
 
-use crate::{attachments, config::Config};
+use crate::{approval::OwnerQuestions, attachments, config::Config};
 
 pub(crate) struct Session {
     pub(crate) id: String,
@@ -42,6 +42,11 @@ pub(crate) struct Session {
     /// The session's place in the daemon's workbench, which shows what it
     /// is doing; `None` outside the daemon.
     pub(crate) workbench: Option<Arc<scv_tools::workbench::SessionHandle>>,
+    /// Where a request only the owner may answer goes outside the TUI.
+    pub(crate) owner: OwnerQuestions,
+    /// The person at the client is the owner (the TUI), so such a request is
+    /// its usual prompt.
+    pub(crate) owner_at_client: bool,
 }
 
 impl Session {
@@ -74,6 +79,8 @@ pub(crate) struct SessionClient {
     pub(crate) channel: Option<String>,
     /// The client approves every approval request without asking anyone.
     pub(crate) auto_approve: bool,
+    /// The client is the TUI, where the person at the terminal is the owner.
+    pub(crate) owner_at_client: bool,
     /// The conversation's chat log, relative to the history directory.
     pub(crate) chat: Option<PathBuf>,
     /// The client's whole system prompt, for a tool-free session only.

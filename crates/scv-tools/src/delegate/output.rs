@@ -6,11 +6,15 @@
 //! stream with no parsable event falls back to its text. Claude's first
 //! `system`/`init` event is also checked against the pinned billing identity:
 //! API-key runs require `apiKeySource = "apiKeyHelper"`, while subscription
-//! runs require `apiKeySource = "none"`. A mismatch, or a run that would
-//! otherwise complete with no init event, cancels [`AgentStream::halt_token`]
-//! when the child is still running. The turn fails with that credential error
-//! instead of the model's reply. A run that already failed, timed out, or was
-//! cancelled keeps that status.
+//! runs require `apiKeySource = "none"`. The same event's `permissionMode`
+//! is checked against the mode the policy expects ([`mode::Expected`]), and
+//! a Codex run's mode, read from its rollout, arrives through
+//! [`AgentStream::check_mode`]. A mismatch, or a run that would otherwise
+//! complete with no init event or no mode, cancels
+//! [`AgentStream::halt_token`] when the child is still running. The turn
+//! fails with that credential or mode error instead of the model's reply. A
+//! run that already failed, timed out, or was cancelled keeps that status
+//! unless its mode did not match.
 
 use scv_core::{ProgressSink, ToolFailure, ToolOutput};
 use scv_protocol::JobStatus;
@@ -22,6 +26,7 @@ use crate::{
     delegate::{
         activity::RunActivity,
         adapters::{AgentAuth, OutputFormat},
+        mode,
         progress::{progress_lines, tool_lines},
     },
     process::OutputSink,
@@ -105,12 +110,18 @@ pub(crate) struct AgentStream {
     /// The model stopped with a `refusal` stop reason.
     refused: bool,
     auth: AgentAuth,
-    /// Set when the pinned credential source does not match, or never arrived
-    /// on a run that would otherwise complete. Later events are ignored, and
-    /// [`Self::halt_token`] is cancelled so the child is stopped.
-    credential_rejected: bool,
+    /// Set when the pinned credential source or the permission mode does not
+    /// match, or never arrived on a run that would otherwise complete. Later
+    /// events are ignored, and [`Self::halt_token`] is cancelled so the child
+    /// is stopped.
+    rejected: bool,
     /// A Claude init event reported the pinned credential source.
     saw_pinned_source: bool,
+    /// The mode the policy expects the run to report, for an agent that
+    /// reports one; `None` checks nothing.
+    mode: Option<mode::Expected>,
+    /// The mode the run reported, once it matched.
+    verified_mode: Option<String>,
     halt: CancellationToken,
     usage: Option<AgentUsage>,
     /// The CLI's own session ID, for continuing the conversation.
@@ -143,8 +154,10 @@ impl AgentStream {
             completed: false,
             refused: false,
             auth: AgentAuth::None,
-            credential_rejected: false,
+            rejected: false,
             saw_pinned_source: false,
+            mode: None,
+            verified_mode: None,
             halt: CancellationToken::new(),
             usage: None,
             session: None,
@@ -173,11 +186,56 @@ impl AgentStream {
         self
     }
 
+    /// Require the run to report a permission mode `expected` accepts:
+    /// Claude Code's init event, or a Codex rollout through
+    /// [`check_mode`](Self::check_mode).
+    pub(crate) fn with_mode(mut self, expected: Option<mode::Expected>) -> Self {
+        self.mode = expected;
+        self
+    }
+
     /// Cancelled when this stream sees a Claude credential source other than
-    /// the one its billing identity is pinned to. The process supervisor
-    /// watches it and stops the child.
+    /// the one its billing identity is pinned to, or a permission mode the
+    /// policy does not expect. The process supervisor watches it and stops
+    /// the child.
     pub(crate) fn halt_token(&self) -> CancellationToken {
         self.halt.clone()
+    }
+
+    /// The CLI's own session ID, once its output named one.
+    pub(crate) fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    /// Whether the run's mode is settled: verified, or the run stopped.
+    pub(crate) fn mode_settled(&self) -> bool {
+        self.rejected || self.verified_mode.is_some() || self.mode.is_none()
+    }
+
+    /// Check the mode the run reported, which SCV read outside its stdout
+    /// (a Codex rollout): accepted, it is the run's verified mode; refused,
+    /// the run stops.
+    pub(crate) fn check_mode(&mut self, reported: &str) {
+        let Some(expected) = &self.mode else {
+            return;
+        };
+        if self.rejected {
+            return;
+        }
+        if expected.accepts(reported) {
+            self.verified_mode = Some(reported.to_owned());
+        } else {
+            let error = expected.mismatch(reported);
+            self.reject(error);
+        }
+    }
+
+    /// Stop a run whose mode should have been reported and was not.
+    pub(crate) fn reject_missing_mode(&mut self) {
+        if let Some(expected) = self.mode.as_ref().filter(|_| !self.mode_settled()) {
+            let error = expected.missing();
+            self.reject(error);
+        }
     }
 
     pub(crate) fn push(&mut self, bytes: &[u8]) {
@@ -248,7 +306,7 @@ impl AgentStream {
     }
 
     fn event(&mut self, event: &Value) {
-        if self.credential_rejected {
+        if self.rejected {
             return;
         }
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
@@ -304,6 +362,15 @@ impl AgentStream {
                             self.reject_credential(actual);
                         }
                     }
+                    if self.format == OutputFormat::ClaudeStreamJson
+                        && self.mode.is_some()
+                        && !self.rejected
+                    {
+                        match event.get("permissionMode").and_then(Value::as_str) {
+                            Some(reported) => self.check_mode(reported),
+                            None => self.reject_missing_mode(),
+                        }
+                    }
                 }
                 "result" => {
                     if let Some(result) = event.get("result").and_then(Value::as_str) {
@@ -329,6 +396,9 @@ impl AgentStream {
                     // check exists to catch. Stop before any further work.
                     if self.completed && self.requires_pinned_source() && !self.saw_pinned_source {
                         self.reject_credential("missing");
+                    }
+                    if self.completed && self.format == OutputFormat::ClaudeStreamJson {
+                        self.reject_missing_mode();
                     }
                 }
                 "assistant" => {
@@ -477,17 +547,24 @@ impl AgentStream {
         }
     }
 
-    /// The pinned credential source did not match, or never arrived. Forget
-    /// any model text and ask the supervisor to stop the child.
+    /// The pinned credential source did not match, or never arrived.
     fn reject_credential(&mut self, actual: &str) {
-        self.credential_rejected = true;
+        self.reject(Self::credential_error(self.auth, actual));
+    }
+
+    /// The credential source or permission mode did not match, or never
+    /// arrived. Forget any model text and ask the supervisor to stop the
+    /// child.
+    fn reject(&mut self, error: String) {
+        self.rejected = true;
         self.failed = true;
         self.completed = false;
         self.refused = false;
         self.reply = None;
         self.usage = None;
         self.session = None;
-        self.error = Some(Self::credential_error(self.auth, actual));
+        self.verified_mode = None;
+        self.error = Some(error);
         self.halt.cancel();
     }
 
@@ -497,18 +574,11 @@ impl AgentStream {
         if !self.line.is_empty() || self.line_overflowed {
             self.end_line();
         }
-        if self.credential_rejected {
+        if self.rejected {
             let error = self.error.clone().unwrap_or_else(|| {
-                "credential source did not match; the run was stopped".to_owned()
+                "credential source or permission mode did not match; the run was stopped".to_owned()
             });
-            return AgentResult {
-                status: RunStatus::Failed,
-                reply: error.clone(),
-                error: Some(error),
-                usage: None,
-                truncated: false,
-                session: None,
-            };
+            return AgentResult::stopped(error);
         }
         let text = String::from_utf8_lossy(&self.text).trim_end().to_owned();
         let structured = self.format != OutputFormat::Text && self.parsed_events > 0;
@@ -529,15 +599,13 @@ impl AgentStream {
             && !self.saw_pinned_source
             && status == RunStatus::Completed
         {
-            let error = Self::credential_error(self.auth, "missing");
-            return AgentResult {
-                status: RunStatus::Failed,
-                reply: error.clone(),
-                error: Some(error),
-                usage: None,
-                truncated: false,
-                session: None,
-            };
+            return AgentResult::stopped(Self::credential_error(self.auth, "missing"));
+        }
+        if let Some(expected) = &self.mode
+            && self.verified_mode.is_none()
+            && status == RunStatus::Completed
+        {
+            return AgentResult::stopped(expected.missing());
         }
         let mut reply = if structured {
             self.reply.or(fallback_reply).or_else(|| self.error.clone())
@@ -570,6 +638,7 @@ impl AgentStream {
             usage: self.usage,
             truncated: self.text_truncated && !structured,
             session: self.session,
+            mode: self.verified_mode.as_deref().map(mode::verified),
         }
     }
 }
@@ -606,9 +675,25 @@ pub(crate) struct AgentResult {
     pub(crate) truncated: bool,
     /// The session ID the CLI reported, if any.
     pub(crate) session: Option<String>,
+    /// What SCV knows of the permission mode the run had: `verified <mode>`,
+    /// or `unverified`; `None` for an agent with no mode to verify.
+    pub(crate) mode: Option<String>,
 }
 
 impl AgentResult {
+    /// A run SCV stopped for `error`, keeping nothing the agent said.
+    fn stopped(error: String) -> Self {
+        Self {
+            status: RunStatus::Failed,
+            reply: error.clone(),
+            error: Some(error),
+            usage: None,
+            truncated: false,
+            session: None,
+            mode: None,
+        }
+    }
+
     /// The tool result: the reply bounded to `limit` bytes, never the log.
     pub(crate) fn to_json(
         &self,
@@ -634,6 +719,9 @@ impl AgentResult {
         });
         if let Some(error) = &self.error {
             value["error"] = truncate_utf8(error, limit).0.into();
+        }
+        if let Some(mode) = &self.mode {
+            value["mode"] = mode.as_str().into();
         }
         if self.status == RunStatus::Declined {
             value["note"] = DECLINED_NOTE.into();

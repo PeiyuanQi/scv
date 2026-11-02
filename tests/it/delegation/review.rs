@@ -27,8 +27,18 @@ fn fake_agent(home: &Path, name: &str, replies: &[String]) {
              echo \"$n\" > \"$dir/{name}-count\"\n\
              printf '%s\\n' \"$@\" > \"$dir/{name}-$n.args\"\n\
              if [ -f \"$dir/{name}-$n.sleep\" ]; then sleep 30; fi\n\
+             {rollout}\
              cat \"$dir/{name}-$n.out\"\n",
-            dir = home.display().to_string()
+            dir = home.display().to_string(),
+            // Codex records its mode in the rollout of the thread it reports.
+            rollout = if name == "codex" {
+                r#"thread=$(sed -n 's/.*"thread_id":"\([^"]*\)".*/\1/p' "$dir/codex-$n.out" | head -n 1)"#
+                    .to_owned()
+                    + "\n"
+                    + &crate::support::codex_rollout("$thread")
+            } else {
+                String::new()
+            },
         ),
     )
     .unwrap();
@@ -59,10 +69,12 @@ fn codex_signed_out() -> String {
 }
 
 /// Claude Code's `stream-json` events for an API-key reply. The init event
-/// is the pinned credential source; without it a completed run fails closed.
+/// is the pinned credential source and the full permission mode the default
+/// policy expects; without it a completed run fails closed.
 fn claude_says(reply: &str) -> String {
     [
-        json!({"type":"system","subtype":"init","apiKeySource":"apiKeyHelper"}),
+        json!({"type":"system","subtype":"init","apiKeySource":"apiKeyHelper",
+               "permissionMode":"bypassPermissions"}),
         json!({"type":"result","subtype":"success","is_error":false,"result":reply,
                "usage":{"input_tokens":1,"output_tokens":1}}),
     ]

@@ -9,7 +9,7 @@ use clap::Parser;
 use scv_server::config::ConfigOverrides;
 use std::path::PathBuf;
 
-use common::ApprovalArg;
+use common::PolicyArg;
 
 #[derive(Parser)]
 #[command(name = "scv-server", version, about = "SCV stdio agent server")]
@@ -28,8 +28,9 @@ struct Cli {
     model: Option<String>,
     #[arg(long)]
     base_url: Option<String>,
-    #[arg(long, value_enum)]
-    approval_policy: Option<ApprovalArg>,
+    /// `[policy] mode`; `--approval-policy` is its old name.
+    #[arg(long, alias = "approval-policy", value_enum)]
+    policy: Option<PolicyArg>,
 }
 
 fn main() -> Result<()> {
@@ -67,7 +68,7 @@ async fn serve(cli: Cli, layout: scv_client::Layout, config_file: Option<PathBuf
             provider: cli.provider,
             model: cli.model,
             base_url: cli.base_url,
-            approval_policy: cli.approval_policy.map(Into::into),
+            mode: cli.policy.map(Into::into),
             no_tools: false,
             config_file,
         },

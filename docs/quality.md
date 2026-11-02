@@ -181,10 +181,33 @@ Daemon and component changes require focused coverage for:
   counts as no, an unfollowed question withdrawn, and unreachable chats and
   repeat questions refused; `scv confirm` exiting 0, 1, or 2 against a
   scripted daemon, a daemon too old for it, no daemon, and an isolated daemon
-  with no owner chat; and `publish.sh` asking before its first `cargo
-  publish` only when delegated, publishing only on yes, never asking for
-  `--check`, and stopping with an explanation when the installed `scv`
-  predates `scv confirm`;
+  with no owner chat; and `publish.sh` checking the whole release with
+  `scv policy check publish` before its first `cargo publish` and publishing
+  only when it exits 0, never checking for `--check`, falling back to
+  `scv confirm` when delegated with an `scv` that predates `scv policy`, and
+  stopping with an explanation when the installed `scv` predates
+  `scv confirm`;
+- the approval policy: `decide` for every mode and risk, the command gates
+  denying a push that forces `main` and asking the owner for a direct
+  `cargo publish` in every mode (behind wrappers, options, and `&&`) while
+  feature-flow's own pushes and scripts stay the mode's, a blanket answer
+  never satisfying a request only the owner may answer, and the question
+  saying why and what; `[policy]` defaults, the deprecated keys read with
+  their meaning kept, an old key and its new key in one layer refused,
+  `scv config show` marking a line that pins the old default, and a project
+  layer only tightening the mode and lowering the publish limit; full
+  switches under `auto` only, an agent's own mode outranking the policy's,
+  and the nested SCV started with `--policy on-risk` or stricter whatever
+  its configured `args`; the mode check (under `auto` the full mode
+  required and only a reported mode taken, under any other mode refused), a Codex
+  rollout read for its latest turn, and summaries naming the policy and
+  whether the mode was verified; and the publish rule: a release within the
+  limit going without a question, one crate over the line asking for the
+  whole release, a crate at crates.io's own limit blocking it unasked under
+  any configured limit, a count that cannot be fetched counting as over,
+  versions counted by creation in the last 24 hours with yanked ones and
+  across pages, a crate crates.io does not know having none, and only crate
+  names reaching the URL;
 - notices stored while another state write waits out an account's busy
   transaction, with receiving and delivery going on, and a notice the daemon
   stopped waiting for never sent;

@@ -6,7 +6,7 @@ use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc, time::D
 use crate::{
     builtin::{chat_attach, chat_history},
     delegate::{
-        adapters::{AgentAuth, OutputFormat, Resume, Transport},
+        adapters::{AgentAuth, ModeReport, OutputFormat, Resume, Transport},
         background,
         conversation::ConversationLimits,
         records::DelegationRegistry,
@@ -209,8 +209,17 @@ pub struct AgentAdapterConfig {
     /// prompt as a flag value.
     pub prompt_args: Vec<String>,
     /// The CLI's own full-autonomy arguments, placed after `args`, when the
-    /// user configured `permissions = "full"`; the approval summary says so.
+    /// agent's policy mode is `auto`; the approval summary says so.
     pub full_permission_args: Option<Vec<String>>,
+    /// The policy mode in effect for this agent (`auto`, `on-risk`,
+    /// `always`, or `read-only`), named in its approval summary and in a
+    /// mode mismatch.
+    pub policy: String,
+    /// How its CLI reports the permission mode it runs in.
+    pub mode_report: ModeReport,
+    /// Whether it has a full-autonomy switch at all. One without (pi,
+    /// OpenCode, Kimi Code, a nested SCV) has no mode to verify.
+    pub mode_switch: bool,
     /// Arguments appended for a per-call model; `{model}` is substituted.
     /// Empty means the adapter does not offer model selection.
     pub model_args: Vec<String>,
@@ -278,10 +287,11 @@ pub struct AgentDefaults {
 #[derive(Debug, Clone)]
 pub struct AcpAgentLaunch {
     pub command: String,
-    /// Arguments with the `permissions = "full"` switches already applied.
+    /// Arguments with the policy's full-autonomy switches already applied.
     pub args: Vec<String>,
-    /// The ACP session mode that grants full permissions, selected in every
-    /// new session when `permissions = "full"`.
+    /// The ACP session mode that grants full permissions. Every new session
+    /// selects it under policy mode `auto`, and under any mode the session
+    /// must report the mode the policy expects.
     pub full_mode: Option<String>,
     /// Extra environment for the ACP server, such as permission settings the
     /// server reads only from its environment.

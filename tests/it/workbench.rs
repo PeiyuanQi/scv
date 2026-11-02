@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::{
     daemon::{start, status, terminate},
-    support::{Isolated, write_private},
+    support::{Isolated, codex_rollout, write_private},
 };
 
 /// A fake Codex that records its arguments. A first turn reports its
@@ -33,22 +33,30 @@ fn fake_codex(home: &Path) -> std::path::PathBuf {
                 "echo \"$@\" >> {log:?}\n",
                 "case \"$*\" in\n",
                 "  *\" resume \"*)\n",
+                "{resumed}",
                 "    echo '{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i2\",\"type\":\"agent_message\",\"text\":\"resumed where it stopped\"}}}}'\n",
                 "    echo '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
                 "    ;;\n",
                 "  *quick*)\n",
+                "{quick}",
                 "    echo '{{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}}'\n",
                 "    echo '{{\"type\":\"item.started\",\"item\":{{\"type\":\"command_execution\",\"command\":\"cargo test\"}}}}'\n",
                 "    echo '{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"landed 0.9.9\"}}}}'\n",
                 "    echo '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
                 "    ;;\n",
                 "  *)\n",
+                "{long}",
                 "    echo '{{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a54\"}}'\n",
                 "    sleep 30\n",
                 "    ;;\n",
                 "esac\n",
             ),
-            log = home.join("codex-calls").display().to_string()
+            log = home.join("codex-calls").display().to_string(),
+            // A resumed turn names no thread again: SCV knows which it
+            // resumed, the argument before the prompt.
+            resumed = "    eval \"thread=\\${$(($# - 1))}\"\n".to_owned() + &codex_rollout("$thread"),
+            quick = codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a53"),
+            long = codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a54"),
         ),
     )
     .unwrap();
@@ -442,6 +450,7 @@ fn takeover_home() -> (tempfile::TempDir, std::path::PathBuf) {
                 "    ;;\n",
                 "  *)\n",
                 "    echo \"$@\" >> {calls:?}\n",
+                "{rollout}",
                 "    echo '{{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a55\"}}'\n",
                 "    echo '{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"done\"}}}}'\n",
                 "    echo '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
@@ -451,6 +460,7 @@ fn takeover_home() -> (tempfile::TempDir, std::path::PathBuf) {
             pid = path.join("terminal-pid").display().to_string(),
             hup = path.join("terminal-hangups").display().to_string(),
             calls = path.join("codex-calls").display().to_string(),
+            rollout = codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a55"),
         ),
     )
     .unwrap();
@@ -458,7 +468,7 @@ fn takeover_home() -> (tempfile::TempDir, std::path::PathBuf) {
     write_private(
         &path.join("config.toml"),
         &format!(
-            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\npermissions = \"full\"\n",
+            "[agents.codex]\ncommand = {:?}\ntransport = \"resume\"\nmode = \"auto\"\n",
             agent.display().to_string()
         ),
     );

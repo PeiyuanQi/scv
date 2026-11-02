@@ -1061,7 +1061,9 @@ job-4 · Landing: landed · 4f2a9c1 → origin/main · confirmed by reviewer cla
 
 This is what lets the owner keep chatting while work runs: an owner session
 starts with `auto_approve: true`, so the background agents it starts get the
-approvals the owner's own turns get, and its system prompt tells the model to
+approvals the owner's own turns get (apart from requests only the owner may
+answer, which are [asked in the chat](#questions-to-the-owner)), and its
+system prompt tells the model to
 hand real work to background agents and answer at once with the job handle
 (see [Delegate first](tools.md#delegate-first)). The owner can ask how a job
 is going or have it stopped at any time.
@@ -1095,10 +1097,11 @@ so its entry claims neither and names the journal to check:
 ## Restarts and notices
 
 An owner can ask SCV from a chat to change, publish, and deploy SCV itself:
-the delegated agent runs the feature flow, whose `publish.sh` first asks the
-owner in that chat whether to publish (see
-[Questions to the owner](#questions-to-the-owner)) and whose `deploy.sh` ends
-with `scv restart --when-idle`. The daemon then restarts only once that agent has
+the delegated agent runs the feature flow, whose `publish.sh` publishes
+within the daily publish limit and past it first asks the owner in that chat
+(see [Questions to the owner](#questions-to-the-owner)), and whose
+`deploy.sh` ends with `scv restart --when-idle`. The daemon then restarts
+only once that agent has
 finished (a nested SCV or ACP agent, which lives for its whole conversation:
 once its turn has ended and, for a nested SCV, the background jobs of its own
 session have been reported to it), its report is stored in the chat's outbox,
@@ -1150,11 +1153,28 @@ it late. See
 
 Before a step that cannot be undone, a delegated agent (or anything else on
 the host) can ask the owner yes or no with `scv confirm [--timeout SECS]
-QUESTION`; the feature flow's `publish.sh` asks this way before publishing SCV
-to crates.io. The question goes to the chat that started the work, found as
-for a planned restart: the caller's `SCV_PARENT` chain names the delegation,
-the delegation its daemon session, and the hub the direct chat that session
-answers. Work that did not start in a chat, such as a TUI session, asks where
+QUESTION`. SCV asks the same way in two more cases:
+
+- `scv policy check publish`, which the feature flow's `publish.sh` runs
+  before publishing SCV to crates.io, asks only when the release would take
+  a crate past `[policy] publish_crate_versions_per_day` (20) versions in the
+  last 24 hours, or when a count cannot be fetched (see
+  [release](release.md#publication-and-checks)).
+- The approval gate asks for a request only the owner may answer, such as a
+  direct `cargo publish` (see [policy](configuration.md#policy)), in every
+  daemon session but a TUI chat's own turns, where the person at the
+  terminal is asked. Background jobs' requests, a TUI chat's included, are
+  asked this way too. The question says why and what the call runs. A
+  request that cannot be asked (a stdio server never can), or gets no answer
+  in time, is denied.
+
+A chat's own blanket approval (an owner session's `auto_approve`) never
+answers a request only the owner may answer; only the owner's explicit yes
+to its question does. The question goes to the chat that started the work,
+found as for a planned restart: the caller's `SCV_PARENT` chain names the
+delegation, the delegation its daemon session (for the gate, the daemon
+session whose call asks), and the hub the direct chat that session answers.
+Work that did not start in a chat, such as a TUI session, asks where
 unprompted notices go: the owner of the first connected `[notify].owner`
 account, or else the chat the owner last wrote from. Only an account owner's
 direct chat can be asked; with none reachable, nothing is asked.
@@ -1216,6 +1236,8 @@ not learned: no daemon, a daemon too old for the command, no owner chat to
 ask in, a question already waiting there, the question refused by the platform
 or still undelivered at its deadline, or the daemon restarting while it
 waited. A delegated agent may run it; it manages nothing.
+`scv policy check publish` exits the same way, 0 also when no question was
+needed, and 2 also when it could not read the configuration.
 
 Checked live with the owner on 2026-09-26: a question from a terminal went to
 the first `[notify]` account (Feishu); `yes` made `scv confirm` exit 0 and
@@ -1286,8 +1308,11 @@ CLI or daemon control can change:
 - `owner`: messages from the account's authenticated owner, the iLink
   `user_id` recorded at QR login or the Feishu `open_id` recorded at sign-in,
   start a full session with every configured SCV tool, and the bridge approves
-  that session's approval requests. Other senders, and the owner writing in a
-  group, keep `none` behavior. Accounts without a known owner ID grant tools to nobody.
+  that session's approval requests. A request only the owner may answer
+  never reaches the bridge: it is asked in the chat as a
+  [question to the owner](#questions-to-the-owner). Other senders, and the
+  owner writing in a group, keep `none` behavior. Accounts without a known
+  owner ID grant tools to nobody.
   Owner turns may run for the configured tool ceiling
   (`tools.max_timeout_seconds`, default four hours) plus five minutes, so four
   hours and five minutes by default and at least 30 minutes, instead of 5; the
@@ -1385,8 +1410,8 @@ A mail chat:
   chat log cannot be read, until that log is removed. A new app signed in
   for mail avoids both. Nothing is changed or sent when it refuses;
 - is never the owner's last chat, a `[notify].owner` target (validation
-  refuses one), or asked a `scv confirm` question: the hub refuses to queue
-  SCV's own notices or questions to it;
+  refuses one), or asked a [question to the owner](#questions-to-the-owner):
+  the hub refuses to queue SCV's own notices or questions to it;
 - stores only *quarantined* notices from email accounts, each under a key
   that it stores once: handing the same key over again, as after a lost
   acknowledgement, is acknowledged without a second copy. They are sent as

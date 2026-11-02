@@ -1,14 +1,17 @@
 //! Yes/no questions to the owner in chat, which `scv confirm` asks before an
-//! irreversible step, such as a delegated agent publishing SCV to crates.io.
+//! irreversible step, `scv policy check publish` asks past the publish
+//! limit, and the approval gates ask for a request only the owner may answer
+//! ([`Confirmer::ask_owner`]).
 //!
 //! A question goes to the chat that started the work the asker runs inside
 //! (its `SCV_PARENT` chain names the delegation, whose daemon session a chat
-//! bridge answers), or else to the owner chat an unprompted notice would go
-//! to. It is sent through the account's durable outbox and held in the
-//! channel hub. Once the bridge has delivered its text, the owner's next
-//! explicit yes or no in that chat, sent after that, answers it without
-//! starting a turn; text the platform refuses, or that is still undelivered
-//! at the deadline, fails the question, since the owner was never asked.
+//! bridge answers, or a gate names its session), or else to the owner chat
+//! an unprompted notice would go to. It is sent through the account's
+//! durable outbox and held in the channel hub. Once the bridge has
+//! delivered its text, the owner's next explicit yes or no in that chat,
+//! sent after that, answers it without starting a turn; text the platform
+//! refuses, or that is still undelivered at the deadline, fails the
+//! question, since the owner was never asked.
 //! The asker follows it with `confirm_status`; a question nobody follows for
 //! [`LEASE`] is withdrawn. Questions live in memory only: a daemon restart
 //! drops them.
@@ -34,7 +37,8 @@ const MAX_QUESTION_BYTES: usize = 4 * 1024;
 const LEASE: Duration = Duration::from_secs(60);
 /// How long a settled question's outcome stays readable.
 const KEEP_SETTLED: Duration = Duration::from_secs(10 * 60);
-/// How often a waiting question checks its deadline and lease.
+/// How often a waiting question checks its deadline and lease, and a gate
+/// waiting on one follows it.
 const TICK: Duration = Duration::from_secs(1);
 
 /// What the chat is told when no answer came in time.
@@ -96,6 +100,52 @@ impl Confirmer {
         parent: Option<&str>,
         timeout_seconds: Option<u64>,
     ) -> Result<ConfirmInfo, String> {
+        let session = parent
+            .and_then(|chain| self.registry.own_run(chain))
+            .map(|run| run.session);
+        self.ask_in(question, session.as_deref(), timeout_seconds)
+            .await
+    }
+
+    /// Ask the owner `question` for the work of daemon session `session`
+    /// and wait for the answer, following it as `scv confirm` does: yes only
+    /// on an explicit yes before the deadline ([`DEFAULT_CONFIRM_SECONDS`]).
+    /// A question that cannot be asked, or a cancelled wait, is a no.
+    pub(crate) async fn ask_owner(
+        self: &Arc<Self>,
+        question: &str,
+        session: &str,
+        cancellation: &CancellationToken,
+    ) -> bool {
+        let info = match self.ask_in(question, Some(session), None).await {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::warn!("Could not ask the owner for session {session}: {error}");
+                return false;
+            }
+        };
+        loop {
+            match self.status(&info.id).map(|info| info.state) {
+                Ok(ConfirmState::Pending) => {}
+                Ok(state) => return state == ConfirmState::Yes,
+                Err(_) => return false,
+            }
+            tokio::select! {
+                // Unfollowed, the question is withdrawn after its lease.
+                () = cancellation.cancelled() => return false,
+                () = tokio::time::sleep(TICK) => {}
+            }
+        }
+    }
+
+    /// Ask `question` in the chat of daemon session `session`, or else the
+    /// owner chat.
+    async fn ask_in(
+        self: &Arc<Self>,
+        question: &str,
+        session: Option<&str>,
+        timeout_seconds: Option<u64>,
+    ) -> Result<ConfirmInfo, String> {
         let question = question.trim();
         if question.is_empty() {
             return Err("the question is empty".into());
@@ -108,7 +158,7 @@ impl Confirmer {
         let seconds = timeout_seconds
             .unwrap_or(DEFAULT_CONFIRM_SECONDS)
             .clamp(1, MAX_CONFIRM_SECONDS);
-        let chat = self.chat(parent).await?;
+        let chat = self.chat(session).await?;
         let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
         let answer = self
             .hub
@@ -158,12 +208,10 @@ impl Confirmer {
         Ok(entry.info.clone())
     }
 
-    /// The owner's direct chat to ask in: the chat that started the
-    /// delegation `parent` names, or else the notify target.
-    async fn chat(&self, parent: Option<&str>) -> Result<Origin, String> {
-        let started = parent
-            .and_then(|chain| self.registry.own_run(chain))
-            .and_then(|run| self.hub.origin(&run.session));
+    /// The owner's direct chat to ask in: the chat that started daemon
+    /// session `session`, or else the notify target.
+    async fn chat(&self, session: Option<&str>) -> Result<Origin, String> {
+        let started = session.and_then(|session| self.hub.origin(session));
         let chat = match started {
             Some(chat) => chat,
             None => self.notifier.owner_chat().await.ok_or(

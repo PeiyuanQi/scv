@@ -222,9 +222,13 @@ struct Parent {
 impl Parent {
     /// Start the parent in `home`, whose `scv` agent runs this build's `scv`.
     async fn start(home: &Path, address: SocketAddr, workspace: &Path) -> Self {
+        // The parent asks its client, so the nested approvals reach it.
         write_private(
             &home.join("config.toml"),
-            &format!("[agents.scv]\ncommand = {:?}\n", env!("CARGO_BIN_EXE_scv")),
+            &format!(
+                "[policy]\nmode = \"on-risk\"\n\n[agents.scv]\ncommand = {:?}\n",
+                env!("CARGO_BIN_EXE_scv")
+            ),
         );
         let mut server = Command::new(env!("CARGO_BIN_EXE_scv"))
             .isolated(home)
@@ -413,13 +417,15 @@ async fn a_nested_scvs_own_background_job_keeps_it_at_work_between_turns() {
         format!(
             concat!(
                 "#!/bin/sh\n",
+                "{rollout}",
                 "echo '{{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}}'\n",
                 "i=0\n",
                 "while [ ! -e {finish:?} ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done\n",
                 "echo '{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"landed 0.9.9\"}}}}'\n",
                 "echo '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
             ),
-            finish = finish.display().to_string()
+            finish = finish.display().to_string(),
+            rollout = crate::support::codex_rollout("0199a213-81c0-7800-8aa1-bbab2a035a53"),
         ),
     )
     .unwrap();

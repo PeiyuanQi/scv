@@ -9,12 +9,12 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
-use super::common::ApprovalArg;
+use super::common::PolicyArg;
 
 /// The command-line settings `scv start` and `scv restart` write into the
 /// unit's `scv run` command.
 pub(crate) struct Flags<'a> {
-    pub(crate) approval_policy: Option<ApprovalArg>,
+    pub(crate) policy: Option<PolicyArg>,
     pub(crate) provider: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
     pub(crate) base_url: Option<&'a str>,
@@ -58,8 +58,8 @@ pub(crate) fn daemon_control(
                 command.push(systemd_quote(std::ffi::OsStr::new(value)));
             }
         }
-        if let Some(policy) = flags.approval_policy {
-            command.push("--approval-policy".into());
+        if let Some(policy) = flags.policy {
+            command.push("--policy".into());
             command.push(systemd_quote(std::ffi::OsStr::new(
                 policy.to_possible_value().expect("value enum").get_name(),
             )));

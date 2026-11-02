@@ -523,7 +523,7 @@ async fn web_fetch_is_auto_approved_only_for_allowlisted_https_hosts() {
     std::fs::write(
         &config,
         format!(
-            "[provider]\nactive = \"fake\"\n\n[providers.fake]\nkind = \"openai-compatible\"\nmodel = \"fake-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n\n[web]\nauto_approve_domains = [\"localhost\"]\nsearch = \"provider\"\n"
+            "[provider]\nactive = \"fake\"\n\n[providers.fake]\nkind = \"openai-compatible\"\nmodel = \"fake-model\"\nbase_url = \"http://{address}/v1\"\napi_key = \"test-only\"\n\n[policy]\nmode = \"on-risk\"\n\n[web]\nauto_approve_domains = [\"localhost\"]\nsearch = \"provider\"\n"
         ),
     )
     .unwrap();

@@ -74,9 +74,18 @@ own:
 - **What you know:** file paths, error text, decisions already made, and
   links. Quote them; don't paraphrase error messages.
 - **Constraints:** what not to touch, and actions that need the owner's yes
-  first. Anything that cannot be undone, such as publishing, pushing to
-  `main`, deleting, spending money, or messaging other people, waits for the
-  owner. A delegated agent asks with `scv confirm "<question>"`.
+  first. Never force-push `main`, skip a repository's required CI or review,
+  or stash, reset, or discard work that is not the task's. These wait for
+  the owner's yes: deleting anything that is not the task's own (other
+  branches or worktrees, data, uncommitted work); pushing to a shared branch,
+  except landing the owner asked for; installing, deploying, or restarting
+  without an explicit request for it; spending money; messaging anyone but
+  the owner; publishing anywhere but crates.io, or to crates.io past the
+  daily limit; and a request whose repository, change, or target branch is
+  unclear, or work grown beyond what was asked. A release the owner asked for
+  publishes to crates.io within the daily limit without a further yes, through
+  the project's publish script. A delegated agent asks with
+  `scv confirm "<question>"`.
 - **Done when:** how the agent can tell it has finished, such as tests that
   pass or a file that exists.
 - **Report:** what to send back, and how short.
@@ -130,7 +139,7 @@ own Review and Landing lines, ahead of your summary.
   approves, and the approving reviewer then checks what landed.
   `before_review` lets it land each round's work before it is reviewed: use
   it only when the user asked to land first, such as for an urgent fix.
-  Publishing still asks the user through its own approval.
+  Publishing past the daily limit asks the owner.
 - **The reviewer.** Leave `review.agent` out: Claude-family work is reviewed
   by codex, then grok; codex work is reviewed by claude-ai, claude, then grok;
   other work is reviewed by claude-ai, claude, codex, then grok. A fresh
@@ -177,6 +186,7 @@ cause.
 | Status `declined` | Follow the refusal rule in the system prompt. |
 | Status `timeout` | Continue its `session` to ask for progress, or run it again with a longer `timeout_seconds`. |
 | `conversation … ended` or `… is unknown` | Start a new conversation, with a brief that restates the context. |
+| `… reported permission mode …, but policy mode … expects …`, `… did not report its permission mode …`, or `… moved its session from permission mode …` | Tell the owner the expected and reported modes, quoting the error. Don't retry in another mode or with another agent to get around it. |
 | Anything else | Tell the user the error. Retry only after changing what caused it. |
 
 ## Keeping up with the agents
