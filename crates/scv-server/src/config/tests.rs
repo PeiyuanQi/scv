@@ -288,6 +288,7 @@ fn an_old_key_and_its_new_key_in_one_layer_are_refused() {
     // only make it stricter.
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let workspace_root = workspace.path().canonicalize().unwrap();
     let layout = Layout::new(home.path());
     write_private(&layout.config(), "[policy]\nmode = \"on-risk\"\n");
     std::fs::create_dir_all(workspace.path().join(".scv")).unwrap();
@@ -296,14 +297,14 @@ fn an_old_key_and_its_new_key_in_one_layer_are_refused() {
         "[tools]\napproval_policy = \"never\"\n",
     )
     .unwrap();
-    let config = Config::load(&layout, workspace.path(), ConfigOverrides::default()).unwrap();
+    let config = Config::load(&layout, &workspace_root, ConfigOverrides::default()).unwrap();
     assert_eq!(config.policy_mode(), PolicyMode::ReadOnly);
     std::fs::write(
         workspace.path().join(".scv/config.toml"),
         "[policy]\nmode = \"auto\"\n",
     )
     .unwrap();
-    assert!(Config::load(&layout, workspace.path(), ConfigOverrides::default()).is_err());
+    assert!(Config::load(&layout, &workspace_root, ConfigOverrides::default()).is_err());
 }
 
 #[test]
