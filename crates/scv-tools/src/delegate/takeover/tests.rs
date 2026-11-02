@@ -365,6 +365,15 @@ async fn an_agent_that_ignores_the_hangup_is_stopped_with_what_it_started() {
     takeover.end().await;
     assert!(started.elapsed() < Duration::from_secs(9));
     assert!(takeover.is_finished());
+    // Signalling the group returns before every descendant has exited and
+    // been reaped, especially on macOS, where zombies still answer kill(0).
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while group_alive(takeover.pid) || alive(child) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the agent's process group or child outlived the takeover");
     assert!(!group_alive(takeover.pid));
     assert!(!alive(child), "the agent's own child {child} outlived it");
     assert!(!store.is_busy(&handle));
