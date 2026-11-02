@@ -14,6 +14,7 @@ use std::{
     os::unix::fs::PermissionsExt as _,
     path::Path,
     process::Stdio,
+    sync::mpsc,
     thread,
     time::Duration,
 };
@@ -30,7 +31,7 @@ use tokio::{
 /// One provider for both SCVs, told apart by the model each asks for. The
 /// parent delegates twice; the nested SCV runs `bash` on its first turn and
 /// recalls the first turn's word on its second.
-fn serve_provider(listener: TcpListener) {
+fn serve_provider(listener: TcpListener, reply_seen: mpsc::Receiver<()>) {
     thread::spawn(move || {
         let mut parent_step = 0;
         for stream in listener.incoming() {
@@ -46,11 +47,32 @@ fn serve_provider(listener: TcpListener) {
                         "no memory of a word"
                     })
                 } else if body.contains("function_call_output") {
-                    text(if body.contains("denied by policy") {
+                    let reply = if body.contains("denied by policy") {
                         "bash was denied"
                     } else {
                         "noted heron"
-                    })
+                    };
+                    // Keep the turn running until the client observes the
+                    // streamed reply: final progress may otherwise be dropped
+                    // by the parent's 500 ms pacing window.
+                    let delta = json!({
+                        "type": "response.output_text.delta",
+                        "delta": format!("{reply}\n"),
+                    });
+                    let prefix = format!("data: {delta}\n\n");
+                    let completed = "data: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prefix}",
+                        prefix.len() + completed.len(),
+                    )
+                    .unwrap();
+                    stream.flush().unwrap();
+                    reply_seen
+                        .recv_timeout(Duration::from_secs(60))
+                        .expect("the client did not receive the nested reply as progress");
+                    stream.write_all(completed.as_bytes()).unwrap();
+                    continue;
                 } else {
                     call("call_1", "bash", json!({"command":"echo child-ran"}))
                 }
@@ -109,9 +131,15 @@ fn nested_run(registry: &DelegationRegistry) -> DelegationEntry {
 }
 
 async fn delegate(approve_nested: bool) {
+    let expected = if approve_nested {
+        "noted heron"
+    } else {
+        "bash was denied"
+    };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    serve_provider(listener);
+    let (progress_reported, reply_seen) = mpsc::channel();
+    serve_provider(listener, reply_seen);
 
     let home = tempfile::tempdir().unwrap();
     let home_path = std::fs::canonicalize(home.path()).unwrap();
@@ -151,6 +179,9 @@ async fn delegate(approve_nested: bool) {
                 }
                 ServerEvent::ToolProgress { call_id, text, .. } => {
                     assert_eq!(call_id, "call_1");
+                    if index == 0 && text.contains(expected) {
+                        progress_reported.send(()).unwrap();
+                    }
                     turn.progress.push(text);
                 }
                 ServerEvent::ToolCompleted { output, .. } => turn.tool_output = Some(output),
@@ -189,11 +220,6 @@ async fn delegate(approve_nested: bool) {
     assert_eq!(output["status"], "completed");
     assert_eq!(output["session"], "scv-1");
     assert_eq!(output["turn"], 1);
-    let expected = if approve_nested {
-        "noted heron"
-    } else {
-        "bash was denied"
-    };
     assert_eq!(output["reply"], expected);
     let progress = first.progress.join("\n");
     assert!(progress.contains("bash"), "{progress}");
