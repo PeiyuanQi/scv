@@ -1,7 +1,7 @@
 //! Checking configuration: each value on its own, values against each
 //! other, and what a project layer may change.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::{AgentTransport, Config, PolicyMode, WebSearchMode};
 
@@ -377,6 +377,18 @@ impl Config {
             } else {
                 ""
             };
+            // Gemini CLI's ACP server takes neither, though its CLI takes a
+            // model, so a transport that runs that server takes none.
+            let none_over_acp = descriptor
+                .and_then(|descriptor| adapter.acp_launch(descriptor))
+                .is_some_and(|launch| launch.no_session_options);
+            let not_over_acp = |what: &str| {
+                anyhow!(
+                    "agents.{agent}.{what} is set but {agent} takes none over ACP, which \
+                     transport \"auto\" with its own command or \"acp\" uses; set transport = \
+                     \"resume\" to pass it to its CLI once per turn"
+                )
+            };
             if let Some(model) = &adapter.model {
                 if !scv_tools::valid_model_name(model) {
                     bail!("agents.{agent}.model is not a valid model name");
@@ -386,6 +398,9 @@ impl Config {
                         "agents.{agent}.model is set but {agent} does not offer model \
                          selection{only_over_acp}"
                     );
+                }
+                if none_over_acp {
+                    return Err(not_over_acp("model"));
                 }
             }
             for (field, effort) in [
@@ -408,6 +423,9 @@ impl Config {
                         "agents.{agent}.{field} is set but {agent} does not offer effort \
                          selection{only_over_acp}"
                     );
+                }
+                if none_over_acp {
+                    return Err(not_over_acp(field));
                 }
             }
             if adapter.transport == AgentTransport::Resume

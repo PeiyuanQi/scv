@@ -75,6 +75,16 @@ for line in sys.stdin:
         if MODE == "auth":
             send({"id": rid, "error": {"code": -32000, "message": "Authentication required"}})
             continue
+        if MODE == "gemini":
+            # Gemini CLI 0.66: its approval modes, `yolo` only in a trusted
+            # folder, and models only for session/set_model.
+            args = sys.argv[3:]
+            log("args=" + " ".join(args))
+            current = "yolo" if "--skip-trust" in args and "yolo" in args else "default"
+            send({"id": rid, "result": {"sessionId": "s%d" % sessions,
+                  "modes": {"currentModeId": current, "availableModes": [{"id": m, "name": m} for m in ("default", "autoEdit", "yolo", "plan")]},
+                  "models": {"currentModelId": "auto", "availableModels": [{"modelId": "gemini-2.5-pro", "name": "Pro"}]}}})
+            continue
         # "codex" also offers the mode as a config option, as codex-acp does.
         send({"id": rid, "result": {"sessionId": "s%d" % sessions,
               "modes": {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Default"}, {"id": FULL_MODE, "name": "Full"}]},
@@ -82,12 +92,12 @@ for line in sys.stdin:
     elif method == "session/set_mode":
         log("mode=" + params["modeId"])
         # Like claude-agent-acp, the answer is {} whatever happened: the
-        # mode taken is reported in an update, unless the agent is "silent"
-        # or "codex" (codex-acp reports nothing), and "downgrade" takes
-        # another one.
+        # mode taken is reported in an update, unless the agent is "silent",
+        # "codex" (codex-acp reports nothing), or "gemini" (neither does
+        # Gemini CLI), and "downgrade" takes another one.
         if MODE == "downgrade":
             update(params["sessionId"], {"sessionUpdate": "current_mode_update", "currentModeId": "default"})
-        elif MODE not in ("silent", "codex"):
+        elif MODE not in ("silent", "codex", "gemini"):
             update(params["sessionId"], {"sessionUpdate": "config_option_update", "configOptions": with_mode(params["modeId"])})
         send({"id": rid, "result": {}})
     elif method == "session/set_config_option":

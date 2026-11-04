@@ -242,9 +242,9 @@ command line, where its state lives inside the private home, the variables it
 must not inherit, and how it signs in; adding an agent is one more entry. A
 session offers only the agents whose executable resolves when the session
 starts, so an agent installed later appears in new sessions. An agent whose
-sign-in SCV checks by reading a local file (Grok, DeepSeek Harness, pi, and
-the nested SCV; see [Signing in](#signing-in-delegated-agents)) is also left
-out while that check says it is signed out. Gemini CLI, Qwen Code, OpenCode,
+sign-in SCV checks by reading a local file (Grok, DeepSeek Harness, pi,
+Gemini CLI, and the nested SCV; see [Signing in](#signing-in-delegated-agents))
+is also left out while that check says it is signed out. Qwen Code, OpenCode,
 Copilot, Cursor, Amp, and Kimi keep sign-ins SCV has no verified way to read,
 so they are offered whenever installed and their sign-in is reported as
 unchecked; a call that fails signed out gets the sign-in hint. Claude identities are checked from
@@ -392,9 +392,9 @@ takes it:
 
 | Option | Taken by |
 | --- | --- |
-| `model` | Agents whose adapter maps it to arguments (`model_args`: Claude Code, Codex, Grok Build, pi, Gemini CLI, Qwen Code, OpenCode, Copilot, and Cursor, on either transport), DeepSeek Harness and Kimi over ACP, and the nested SCV, for a new conversation; not Amp, which chooses its own models |
+| `model` | Agents whose adapter maps it to arguments (`model_args`: Claude Code, Codex, Grok Build, pi, Qwen Code, OpenCode, Copilot, and Cursor, on either transport, and Gemini CLI in one process per turn only), DeepSeek Harness and Kimi over ACP, and the nested SCV, for a new conversation; not Amp, which chooses its own models |
 | `effort` | Agents whose adapter maps it to arguments (`effort_args`: Claude Code, Codex, Grok Build, and pi), and DeepSeek Harness and Kimi over ACP when their servers offer it; not the nested SCV |
-| `session` | Agents that can continue a conversation: Claude Code, Codex, pi, and Cursor in one process per turn, every agent over ACP, and the nested SCV |
+| `session` | Agents that can continue a conversation: Claude Code, Codex, pi, Gemini CLI, and Cursor in one process per turn, every agent over ACP, and the nested SCV |
 
 A call that passes one of them to an agent that does not take it fails before
 anything launches, naming the agents that do: `scv does not take effort; these
@@ -466,7 +466,8 @@ ledger under [`daemon.status`](protocol.md#daemonstatus)).
 Each agent's line lists the values its ACP server offers, or names the model
 family its CLI takes (Claude aliases such as `sonnet` for `claude`, OpenAI
 model IDs for `codex`, Grok model IDs for `grok`, pi model patterns or
-`provider/id` for `pi`, and for `dsh`, `provider/model` as its ACP server
+`provider/id` for `pi`, Gemini model IDs or aliases such as `gemini-2.5-pro`
+or `auto` for `gemini`, and for `dsh`, `provider/model` as its ACP server
 lists them). The `model` and `effort` descriptions tell the model
 to set them when the user asks, and `effort` also to the line's hard-task
 effort for a hard task; an omitted value runs with the user's default the
@@ -485,7 +486,7 @@ does not support.
 
 Each agent resolves only its configured executable and fixed argument vector,
 adds any selected or default model/effort arguments, then any `prompt_args` (for CLIs
-whose prompt is a flag value, such as `grok -p`), appends the prompt as one
+whose prompt is a flag value, such as `grok -p` and `gemini -p`), appends the prompt as one
 argument, and starts it directly in the workspace or the selected `cwd`. A
 prompt cannot start with `-`, so it is never read as a flag.
 The executable is looked up in the user's per-user install directories
@@ -495,18 +496,24 @@ shell uses, because the user service's `PATH` omits them; the daemon therefore
 runs the same install the user's shell does.
 Native adapters receive an instance-private `HOME`, `SCV_HOME`, and XDG
 configuration/data/state directory, plus the agent's own state location inside
-it: `CODEX_HOME`, `GROK_HOME` (`.grok`), `DSH_HOME` (`.dsh`), or
-`PI_CODING_AGENT_DIR` (`.pi/agent`). Gemini CLI, Qwen Code, OpenCode,
-Copilot, Cursor, Amp, and Kimi have no such variable and keep their state
-wherever they put it under the private `HOME` and XDG directories. Grok also gets
-`GROK_DISABLE_AUTOUPDATER=1`. Before those are set, SCV removes every inherited
+it: `CODEX_HOME`, `GROK_HOME` (`.grok`), `DSH_HOME` (`.dsh`),
+`PI_CODING_AGENT_DIR` (`.pi/agent`), or `GEMINI_CLI_HOME` (the agent home
+itself, where Gemini CLI keeps `.gemini`: `settings.json`, its sign-ins, and
+its `tmp/` transcripts). Qwen Code, OpenCode, Copilot, Cursor, Amp, and Kimi
+have no such variable and keep their state wherever they put it under the
+private `HOME` and XDG directories. Grok also gets
+`GROK_DISABLE_AUTOUPDATER=1`, and Gemini CLI gets
+`GEMINI_FORCE_FILE_STORAGE=true`, so an API key entered at its `/auth` goes to
+the encrypted `.gemini/gemini-credentials.json` in the agent home instead of
+the system keychain, which every home shares. Before those are set, SCV removes every inherited
 variable ending in `_API_KEY`, SCV's selector variables, the AWS variables
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and
 `AWS_BEARER_TOKEN_BEDROCK`, and each adapter's
 credential, endpoint, and state variables (`ANTHROPIC_*` keys and tokens,
 `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `OPENAI_BASE_URL`,
 `CODEX_BASE_URL`, `GROK_*`, `DSH_*`, `DEEPSEEK_BASE_URL`, `PI_*`, `GEMINI_*`,
-`GOOGLE_GENAI_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `QWEN_*`, `DASHSCOPE_*`,
+`GOOGLE_GENAI_*`, `GOOGLE_GEMINI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`,
+`GOOGLE_CLOUD_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `QWEN_*`, `DASHSCOPE_*`,
 `OPENCODE_*`, `COPILOT_*`, `CURSOR_*`, `AMP_*`, `KIMI_*`, `MOONSHOT_*`, and
 similar),
 so no nested agent reuses the parent's configuration or another agent's
@@ -594,18 +601,21 @@ The default invocation contracts are:
 | `grok` | `grok [-m <model>] [--reasoning-effort <effort>] -p <prompt>` |
 | `dsh` | `dsh --profile headless <prompt>` |
 | `pi` | `pi -p --mode json [--model <model>] [--thinking <effort>] <prompt>` |
-| `gemini` | `gemini [--yolo] --output-format stream-json [-m <model>] -p <prompt>` |
+| `gemini` | `gemini [--approval-mode yolo --skip-trust] --output-format stream-json [--session-id <uuid> \| --resume <uuid>] [-m <model>] -p <prompt>` |
 | `qwen` | `qwen [--yolo] [-m <model>] -p <prompt>` |
 | `opencode` | `opencode run [-m <model>] <prompt>` |
 | `copilot` | `copilot [--allow-all-tools] [--model <model>] -p <prompt>` |
 | `cursor` | `cursor-agent -p [--force] --output-format stream-json [--resume <chat-id>] [--model <model>] <prompt>` |
 | `amp` | `amp [--dangerously-allow-all] --stream-json -x <prompt>` |
 
-Kimi Code runs only over ACP (`kimi acp`). Grok's `-p` and pi's `-p` run one
-prompt and exit. DeepSeek Harness run once
+Kimi Code runs only over ACP (`kimi acp`). Grok's `-p`, pi's `-p`, and
+Gemini CLI's `-p` run one prompt and exit. DeepSeek Harness run once
 per turn takes its model and effort from its profile, so it takes neither
 `model` nor `effort` then; over ACP (the default once `dsh` is installed) it
 takes both (see [Agent Client Protocol transport](#agent-client-protocol-transport)).
+Gemini CLI has no effort flag, so it takes no `effort` on either transport,
+and it takes `model` only in one process per turn (`transport = "resume"` or
+a custom `command`), since its ACP server takes none.
 For both Claude agents, `--settings <json>` is always inserted after the fixed
 arguments, followed by `--disallowedTools` and SCV's deny rules (see
 [Permission modes](#permission-modes)). The JSON differs by billing identity
@@ -699,9 +709,15 @@ log never reaches the parent model:
   file in a private `tmp` directory of Codex's agent home holding the final
   message, used if the stream carried none and deleted afterwards.
 - pi's `--mode json` gives the last assistant `message_end` text and usage.
-- Gemini CLI's `--output-format stream-json` gives its `message` deltas (or a
-  whole message) as the reply, `result` usage, and `error` events; a single
-  `{"response":…}` object reads too.
+- Gemini CLI's `--output-format stream-json` events give its session ID in
+  `init`, assistant `message` deltas (or a whole message), `tool_use`,
+  `tool_result`, `error` (one with `severity: "warning"` does not count), and
+  a final `result` whose `status` is `success` or `error`, with
+  `error.message` and usage in `stats.input_tokens` and
+  `stats.output_tokens`. The reply is the assistant text after the last tool
+  call. A single `{"response":…}` object (its `json` format) reads too, and a
+  run that fails before its first event, such as one signed out, reports its
+  stderr.
 - Cursor CLI's `--output-format stream-json` and Amp's `--stream-json` follow
   Claude Code's event shapes (`system` init with the session ID, `assistant`,
   `result`), plus Cursor's `tool_call` events.
@@ -725,8 +741,9 @@ is one object:
 last 2 KiB of stderr, and `truncated` says whether anything was cut. A failed
 run also carries `error`, what went wrong as the CLI or SCV reported it and
 never the model's reply: Claude Code's result of a failed run, Codex's
-`turn.failed` or `error` message, pi's `errorMessage`, a failed plain-text
-run's closing output, and the stderr tail. A failure whose `error` reads like
+`turn.failed` or `error` message, pi's `errorMessage`, Gemini CLI's `result`
+`error.message` (or, without one, its last `error` event), a failed
+plain-text run's closing output, and the stderr tail. A failure whose `error` reads like
 a missing sign-in gains a `hint` (see below), and a `declined` result carries
 a `note` for the calling model. A turn of a conversation (next section) also
 carries `"session"` and `"turn"`. For an agent with a full-autonomy switch,
@@ -749,9 +766,11 @@ clients see as `tool.progress` (see [protocol](protocol.md#tool-lifecycle-and-ap
   its interim text.
 - pi: `$ <command>` for bash, `<tool> <file>` for file tools, the tool name
   otherwise, and `<tool> failed` for a failed call.
-- Gemini CLI: `$ <command>` for shell commands, `<tool> <file>` for file
-  tools, `search:`/`fetch` for web tools, the tool name otherwise, and
-  `<tool> failed` for a failed call.
+- Gemini CLI: `$ <command>` for shell commands, `<tool> <path>` for file
+  and directory tools, `<tool> <pattern>` for `glob` and `grep_search`,
+  `search: <query>` for `google_web_search`, `fetch <url>` for the URL a
+  `web_fetch` names, the tool name otherwise, and `<tool> failed` for a
+  failed call; `write_todos` is skipped.
 - Cursor: `$ <command>`, `<Tool> <file>` for file tools, the pattern of a
   search, and the tool name otherwise. Amp: as Claude Code.
 - Grok, DeepSeek Harness, Qwen Code, OpenCode, and Copilot: none, since their
@@ -777,13 +796,16 @@ a conversation needs no `agent`:
 | `claude`, `claude-ai` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
 | `codex` | nothing; the thread ID comes from `thread.started` | `codex exec resume … <thread-id> <prompt>` |
 | `pi` | `--session-id <uuid>` (chosen by SCV) | `--session-id <uuid>` |
+| `gemini` | `--session-id <uuid>` (chosen by SCV) | `--resume <uuid>` |
 | `cursor` | nothing; the chat ID comes from its `system` init event | `--resume <chat-id>` |
 
-Grok, DeepSeek Harness, Gemini CLI, Qwen Code, OpenCode, Copilot, and Amp
-start a fresh conversation on every call in one process per turn: their resume
-options could not be verified headless here (Gemini CLI resumes by list
-index, which SCV cannot pin to one conversation), so they take no `session`
-that way, and a call that passes one fails before launch. Over ACP each of
+Gemini CLI resumes a session only from the project of its working directory,
+which SCV keeps fixed for a conversation anyway (below).
+
+Grok, DeepSeek Harness, Qwen Code, OpenCode, Copilot, and Amp start a fresh
+conversation on every call in one process per turn: their resume options
+could not be verified headless here, so they take no `session` that way, and
+a call that passes one fails before launch. Over ACP each of
 them that has a server continues conversations as usual.
 
 The model only ever sees handles. The CLI's own session IDs stay inside SCV,
@@ -813,8 +835,10 @@ between turns of its conversation as `idle`, or `background` while a nested
 SCV's own background jobs still run or wait to be reported to it.
 
 The CLIs keep transcripts in their private agent homes (Claude Code under
-`.claude/projects`, Codex under `sessions`, pi under `.pi/agent/sessions`).
-`scv agents gc` removes old ones:
+`.claude/projects`, Codex under `sessions`, pi under `.pi/agent/sessions`,
+Gemini CLI as `.gemini/tmp/<project>/chats/session-<time>-<id8>.jsonl`, where
+`<id8>` is the first 8 characters of the session ID). `scv agents gc` removes
+old ones:
 
 ```sh
 scv agents gc --dry-run                 # what would go, per agent
@@ -823,8 +847,9 @@ scv agents gc --older-than 7d codex     # default 30d, never less than an hour
 
 A live conversation leaves a marker in `$SCV_HOME/state/conversations`, named
 after its CLI session ID, and `gc` keeps any transcript a marker whose SCV
-process still runs names. Transcripts written in the last hour are always
-kept, and symlinks are never followed.
+process still runs names; a Gemini CLI transcript is kept when its name
+carries the first eight characters of a live conversation's ID. Transcripts
+written in the last hour are always kept, and symlinks are never followed.
 
 ### Background jobs
 
@@ -1456,8 +1481,9 @@ Adapter processes use instance-private state directories under
 `$SCV_HOME/agents/<name>`. In particular, `codex` receives
 `CODEX_HOME=$SCV_HOME/agents/codex` and does not read the user's normal
 `~/.codex` state, `claude` does not read `~/.claude`, and Grok, DeepSeek
-Harness, pi, and the other CLIs never read `~/.grok`, `~/.dsh`, `~/.pi`, or
-the user's own state, with one exception SCV cannot close: Gemini CLI and
+Harness, pi, Gemini CLI, and the other CLIs never read `~/.grok`, `~/.dsh`,
+`~/.pi`, `~/.gemini`, or the user's own state, with one exception SCV cannot
+close: Gemini CLI and
 Qwen Code load the first `.gemini/.env` (`.qwen/.env`) or `.env` they find
 walking up from their working directory, before the one in their home, and
 set its variables where unset. With the workspace inside the user's home, a
@@ -1478,8 +1504,9 @@ CLI's own full-autonomy switches after the fixed arguments:
 WebSearch and WebFetch), `--dangerously-bypass-approvals-and-sandbox -c
 web_search="live"` for Codex (`codex exec` has no `--search` flag), and
 `--always-approve` for Grok (web search is on by default); DeepSeek Harness
-gets `DSH_PERMISSION_MODE=danger-full-access`, Gemini CLI and Qwen Code get
-`--yolo`, Copilot `--allow-all-tools`, Cursor `--force`, and Amp
+gets `DSH_PERMISSION_MODE=danger-full-access`, Gemini CLI
+`--approval-mode yolo --skip-trust`, Qwen Code `--yolo`, Copilot
+`--allow-all-tools`, Cursor `--force`, and Amp
 `--dangerously-allow-all`, while pi, which has no approval prompts, sandbox,
 or built-in web search, and OpenCode and Kimi, whose permissions are their
 own configuration, get nothing. OpenCode's own defaults ask for nothing
@@ -1490,6 +1517,16 @@ configuration decides what it asks; in print mode Claude Code, for example,
 then refuses Bash, Edit, and Write. What an agent relays to SCV is a
 request of the `agent` tool, so `[policy] mode` decides it, whatever the
 agent's own mode.
+
+Gemini CLI's `yolo` approves every tool call, Google Search included, but
+Gemini CLI honours it only in a trusted folder. `--skip-trust` trusts the
+workspace for that run, which also applies the project's own `.gemini`
+settings, policies, hooks, and MCP servers, so SCV adds it only under
+`auto`. Under a stricter mode a `gemini` run once per turn stops in a folder
+its agent home has not trusted (Gemini CLI: "not running in a trusted
+directory"), while over ACP an untrusted folder runs in Gemini CLI's default
+mode and each tool call's permission request is relayed to the calling
+session for approval. Its sandbox is off unless its own settings turn it on.
 
 SCV checks the permission mode the agent reports against the one its policy
 mode expects, and fails closed. Under `auto` the agent must report its full
@@ -1518,7 +1555,10 @@ the turn, closes the session, and fails the call; Claude's own `plan` mode
 is the one exception, since Claude returns from it to the mode it left. For
 an ACP agent with a switch but no session mode to compare (Grok Build,
 DeepSeek Harness, Gemini CLI, Qwen Code), SCV keeps the mode the session
-reports, if any, without checking it. The result's `mode` (see
+reports, if any, without checking it. Gemini CLI's `session/new` reports its
+approval mode, `yolo` under `auto`, but it answers `session/set_mode` with
+`{}` and reports no change, so SCV starts its server in that mode instead of
+selecting it and leaves it unverified. The result's `mode` (see
 [Results](#results)), the job record's `mode`, and `scv agents check` say
 what SCV knew: `verified <mode>`, `unverified`, or
 `unverified (it reports <mode>)`.
@@ -2049,7 +2089,7 @@ permission requests and reports progress as it happens:
 | `codex` | `codex-acp` | npm `@agentclientprotocol/codex-acp` (ACP organisation) |
 | `grok` | `grok agent stdio` | built in |
 | `dsh` | `dsh --profile acp` | built in (0.1.7-rc.1) |
-| `gemini` | `gemini --experimental-acp` | built in |
+| `gemini` | `gemini --acp` | built in (`--experimental-acp` is its deprecated older spelling) |
 | `qwen` | `qwen --experimental-acp` | built in (a Gemini CLI fork) |
 | `opencode` | `opencode acp` | built in |
 | `kimi` | `kimi acp` | built in (Kimi Code CLI 2.4.0) |
@@ -2064,7 +2104,9 @@ or in a per-user install directory) and the agent's `command` is the built-in on
 otherwise one CLI process per turn; `acp` requires the server and offers the
 agent only when it is installed; `resume` always uses one process per turn. A
 custom `command` points SCV at a specific CLI, which the ACP server would not
-run, so `auto` keeps it; custom `args` do not matter.
+run, so `auto` keeps it; custom `args` do not matter. Gemini CLI's ACP server
+is the same `gemini` executable, so with `auto` and its own `command` it runs
+over ACP whenever it is installed.
 
 ```text
 initialize {protocolVersion: 1, no fs or terminal capabilities}
@@ -2109,6 +2151,15 @@ nowhere. Between turns SCV sends no steering request.
   agent does not offer fails the call with the offered list and keeps the
   conversation. Each new session's lists are saved and shown to later
   sessions (see [Model and effort values](#model-and-effort-values)).
+- Gemini CLI takes neither `model` nor `effort` over ACP: its server changes
+  a session's model only through the unstable `session/set_model`, which SCV
+  does not send, and lists no `configOptions`. A call that names a model
+  fails with `gemini does not offer a model choice over ACP; omit model` and
+  keeps the conversation, and `[agents.gemini] model` with a transport that
+  runs its ACP server is a startup error: `agents.gemini.model is set but
+  gemini takes none over ACP, which transport "auto" with its own command or
+  "acp" uses; set transport = "resume" to pass it to its CLI once per turn`.
+  With `transport = "resume"`, `model` becomes `-m <model>`.
 - `session/update` notifications become `tool.progress`: completed lines of
   the agent's message, each tool call's title (or kind), `… failed` for a
   failed tool call, and the current plan step. Thoughts and tool output never
@@ -2129,8 +2180,11 @@ nowhere. Between turns SCV sends no steering request.
 - Policy mode `auto` maps onto each agent's own switch: Claude's
   `bypassPermissions` and Codex's `agent-full-access` session modes (selected
   in every new session), `grok agent --always-approve
-  stdio`, DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`, and
-  `--yolo` before `--experimental-acp` for Gemini CLI and Qwen Code. OpenCode
+  stdio`, DeepSeek Harness's `DSH_PERMISSION_MODE=danger-full-access`,
+  `gemini --approval-mode yolo --skip-trust --acp` for Gemini CLI (it
+  answers `session/set_mode` without reporting the mode, and an untrusted
+  folder refuses `yolo`), and `--yolo` before `--experimental-acp` for Qwen
+  Code. OpenCode
   and Kimi have no such switch: their permissions are their own
   configuration, and what it has them ask is relayed (OpenCode's defaults
   ask nothing). A permission request that still arrives is relayed as usual,
@@ -2199,8 +2253,8 @@ scv agents login dsh                     # prompts for a DeepSeek API key
 scv agents login pi                      # opens pi: run /login, then /quit
 scv agents login pi --openai-compatible  # or point pi at any OpenAI-compatible endpoint
 scv agents import pi --from-scv-provider # or reuse SCV's own provider
-scv agents login gemini                  # opens Gemini CLI: choose how to sign in, then /quit
-scv agents login qwen                    # opens Qwen Code the same way
+scv agents login gemini                  # opens Gemini CLI: run /auth, then /quit
+scv agents login qwen                    # opens Qwen Code: choose how to sign in, then /quit
 scv agents login opencode                # opencode auth login
 scv agents login copilot                 # opens Copilot CLI: run /login, then /exit
 scv agents login cursor                  # cursor-agent login
@@ -2268,7 +2322,7 @@ and records a digest of what it copied, never the content, in
 `up to date` or that the source has changed since, with the import command to
 run; see [imported agent setups](configuration.md#imported-agent-setups).
 
-Gemini CLI, Qwen Code, Copilot, and Kimi sign in inside their own interactive
+Qwen Code, Copilot, and Kimi sign in inside their own interactive
 CLI, which `login` opens in the private home with a hint naming the steps;
 OpenCode, Cursor, and Amp have sign-in commands, which `login` runs there.
 `logout` runs their sign-out command, or opens the CLI with a hint naming
@@ -2315,6 +2369,25 @@ names), its key in `auth.json`, and `defaultProvider`/`defaultModel` in
 `status` shows the default provider, API, endpoint host, and model, and which
 providers have stored sign-ins; `logout` removes `auth.json`, the `scv`
 provider, and a default that points at it.
+
+`scv agents login gemini` opens Gemini CLI interactively in its agent home:
+run `/auth` and choose "Sign in with Google" or "Use Gemini API Key", then
+`/quit`. Vertex AI does not work for a delegated `gemini`, because it reads
+`GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, or `GOOGLE_API_KEY`, from
+the environment, which SCV removes. Gemini CLI has no status or logout
+command, so `status` reads the auth method `/auth` saved
+(`security.auth.selectedType` in `.gemini/settings.json`) and checks the
+matching credential file without printing it: a Google sign-in in
+`oauth_creds.json` reads `signed in (Google account)`, an API key in the
+encrypted `gemini-credentials.json` reads `signed in (Gemini API key, stored
+encrypted)`, and a `GEMINI_API_KEY` set in the agent home's `.gemini/.env`
+reads `signed in (Gemini API key in .gemini/.env)`. A `settings.json` with
+comments, which is not plain JSON, is reported as such. `logout` removes
+`.gemini/oauth_creds.json`, `.gemini/gemini-credentials.json`, and
+`.gemini/google_accounts.json`, and keeps `settings.json` and `.gemini/.env`,
+naming a key the latter still sets; `scv config show` lists
+`oauth_creds.json`, `gemini-credentials.json`, and `.env` as its credential
+files. Gemini CLI has nothing to import.
 
 `scv agents import scv` gives the nested SCV behind the `scv` agent a copy of
 SCV's own active provider: `$SCV_HOME/agents/scv/config.toml` (mode `0600`,
@@ -2432,7 +2505,8 @@ CLIs in CI. Canned event streams cover each output format, sign-out, oversized
 lines, the Codex `-o` file, and bounded replies; real processes cover records,
 kill, a timed-out run's `setsid` descendant, and an orphan left by a
 SIGKILLed `scv server --stdio`. Fake SCV homes cover the DeepSeek Harness key file, pi's endpoint
-files and import, and that no sign-in output contains a key. Shared process-runner tests cover
+files and import, Gemini CLI's status by auth method and its logout, and that
+no sign-in output contains a key. Shared process-runner tests cover
 output limits, timeout, cancellation, and background-descendant cleanup. A
 bash stand-in for `scv server --stdio` covers `scv` conversations on one
 child, progress, approval relay (approved, denied, and without a gate), cancel
@@ -2455,8 +2529,12 @@ after the server and a process it left behind are gone. Unit tests cover
 reading, sanitizing, and invalidating the saved file. A fake `dsh` covers
 `scv agents check` end to end, both a passing call and a signed-out one.
 Canned Gemini CLI, Cursor, and Amp event streams cover their replies,
-sessions, and progress lines; the adapter table's tests cover each new
-agent's arguments, removed variables, and that Kimi runs over ACP only.
+sessions, and progress lines; a bash stand-in for `gemini` covers a session
+started under SCV's ID and resumed, and a signed-out failure's hint; the ACP
+stand-in covers Gemini CLI starting in `yolo` only with its trust switch and
+refusing a model; transcripts named by an ID prefix stay while their
+conversation lives; the adapter table's tests cover each new agent's
+arguments, removed variables, and that Kimi runs over ACP only.
 Unit tests cover which reported modes each policy mode accepts, the
 approval summaries, and reading the latest turn's mode from a Codex
 rollout.

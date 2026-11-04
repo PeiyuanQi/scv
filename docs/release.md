@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.9`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.9` pins.
+The current workspace release is `0.4.10`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.10` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -52,6 +52,36 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.10
+
+`0.4.10` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3.
+The `gemini` agent follows Gemini CLI 0.66 (see
+[Delegated agents](tools.md#delegated-agents-agent)):
+
+- Its ACP server starts as `gemini --acp`, and under policy mode `auto` both
+  transports add `--approval-mode yolo --skip-trust`, since Gemini CLI
+  refuses `yolo` in a folder it does not trust and a run once per turn stops
+  there. Trusting the workspace also applies the project's own `.gemini`
+  settings, hooks, and MCP servers; a stricter mode adds neither switch.
+- It keeps `.gemini` in the agent home as before, now through
+  `GEMINI_CLI_HOME`, and an API key entered at `/auth` in the encrypted
+  `.gemini/gemini-credentials.json` there rather than the system keychain.
+  More `GOOGLE_*` credential and endpoint variables are removed.
+- Conversations continue in one process per turn (`--session-id`, then
+  `--resume`), and `scv agents gc` removes its old transcripts.
+- `scv agents status` reads its sign-in from its own files, so a session no
+  longer offers `gemini` while that check says it is signed out; sign it in
+  once with `scv agents login gemini` (run `/auth`). `logout` removes its
+  sign-ins.
+- Its ACP server takes no `model`, so `[agents.gemini] model` (or `effort`)
+  with `transport` `"auto"` and the built-in command, or `"acp"`, is now a
+  startup error; set `transport = "resume"` to keep it.
+- The reply of a run once per turn is the text after its last tool call.
+
+What changes for code that embeds SCV's crates: `scv-tools`'s
+`adapters::AcpLaunch` gains `no_session_options` and `adapters::KeyStore`
+gains `Gemini`, so struct literals and exhaustive matches need them.
 
 ## Upgrading to 0.4.7
 

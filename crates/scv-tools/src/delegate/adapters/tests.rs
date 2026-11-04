@@ -47,6 +47,13 @@ fn descriptors_are_unique_and_self_consistent() {
                 adapter.name
             );
         }
+        if let Some(launch) = adapter.acp {
+            assert!(
+                !(launch.session_options && launch.no_session_options),
+                "{}",
+                adapter.name
+            );
+        }
         // Anything SCV sets must survive the removal pass.
         for (variable, _) in adapter
             .home_environment
@@ -85,17 +92,18 @@ fn descriptors_are_unique_and_self_consistent() {
                 } => vec![credentials, config],
                 KeyStore::Grok { auth, config } => vec![auth, config],
                 KeyStore::DshRefs { path, .. } => vec![path],
-                KeyStore::Pi { dir } => vec![dir],
+                KeyStore::Pi { dir } | KeyStore::Gemini { dir } => vec![dir],
                 // The nested SCV's `SCV_HOME` is the agent home itself.
                 KeyStore::Scv { .. } => vec![],
             };
+            // An empty home is the agent home itself (`GEMINI_CLI_HOME`).
             for path in paths {
                 assert!(
                     claude_private_home
                         || adapter
                             .home_environment
                             .iter()
-                            .any(|(_, home)| !home.is_empty() && path.starts_with(home)),
+                            .any(|(_, home)| path.starts_with(home)),
                     "{}: {path}",
                     adapter.name
                 );
@@ -150,7 +158,15 @@ fn removal_covers_every_adapter_and_generic_api_keys() {
         "SCV_CONFIG",
         "GEMINI_API_KEY",
         "GEMINI_CLI_HOME",
+        "GEMINI_FORCE_FILE_STORAGE",
+        "GEMINI_CLI_TRUST_WORKSPACE",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENAI_USE_VERTEXAI",
+        "GOOGLE_GENAI_USE_GCA",
+        "GOOGLE_GEMINI_BASE_URL",
+        "GOOGLE_VERTEX_BASE_URL",
         "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_ACCESS_TOKEN",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "QWEN_HOME",
         "DASHSCOPE_API_KEY",
@@ -176,6 +192,8 @@ fn removal_covers_every_adapter_and_generic_api_keys() {
         "GITHUB_TOKEN",
         "GROKKING",
         "PIPX_HOME",
+        "GEMINIRC",
+        "GOOGLE_CHROME_BIN",
     ] {
         assert!(!is_removed_agent_variable(OsStr::new(kept)), "{kept}");
     }
@@ -239,17 +257,12 @@ fn the_added_agents_fail_safe_where_their_integration_is_unverified() {
             .all(|adapter| adapter.cli_turns)
     );
     // SCV cannot check their sign-ins, so it never hides them for it.
-    for name in [
-        "gemini", "qwen", "opencode", "copilot", "cursor", "amp", "kimi",
-    ] {
+    for name in ["qwen", "opencode", "copilot", "cursor", "amp", "kimi"] {
         assert_eq!(adapter(name).unwrap().status, Status::Unchecked, "{name}");
         assert_eq!(adapter(name).unwrap().auth, AgentAuth::None, "{name}");
     }
     // Devin is a cloud service with no local CLI or ACP server.
     assert!(adapter("devin").is_none());
-    let gemini = acp("gemini").unwrap();
-    assert_eq!(acp_args(&gemini, true), ["--yolo", "--experimental-acp"]);
-    assert_eq!(acp_args(&gemini, false), ["--experimental-acp"]);
     assert_eq!(acp_args(&acp("opencode").unwrap(), true), ["acp"]);
     assert_eq!(
         OutputFormat::GeminiStreamJson.args(),
@@ -263,4 +276,66 @@ fn the_added_agents_fail_safe_where_their_integration_is_unverified() {
     assert_eq!(adapter("amp").unwrap().prompt_args, ["-x"]);
     assert_eq!(adapter("cursor").unwrap().args, ["-p"]);
     assert_eq!(adapter("opencode").unwrap().args, ["run"]);
+}
+
+#[test]
+fn gemini_runs_headless_inside_its_home_and_trusts_folders_only_under_auto() {
+    let gemini = adapter("gemini").unwrap();
+    assert_eq!(gemini.command, "gemini");
+    // The prompt is the value of `-p`; a bare prompt would open its UI.
+    assert_eq!(gemini.prompt_args, ["-p"]);
+    assert_eq!(gemini.model_args, ["-m", "{model}"]);
+    assert_eq!(gemini.effort_args, [] as [&str; 0]);
+    assert_eq!(gemini.home_environment, [("GEMINI_CLI_HOME", "")]);
+    // Keys entered at `/auth` stay in its home, not the shared keychain.
+    assert_eq!(
+        gemini.fixed_environment,
+        [("GEMINI_FORCE_FILE_STORAGE", "true")]
+    );
+    assert_eq!(
+        OutputFormat::GeminiStreamJson.args(),
+        ["--output-format", "stream-json"]
+    );
+    assert!(!OutputFormat::GeminiStreamJson.claude_like());
+    // Workspace trust lets a project's own settings raise its autonomy, so
+    // it comes only with the full-autonomy switch.
+    assert!(!gemini.args.contains(&"--skip-trust"));
+    assert_eq!(
+        gemini.full_permission_args,
+        ["--approval-mode", "yolo", "--skip-trust"]
+    );
+    assert_eq!(gemini.mode_report, ModeReport::None);
+    assert!(gemini.mode_switch());
+    // It answers `session/set_mode` without reporting the mode, so its ACP
+    // server starts in `yolo` instead.
+    let launch = gemini.acp.unwrap();
+    assert_eq!(acp_args(&launch, false), ["--acp"]);
+    assert_eq!(
+        acp_args(&launch, true),
+        ["--approval-mode", "yolo", "--skip-trust", "--acp"]
+    );
+    assert_eq!(launch.full_mode, None);
+    assert!(launch.no_session_options && !launch.session_options);
+    assert_eq!(
+        gemini.resume,
+        Resume::Supported {
+            start: &["--session-id", "{session}"],
+            subcommand: &[],
+            options: &["--resume", "{session}"],
+            positional: &[],
+        }
+    );
+    assert_eq!(
+        gemini.conversation_files.and_then(|files| files.id_prefix),
+        Some(8)
+    );
+    assert_eq!(
+        gemini.status,
+        Status::Stored(KeyStore::Gemini { dir: ".gemini" })
+    );
+    assert_eq!(
+        gemini.logout,
+        Logout::Stored(KeyStore::Gemini { dir: ".gemini" })
+    );
+    assert_eq!(gemini.takeover, Takeover::Unsupported);
 }

@@ -10,8 +10,8 @@ fn signed_out_agents_with_a_local_sign_in_check_are_not_offered() {
         ..Config::default()
     };
     let offered = offered_adapters(&config);
-    // Nothing stored for dsh, pi, grok, or the nested SCV: all hidden.
-    for hidden in ["dsh", "pi", "grok", "scv"] {
+    // Nothing stored for dsh, pi, grok, gemini, or the nested SCV: all hidden.
+    for hidden in ["dsh", "pi", "grok", "gemini", "scv"] {
         assert!(!offered.contains_key(hidden), "{hidden} offered");
     }
     // Codex reports sign-in through its own CLI, which is too slow to run at

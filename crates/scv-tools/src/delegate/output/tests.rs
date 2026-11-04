@@ -213,6 +213,110 @@ fn pi_json_yields_the_last_assistant_message() {
 }
 
 #[test]
+fn gemini_stream_json_yields_the_text_after_the_last_tool_call() {
+    let stdout = concat!(
+        r#"{"type":"init","timestamp":"2026-11-04T08:00:00.000Z","session_id":"0a1b2c3d-1111-4222-8333-444455556666","model":"auto-gemini-3"}"#,
+        "\n",
+        r#"{"type":"message","timestamp":"t","role":"user","content":"list the files"}"#,
+        "\n",
+        r#"{"type":"message","timestamp":"t","role":"assistant","content":"I'll look ","delta":true}"#,
+        "\n",
+        r#"{"type":"message","timestamp":"t","role":"assistant","content":"first.","delta":true}"#,
+        "\n",
+        r#"{"type":"tool_use","timestamp":"t","tool_name":"run_shell_command","tool_id":"c1","parameters":{"command":"ls"}}"#,
+        "\n",
+        r#"{"type":"tool_result","timestamp":"t","tool_id":"c1","status":"success","output":"PRIVATE-OUTPUT"}"#,
+        "\n",
+        r#"{"type":"error","timestamp":"t","severity":"warning","message":"Loop detected, stopping execution"}"#,
+        "\n",
+        r#"{"type":"message","timestamp":"t","role":"assistant","content":"Two files: ","delta":true}"#,
+        "\n",
+        r#"{"type":"message","timestamp":"t","role":"assistant","content":"a.rs and b.rs.","delta":true}"#,
+        "\n",
+        r#"{"type":"result","timestamp":"t","status":"success","stats":{"total_tokens":130,"input_tokens":120,"output_tokens":10,"cached":0,"input":120,"duration_ms":900,"tool_calls":1,"models":{}}}"#,
+        "\n"
+    );
+    let result = run(OutputFormat::GeminiStreamJson, stdout, OK);
+    assert_eq!(result.status, RunStatus::Completed);
+    assert_eq!(result.reply, "Two files: a.rs and b.rs.");
+    assert_eq!(result.error, None);
+    assert_eq!(
+        result.session.as_deref(),
+        Some("0a1b2c3d-1111-4222-8333-444455556666")
+    );
+    assert_eq!(
+        result.usage,
+        Some(AgentUsage {
+            input_tokens: 120,
+            output_tokens: 10
+        })
+    );
+    // A whole (non-delta) message replaces the text before it, and a tool
+    // call without text after it leaves the earlier text as the reply.
+    let stdout = concat!(
+        r#"{"type":"message","role":"assistant","content":"draft","delta":true}"#,
+        "\n",
+        r#"{"type":"message","role":"assistant","content":"final"}"#,
+        "\n",
+        r#"{"type":"tool_use","tool_name":"write_todos","tool_id":"c2","parameters":{}}"#,
+        "\n",
+        r#"{"type":"message","role":"assistant","content":"","delta":true}"#,
+        "\n",
+        r#"{"type":"result","status":"success"}"#,
+        "\n"
+    );
+    assert_eq!(
+        run(OutputFormat::GeminiStreamJson, stdout, OK).reply,
+        "final"
+    );
+}
+
+#[test]
+fn gemini_failures_carry_the_result_error_or_the_error_event_before_it() {
+    // An API error ends the run with an error result.
+    let stdout = concat!(
+        r#"{"type":"init","session_id":"s1","model":"gemini-2.5-pro"}"#,
+        "\n",
+        r#"{"type":"result","status":"error","error":{"type":"Error","message":"[API Error: 429 Resource exhausted]"},"stats":{"input_tokens":0,"output_tokens":0}}"#,
+        "\n"
+    );
+    let result = run(
+        OutputFormat::GeminiStreamJson,
+        stdout,
+        RunExit::Exited { success: false },
+    );
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("[API Error: 429 Resource exhausted]")
+    );
+    assert_eq!(result.reply, "[API Error: 429 Resource exhausted]");
+    assert_eq!(result.session.as_deref(), Some("s1"));
+    // An empty or blocked response names its reason in an error event and
+    // ends with a bare error result.
+    let stdout = concat!(
+        r#"{"type":"message","role":"assistant","content":"Partial","delta":true}"#,
+        "\n",
+        r#"{"type":"error","severity":"error","message":"The response was blocked."}"#,
+        "\n",
+        r#"{"type":"result","status":"error","stats":{"input_tokens":5,"output_tokens":0}}"#,
+        "\n"
+    );
+    let result = run(OutputFormat::GeminiStreamJson, stdout, OK);
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(result.error.as_deref(), Some("The response was blocked."));
+    assert_eq!(result.reply, "Partial\nThe response was blocked.");
+    // Signed out, it exits before its first event; stdout is empty.
+    let result = run(
+        OutputFormat::GeminiStreamJson,
+        "",
+        RunExit::Exited { success: false },
+    );
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(result.session, None);
+}
+
+#[test]
 fn text_output_is_the_reply_and_structured_garbage_falls_back_to_text() {
     let result = run(OutputFormat::Text, "hello\nworld\n", OK);
     assert_eq!(result.reply, "hello\nworld");
@@ -379,7 +483,8 @@ fn gemini_stream_json_assembles_deltas_and_reads_its_result() {
     );
     let result = run(OutputFormat::GeminiStreamJson, stdout, OK);
     assert_eq!(result.status, RunStatus::Completed);
-    assert_eq!(result.reply, "Looking done.");
+    // The text before the tool call was narration; the reply follows it.
+    assert_eq!(result.reply, " done.");
     assert_eq!(
         result.session.as_deref(),
         Some("9c1e0f2a-0000-4000-8000-000000000001")

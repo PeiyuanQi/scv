@@ -80,14 +80,19 @@ refused. The nested agent loads that directory's own instructions (such as
 content just like any file the agent reads there; choosing a directory never
 widens what the agent could already reach with the user's permissions. SCV supplies an instance-private `HOME`, `SCV_HOME`, XDG
 directories, and the agent's own state variable (`CODEX_HOME`, `GROK_HOME`,
-`DSH_HOME`, or `PI_CODING_AGENT_DIR`) inside that home. It first removes from
+`DSH_HOME`, `PI_CODING_AGENT_DIR`, or `GEMINI_CLI_HOME`) inside that home. It
+first removes from
 the child environment SCV's selector variables, every variable ending in
 `_API_KEY`, the AWS variables `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_BEARER_TOKEN_BEDROCK`,
 and the credential, endpoint, and state variables that any adapter
 declares (such as `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`,
-`OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, and `PI_*`), so no agent inherits the
-user's or another agent's model credentials. `GH_TOKEN` and `GITHUB_TOKEN`
+`OPENAI_BASE_URL`, `GROK_*`, `DSH_*`, `PI_*`, `GEMINI_*`, `GOOGLE_GENAI_*`,
+`GOOGLE_CLOUD_*`, and `GOOGLE_APPLICATION_CREDENTIALS`), so no agent inherits
+the user's or another agent's model credentials. Gemini CLI also gets
+`GEMINI_FORCE_FILE_STORAGE=true`, so an API key entered at its `/auth` stays
+in its agent home (encrypted in `.gemini/gemini-credentials.json`) rather than
+the system keychain, which every home shares. `GH_TOKEN` and `GITHUB_TOKEN`
 are kept for every agent, since they are how `gh` and git hosting tools sign
 in; Copilot reads them too, so with one set a delegated `copilot` runs on that
 GitHub identity. What an agent reads from files on its own is beyond that:
@@ -116,8 +121,8 @@ codex` copies the user's Codex `config.toml`, plus `auth.json` only when it
 holds a static API key; it never copies a ChatGPT refresh token. `scv agents
 import pi --from-scv-provider` copies SCV's own provider endpoint and key into
 pi's private files only on that explicit command. Delegated runs therefore
-never share the user's personal Claude Code, Codex, Grok, DeepSeek Harness, or
-pi session. The delegated CLI still has the user's operating system
+never share the user's personal Claude Code, Codex, Grok, DeepSeek Harness,
+pi, or Gemini CLI session. The delegated CLI still has the user's operating system
 permissions and may implement its own tools and approvals, but it cannot
 silently reuse the user's normal agent state.
 
@@ -131,7 +136,10 @@ starts the agent without them, so its own configuration decides what it
 asks. Only user-level configuration can set `[agents]`, and a project layer
 can only make `[policy] mode` stricter (see [Policy](configuration.md#policy)).
 Every approval summary for an agent started in its full mode states
-`FULL PERMISSIONS` and the policy mode. Combined with a channel's owner
+`FULL PERMISSIONS` and the policy mode. For Gemini CLI the switches also
+trust the workspace for that run (`--skip-trust`), which applies the
+project's own `.gemini` settings, policies, hooks, and MCP servers; without
+them Gemini CLI refuses `yolo` there. Combined with a channel's owner
 tools, the default lets the owner's WeChat or Feishu account run unattended
 development work, equivalent to the owner running those agents unprompted in
 a terminal.
@@ -249,7 +257,9 @@ account email or key fragment that output contains. Claude identities are
 read from their private files. SCV never runs `claude auth status`.
 
 An agent reached over the Agent Client Protocol (`claude-agent-acp`,
-`codex-acp`, `grok agent stdio`, `dsh --profile acp`) is the same agent with
+`codex-acp`, `grok agent stdio`, `dsh --profile acp`, `gemini --acp`, and the
+others in [the ACP transport](tools.md#agent-client-protocol-transport)) is
+the same agent with
 the same private home and trust. ACP changes how SCV talks to it. For
 `claude` it also places the API key in the adapter process environment. The
 bundled Claude Code process inherits that variable until the pin blanks it,

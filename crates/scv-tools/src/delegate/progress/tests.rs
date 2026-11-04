@@ -90,6 +90,68 @@ fn pi_reports_tool_starts_and_failures() {
 }
 
 #[test]
+fn gemini_reports_tool_calls_and_failures_but_not_their_output() {
+    let tool = |name: &str, parameters: Value| {
+        let event =
+            json!({"type":"tool_use","tool_name":name,"tool_id":"c1","parameters":parameters});
+        progress_lines(OutputFormat::GeminiStreamJson, "tool_use", &event)
+    };
+    assert_eq!(
+        tool(
+            "run_shell_command",
+            json!({"command":"bash -c 'cargo test'","description":"Run tests"})
+        ),
+        ["$ cargo test"]
+    );
+    assert_eq!(
+        tool(
+            "replace",
+            json!({"file_path":"/w/crates/core/src/lib.rs","old_string":"a","new_string":"b"})
+        ),
+        ["replace …/src/lib.rs"]
+    );
+    assert_eq!(
+        tool("list_directory", json!({"dir_path":"src"})),
+        ["list_directory src"]
+    );
+    assert_eq!(
+        tool("grep_search", json!({"pattern":"TODO"})),
+        ["grep_search TODO"]
+    );
+    assert_eq!(
+        tool("google_web_search", json!({"query":"latest serde"})),
+        ["search: latest serde"]
+    );
+    assert_eq!(
+        tool(
+            "web_fetch",
+            json!({"prompt":"Summarize https://docs.rs/serde?token=abc for me"})
+        ),
+        ["fetch https://docs.rs/serde"]
+    );
+    assert_eq!(tool("write_todos", json!({"todos":[]})), [] as [String; 0]);
+    assert_eq!(tool("mcp_github_search", json!({})), ["mcp_github_search"]);
+    // A result names only a failure, never the output.
+    let result =
+        json!({"type":"tool_result","tool_id":"c1","status":"success","output":"private output"});
+    assert_eq!(
+        progress_lines(OutputFormat::GeminiStreamJson, "tool_result", &result),
+        [] as [String; 0]
+    );
+    let failed =
+        json!({"type":"tool_result","tool_id":"c1","status":"error","output":"private output"});
+    assert_eq!(
+        progress_lines(OutputFormat::GeminiStreamJson, "tool_result", &failed),
+        ["tool failed"]
+    );
+    let message = json!({"type":"message","role":"assistant","content":"working","delta":true});
+    assert_eq!(
+        progress_lines(OutputFormat::GeminiStreamJson, "message", &message),
+        [] as [String; 0]
+    );
+}
+
+#[test]
 fn credentials_are_redacted() {
     assert_eq!(
         redact("curl -H Authorization: Bearer abc.def https://x"),

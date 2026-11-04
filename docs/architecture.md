@@ -115,7 +115,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.4.9` and exact workspace dependency pins.
+`0.4.10` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -185,7 +185,7 @@ What lives where in the largest crates:
 | | `delegate/review.rs` | Reviewed jobs: the builder and fresh-reviewer loop, reviewer routing, the landing confirmation, and its parts: the verdict and landing blocks (`blocks`), the live state every surface reads (`state`), SCV's prompt texts (`prompts`), and the journal (`journal`) |
 | | `delegate/output.rs`, `delegate/progress.rs` | Reading a delegated CLI's output and progress |
 | | `delegate/mode.rs` | The permission mode the policy expects of a delegated agent, reading it from a Codex run's rollout, the approval summary's sentence about it, and the result's `mode` |
-| | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints), public as `scv_tools::stores` |
+| | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints, Gemini CLI status and logout), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
 | | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state (a `Store` generic over the account's state type), what the daemon shares with running bridges, chat media, and logging the owner's direct chat and its threads |

@@ -1144,3 +1144,160 @@ async fn a_timed_out_run_and_its_detached_descendants_are_stopped() {
     assert_eq!(remaining, 0, "tagged processes of {handle} survived");
     assert_eq!(delegation.registry.list(true), []);
 }
+
+/// Gemini CLI as SCV runs it once per turn, from its descriptor: the script
+/// path is the only fixed argument, so `$@` starts with the format options.
+fn fake_gemini(
+    workspace: &Path,
+    script: &str,
+    conversations: Arc<ConversationStore>,
+) -> NativeAgentTool {
+    let gemini = adapters::adapter("gemini").unwrap();
+    let script_path = workspace.join("fake-gemini.sh");
+    std::fs::write(&script_path, script).unwrap();
+    let strings = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
+    NativeAgentTool::new(
+        "gemini".into(),
+        AgentAdapterConfig {
+            command: "bash".into(),
+            args: vec![script_path.display().to_string()],
+            prompt_args: strings(gemini.prompt_args),
+            full_permission_args: None,
+            policy: "on-risk".into(),
+            mode_report: gemini.mode_report,
+            mode_switch: gemini.mode_switch(),
+            model_args: strings(gemini.model_args),
+            effort_args: strings(gemini.effort_args),
+            model_hint: gemini.model_hint.into(),
+            environment: Vec::new(),
+            search_dirs: Vec::new(),
+            output: gemini.output,
+            resume: gemini.resume,
+            home: None,
+            auth: crate::AgentAuthPlan::None,
+            transport: Transport::Process,
+            acp: None,
+            use_for: None,
+            defaults: AgentDefaults::default(),
+            options_file: None,
+            busy: crate::BusyConfig::default(),
+        },
+        Timeouts {
+            default: Duration::from_secs(10),
+            max: Duration::from_secs(30),
+        },
+        64 * 1024,
+        None,
+        conversations,
+    )
+}
+
+#[tokio::test]
+async fn gemini_starts_a_session_under_scv_id_and_resumes_it() {
+    let workspace = tempfile::tempdir().unwrap();
+    let log = workspace.path().join("calls.txt");
+    // Reports the session it was given, a tool call, and an echo of the prompt.
+    let script = format!(
+        r#"printf '%s\n' "$@" '--' >> {log}
+id=
+while [ $# -gt 1 ]; do case "$1" in --session-id|--resume) id=$2 ;; esac; shift; done
+echo "{{\"type\":\"init\",\"session_id\":\"$id\",\"model\":\"gemini-2.5-pro\"}}"
+echo '{{"type":"message","role":"assistant","content":"Reading.","delta":true}}'
+echo '{{"type":"tool_use","tool_name":"read_file","tool_id":"c1","parameters":{{"file_path":"/w/src/main.rs"}}}}'
+echo '{{"type":"tool_result","tool_id":"c1","status":"success","output":"PRIVATE-OUTPUT"}}'
+echo "{{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"echo: $1\",\"delta\":true}}"
+echo '{{"type":"result","status":"success","stats":{{"input_tokens":7,"output_tokens":2}}}}'
+"#,
+        log = log.display()
+    );
+    let tool = fake_gemini(workspace.path(), &script, test_conversations());
+    assert_eq!(
+        tool.accepts(),
+        Accepts {
+            model: true,
+            effort: false,
+            session: true
+        }
+    );
+    let first = tool
+        .execute(
+            json!({"prompt":"remember heron","model":"gemini-2.5-pro"}),
+            context(workspace.path()),
+        )
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_str(&first.content).unwrap();
+    assert_eq!(value["status"], "completed", "{value}");
+    assert_eq!(value["reply"], "echo: remember heron");
+    assert_eq!(value["usage"]["input_tokens"], 7);
+    assert_eq!(value["session"], "gemini-1");
+    assert!(!first.content.contains("PRIVATE-OUTPUT"));
+    let second = tool
+        .execute(
+            json!({"prompt":"what word?","session":"gemini-1"}),
+            context(workspace.path()),
+        )
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_str(&second.content).unwrap();
+    assert_eq!(value["reply"], "echo: what word?", "{value}");
+    assert_eq!(value["turn"], 2);
+    let recorded: Vec<Vec<String>> = std::fs::read_to_string(&log)
+        .unwrap()
+        .split("--\n")
+        .filter(|call| !call.is_empty())
+        .map(|call| call.lines().map(str::to_owned).collect())
+        .collect();
+    // The prompt is the value of `-p`, after the session and the model.
+    assert_eq!(
+        recorded[0][..3],
+        ["--output-format", "stream-json", "--session-id"]
+    );
+    let id = recorded[0][3].clone();
+    assert!(uuid::Uuid::parse_str(&id).is_ok(), "{id}");
+    assert_eq!(
+        recorded[0][4..],
+        ["-m", "gemini-2.5-pro", "-p", "remember heron"]
+    );
+    assert_eq!(
+        recorded[1],
+        [
+            "--output-format",
+            "stream-json",
+            "--resume",
+            &id,
+            "-p",
+            "what word?"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn signed_out_gemini_failure_names_the_host_login_command() {
+    let workspace = tempfile::tempdir().unwrap();
+    // Gemini CLI 0.66's headless error with no auth method, before any event.
+    let tool = fake_gemini(
+        workspace.path(),
+        "echo 'Please set an Auth method in your /home/u/.gemini/settings.json or specify one of the following environment variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA' >&2\nexit 41\n",
+        test_conversations(),
+    );
+    let output = tool
+        .execute(json!({"prompt":"hi"}), context(workspace.path()))
+        .await
+        .unwrap();
+    assert!(output.is_error());
+    let value: Value = serde_json::from_str(&output.content).unwrap();
+    assert_eq!(value["status"], "failed");
+    assert_eq!(value["exit_code"], 41);
+    assert!(
+        value["error"].as_str().unwrap().contains("Auth method"),
+        "{value}"
+    );
+    assert!(
+        value["hint"]
+            .as_str()
+            .unwrap()
+            .ends_with("scv agents login gemini"),
+        "{value}"
+    );
+}

@@ -54,10 +54,11 @@ pub enum OutputFormat {
     /// pi `--mode json`: JSON events per line; the reply is the last
     /// assistant `message_end`.
     PiJson,
-    /// Gemini CLI `--output-format stream-json`: `init`, `message` (deltas
-    /// or whole messages), `tool_use`, `tool_result`, `error`, and a final
-    /// `result` with usage. A single `{"response":…}` object (its `json`
-    /// format) reads too.
+    /// Gemini CLI `--output-format stream-json`: `init` (the session ID),
+    /// `message` (deltas or whole messages), `tool_use`, `tool_result`,
+    /// `error`, and a final `result` with usage; the reply is the assistant
+    /// text after the last tool call. A single `{"response":…}` object (its
+    /// `json` format) reads too.
     GeminiStreamJson,
     /// Cursor CLI `--output-format stream-json`: Claude Code's event shapes
     /// (`system` init, `assistant`, `result`) plus `tool_call` events.
@@ -122,8 +123,13 @@ pub struct AcpLaunch {
     /// The server takes `model` and `effort` as session config options even
     /// though the CLI run once per turn takes neither as an argument, as
     /// DeepSeek Harness's does. Other agents take them over ACP where their
-    /// CLI takes them as arguments.
+    /// CLI takes them as arguments, unless `no_session_options`.
     pub session_options: bool,
+    /// The server takes neither `model` nor `effort` from SCV, though the
+    /// CLI run once per turn may take them as arguments: Gemini CLI's server
+    /// changes a session's model only through `session/set_model`, which
+    /// SCV does not send. Never set with `session_options`.
+    pub no_session_options: bool,
 }
 
 /// Expand `launch.args` for the policy mode: `full` under `auto`.
@@ -206,6 +212,10 @@ impl Resume {
 pub struct ConversationFiles {
     pub(crate) dir: &'static str,
     pub(crate) extension: &'static str,
+    /// Names carry only this many leading characters of the session ID, as
+    /// Gemini CLI's `session-<time>-<first 8>.jsonl` do; `None` when they
+    /// carry all of it.
+    pub(crate) id_prefix: Option<usize>,
 }
 
 /// How SCV condenses a CLI's own status output. The raw output names the
@@ -262,6 +272,11 @@ pub enum KeyStore {
     /// A nested SCV's own `config.toml`, holding the provider copied from the
     /// user's SCV by `scv agents import scv`.
     Scv { config: &'static str },
+    /// Gemini CLI's `.gemini` directory: `settings.json` names the auth
+    /// method chosen at `/auth`, a Google sign-in is `oauth_creds.json`, and
+    /// an API key entered there is in the encrypted `gemini-credentials.json`
+    /// (or set as `GEMINI_API_KEY` in its `.env`).
+    Gemini { dir: &'static str },
 }
 
 /// How a CLI run once per turn reports the permission mode it runs in, for
@@ -433,6 +448,7 @@ const DSH_STORE: KeyStore = KeyStore::DshRefs {
     path: ".dsh/.credentials.yaml",
     variable: "DEEPSEEK_API_KEY",
 };
+const GEMINI_STORE: KeyStore = KeyStore::Gemini { dir: ".gemini" };
 const CLAUDE_KEY_STORE: KeyStore = KeyStore::ClaudeApiKey {
     key: ".anthropic-api-key",
     credentials: ".claude/.credentials.json",
@@ -481,6 +497,7 @@ const CLAUDE_BASE: AdapterDescriptor = AdapterDescriptor {
     conversation_files: Some(ConversationFiles {
         dir: ".claude/projects",
         extension: "jsonl",
+        id_prefix: None,
     }),
     credential_files: &[".anthropic-api-key", ".claude/.credentials.json"],
     transport: Transport::Process,
@@ -491,6 +508,7 @@ const CLAUDE_BASE: AdapterDescriptor = AdapterDescriptor {
         full_mode: Some("bypassPermissions"),
         full_environment: &[],
         session_options: false,
+        no_session_options: false,
     }),
     cli_turns: true,
     takeover: Takeover::Refused(CLAUDE_TAKEOVER),
@@ -513,6 +531,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: Some("bypassPermissions"),
             full_environment: &[],
             session_options: false,
+            no_session_options: false,
         }),
         ..CLAUDE_BASE
     },
@@ -533,6 +552,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: Some("bypassPermissions"),
             full_environment: &[],
             session_options: false,
+            no_session_options: false,
         }),
         ..CLAUDE_BASE
     },
@@ -584,6 +604,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         conversation_files: Some(ConversationFiles {
             dir: "sessions",
             extension: "jsonl",
+            id_prefix: None,
         }),
         credential_files: &["auth.json"],
         transport: Transport::Process,
@@ -599,6 +620,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: Some("agent-full-access"),
             full_environment: &[("CODEX_CONFIG", r#"{"web_search":"live"}"#)],
             session_options: false,
+            no_session_options: false,
         }),
         cli_turns: true,
         // `codex resume <thread>` opens its TUI on the thread `exec` and
@@ -656,6 +678,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: None,
             full_environment: &[],
             session_options: false,
+            no_session_options: false,
         }),
         cli_turns: true,
         takeover: Takeover::Unsupported,
@@ -701,6 +724,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: None,
             full_environment: &[],
             session_options: true,
+            no_session_options: false,
         }),
         cli_turns: true,
         takeover: Takeover::Unsupported,
@@ -743,6 +767,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         conversation_files: Some(ConversationFiles {
             dir: ".pi/agent/sessions",
             extension: "jsonl",
+            id_prefix: None,
         }),
         credential_files: &[".pi/agent/auth.json", ".pi/agent/models.json"],
         transport: Transport::Process,
@@ -759,49 +784,82 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
         offers: "Google's coding agent; it reads, edits, and runs code in a project and has Google Search",
         command: "gemini",
         args: &[],
+        // `-p` is its headless mode; a positional prompt on a terminal opens
+        // its interactive UI.
         prompt_args: &["-p"],
         model_args: &["-m", "{model}"],
+        // It has no effort or thinking-level flag.
         effort_args: &[],
-        model_hint: "Gemini model ID, such as gemini-2.5-pro.",
-        home_environment: &[],
-        fixed_environment: &[],
+        model_hint: "Gemini model ID or alias, such as gemini-2.5-pro, pro, flash, or auto; it takes no effort.",
+        // Its `.gemini` directory sits under `GEMINI_CLI_HOME`.
+        home_environment: &[("GEMINI_CLI_HOME", "")],
+        // An API key entered at `/auth` goes to `.gemini/gemini-credentials.json`
+        // (encrypted) instead of the system keychain, which every home shares.
+        fixed_environment: &[("GEMINI_FORCE_FILE_STORAGE", "true")],
         removed_environment: &[
             "GEMINI_*",
             "GOOGLE_GENAI_*",
-            "GOOGLE_CLOUD_PROJECT",
-            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_GEMINI_BASE_URL",
+            "GOOGLE_VERTEX_BASE_URL",
+            "GOOGLE_CLOUD_*",
             "GOOGLE_APPLICATION_CREDENTIALS",
         ],
-        // YOLO mode approves every tool call without asking.
-        full_permission_args: &["--yolo"],
+        // `yolo` approves every tool call, Google Search included, but only
+        // in a trusted folder: elsewhere it falls back to `default`, and a
+        // headless run stops. `--skip-trust` trusts the workspace for this
+        // run, which also applies its own `.gemini` settings, policies,
+        // hooks, and MCP servers, so it comes only with the full-autonomy
+        // switch. Its sandbox is off unless its settings turn it on.
+        full_permission_args: &["--approval-mode", "yolo", "--skip-trust"],
         full_permission_environment: &[],
+        // Its `init` event carries only the session ID and model.
         mode_report: ModeReport::None,
+        // npm's documented per-user global prefix.
         search_dirs: &[".npm-global/bin"],
         login: Login::Interactive {
             args: &[],
-            hint: "choose how to sign in (Login with Google, or a Gemini API key), then /quit",
+            hint: "run /auth and choose Sign in with Google or Use Gemini API Key, then /quit",
         },
-        status: Status::Unchecked,
+        // It has no status or logout command.
+        status: Status::Stored(GEMINI_STORE),
         status_summary: StatusSummary::ExitStatus,
-        logout: Logout::Interactive {
-            args: &[],
-            hint: "sign out with its own command (/auth), then /quit",
-        },
+        logout: Logout::Stored(GEMINI_STORE),
         output: OutputFormat::GeminiStreamJson,
-        // Its saved sessions resume by list index, which SCV cannot pin to
-        // one conversation; over ACP a session continues.
-        resume: Resume::Unsupported,
-        conversation_files: None,
-        credential_files: &[".gemini/oauth_creds.json", ".gemini/.env"],
+        // `--session-id` starts a session under SCV's ID and `--resume` takes
+        // that full ID, both headless, within the project of the working
+        // directory.
+        resume: Resume::Supported {
+            start: &["--session-id", "{session}"],
+            subcommand: &[],
+            options: &["--resume", "{session}"],
+            positional: &[],
+        },
+        // `tmp/<project>/chats/session-<time>-<first 8 of the ID>.jsonl`.
+        conversation_files: Some(ConversationFiles {
+            dir: ".gemini/tmp",
+            extension: "jsonl",
+            id_prefix: Some(8),
+        }),
+        credential_files: &[
+            ".gemini/oauth_creds.json",
+            ".gemini/gemini-credentials.json",
+            ".gemini/.env",
+        ],
         transport: Transport::Process,
-        // Native: Gemini CLI was the first ACP agent (`--experimental-acp`).
+        // Native: `gemini --acp` (`--experimental-acp` is its deprecated
+        // spelling). Its sessions list approval modes, but it answers
+        // `session/set_mode` with `{}` and reports no change, so SCV starts
+        // it in `yolo` with the same switches as its CLI instead of selecting
+        // that mode. It changes a session's model only through
+        // `session/set_model`.
         acp: Some(AcpLaunch {
             command: "gemini",
-            args: &["{full}", "--experimental-acp"],
-            full_args: &["--yolo"],
+            args: &["{full}", "--acp"],
+            full_args: &["--approval-mode", "yolo", "--skip-trust"],
             full_mode: None,
             full_environment: &[],
             session_options: false,
+            no_session_options: true,
         }),
         cli_turns: true,
         takeover: Takeover::Unsupported,
@@ -849,6 +907,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: None,
             full_environment: &[],
             session_options: false,
+            no_session_options: false,
         }),
         cli_turns: true,
         takeover: Takeover::Unsupported,
@@ -890,6 +949,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: None,
             full_environment: &[],
             session_options: false,
+            no_session_options: false,
         }),
         cli_turns: true,
         takeover: Takeover::Unsupported,
@@ -1051,6 +1111,7 @@ pub const ADAPTERS: &[AdapterDescriptor] = &[
             full_mode: None,
             full_environment: &[],
             session_options: true,
+            no_session_options: false,
         }),
         cli_turns: false,
         takeover: Takeover::Unsupported,

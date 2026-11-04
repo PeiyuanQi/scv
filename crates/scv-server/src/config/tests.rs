@@ -598,6 +598,55 @@ fn deepseek_harness_takes_a_model_and_effort_only_over_acp() {
 }
 
 #[test]
+fn gemini_takes_a_model_only_once_per_turn() {
+    let with = |transport: AgentTransport, model: bool, effort: bool| {
+        let mut config = Config::default();
+        let gemini = config.agents.0.get_mut("gemini").unwrap();
+        gemini.model = model.then(|| "gemini-2.5-pro".into());
+        gemini.effort = effort.then(|| "high".into());
+        gemini.transport = transport;
+        config
+    };
+    // Its CLI takes `-m`; it has no effort flag.
+    with(AgentTransport::Resume, true, false)
+        .validate()
+        .unwrap();
+    let message = with(AgentTransport::Resume, false, true)
+        .validate()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.starts_with("agents.gemini.effort is set but gemini does not offer effort"),
+        "{message}"
+    );
+    // Its ACP server, which `auto` runs with its own command, takes none.
+    for transport in [AgentTransport::Auto, AgentTransport::Acp] {
+        let message = with(transport, true, false)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.starts_with("agents.gemini.model is set but gemini takes none over ACP")
+                && message.contains("transport = \"resume\""),
+            "{message}"
+        );
+    }
+    // A custom command runs its CLI once per turn.
+    let mut custom = with(AgentTransport::Auto, true, false);
+    custom.agents.0.get_mut("gemini").unwrap().command = "/opt/gemini/bin/gemini".into();
+    custom.validate().unwrap();
+    // An effort the user maps to its CLI is still none over ACP.
+    let mut mapped = with(AgentTransport::Auto, false, true);
+    mapped.agents.0.get_mut("gemini").unwrap().effort_args =
+        vec!["--thinking".into(), "{effort}".into()];
+    let message = mapped.validate().unwrap_err().to_string();
+    assert!(
+        message.starts_with("agents.gemini.effort is set but gemini takes none over ACP"),
+        "{message}"
+    );
+}
+
+#[test]
 fn background_jobs_are_bounded_and_projects_may_only_lower_them() {
     let user = Config::default();
     assert_eq!(user.agent.max_background, 4);
@@ -899,6 +948,20 @@ fn adapters_are_bound_to_the_instance_home() {
     )));
     assert_eq!(adapters["grok"].prompt_args, ["-p"]);
     assert!(adapters["pi"].model_hint.contains("provider scv"));
+    // Gemini CLI keeps `.gemini` under `GEMINI_CLI_HOME`, the home itself,
+    // and its API key out of the shared keychain.
+    for (variable, value) in [
+        ("GEMINI_CLI_HOME", "/tmp/scv-instance/agents/gemini"),
+        ("GEMINI_FORCE_FILE_STORAGE", "true"),
+    ] {
+        assert!(
+            adapters["gemini"]
+                .environment
+                .contains(&(OsString::from(variable), OsString::from(value))),
+            "{variable}"
+        );
+    }
+    assert_eq!(adapters["gemini"].prompt_args, ["-p"]);
 }
 
 #[test]
@@ -946,6 +1009,7 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
         ("codex", Some("agent-full-access")),
         ("grok", None),
         ("dsh", None),
+        ("gemini", None),
     ] {
         let acp = launch(&defaults, agent).unwrap();
         assert!(!acp.required, "{agent}: auto falls back to resume");
@@ -962,9 +1026,16 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
         ["agent", "--always-approve", "stdio"]
     );
     assert_eq!(launch(&defaults, "dsh").unwrap().args, ["--profile", "acp"]);
+    // Gemini CLI's server starts in `yolo`, which an untrusted folder
+    // refuses, since it reports no mode SCV selects.
+    assert_eq!(
+        launch(&defaults, "gemini").unwrap().args,
+        ["--approval-mode", "yolo", "--skip-trust", "--acp"]
+    );
     // Only DeepSeek Harness's server takes model and effort that its CLI
-    // does not; the others take them where their CLI does.
-    for agent in ["claude", "codex", "grok", "dsh"] {
+    // does not; the others take them where their CLI does, but Gemini CLI's
+    // takes neither.
+    for agent in ["claude", "codex", "grok", "dsh", "gemini"] {
         assert_eq!(
             launch(&defaults, agent).unwrap().session_options,
             agent == "dsh",
@@ -981,13 +1052,15 @@ fn agents_prefer_their_acp_server_unless_configured_otherwise() {
         toml::from_str(
             "[agents.claude]\ntransport = \"acp\"\n\n\
                  [agents.codex]\ntransport = \"resume\"\n\n\
-                 [agents.grok]\nmode = \"on-risk\"\n",
+                 [agents.grok]\nmode = \"on-risk\"\n\n\
+                 [agents.gemini]\nmode = \"on-risk\"\n",
         )
         .unwrap(),
     );
     let config: Config = value.try_into().unwrap();
     config.validate().unwrap();
     let adapters = config.adapters();
+    assert_eq!(launch(&adapters, "gemini").unwrap().args, ["--acp"]);
     let claude = launch(&adapters, "claude").unwrap();
     assert!(claude.required);
     assert_eq!(claude.full_mode.as_deref(), Some("bypassPermissions"));
@@ -1081,6 +1154,11 @@ fn full_permissions_are_the_default_and_a_stricter_mode_turns_them_off() {
     )));
     // pi has no permission system: `auto` adds nothing.
     assert_eq!(full("pi"), [] as [String; 0]);
+    // `yolo` holds only in a trusted folder, and trusting one applies the
+    // project's own Gemini settings, so neither comes without `auto`.
+    assert_eq!(full("gemini"), ["--approval-mode", "yolo", "--skip-trust"]);
+    assert_eq!(adapters["gemini"].args, [] as [String; 0]);
+    assert!(adapters["gemini"].mode_switch);
 
     // A stricter policy starts every agent without its switches, and one
     // agent's own mode outranks it.

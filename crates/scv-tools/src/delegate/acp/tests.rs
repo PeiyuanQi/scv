@@ -47,7 +47,7 @@ fn fake_agent(dir: &Path, mode: &str) -> PathBuf {
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\nexec python3 -u \"{}\" \"{}\" {mode}\n",
+            "#!/bin/sh\nexec python3 -u \"{}\" \"{}\" {mode} \"$@\"\n",
             program.display(),
             dir.display()
         ),
@@ -1828,4 +1828,93 @@ async fn a_conversation_taken_over_in_its_terminal_stops_its_server_and_then_loa
         calls(dir.path())
     );
     assert_ne!(pid(dir.path()), server);
+}
+
+#[tokio::test]
+async fn gemini_starts_in_yolo_under_auto_and_takes_no_model_over_acp() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = fake_agent(dir.path(), "gemini");
+    let gemini = crate::adapters::adapter("gemini").unwrap();
+    let launch = gemini.acp.unwrap();
+    let tool = |full: bool| {
+        // Its CLI takes `-m`, but its server lists models only for
+        // `session/set_model`, which SCV does not send.
+        let mut config = adapter(full);
+        config.model_args = vec!["-m".into(), "{model}".into()];
+        config.mode_switch = gemini.mode_switch();
+        AcpAgentTool::new(
+            "gemini".into(),
+            &config,
+            AcpAgentLaunch {
+                command: script.display().to_string(),
+                args: crate::adapters::acp_args(&launch, full),
+                full_mode: launch.full_mode.map(str::to_owned),
+                environment: Vec::new(),
+                required: false,
+                session_options: launch.session_options,
+            },
+            Some(script.clone()),
+            Timeouts {
+                default: Duration::from_secs(20),
+                max: Duration::from_secs(30),
+            },
+            64 * 1024,
+            None,
+            store(Duration::from_secs(60)),
+        )
+    };
+    let auto = tool(true);
+    let output = auto
+        .execute(
+            json!({"prompt":"remember heron"}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    let value = json(&output);
+    assert_eq!(value["status"], "completed", "{value}");
+    assert!(
+        value["reply"].as_str().unwrap().contains("stored heron"),
+        "{value}"
+    );
+    // It answers `session/set_mode` without reporting the mode, so SCV
+    // starts it in `yolo`, which holds only in a trusted folder, and keeps
+    // the mode its session reports unverified.
+    assert_eq!(value["mode"], "unverified (it reports yolo)", "{value}");
+    let log = calls(dir.path());
+    assert!(
+        log.contains("args=--approval-mode yolo --skip-trust --acp\n"),
+        "{log}"
+    );
+    assert!(!log.contains("mode="), "{log}");
+    // Nothing to list: it offers no config options.
+    assert!(auto.offered().is_none());
+    let refused = auto
+        .execute(
+            json!({"prompt":"recall","session":"gemini-1","model":"gemini-2.5-pro"}),
+            context(dir.path(), None),
+        )
+        .await
+        .unwrap();
+    let value = json(&refused);
+    assert_eq!(value["status"], "failed", "{value}");
+    assert!(
+        value
+            .to_string()
+            .contains("gemini does not offer a model choice over ACP; omit model"),
+        "{value}"
+    );
+    assert_eq!(value["session"], "gemini-1", "the session survives");
+    // Under a stricter policy it starts untrusted, in its default mode, and
+    // relays its own permission requests.
+    let strict = tool(false);
+    let value = json(
+        &strict
+            .execute(json!({"prompt":"recall"}), context(dir.path(), None))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(value["status"], "completed", "{value}");
+    assert_eq!(value["mode"], "unverified (it reports default)", "{value}");
+    assert!(calls(dir.path()).contains("args=--acp\n"));
 }

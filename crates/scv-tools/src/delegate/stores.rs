@@ -696,7 +696,7 @@ pub fn store_key(store: KeyStore, home: &Path, key: &str) -> Result<Vec<String>>
                 display(&path, home)
             )])
         }
-        KeyStore::Grok { .. } | KeyStore::Pi { .. } => {
+        KeyStore::Grok { .. } | KeyStore::Pi { .. } | KeyStore::Gemini { .. } => {
             bail!("this agent signs in with its own login, not a stored key")
         }
         KeyStore::Scv { .. } => {
@@ -734,7 +734,99 @@ pub fn stored_status(store: KeyStore, home: &Path) -> Result<StoredStatus> {
         }
         KeyStore::Pi { dir } => pi_status(&home.join(dir)),
         KeyStore::Scv { config } => scv_child_status(&home.join(config)),
+        KeyStore::Gemini { dir } => gemini_status(&home.join(dir)),
     }
+}
+
+/// Gemini CLI's files in its `.gemini` directory that hold a sign-in or key:
+/// a Google sign-in, the encrypted store an API key entered at `/auth` goes
+/// to, and the signed-in account's address.
+const GEMINI_CREDENTIALS: [(&str, &str); 3] = [
+    ("oauth_creds.json", "Google sign-in"),
+    ("gemini-credentials.json", "stored API key and tokens"),
+    ("google_accounts.json", "signed-in account"),
+];
+
+/// What Gemini CLI signs in with, by the method `/auth` saved in
+/// `settings.json` and the credential file that method reads.
+fn gemini_status(dir: &Path) -> Result<StoredStatus> {
+    let google = read_json_object(&dir.join(GEMINI_CREDENTIALS[0].0))?.is_some_and(|object| {
+        ["refresh_token", "access_token"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|token| !token.trim().is_empty())
+        })
+    });
+    // Encrypted, so only its presence is checked.
+    let stored_key = std::fs::metadata(dir.join(GEMINI_CREDENTIALS[1].0))
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
+    let env_key = dotenv_sets(&dir.join(".env"), "GEMINI_API_KEY")?;
+    let key = stored_key || env_key;
+    let method = match read_bounded(&dir.join("settings.json"))? {
+        None => None,
+        Some(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(settings) => settings
+                .pointer("/security/auth/selectedType")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+            // Gemini CLI allows comments there; never echo the content.
+            Err(_) => {
+                return Ok(if google || key {
+                    StoredStatus::ready(
+                        "credentials stored; settings.json is not plain JSON, so SCV cannot \
+                         tell which auth method Gemini CLI uses"
+                            .into(),
+                    )
+                } else {
+                    StoredStatus::missing(vec!["not signed in".into()])
+                });
+            }
+        },
+    };
+    Ok(match method.as_deref() {
+        Some("oauth-personal") if google => {
+            StoredStatus::ready("signed in (Google account)".into())
+        }
+        Some("gemini-api-key") if stored_key => {
+            StoredStatus::ready("signed in (Gemini API key, stored encrypted)".into())
+        }
+        Some("gemini-api-key") if env_key => {
+            StoredStatus::ready("signed in (Gemini API key in .gemini/.env)".into())
+        }
+        Some("gemini-api-key") => StoredStatus::missing(vec![
+            "not signed in".into(),
+            "Note: SCV removes $GEMINI_API_KEY from delegated agents; enter the key at /auth \
+             so Gemini CLI stores it in its agent home"
+                .into(),
+        ]),
+        Some("vertex-ai") => StoredStatus::missing(vec![
+            "not signed in".into(),
+            "Note: Vertex AI reads GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION, or \
+             GOOGLE_API_KEY, from the environment, which SCV removes from delegated agents; \
+             choose Sign in with Google or Use Gemini API Key at /auth"
+                .into(),
+        ]),
+        Some("oauth-personal") | None => StoredStatus::missing(vec!["not signed in".into()]),
+        // Such as the machine's own Google Cloud credentials.
+        Some(other) => {
+            StoredStatus::ready(format!("auth method {other:?}, which SCV does not check"))
+        }
+    })
+}
+
+/// Whether the dotenv file at `path` sets `variable` to a non-empty value.
+/// Its text is never echoed.
+fn dotenv_sets(path: &Path, variable: &str) -> Result<bool> {
+    Ok(read_bounded(path)?.is_some_and(|text| {
+        text.lines().any(|line| {
+            let line = line.trim_start();
+            let line = line.strip_prefix("export ").map_or(line, str::trim_start);
+            line.strip_prefix(variable)
+                .and_then(|rest| rest.trim_start().strip_prefix('='))
+                .is_some_and(|value| !value.trim().trim_matches(['"', '\'']).is_empty())
+        })
+    }))
 }
 
 /// Remove the credentials SCV can see in `store`.
@@ -795,6 +887,28 @@ pub fn remove_stored(store: KeyStore, home: &Path) -> Result<Vec<String>> {
             }
             if notes.is_empty() {
                 notes.push("Nothing stored".into());
+            }
+            Ok(notes)
+        }
+        // `settings.json` keeps the chosen auth method, which is no secret,
+        // and `.env` may set more than the key, so it stays too.
+        KeyStore::Gemini { dir } => {
+            let mut notes = Vec::new();
+            for (file, holds) in GEMINI_CREDENTIALS {
+                let path = home.join(dir).join(file);
+                if remove_if_present(&path)? {
+                    notes.push(format!("Removed {} ({holds})", display(&path, home)));
+                }
+            }
+            if notes.is_empty() {
+                notes.push("Nothing stored".into());
+            }
+            let env = home.join(dir).join(".env");
+            if dotenv_sets(&env, "GEMINI_API_KEY")? {
+                notes.push(format!(
+                    "Note: {} still sets GEMINI_API_KEY; remove it there to sign out",
+                    display(&env, home)
+                ));
             }
             Ok(notes)
         }

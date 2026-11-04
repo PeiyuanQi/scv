@@ -78,6 +78,10 @@ Daemon and component changes require focused coverage for:
   with mode `0600` from a piped key, merged without disturbing other entries,
   validated before any write, reported and removed without printing a key, and
   pi importing SCV's own provider;
+- Gemini CLI's status following the auth method in its `settings.json` and
+  the matching credential file or `.env` key without printing either, and
+  its logout removing only its sign-ins and keeping `settings.json` and
+  `.env`;
 - identity/origin binding, same-identity token rotation, conservative legacy
   binding, replacement requiring logout, and stale-runner write rejection;
 - account settings read from and written to `[channels.<channel>.<account>]`

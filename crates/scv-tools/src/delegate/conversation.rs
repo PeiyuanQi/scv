@@ -802,7 +802,13 @@ pub fn collect_garbage(
     dry_run: bool,
 ) -> std::io::Result<GcReport> {
     let older_than = older_than.max(MIN_GC_AGE);
-    let live = live_sessions(marker_dir, dry_run);
+    let mut live = live_sessions(marker_dir, dry_run);
+    if let Some(chars) = files.id_prefix {
+        // Session IDs are ASCII, so any byte offset is a character boundary.
+        for id in &mut live {
+            id.truncate(chars);
+        }
+    }
     let root = adapter_home.join(files.dir);
     let mut report = GcReport::default();
     let Some(cutoff) = SystemTime::now().checked_sub(older_than) else {

@@ -89,15 +89,26 @@ fn gemini(kind: &str, event: &Value) -> Vec<String> {
                     .or_else(|| field("absolute_path"))
                     .or_else(|| field("path"))
                     .map(|path| format!("{name} {}", short_path(path))),
+                "list_directory" => field("dir_path")
+                    .or_else(|| field("path"))
+                    .map(|path| format!("{name} {}", short_path(path))),
                 "google_web_search" => {
                     field("query").map(|query| format!("search: {}", detail(query)))
                 }
+                // Its prompt names the URLs to fetch among its instructions.
                 "web_fetch" => field("prompt")
+                    .and_then(|prompt| {
+                        prompt.split_whitespace().find(|word| {
+                            word.starts_with("https://") || word.starts_with("http://")
+                        })
+                    })
                     .or_else(|| field("url"))
                     .map(|url| format!("fetch {}", url_without_query(url))),
-                "glob" | "search_file_content" => {
+                "glob" | "grep_search" | "search_file_content" => {
                     field("pattern").map(|pattern| format!("{name} {}", detail(pattern)))
                 }
+                // Plan bookkeeping, not work.
+                "write_todos" => return Vec::new(),
                 _ => None,
             };
             vec![line.unwrap_or_else(|| detail(name))]

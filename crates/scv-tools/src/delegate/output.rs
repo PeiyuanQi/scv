@@ -126,6 +126,9 @@ pub(crate) struct AgentStream {
     usage: Option<AgentUsage>,
     /// The CLI's own session ID, for continuing the conversation.
     session: Option<String>,
+    /// A tool ran since the last assistant text, so the next text starts a
+    /// new message (Gemini CLI streams its messages as deltas).
+    new_message: bool,
     /// Where status lines from structured events go while the run lasts.
     progress: ProgressSink,
     /// The run's activity log: its message text and tool lines as they come.
@@ -161,6 +164,7 @@ impl AgentStream {
             halt: CancellationToken::new(),
             usage: None,
             session: None,
+            new_message: false,
             progress: ProgressSink::default(),
             activity: None,
             utf8_tail: Vec::new(),
@@ -473,12 +477,13 @@ impl AgentStream {
         }
     }
 
-    /// One Gemini CLI `stream-json` event, or its whole `json` output.
+    /// One Gemini CLI `stream-json` event, or its whole `json` output. The
+    /// reply is the assistant text after the last tool call.
     fn gemini_event(&mut self, kind: &str, event: &Value) {
         let text = |key: &str| event.get(key).and_then(Value::as_str);
         match kind {
             "message" if text("role") == Some("assistant") => {
-                let Some(content) = text("content") else {
+                let Some(content) = text("content").filter(|content| !content.is_empty()) else {
                     return;
                 };
                 let delta = event.get("delta").and_then(Value::as_bool) == Some(true);
@@ -489,11 +494,15 @@ impl AgentStream {
                         activity.message(content);
                     }
                 }
-                match (&mut self.reply, delta) {
-                    (Some(reply), true) => reply.push_str(content),
-                    (reply, _) => *reply = Some(content.to_owned()),
+                let reply = self.reply.get_or_insert_with(String::new);
+                if !delta || std::mem::take(&mut self.new_message) {
+                    reply.clear();
                 }
+                // Bounded like the one event other formats take a reply from.
+                let room = MAX_EVENT_LINE_BYTES.saturating_sub(reply.len());
+                reply.push_str(scv_client::text::utf8_prefix(content, room));
             }
+            "tool_use" | "tool_result" => self.new_message = true,
             "error" if text("severity") != Some("warning") => {
                 if let Some(message) = text("message") {
                     self.error = Some(message.to_owned());
@@ -861,6 +870,10 @@ pub(crate) fn add_sign_in_hint(output: &mut ToolOutput, agent: &str) {
         "missing_credential",
         "no api key",
         "auth_required",
+        // Gemini CLI: "Please set an Auth method", and over ACP "Gemini API
+        // key is missing or not configured".
+        "auth method",
+        "api key is missing",
     ]
     .iter()
     .any(|needle| lower.contains(needle));

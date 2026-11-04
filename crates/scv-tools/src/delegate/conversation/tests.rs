@@ -274,6 +274,7 @@ fn markers_follow_the_conversation_and_gc_keeps_live_transcripts() {
     let files = ConversationFiles {
         dir: "sessions",
         extension: "jsonl",
+        id_prefix: None,
     };
     let dry = collect_garbage(&adapter, files, &markers, DAY, true).unwrap();
     assert_eq!(dry.removed, vec![stale.clone()]);
@@ -291,6 +292,51 @@ fn markers_follow_the_conversation_and_gc_keeps_live_transcripts() {
     let report = collect_garbage(&adapter, files, &markers, Duration::ZERO, false).unwrap();
     assert_eq!(report.removed, vec![live]);
     assert!(recent.exists());
+}
+
+#[test]
+fn transcripts_named_by_an_id_prefix_stay_while_their_conversation_lives() {
+    let home = tempfile::tempdir().unwrap();
+    let markers = home.path().join("state/conversations");
+    let adapter = home.path().join("agents/gemini");
+    let chats = adapter.join(".gemini/tmp/project/chats");
+    std::fs::create_dir_all(&chats).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(10 * 86400);
+    let transcript = |name: &str| {
+        let path = chats.join(name);
+        std::fs::write(&path, "{}\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        path
+    };
+    // Gemini CLI names a session by the first eight characters of its ID.
+    let live = transcript("session-2026-01-02T00-00-0a1b2c3d.jsonl");
+    let stale = transcript("session-2026-01-02T00-00-ffffeeee.jsonl");
+    let store = store(8, DAY, Some(&markers));
+    store
+        .begin("gemini", None, Path::new("/w"), false)
+        .unwrap()
+        .finish(Some("0a1b2c3d-1111-4222-8333-444455556666".into()), true);
+    let files = ConversationFiles {
+        dir: ".gemini/tmp",
+        extension: "jsonl",
+        id_prefix: Some(8),
+    };
+    let report = collect_garbage(&adapter, files, &markers, DAY, false).unwrap();
+    assert_eq!(report.removed, vec![stale]);
+    assert_eq!(report.kept_live, 1);
+    assert!(live.exists());
+    // The whole ID would not match the name.
+    let whole = ConversationFiles {
+        id_prefix: None,
+        ..files
+    };
+    let report = collect_garbage(&adapter, whole, &markers, DAY, true).unwrap();
+    assert_eq!(report.removed, vec![live]);
 }
 
 #[test]

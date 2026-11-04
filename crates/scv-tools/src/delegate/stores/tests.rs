@@ -687,3 +687,135 @@ fn a_large_claude_json_is_checked_for_a_console_key_without_failing_status() {
         "{too_large:?}"
     );
 }
+
+const GEMINI: KeyStore = KeyStore::Gemini { dir: ".gemini" };
+
+/// Gemini CLI's status in a home whose `.gemini` holds `files`.
+fn gemini_status_of(files: &[(&str, &str)]) -> (bool, String) {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".gemini")).unwrap();
+    for (name, contents) in files {
+        std::fs::write(home.path().join(".gemini").join(name), contents).unwrap();
+    }
+    let StoredStatus { ready, lines } = stored_status(GEMINI, home.path()).unwrap();
+    (ready, lines.join("\n"))
+}
+
+const GOOGLE: &str = r#"{"security":{"auth":{"selectedType":"oauth-personal"}}}"#;
+const API_KEY: &str =
+    r#"{"security":{"auth":{"selectedType":"gemini-api-key"}},"ui":{"theme":"x"}}"#;
+const OAUTH_CREDS: &str = r#"{"access_token":"ya29.secret","refresh_token":"1//secret","token_type":"Bearer","expiry_date":1}"#;
+
+#[test]
+fn gemini_status_follows_the_auth_method_without_printing_credentials() {
+    assert_eq!(gemini_status_of(&[]), (false, "not signed in".to_owned()));
+    // A Google sign-in, under the method `/auth` saved.
+    let (ready, lines) =
+        gemini_status_of(&[("settings.json", GOOGLE), ("oauth_creds.json", OAUTH_CREDS)]);
+    assert!(ready);
+    assert_eq!(lines, "signed in (Google account)");
+    assert!(!gemini_status_of(&[("settings.json", GOOGLE), ("oauth_creds.json", "{}")]).0);
+    // Credentials without a chosen method do not run headless.
+    assert!(!gemini_status_of(&[("oauth_creds.json", OAUTH_CREDS)]).0);
+    // An API key entered at `/auth` is stored encrypted.
+    let (ready, lines) = gemini_status_of(&[
+        ("settings.json", API_KEY),
+        ("gemini-credentials.json", "0f:1e:c0ffee"),
+    ]);
+    assert!(ready);
+    assert_eq!(lines, "signed in (Gemini API key, stored encrypted)");
+    let (ready, lines) = gemini_status_of(&[("settings.json", API_KEY)]);
+    assert!(!ready);
+    assert!(lines.contains("SCV removes $GEMINI_API_KEY"), "{lines}");
+    // Or set in its own `.env`, which it loads when no project sets one.
+    let (ready, lines) = gemini_status_of(&[
+        ("settings.json", API_KEY),
+        (".env", "# for SCV\nexport GEMINI_API_KEY=\"AIza-secret\"\n"),
+    ]);
+    assert!(ready);
+    assert_eq!(lines, "signed in (Gemini API key in .gemini/.env)");
+    assert!(
+        !gemini_status_of(&[
+            ("settings.json", API_KEY),
+            (".env", "GEMINI_API_KEY=\nGEMINI_MODEL=pro\n"),
+        ])
+        .0
+    );
+    // Vertex AI reads only variables SCV removes.
+    let (ready, lines) = gemini_status_of(&[(
+        "settings.json",
+        r#"{"security":{"auth":{"selectedType":"vertex-ai"}}}"#,
+    )]);
+    assert!(!ready);
+    assert!(lines.contains("GOOGLE_CLOUD_PROJECT"), "{lines}");
+    // A method SCV cannot check stays offered.
+    let (ready, lines) = gemini_status_of(&[(
+        "settings.json",
+        r#"{"security":{"auth":{"selectedType":"compute-default-credentials"}}}"#,
+    )]);
+    assert!(ready);
+    assert!(lines.contains("\"compute-default-credentials\""), "{lines}");
+    // Settings with comments are not plain JSON; stored credentials count.
+    let commented = "{\n  // chosen at /auth\n  \"security\": {\"auth\": {\"selectedType\": \"oauth-personal\"}}\n}";
+    let (ready, lines) = gemini_status_of(&[
+        ("settings.json", commented),
+        ("oauth_creds.json", OAUTH_CREDS),
+    ]);
+    assert!(ready);
+    assert!(lines.contains("not plain JSON"), "{lines}");
+    assert!(!lines.contains("chosen at"), "{lines}");
+    assert!(!gemini_status_of(&[("settings.json", commented)]).0);
+    // A credential file that is not JSON is an error that never echoes it.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".gemini")).unwrap();
+    std::fs::write(home.path().join(".gemini/oauth_creds.json"), "ya29.secret").unwrap();
+    let error = stored_status(GEMINI, home.path()).unwrap_err().to_string();
+    assert!(!error.contains("secret"), "{error}");
+}
+
+#[test]
+fn gemini_logout_removes_its_sign_ins_and_keeps_its_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(".gemini");
+    std::fs::create_dir(&dir).unwrap();
+    assert_eq!(
+        remove_stored(GEMINI, home.path()).unwrap(),
+        ["Nothing stored"]
+    );
+    for (name, contents) in [
+        ("settings.json", GOOGLE),
+        ("oauth_creds.json", OAUTH_CREDS),
+        ("gemini-credentials.json", "0f:1e:c0ffee"),
+        (
+            "google_accounts.json",
+            r#"{"active":"me@example.com","old":[]}"#,
+        ),
+    ] {
+        std::fs::write(dir.join(name), contents).unwrap();
+    }
+    assert!(stored_status(GEMINI, home.path()).unwrap().ready);
+    let notes = remove_stored(GEMINI, home.path()).unwrap();
+    assert_eq!(
+        notes,
+        [
+            "Removed .gemini/oauth_creds.json (Google sign-in)",
+            "Removed .gemini/gemini-credentials.json (stored API key and tokens)",
+            "Removed .gemini/google_accounts.json (signed-in account)",
+        ]
+    );
+    assert!(dir.join("settings.json").exists());
+    assert!(!stored_status(GEMINI, home.path()).unwrap().ready);
+    // A key in its `.env` is named, not removed or printed.
+    std::fs::write(dir.join(".env"), "GEMINI_API_KEY=AIza-secret\n").unwrap();
+    let notes = remove_stored(GEMINI, home.path()).unwrap();
+    assert_eq!(
+        notes,
+        [
+            "Nothing stored",
+            "Note: .gemini/.env still sets GEMINI_API_KEY; remove it there to sign out",
+        ]
+    );
+    assert!(dir.join(".env").exists());
+    // It signs in with its own `/auth`, not a key SCV stores.
+    assert!(store_key(GEMINI, home.path(), "AIza-key-0123456789").is_err());
+}

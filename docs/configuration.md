@@ -335,6 +335,9 @@ command = "gemini"
 args = []
 prompt_args = ["-p"]
 model_args = ["-m", "{model}"]
+# No effort, and a model only once per turn, since its ACP server takes none:
+# transport = "resume"
+# model = "gemini-2.5-pro"
 
 [agents.opencode]
 command = "opencode"
@@ -718,7 +721,8 @@ the private home) says `ask`.
 | `grok` | `--always-approve` | on by default |
 | `dsh` | `DSH_PERMISSION_MODE=danger-full-access` (sandbox off, approvals `never`) | its own web tool |
 | `pi` | nothing: pi has no approval prompts or sandbox | none built in |
-| `gemini`, `qwen` | `--yolo` | the CLI's own (Google Search for Gemini CLI) |
+| `gemini` | `--approval-mode yolo --skip-trust` (every tool call approved, the workspace trusted for that run) | Google Search, unprompted |
+| `qwen` | `--yolo` | the CLI's own |
 | `opencode` | nothing: its permissions are its own configuration, which by default ask nothing | the CLI's own, if any |
 | `copilot` | `--allow-all-tools` | the CLI's own, if any |
 | `cursor` | `--force` | the CLI's own, if any |
@@ -738,13 +742,25 @@ instead:
 | `codex` | `agent-full-access` session mode and `CODEX_CONFIG={"web_search":"live"}` | native `web_search` tool (if the provider supports it) |
 | `grok` | `grok agent --always-approve stdio` | on by default |
 | `dsh` | the same `DSH_PERMISSION_MODE` variable | its own web tool |
-| `gemini`, `qwen` | `--yolo` before `--experimental-acp` | as above |
+| `gemini` | `gemini --approval-mode yolo --skip-trust --acp` | as above |
+| `qwen` | `--yolo` before `--experimental-acp` | as above |
 | `opencode`, `kimi` | nothing; what their own configuration asks is relayed | the CLI's own, if any |
 
 `codex-acp` takes no `-c` overrides; `CODEX_CONFIG` is its JSON form of them,
 merged into every session, so SCV sets it on the ACP server rather than
 rewriting the imported `$SCV_HOME/agents/codex/config.toml`. An inherited
 `CODEX_CONFIG` is removed from every delegated agent's environment.
+
+Gemini CLI honours `yolo` only in a trusted folder; elsewhere it falls back
+to its default mode, and a run once per turn stops. `--skip-trust` trusts
+the workspace for that run, which also applies the project's own `.gemini`
+settings, policies, hooks, and MCP servers, so SCV adds it only under `auto`.
+Under a stricter mode a `gemini` run once per turn stops in a folder its
+agent home has not trusted, and over ACP an untrusted folder runs in Gemini
+CLI's default mode with each tool call relayed for approval. Its ACP server
+answers `session/set_mode` without reporting the mode it took, so SCV starts
+it in `yolo` with the same switches instead of selecting that mode (see
+[Mode check](#mode-check)).
 
 Taking a Codex conversation over in its terminal needs its full mode, so it
 is offered only when Codex's mode is `auto`; see
@@ -770,7 +786,7 @@ say `unverified`.
 | `claude`, `claude-ai` (ACP) | the `modes` of `session/new`, then the mode the agent reports; under `auto` SCV sets the `mode` config option to `bypassPermissions` and takes the mode its answer lists, since `claude-agent-acp` answers `session/set_mode` with `{}` whatever mode it picks | before the prompt is sent |
 | `codex` (CLI) | the rollout file under the agent home's `sessions/`, whose `turn_context` records `approval_policy` and `sandbox_policy`; full is `approval_policy never, sandbox danger-full-access` | shortly after the turn starts: read for up to 30 seconds after `thread.started`, and once more when the run ends; not before its first command |
 | `codex` (ACP) | `modes.currentModeId`, then the answer to setting the `mode` config option (`codex-acp` answers `session/set_mode` with `{}` and reports nothing); full is `agent-full-access` | before the prompt is sent |
-| `grok`, `dsh`, `copilot`, `gemini`, `qwen`, `cursor`, `amp` | nothing SCV reads | unverified |
+| `grok`, `dsh`, `copilot`, `gemini`, `qwen`, `cursor`, `amp` | nothing SCV reads; over ACP Gemini CLI's `session/new` reports its mode, which SCV records unchecked | unverified |
 | `pi`, `opencode`, `kimi` | nothing: no switch to verify | not applicable |
 | `scv` (nested) | nothing: its `args` run it with `--policy on-risk`, so every request that is not read-only is relayed to the parent's gate; in configured `[agents.scv] args` SCV replaces any `--policy` with the stricter of `on-risk` and the one given | the parent's policy decides |
 
@@ -851,8 +867,12 @@ also speak the Agent Client Protocol (ACP):
 The ACP servers are `claude-agent-acp` (npm
 `@agentclientprotocol/claude-agent-acp`), `codex-acp` (npm
 `@agentclientprotocol/codex-acp`), `grok agent stdio`, `dsh --profile acp`,
-`gemini --experimental-acp`, `qwen --experimental-acp`, `opencode acp`, and
+`gemini --acp`, `qwen --experimental-acp`, `opencode acp`, and
 `kimi acp`; see [the ACP transport](tools.md#agent-client-protocol-transport).
+Gemini CLI's ACP server is the `gemini` executable itself, so with `"auto"`
+and its own `command` it runs over ACP whenever it is installed. Over ACP it
+takes no `model`, so `[agents.gemini] model` needs `transport = "resume"`;
+with `"acp"`, or `"auto"` and its own `command`, it is a startup error.
 
 ```toml
 [agents.codex]
@@ -1041,13 +1061,15 @@ stable hashed service name and persist `SCV_HOME`/`SCV_CONFIG` in that unit.
 
 Native agent adapters run with an instance-private `HOME`, `SCV_HOME`, XDG
 configuration/data/state directories, and the agent's own state variable
-pointing inside it (`CODEX_HOME`, `GROK_HOME`, `DSH_HOME`, or
-`PI_CODING_AGENT_DIR`). They do not inherit `SCV_CONFIG`, `SCV_MODEL`,
-`SCV_PROVIDER`, `SCV_BASE_URL`, `SCV_API_KEY_ENV`, any `*_API_KEY` variable,
-the AWS variables `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-`AWS_SESSION_TOKEN`, and `AWS_BEARER_TOKEN_BEDROCK`, or
-any adapter's credential, endpoint, or state variables (such as
-`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `GROK_*`, `DSH_*`, or `PI_*`),
+pointing inside it (`CODEX_HOME`, `GROK_HOME`, `DSH_HOME`,
+`PI_CODING_AGENT_DIR`, or `GEMINI_CLI_HOME`). They do not inherit `SCV_CONFIG`,
+`SCV_MODEL`, `SCV_PROVIDER`, `SCV_BASE_URL`, `SCV_API_KEY_ENV`, any
+`*_API_KEY` variable, the AWS variables `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_BEARER_TOKEN_BEDROCK`,
+or any adapter's credential, endpoint, or state variables (such as
+`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, `GROK_*`, `DSH_*`, `PI_*`,
+`GEMINI_*`, `GOOGLE_GENAI_*`, `GOOGLE_CLOUD_*`, or
+`GOOGLE_APPLICATION_CREDENTIALS`),
 and therefore cannot silently reuse or alter the user's normal agent
 configuration. Sign the agents in for SCV with `scv agents login <name>`, copy
 your Codex provider setup with `scv agents import codex` or your Grok model
