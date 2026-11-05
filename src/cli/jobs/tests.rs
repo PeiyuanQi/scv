@@ -28,6 +28,20 @@ fn job(session: &str, name: &str) -> WorkbenchJob {
 }
 
 #[test]
+fn a_thread_key_is_typed_without_a_nul_byte() {
+    assert_eq!(thread_key("ou_owner"), "ou_owner");
+    assert_eq!(
+        thread_key(r"ou_owner\0thread\0omt_1"),
+        "ou_owner\0thread\0omt_1"
+    );
+    assert_eq!(thread_key(r"ou\0owner"), r"ou\0owner");
+    assert_eq!(
+        thread_key(r"C123:1700000000.000000"),
+        "C123:1700000000.000000"
+    );
+}
+
+#[test]
 fn a_job_is_named_by_its_handle_or_a_session_prefix_and_handle() {
     let snapshot = WorkbenchSnapshot {
         jobs: vec![
@@ -62,6 +76,11 @@ fn only_reading_commands_run_inside_a_delegation() {
         target: "job-1".into(),
         follow: false,
         json: true
+    }));
+    assert!(!acts(&JobsCommand::HandBack {
+        thread: None,
+        message: None,
+        json: false,
     }));
     assert!(acts(&JobsCommand::Cancel {
         job: "job-1".into(),

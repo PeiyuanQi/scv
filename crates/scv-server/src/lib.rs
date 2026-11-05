@@ -26,6 +26,7 @@ mod prompt;
 pub mod publish;
 mod restart;
 mod session;
+mod subscription;
 #[cfg(test)]
 mod test_support;
 mod workbench;

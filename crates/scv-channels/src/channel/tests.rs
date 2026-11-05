@@ -111,6 +111,7 @@ fn the_bridge_grants_tools_only_with_an_owner_and_a_turn_timeout() {
         link: &link,
         health: &|_| {},
         stop: &stop,
+        follow_ups: None,
     };
     let bridge = run.bridge(ChannelKind::Wechat).unwrap();
     assert_eq!(bridge.owner, Some("owner@im.wechat"));

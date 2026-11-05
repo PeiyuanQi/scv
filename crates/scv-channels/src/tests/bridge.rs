@@ -4,9 +4,10 @@
 
 use super::*;
 use crate::media::MediaSettings;
+use async_trait::async_trait;
 use scv_client::Layout;
 use serde_json::{Value, json};
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -174,6 +175,10 @@ struct Bench {
     purpose: state::Purpose,
     /// The owner holds remote tools; off unless a test says so.
     tools: bool,
+    /// How long an owner turn with tools may run.
+    turn_timeout: Duration,
+    /// Task subscriptions. `None` unless a test sets one.
+    follow: Option<Arc<ScriptFollow>>,
 }
 
 /// The test's side: the fake daemon, and the platform's two directions.
@@ -215,6 +220,8 @@ impl Bench {
             senders: state::Senders::Anyone,
             purpose: state::Purpose::Chat,
             tools: false,
+            turn_timeout: OWNER_TURN_TIMEOUT,
+            follow: None,
         };
         (bench, Peer { daemon, push, sent })
     }
@@ -267,7 +274,7 @@ impl Bench {
                 owner: self.owner,
                 tool_owner: self.owner.filter(|_| self.tools).map(|owner| ToolOwner {
                     user_id: owner.into(),
-                    turn_timeout: OWNER_TURN_TIMEOUT,
+                    turn_timeout: self.turn_timeout,
                 }),
                 senders: self.senders,
                 purpose: self.purpose,
@@ -275,6 +282,10 @@ impl Bench {
                 log: crate::chatlog::LogOptions::test(self.directory.path(), "test"),
                 link,
                 report: &|_| {},
+                follow_ups: self
+                    .follow
+                    .as_ref()
+                    .map(|follow| follow.as_ref() as &dyn TaskFollowUps),
             },
             &self.store,
             |_| Ok(true),
@@ -301,6 +312,34 @@ impl Peer {
 
     async fn sent(&mut self) -> Sent {
         self.sent.recv().await.unwrap()
+    }
+}
+
+/// A scripted task subscription: one decision for every offer, and a queue
+/// of messages to run as ordinary turns.
+struct ScriptFollow {
+    decision: StdMutex<FollowUp>,
+    returns: StdMutex<Vec<ReturnedFollowUp>>,
+    offered: StdMutex<Vec<String>>,
+}
+
+#[async_trait]
+impl TaskFollowUps for ScriptFollow {
+    async fn follow_up(
+        &self,
+        _account: &str,
+        _thread: &str,
+        _message_id: &str,
+        text: &str,
+        _reply_to: &str,
+        _thread_reply: &str,
+    ) -> FollowUp {
+        self.offered.lock().unwrap().push(text.to_owned());
+        *self.decision.lock().unwrap()
+    }
+
+    async fn take_returns(&self, _account: &str, _owner: &str) -> Vec<ReturnedFollowUp> {
+        std::mem::take(&mut *self.returns.lock().unwrap())
     }
 }
 
@@ -1736,6 +1775,7 @@ async fn run_to_end(bench: &Bench, purpose: state::Purpose) -> Result<()> {
             log: crate::chatlog::LogOptions::test(bench.directory.path(), "test"),
             link: &link,
             report: &|_| {},
+            follow_ups: None,
         },
         &bench.store,
         |_| Ok(true),
@@ -2298,6 +2338,265 @@ async fn an_owners_thread_is_owner_work_of_their_direct_chat_in_the_hub() {
                     text: "SCV updated.".into(),
                 }
             );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_handed_back_thread_message_is_answered_in_its_thread_without_tools() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let follow = Arc::new(ScriptFollow {
+        decision: StdMutex::new(FollowUp::Delivered),
+        returns: StdMutex::new(vec![ReturnedFollowUp {
+            thread: "owner\0thread\0omt_1".into(),
+            message_id: "t1".into(),
+            text: "not this job".into(),
+            reply_to: "thread-re-t1".into(),
+            thread_reply: "into-omt_1".into(),
+        }]),
+        offered: StdMutex::new(Vec::new()),
+    });
+    let bench = Bench {
+        follow: Some(follow),
+        ..bench
+    };
+    peer.push(vec![]);
+    bench
+        .run(async {
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            assert_eq!(
+                start["no_tools"], true,
+                "a hand-back on an account without remote tools stays without them"
+            );
+            assert_eq!(next_turn(&mut side).await, "not this job");
+            assert_eq!(
+                bench.state().in_flight[0].context_token,
+                "thread-re-t1",
+                "the reply handle is the inbound message's"
+            );
+            finish_turn(&mut side, "back to you").await;
+            assert_eq!(
+                peer.sent().await,
+                Sent {
+                    to: "owner".into(),
+                    reply_to: "thread-re-t1".into(),
+                    text: "back to you".into(),
+                }
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_image_only_follow_up_names_the_file_for_the_job() {
+    let (bench, peer) = Bench::owned_by("owner");
+    let follow = Arc::new(ScriptFollow {
+        decision: StdMutex::new(FollowUp::Delivered),
+        returns: StdMutex::new(Vec::new()),
+        offered: StdMutex::new(Vec::new()),
+    });
+    let bench = Bench {
+        tools: true,
+        follow: Some(Arc::clone(&follow)),
+        ..bench
+    };
+    let Inbound::Text(mut image) = message("pic", "owner", "") else {
+        unreachable!()
+    };
+    image.media.push(Media {
+        kind: MediaKind::Image,
+        name: "cat.jpg".into(),
+        size: Some(10),
+        mime: Some("image/jpeg".into()),
+        transcript: None,
+        source: "cat".into(),
+    });
+    peer.push(vec![Inbound::Text(image)]);
+    bench
+        .run(async {
+            eventually(|| !follow.offered.lock().unwrap().is_empty()).await;
+            eventually(|| bench.state().seen.iter().any(|id| id == "pic")).await;
+        })
+        .await;
+    assert_eq!(
+        follow.offered.lock().unwrap().as_slice(),
+        [
+            "[The owner sent an image (cat.jpg) with this message. The file is not attached to the job.]"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_voice_follow_up_includes_the_platform_transcript() {
+    let (bench, peer) = Bench::owned_by("owner");
+    let follow = Arc::new(ScriptFollow {
+        decision: StdMutex::new(FollowUp::Delivered),
+        returns: StdMutex::new(Vec::new()),
+        offered: StdMutex::new(Vec::new()),
+    });
+    let bench = Bench {
+        tools: true,
+        follow: Some(Arc::clone(&follow)),
+        ..bench
+    };
+    let Inbound::Text(mut voice) = message("v1", "owner", "") else {
+        unreachable!()
+    };
+    voice.media.push(Media {
+        kind: MediaKind::Audio,
+        name: String::new(),
+        size: None,
+        mime: Some("audio/silk".into()),
+        transcript: Some("  call me  ".into()),
+        source: "file_v3_voice".into(),
+    });
+    peer.push(vec![Inbound::Text(voice)]);
+    bench
+        .run(async {
+            eventually(|| !follow.offered.lock().unwrap().is_empty()).await;
+            eventually(|| bench.state().seen.iter().any(|id| id == "v1")).await;
+        })
+        .await;
+    assert_eq!(
+        follow.offered.lock().unwrap().as_slice(),
+        [
+            "[The owner sent a voice message with this message. The file is not attached to the job.] It says: \"call me\""
+        ]
+    );
+    assert_eq!(
+        *bench.transport.downloads.lock().unwrap(),
+        0,
+        "the voice file is not downloaded into the job"
+    );
+}
+
+#[tokio::test]
+async fn a_follow_up_with_text_and_a_file_tells_the_job_about_the_file() {
+    let (bench, peer) = Bench::owned_by("owner");
+    let follow = Arc::new(ScriptFollow {
+        decision: StdMutex::new(FollowUp::Delivered),
+        returns: StdMutex::new(Vec::new()),
+        offered: StdMutex::new(Vec::new()),
+    });
+    let bench = Bench {
+        tools: true,
+        follow: Some(Arc::clone(&follow)),
+        ..bench
+    };
+    let Inbound::Text(mut image) = message("pic", "owner", "see this") else {
+        unreachable!()
+    };
+    image.media.push(Media {
+        kind: MediaKind::Image,
+        name: "cat.jpg".into(),
+        size: Some(10),
+        mime: Some("image/jpeg".into()),
+        transcript: None,
+        source: "cat".into(),
+    });
+    peer.push(vec![Inbound::Text(image)]);
+    bench
+        .run(async {
+            eventually(|| !follow.offered.lock().unwrap().is_empty()).await;
+            eventually(|| bench.state().seen.iter().any(|id| id == "pic")).await;
+        })
+        .await;
+    assert_eq!(
+        follow.offered.lock().unwrap().as_slice(),
+        [
+            "see this\n\n[The owner sent an image (cat.jpg) with this message. The file is not attached to the job.]"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_owner_message_without_remote_tools_is_not_given_to_the_job() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let follow = Arc::new(ScriptFollow {
+        decision: StdMutex::new(FollowUp::Delivered),
+        returns: StdMutex::new(Vec::new()),
+        offered: StdMutex::new(Vec::new()),
+    });
+    let bench = Bench {
+        follow: Some(Arc::clone(&follow)),
+        ..bench
+    };
+    peer.push(vec![message("m1", "owner", "land it")]);
+    bench
+        .run(async {
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            assert_eq!(start["no_tools"], true);
+            assert_eq!(next_turn(&mut side).await, "land it");
+            finish_turn(&mut side, "done").await;
+            assert_eq!(peer.sent().await.text, "done");
+        })
+        .await;
+    assert!(
+        follow.offered.lock().unwrap().is_empty(),
+        "remote_tools = none does not deliver into the subscribed job"
+    );
+}
+
+#[tokio::test]
+async fn a_handed_back_message_from_another_chat_has_no_tools() {
+    let (bench, peer) = Bench::owned_by("owner");
+    let follow = Arc::new(ScriptFollow {
+        decision: StdMutex::new(FollowUp::Turn),
+        returns: StdMutex::new(vec![ReturnedFollowUp {
+            thread: "someone-else".into(),
+            message_id: "m1".into(),
+            text: "not yours".into(),
+            reply_to: "re-m1".into(),
+            thread_reply: String::new(),
+        }]),
+        offered: StdMutex::new(Vec::new()),
+    });
+    let bench = Bench {
+        tools: true,
+        follow: Some(follow),
+        ..bench
+    };
+    peer.push(vec![]);
+    bench
+        .run(async {
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            assert_eq!(
+                start["no_tools"], true,
+                "tools follow the thread's chat, not the account grant alone"
+            );
+            assert_eq!(next_turn(&mut side).await, "not yours");
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_handed_back_message_uses_the_owners_tool_limit() {
+    let (bench, mut peer) = Bench::owned_by("owner");
+    let follow = Arc::new(ScriptFollow {
+        decision: StdMutex::new(FollowUp::Turn),
+        returns: StdMutex::new(vec![ReturnedFollowUp {
+            thread: "owner".into(),
+            message_id: "m1".into(),
+            text: "land it".into(),
+            reply_to: "re-m1".into(),
+            thread_reply: String::new(),
+        }]),
+        offered: StdMutex::new(Vec::new()),
+    });
+    let bench = Bench {
+        tools: true,
+        turn_timeout: Duration::from_secs(2),
+        follow: Some(follow),
+        ..bench
+    };
+    peer.push(vec![]);
+    bench
+        .run(async {
+            let (mut side, start) = accept_session_start(&peer.daemon).await;
+            assert_eq!(start["no_tools"], false);
+            assert_eq!(next_turn(&mut side).await, "land it");
+            // The owner's limit, not the ordinary turn limit, ends the turn.
+            assert_eq!(peer.sent().await.text, FAILURE_REPLY);
         })
         .await;
 }

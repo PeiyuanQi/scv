@@ -11,7 +11,7 @@
 //! fails a job: a write that fails is logged and skipped.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Read as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -99,6 +99,13 @@ pub struct JobRecord {
     /// The interrupted job this one resumes, `<session>/<job>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
+    /// The subscription follow-up this job already took, from
+    /// [`subscription::acceptance_token`](super::subscription::acceptance_token).
+    /// Written with the record before the call returns. A crash before the
+    /// subscription cursor moves finds it and does not send the text again.
+    /// Dismissing the job does not clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_follow_up: Option<String>,
     /// The owner dismissed it: what is left only keeps its number taken
     /// until it is pruned, and nothing lists or loads it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -195,6 +202,7 @@ impl JobLedger {
             interrupted: None,
             resumed_as: None,
             resumed_from: None,
+            accepted_follow_up: None,
             dismissed: false,
         })
     }
@@ -262,6 +270,26 @@ impl JobLedger {
         self.save(record);
         written.insert(record.job.clone(), revision);
     }
+
+    /// [`Self::save_revision`] for a write the caller must not go on
+    /// without: a failure is returned, not logged, and the revision counts
+    /// as written only once it is on disk.
+    pub(crate) fn save_revision_required(
+        &self,
+        record: &JobRecord,
+        revision: u64,
+    ) -> std::io::Result<()> {
+        let mut written = crate::sync::lock(&self.written);
+        if written
+            .get(&record.job)
+            .is_some_and(|newest| *newest >= revision)
+        {
+            return Ok(());
+        }
+        save(&self.root, record)?;
+        written.insert(record.job.clone(), revision);
+        Ok(())
+    }
 }
 
 /// Write `record` in its session's directory under `root`.
@@ -300,6 +328,11 @@ fn write(root: &Path, record: &JobRecord) -> std::io::Result<()> {
         }
         if record.resumed_from.is_none() {
             record.resumed_from = existing.resumed_from;
+        }
+        // The job took a follow-up before this snapshot was copied. A later
+        // write must not drop that, or a crash would send the text again.
+        if record.accepted_follow_up.is_none() {
+            record.accepted_follow_up = existing.accepted_follow_up;
         }
     }
     fit_record(&mut record);
@@ -384,6 +417,7 @@ pub fn dismiss(root: &Path, session: &str, job: &str) -> std::io::Result<()> {
     record.reply = None;
     record.error = None;
     record.interrupted = None;
+    // `accepted_follow_up` stays. The job already has that text.
     record.updated_unix = unix_now();
     write(root, &record)
 }
@@ -469,6 +503,18 @@ pub fn list_all(root: &Path) -> Vec<JobRecord> {
     records
 }
 
+/// The job that already took the follow-up `token`, dismissed records
+/// included. `None` when no record names it: a plan, or a pending
+/// subscription, is not acceptance.
+pub(crate) fn find_accepted(root: &Path, token: &str) -> Option<JobRecord> {
+    if token.is_empty() {
+        return None;
+    }
+    list_all(root)
+        .into_iter()
+        .find(|record| record.accepted_follow_up.as_deref() == Some(token))
+}
+
 fn read_record(path: &Path) -> Option<JobRecord> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let file = std::fs::OpenOptions::new()
@@ -519,10 +565,23 @@ pub(crate) fn interrupt(record: &mut JobRecord, reason: &str) {
 /// Remove finished jobs whose record has not changed for `keep`, and
 /// interrupted and dismissed ones too once they are that old.
 pub fn prune(root: &Path, keep: Duration) -> usize {
+    prune_keeping(root, keep, &HashSet::new())
+}
+
+/// [`prune`], leaving every `<session>/<job>` in `retain`. A live task
+/// subscription names the ledger records it still resolves through, and
+/// those stay even after they would otherwise be old enough to remove.
+pub fn prune_keeping<S: std::hash::BuildHasher>(
+    root: &Path,
+    keep: Duration,
+    retain: &HashSet<String, S>,
+) -> usize {
     let now = unix_now();
     let mut removed = 0;
     let old = |record: &JobRecord| {
-        record.state.is_final() && now.saturating_sub(record.updated_unix) > keep.as_secs()
+        record.state.is_final()
+            && now.saturating_sub(record.updated_unix) > keep.as_secs()
+            && !retain.contains(&format!("{}/{}", record.session, record.job))
     };
     for record in list_all(root) {
         if !old(&record) {

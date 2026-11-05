@@ -377,6 +377,9 @@ pub struct AccountRun<'a> {
     /// finish work first (an email account's mail action under way) watches
     /// it and returns once done; the others are simply dropped.
     pub stop: &'a tokio_util::sync::CancellationToken,
+    /// Task subscriptions for owner messages on a bound thread. `None` when
+    /// the process has none.
+    pub follow_ups: Option<&'a dyn crate::TaskFollowUps>,
 }
 
 impl<'a> AccountRun<'a> {
@@ -421,6 +424,7 @@ impl<'a> AccountRun<'a> {
             },
             link: self.link,
             report: self.health,
+            follow_ups: self.follow_ups,
         })
     }
 }

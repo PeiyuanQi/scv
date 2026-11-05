@@ -235,13 +235,19 @@ fn a_snapshot_taken_before_a_dismissal_or_a_resume_does_not_undo_either() {
 
     let mut successor = ledger.record(&new_job("job-3", &arguments)).unwrap();
     successor.resumed_from = Some("session-1/job-2".into());
+    successor.accepted_follow_up = Some("{\"message_id\":\"m1\",\"thread\":\"t\"}".into());
     ledger.save(&successor);
     let mut stale = successor.clone();
     stale.resumed_from = None;
+    stale.accepted_follow_up = None;
     stale.reply = Some("continued".into());
     ledger.save_revision(&stale, 2);
     let kept = load(root.path(), "session-1", "job-3").unwrap();
     assert_eq!(kept.resumed_from.as_deref(), Some("session-1/job-2"));
+    assert_eq!(
+        kept.accepted_follow_up.as_deref(),
+        Some("{\"message_id\":\"m1\",\"thread\":\"t\"}")
+    );
     assert_eq!(kept.reply.as_deref(), Some("continued"));
 }
 
@@ -267,6 +273,7 @@ fn a_dismissed_record_keeps_only_its_number() {
     let mut record = ledger.record(&new_job("job-2", &arguments)).unwrap();
     record.state = AgentState::Failed;
     record.error = Some("boom".into());
+    record.accepted_follow_up = Some("taken".into());
     ledger.save(&record);
     dismiss(root.path(), "session-1", "job-2").unwrap();
     assert_eq!(load(root.path(), "session-1", "job-2"), None);
@@ -276,6 +283,10 @@ fn a_dismissed_record_keeps_only_its_number() {
     assert!(
         !kept.contains("secret plan") && !kept.contains("boom"),
         "{kept}"
+    );
+    assert!(
+        kept.contains("taken"),
+        "dismissing the job keeps the follow-up it already accepted: {kept}"
     );
     assert!(dismiss(root.path(), "session-1", "job-2").is_err());
     // It goes with the rest once old enough.

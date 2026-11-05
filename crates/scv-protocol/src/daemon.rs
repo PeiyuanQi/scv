@@ -866,6 +866,50 @@ pub enum DaemonCommand {
         /// The job.
         job: String,
     },
+    /// Bind a chat thread to one background job that already exists. The
+    /// daemon records the session owner as who authorized it. Binding does
+    /// not start a job. One thread has one subscription.
+    Subscribe {
+        /// The conversation key intake already uses.
+        thread: String,
+        /// The ledger session that owns the job.
+        session: String,
+        /// The ledger job.
+        job: String,
+        /// Why the owner bound it.
+        why: String,
+    },
+    /// Stop delivery on a thread. The subscription record stays, and a later
+    /// message does not resume the job.
+    Unsubscribe {
+        /// The conversation key the owner bound, or an extra thread on it.
+        thread: String,
+    },
+    /// Deliver another thread to the job a thread already subscribes to.
+    /// The authorization is unchanged. The worker can drop this thread; the
+    /// bound thread stays.
+    SubscribeExtra {
+        /// The conversation key already bound.
+        thread: String,
+        /// The extra conversation key.
+        extra: String,
+    },
+    /// The worker says an offered follow-up is not this job's work. The
+    /// message returns to ordinary intake. An extra thread is dropped; the
+    /// thread the owner bound stays. With `thread` and `message_id` omitted,
+    /// `parent` selects the follow-up that job's own ledger record accepted,
+    /// not a later job in the same resume chain.
+    HandBack {
+        /// The conversation key. Omitted with `parent`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<String>,
+        /// The inbound message id. Omitted with `parent`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// The caller's `SCV_PARENT` chain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+    },
     /// Forget a finished or interrupted job's record.
     WorkbenchDismiss {
         /// The session that owned it.

@@ -40,6 +40,17 @@ const WAIT_REFUSED: i32 = 3;
 /// How many times in a row `scv jobs wait` asks again after the daemon was
 /// slow or the exchange broke off, before it gives up.
 const WAIT_RETRIES: u32 = 3;
+/// The separator in a thread's conversation key, as the owner types it.
+/// A command-line argument cannot hold the NUL byte intake uses.
+const THREAD_ESCAPE: &str = "\\0thread\\0";
+const THREAD_MARK: &str = "\0thread\0";
+
+/// The conversation key intake stores. A direct-chat key is unchanged. A
+/// thread typed as `<user id>\0thread\0<thread id>` gains the real NUL
+/// separator.
+pub(crate) fn thread_key(typed: &str) -> String {
+    typed.replace(THREAD_ESCAPE, THREAD_MARK)
+}
 
 pub(crate) async fn run(layout: &Layout, command: Option<JobsCommand>, cwd: &Path) -> Result<()> {
     let command = command.unwrap_or(JobsCommand::List {
@@ -145,6 +156,66 @@ pub(crate) async fn run(layout: &Layout, command: Option<JobsCommand>, cwd: &Pat
                 DaemonCommand::WorkbenchResume {
                     session: job.session,
                     job: job.job,
+                },
+                json,
+            )
+            .await
+        }
+        JobsCommand::Subscribe {
+            job,
+            thread,
+            why,
+            json,
+        } => {
+            let job = find_job(&snapshot(layout).await?, &job)?;
+            act(
+                layout,
+                DaemonCommand::Subscribe {
+                    thread: thread_key(&thread),
+                    session: job.session,
+                    job: job.job,
+                    why,
+                },
+                json,
+            )
+            .await
+        }
+        JobsCommand::SubscribeExtra {
+            thread,
+            extra,
+            json,
+        } => {
+            act(
+                layout,
+                DaemonCommand::SubscribeExtra {
+                    thread: thread_key(&thread),
+                    extra: thread_key(&extra),
+                },
+                json,
+            )
+            .await
+        }
+        JobsCommand::Unsubscribe { thread, json } => {
+            act(
+                layout,
+                DaemonCommand::Unsubscribe {
+                    thread: thread_key(&thread),
+                },
+                json,
+            )
+            .await
+        }
+        JobsCommand::HandBack {
+            thread,
+            message,
+            json,
+        } => {
+            act(
+                layout,
+                DaemonCommand::HandBack {
+                    thread: thread.map(|thread| thread_key(&thread)),
+                    message_id: message,
+                    parent: std::env::var(scv_tools::delegation::PARENT_VARIABLE).ok(),
                 },
                 json,
             )
@@ -307,11 +378,14 @@ pub(crate) async fn worktrees(layout: &Layout, remove: Option<&Path>, force: boo
 }
 
 /// Whether `command` is refused inside a delegated run: everything but
-/// listing and reading logs. Waiting on, reading the result of, and
-/// following the owner's jobs are automation for the owner, so they are
-/// refused too.
+/// listing, reading logs, and handing a subscribed follow-up back. Waiting
+/// on, reading the result of, and following the owner's jobs are automation
+/// for the owner, so they are refused too.
 fn acts(command: &JobsCommand) -> bool {
-    !matches!(command, JobsCommand::List { .. } | JobsCommand::Log { .. })
+    !matches!(
+        command,
+        JobsCommand::List { .. } | JobsCommand::Log { .. } | JobsCommand::HandBack { .. }
+    )
 }
 
 /// The workbench acts for the owner; a delegated agent (or an SCV it
@@ -321,7 +395,8 @@ fn refuse_delegated() -> Result<()> {
     if depth > 0 {
         bail!(
             "the workbench acts for the owner, so this is refused inside a delegated agent run \
-             (delegation depth {depth}); `scv jobs list` and `scv jobs log` still read"
+             (delegation depth {depth}); `scv jobs list`, `scv jobs log`, and `scv jobs hand-back` \
+             still run"
         );
     }
     Ok(())

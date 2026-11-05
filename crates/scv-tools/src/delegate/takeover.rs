@@ -940,6 +940,10 @@ fn logical_lines(view: &vt100::Screen, rows: u16, cols: u16) -> Vec<Range<u16>> 
             && (view.row_wrapped(row)
                 || (filled(row, cols.saturating_sub(1)) && filled(row + 1, 0)));
         if !joins {
+            #[allow(
+                clippy::range_plus_one,
+                reason = "the return type is Range, whose end is exclusive"
+            )]
             lines.push(start..row + 1);
             start = row + 1;
         }

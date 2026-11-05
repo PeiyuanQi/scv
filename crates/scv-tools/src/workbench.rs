@@ -71,6 +71,9 @@ pub const WATCH_TTL: Duration = Duration::from_secs(15);
 const MAX_LISTED: usize = 200;
 /// Finished jobs and ended runs are kept this long.
 pub const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
+/// Resume refused to start a fresh conversation for a follow-up. The message
+/// stays pending; the owner is told once.
+pub const UNRESUMABLE_FOLLOW_UP: &str = "the subscribed job's conversation could not be resumed, so the follow-up was not started as new work";
 /// Ended runs kept at most.
 pub const MAX_RUNS: usize = 500;
 /// How long a client attached to a taken-over terminal counts as watching
@@ -87,6 +90,7 @@ const MAX_TAKEOVERS: usize = 8;
 pub struct Workbench {
     runs: PathBuf,
     jobs: PathBuf,
+    subscriptions: PathBuf,
     worktrees: PathBuf,
     delegations: Arc<DelegationRegistry>,
     inner: Mutex<Inner>,
@@ -221,6 +225,7 @@ impl Workbench {
         Arc::new(Self {
             runs: layout.runs(),
             jobs: layout.jobs(),
+            subscriptions: layout.subscriptions(),
             worktrees: layout.worktrees(),
             delegations,
             inner: Mutex::default(),
@@ -755,6 +760,86 @@ impl Workbench {
         })
     }
 
+    /// Whether live session `session` starts a report turn for a finished
+    /// model job. A workbench session does not.
+    fn reports_jobs(&self, session: &str) -> bool {
+        lock(&self.inner)
+            .sessions
+            .get(session)
+            .and_then(|slot| slot.jobs.as_ref())
+            .and_then(Weak::upgrade)
+            .is_some_and(|jobs| jobs.has_report_turn())
+    }
+
+    /// Origin of a subscription follow-up started in `session`. A session
+    /// that reports jobs keeps it for that report turn. One that does not
+    /// marks it reported when it finishes.
+    fn follow_up_meta(
+        &self,
+        session: &str,
+        resumed_from: Option<String>,
+        accepted_follow_up: Option<String>,
+    ) -> JobMeta {
+        let reports = self.reports_jobs(session);
+        JobMeta {
+            origin: if reports {
+                scv_protocol::JobOrigin::Model
+            } else {
+                scv_protocol::JobOrigin::Owner
+            },
+            keep_origin: reports,
+            resumed_from,
+            accepted_follow_up,
+            ..JobMeta::default()
+        }
+    }
+
+    /// Give conversation `conversation` of live session `session` the owner's
+    /// `prompt`, queued behind a running turn. When `resume_from` is
+    /// `<session>/<job>`, the new job's record links back and that job records
+    /// `resumed_as`. A prompt that went into a running turn writes no link,
+    /// because no new job started.
+    pub async fn deliver_to_job(
+        &self,
+        session: &str,
+        conversation: &str,
+        prompt: &str,
+        resume_from: Option<String>,
+        accepted_follow_up: Option<String>,
+    ) -> Result<Sent, String> {
+        let (agent, workspace) = self.agent(session)?;
+        // A chat session reports the follow-up the way it reports any
+        // background job. A workbench session runs no report turn, so the
+        // job is marked reported when it finishes and does not hold
+        // `scv restart --when-idle`. The acceptance token is on the job's
+        // record before this returns; the subscription cursor moves only
+        // after that. Queued delivery does not steer, so the record is the
+        // acceptance.
+        let meta = self.follow_up_meta(session, resume_from.clone(), accepted_follow_up);
+        let prompt = crate::background::subscription::worker_prompt(prompt);
+        let call = agent
+            .owner_call(
+                json!({"session": conversation, "prompt": prompt}),
+                workspace,
+                SendMode::Queue,
+                meta,
+            )
+            .await
+            .map_err(|error| error.message)?;
+        let sent = match call {
+            OwnerCall::Job(started) => Sent::Job(job_name(session, &started)),
+            OwnerCall::Steered => Sent::Steered,
+        };
+        if let (Some(from), Sent::Job(successor)) = (&resume_from, &sent)
+            && let Some((session, job)) = from.split_once('/')
+        {
+            ledger::update(&self.jobs, session, job, |old| {
+                old.resumed_as = Some(successor.clone());
+            });
+        }
+        Ok(sent)
+    }
+
     /// Start the owner's own job in live session `session` with the `agent`
     /// call `arguments`. Returns `<session>/<job>`.
     pub async fn start(&self, session: &str, arguments: Value) -> Result<String, String> {
@@ -792,6 +877,34 @@ impl Workbench {
     /// once, and not while an agent process of its run still goes. Returns
     /// `<host>/<new job>`.
     pub async fn resume(&self, host: &str, session: &str, job: &str) -> Result<String, String> {
+        self.resume_locked(host, session, job, None, None).await
+    }
+
+    /// [`Self::resume`] with the owner's `prompt` in place of the note that
+    /// the attempt was cut off. A finished job (completed, failed, declined,
+    /// or timed out) is continued this way too, still through the ledger's
+    /// resume link, and still not a reviewed job. `resume` itself is unchanged:
+    /// only an interrupted job, and only with that note.
+    pub async fn resume_with(
+        &self,
+        host: &str,
+        session: &str,
+        job: &str,
+        prompt: &str,
+        accepted_follow_up: Option<String>,
+    ) -> Result<String, String> {
+        self.resume_locked(host, session, job, Some(prompt), accepted_follow_up)
+            .await
+    }
+
+    async fn resume_locked(
+        &self,
+        host: &str,
+        session: &str,
+        job: &str,
+        follow_up: Option<&str>,
+        accepted_follow_up: Option<String>,
+    ) -> Result<String, String> {
         let key = format!("{session}/{job}");
         if !lock(&self.resuming).insert(key.clone()) {
             return Err(format!("{job} is being resumed already"));
@@ -801,7 +914,8 @@ impl Workbench {
             claims: &self.resuming,
             key: &key,
         };
-        self.resume_once(host, session, job, &key).await
+        self.resume_once(host, session, job, &key, follow_up, accepted_follow_up)
+            .await
     }
 
     async fn resume_once(
@@ -810,6 +924,8 @@ impl Workbench {
         session: &str,
         job: &str,
         key: &str,
+        follow_up: Option<&str>,
+        accepted_follow_up: Option<String>,
     ) -> Result<String, String> {
         let record = ledger::load(&self.jobs, session, job)
             .ok_or_else(|| format!("no record of {session}/{job}"))?;
@@ -818,7 +934,14 @@ impl Workbench {
             || (!record.state.is_final()
                 && (!record.owner.is_alive()
                     || (record.owner.pid == std::process::id() && !session_live)));
-        if !interrupted {
+        // A subscribed thread's later message continues a finished job too.
+        // `resume` does not: it passes no follow-up prompt.
+        let ended = matches!(
+            record.state,
+            AgentState::Completed | AgentState::Failed | AgentState::Declined | AgentState::Timeout
+        );
+        let resumable = interrupted || (follow_up.is_some() && ended && !record.reviewed);
+        if !resumable {
             return Err(format!(
                 "{job} was not interrupted ({}); only an interrupted job can be resumed",
                 record.state
@@ -962,15 +1085,26 @@ impl Workbench {
             .and_then(|run| run.vendor.as_deref().zip(cwd.as_deref()))
             .and_then(|(vendor, cwd)| agent.adopt(&record.agent, cwd, vendor));
         let mut arguments = if let Some(handle) = &adopted {
-            json!({
-                "session": handle,
-                "prompt": format!(
+            let prompt = match follow_up {
+                Some(text) => format!(
+                    "[SCV] The owner sent a follow-up on the subscribed thread. Continue the same \
+                     task and keep its constraints. If it is not this job's work, hand it back \
+                     with `scv jobs hand-back` and do not act on it. The task was:\n\n{}\n\n\
+                     Follow-up:\n\n{text}",
+                    record.prompt
+                ),
+                None => format!(
                     "[SCV] SCV stopped before your last turn on this task finished (a restart \
                      or a crash), so it was cut off. Check where the work stands (files, git \
                      status, anything still running), then carry on. The task was:\n\n{}",
                     record.prompt
                 ),
-            })
+            };
+            json!({"session": handle, "prompt": prompt})
+        } else if follow_up.is_some() {
+            // The agent's own conversation could not be resumed. A follow-up
+            // must not start a fresh one that knows only the new message.
+            return Err(UNRESUMABLE_FOLLOW_UP.into());
         } else {
             rerun_arguments(&record, |option| agent.takes(&record.agent, option))
         };
@@ -982,14 +1116,23 @@ impl Workbench {
             }
         }
         // The new job's record says what it resumes from its first write.
-        let meta = JobMeta {
-            resumed_from: Some(key.to_owned()),
-            worktree: record
-                .worktree
-                .clone()
-                .filter(|worktree| Path::new(&worktree.path).is_dir()),
-            ..JobMeta::default()
+        // A follow-up into a session with no report turn is marked reported
+        // when it finishes. One into a chat session stays for that session's
+        // report turn.
+        let mut meta = if follow_up.is_some() {
+            self.follow_up_meta(host, Some(key.to_owned()), accepted_follow_up)
+        } else {
+            JobMeta {
+                origin: scv_protocol::JobOrigin::Owner,
+                resumed_from: Some(key.to_owned()),
+                accepted_follow_up,
+                ..JobMeta::default()
+            }
         };
+        meta.worktree = record
+            .worktree
+            .clone()
+            .filter(|worktree| Path::new(&worktree.path).is_dir());
         let resumed = self.start_with(host, arguments, meta).await?;
         ledger::update(&self.jobs, session, job, |old| {
             old.resumed_as = Some(resumed.clone());
@@ -1057,6 +1200,38 @@ impl Workbench {
     /// The ledger record of `job` in `session`.
     pub fn job_record(&self, session: &str, job: &str) -> Option<JobRecord> {
         ledger::load(&self.jobs, session, job)
+    }
+
+    /// The conversation a follow-up can be given to. A job's record names it
+    /// once the job has finished; until then the run serving the job does,
+    /// which is what a job on its first turn has.
+    pub fn job_conversation(&self, session: &str, job: &str) -> Option<String> {
+        let record = ledger::load_including_dismissed(&self.jobs, session, job)?;
+        if let Some(conversation) = record.conversation.clone().or_else(|| {
+            record
+                .arguments
+                .get("session")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }) {
+            return Some(conversation);
+        }
+        activity::list_states(&self.runs)
+            .into_iter()
+            .find_map(|state| {
+                let serves = state.session == session
+                    && (state.job.as_deref() == Some(job)
+                        || state.jobs.iter().any(|name| name == job));
+                serves.then_some(state.conversation).flatten()
+            })
+    }
+
+    /// The background job run `handle` is serving, when its state names one.
+    pub fn job_for_run(&self, handle: &str) -> Option<(String, String)> {
+        activity::list_states(&self.runs)
+            .into_iter()
+            .find(|state| state.handle == handle)
+            .and_then(|state| state.job.map(|job| (state.session, job)))
     }
 
     /// Job `job` of `session` as the workbench lists it, with its reply or
@@ -1444,7 +1619,14 @@ impl Workbench {
             .map(|record| format!("{}/{}", record.session, record.job))
             .collect();
         let interrupted_runs = activity::settle_orphans(&self.runs);
-        let pruned = ledger::prune(&self.jobs, KEEP) + activity::prune(&self.runs, KEEP, MAX_RUNS);
+        // Read only: the daemon's subscriptions change under their own lock,
+        // which this does not hold.
+        let retain = crate::delegate::background::subscription::pinned_jobs_in(
+            &self.subscriptions,
+            &self.jobs,
+        );
+        let pruned = ledger::prune_keeping(&self.jobs, KEEP, &retain)
+            + activity::prune(&self.runs, KEEP, MAX_RUNS);
         Maintenance {
             interrupted_jobs,
             interrupted_runs,

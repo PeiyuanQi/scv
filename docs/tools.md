@@ -1838,6 +1838,163 @@ approves on its own. Every command asks for the workbench without `watch`,
 so automation never makes a relayed request wait as if the owner were
 watching.
 
+### Task subscriptions
+
+A chat thread can own one live background job that already exists. The owner
+binds it with `scv jobs subscribe JOB --thread KEY --why REASON`. The daemon
+records the session owner (the account that runs the daemon) as who
+authorized it; the command does not accept a different name. It checks the
+ledger and does not start or create a job. `scv jobs unsubscribe --thread
+KEY` stops delivery. The record stays, and a later message does not resume
+the job or re-evaluate the scope. Binding that thread again replaces the
+stopped subscription, or one whose job was dismissed or cancelled or will
+not be resumed. Ids already decided stay decided. A live subscription, including
+one whose finished job is still resumed by a later message, is not replaced.
+
+`KEY` is the conversation key intake uses. The owner's direct chat is that
+account's `user_id`, which `scv channels status` prints. A thread in that
+chat is `<user id>\0thread\0<thread id>`: Feishu's `thread_id`, or Slack's
+`<channel id>:<thread ts>`. A command-line argument cannot contain a NUL
+byte, so type the separator as the characters `\0thread\0`:
+
+```text
+scv jobs subscribe job-3 --thread 'ou_owner\0thread\0omt_1' --why "follow this job"
+scv jobs subscribe-extra --thread 'ou_owner\0thread\0omt_1' --extra 'ou_owner\0thread\0omt_2'
+```
+
+The direct chat itself is `--thread ou_owner`, with no separator. The reply
+prints the key with `\0` in place of each NUL. `subscribe-extra` delivers
+another conversation key to the job that thread already subscribes to. The
+authorization is unchanged. The worker can drop that extra thread; the
+thread the owner bound stays.
+
+The daemon keeps that binding in `$SCV_HOME/state/subscriptions/<id>.json`
+(mode 0600), beside the job ledger and not inside the job's record. The id
+is a digest of the thread's conversation key, the same key intake uses, so
+the key itself is never a path. One thread has one live subscription. Ending the
+job leaves the subscription where it is. A reload reads at most 256 KiB of
+that file, and a write stays within that size. Text of messages the job has
+already taken is what gives way: it already lives on the history sidecar.
+Pending messages, returns waiting for intake, and decided ids stay on the
+record. The decision history is
+`<id>.history.json` beside the record: an id that was decided stays decided
+after the short window on the record rolls off, including across a reload
+and after the channel's seen list has dropped it. It also stays decided
+after an extra thread is dropped, and binding that thread again does not
+deliver the same id. The file is not trimmed
+to make room for a new id. A history that cannot be read does not make an
+id outside that window deliverable. A delivery writes the sidecar, including
+the receiving account, the text, and the reply handles, before it updates
+the record. A crash between those writes still reloads that provenance. If
+the sidecar is missing while the record's decision window is still short, a
+reload recovers those fields from the message the record still holds and
+writes the sidecar before the offer list can roll them off. A hand-back or a
+return to intake writes the record first, the return and that id's decision
+together, however long ago the id was decided. A crash before the history
+write therefore leaves the id settled, so its return runs once and the job
+is not given it again. If the reload cannot write the history it
+recovered from the record, those decisions stay in the record's window:
+a later decision that writes the record before the history writes that
+history first, and stores nothing if it cannot. The daemon is the only process that writes these
+files, under one lock. Maintenance reads them to see which ledger records to
+keep and writes nothing.
+
+The record stores who authorized it, a short reason, and one scope fixed at
+bind time: deliver follow-ups on that thread to that job. The scope is not
+an approval mode. It does not grant merging, publishing, or messaging. A
+record whose scope is anything else, or whose authorization is missing or
+stopped, delivers nothing.
+
+When intake is about to handle an owner message on a thread with a live
+subscription, the daemon records the message as pending and gives that text
+to the job's existing conversation instead of opening a fresh turn. The
+job that takes it records the thread and message id on its ledger record
+(`accepted_follow_up`) before it starts. If that record cannot be written,
+the job does not start. The cursor moves only from
+that record. A restart that finds it does not send the text again. A
+pending plan with no such record is not acceptance. Other jobs' ledger
+writes stay best effort. A failure (no
+workbench yet, no conversation yet, the queue refusing it, resume failing,
+the acceptance record failing to write, or a crash before the record is
+written) leaves the message pending. A
+restart retries pending messages and does not treat them as delivered.
+Intake does not ask a model whether the message is the job's work; the
+job's worker does. The prompt the worker receives says the message is a
+follow-up on the subscribed thread and that `scv jobs hand-back` returns it
+when it is not the job's work. A message that is only a file is described
+that way, and a message that has both text and a file tells the job the
+file came with the text. A non-empty platform transcript, such as a WeChat
+or Slack voice transcript, is included in that text. The file itself is
+not downloaded into the job.
+Delivery follows the account's remote-tool grant: only an owner message in
+a direct chat, or a thread in it, on an account with `remote_tools =
+"owner"` is given to the job. A binding does not override `remote_tools`.
+A retry checks that grant again, and leaves the message pending while the
+account no longer has it.
+
+A job on its first turn has no conversation on its ledger record yet. The
+daemon uses the conversation of the run serving that job. Until one exists,
+the message stays pending and is not discarded.
+
+The worker hands a message back with `scv jobs hand-back` from that job, or
+`scv jobs hand-back --thread KEY --message ID`. With no thread or message,
+the command returns the follow-up that this job's ledger record accepted
+(`accepted_follow_up`), not a later job's message in the same resume chain.
+That still applies after the job has taken the message, and after
+`unsubscribe`: a message the subscription delivered is still returned to
+intake. An id the subscription never held is refused, so a later message
+with that id is not settled by the hand-back. The message returns
+to ordinary intake once, through the return queue of the account that
+received it (`<channel>:<account>`). The queue holds 64 unclaimed messages.
+Another hand-back waits until one is claimed; an unclaimed message stays
+queued. Another account does not run it, and a
+mail chat takes nothing from that queue. The turn has remote tools only
+when the thread's chat is the owner the account grants them to, and it uses
+the owner's turn limit only then. The reply stays in the thread: the return keeps
+the inbound reply handle. A later sight of that id, including
+after the channel's seen list has dropped it, is settled and does not open
+another turn. When it arrived on an extra thread, only that thread is
+dropped. The decided ids from that thread stay decided, so the same id is
+not delivered if the thread is bound again. The thread the owner bound stays, and handing an older message
+back does not move the cursor. The text, the reply handle, and the account
+that received the message stay available
+after the short offer list rolls off. An extra thread is another
+conversation key on the same record. Attaching one does not change the
+authorization.
+
+A queued follow-up starts another background job when the conversation is
+busy. That job is linked with the ledger's `resumed_as` / `resumed_from`
+and becomes the subscription's current job, so cancelling or dismissing it
+stops later delivery. The current job is followed through every resume link.
+A cycle stops the walk. Maintenance does not prune a ledger record a live
+subscription still resolves through, including after the seven-day keep.
+
+A later owner message on the bound thread resumes a finished or interrupted
+job through that link, under the same authorization, which is not evaluated
+again. The follow-up keeps the original task. If the agent's own
+conversation cannot be resumed, the message stays pending and is not started
+as a fresh conversation that knows only the new text. The owner is told
+once, in that chat, that the message is still waiting and will keep being
+tried; unsubscribing the thread stops that. A job the owner
+dismissed or cancelled receives nothing and is not resumed. A restart does
+not resume an interrupted job that has no pending message; only a later
+owner message, or a pending one from before the restart, does. An event
+never starts a job that was not already bound. Waiting on a person is not a
+separate state: a job that is already `awaiting_input` simply receives the
+message.
+
+While the job's session is still alive, the message is queued on that
+conversation. The new job is reported the way any background job of that
+session is, including the server-started turn a chat session uses. A
+workbench session runs no report turn, so a follow-up delivered or resumed
+there is marked reported when it finishes and does not hold `scv restart
+--when-idle`. After a restart the session is gone. The daemon then resumes the job in its
+workbench session for the job's workspace, the same resume the ledger
+already records, and the result stays in the ledger. A reviewed job does
+not receive a follow-up while its review is running; that message goes to
+ordinary intake, and it is not queued as another job on the review's
+conversation. A finished reviewed job is not resumed.
+
 ### Taking a conversation over
 
 A delegated agent runs headless, so its live view is its activity log. The
@@ -2540,7 +2697,15 @@ approval summaries, and reading the latest turn's mode from a Codex
 rollout.
 The workbench's unit tests cover activity logs (paging, truncation, scrubbing
 relayed lines, a run's end after its turn's, quiet and orphaned runs), the
-job ledger (records, interruption, pruning, numbering, dismissal), snapshots
+job ledger (records, interruption, pruning, numbering, dismissal), task
+subscriptions (bind, one thread, the cursor across a reload, a delivery
+that stays pending until it is accepted, a job record that settles a
+pending message without sending it again, an id past the decision window,
+an unreadable history, a full history that refuses a new id, hand-back
+that does not rewind the cursor, a dismissed or stopped job,
+a cancelled continuation, a resume chain longer than a few links, ledger
+records a live subscription keeps, and resume under the same authorization),
+snapshots
 and the conversations they show, owner start, send, cancel, and resume (once,
 and back in a removed worktree's checkout), attended approvals and the
 policy they never override, and worktrees in scratch repositories (a linked

@@ -21,10 +21,15 @@
 //! A call with `review` runs as a reviewed job ([`review`](super::review)):
 //! the same job, whose one call runs the whole builder and reviewer loop and
 //! whose changes and report carry SCV's outcome.
+//!
+//! A chat thread can keep a [`subscription`] to one job that already exists.
+//! Later owner messages on that thread are input to that job. The record sits
+//! beside the ledger, and a restart reloads it without resuming the job.
 
 pub(in crate::delegate) mod lane;
 pub mod ledger;
 mod owed;
+pub mod subscription;
 
 use std::{
     collections::HashSet,
@@ -89,7 +94,8 @@ pub struct BackgroundJobs {
     limit: usize,
     state: Mutex<JobsState>,
     cancellation: CancellationToken,
-    /// Woken whenever a job finishes, so the session can report it.
+    /// Woken whenever a job finishes, so the session can report it. Absent
+    /// on a workbench session, which runs no report turn.
     finished: Option<mpsc::UnboundedSender<()>>,
     /// Decides a running job's nested approval requests, since no turn is
     /// left to carry them to a person. Without it they are denied.
@@ -316,6 +322,7 @@ impl Drop for BackgroundJobs {
 
 impl BackgroundJobs {
     /// At most `limit` jobs run at once. `finished` is woken as jobs finish.
+    /// A workbench session passes none: nothing takes its unreported jobs.
     pub fn new(limit: usize, finished: Option<mpsc::UnboundedSender<()>>) -> Self {
         Self {
             limit,
@@ -363,6 +370,12 @@ impl BackgroundJobs {
         self.limit
     }
 
+    /// Whether a finished model job is taken by a report turn. A workbench
+    /// session has none, so such a job would stay in [`Self::pending`].
+    pub(crate) fn has_report_turn(&self) -> bool {
+        self.finished.is_some()
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, JobsState> {
         lock(&self.state)
     }
@@ -375,7 +388,10 @@ impl BackgroundJobs {
     /// the call fails if it cannot. That write happens outside the job
     /// table's lock, so a slow disk never holds up the session's other job
     /// calls: the job's number is taken first, and a failed write leaves it
-    /// unused.
+    /// unused. A job that takes a subscription follow-up
+    /// ([`JobMeta::accepted_follow_up`]) writes its first record under that
+    /// lock instead, and the call fails, starting nothing, if the write
+    /// does. Every other job's record writes stay best effort.
     #[allow(
         clippy::too_many_arguments,
         reason = "a job's call, its context, its turn, and its review, each its own"
@@ -395,6 +411,8 @@ impl BackgroundJobs {
             origin,
             worktree,
             resumed_from,
+            accepted_follow_up,
+            keep_origin: _,
         } = meta;
         let task = task_line(
             arguments
@@ -431,6 +449,7 @@ impl BackgroundJobs {
             let progress = ProgressSink::buffered();
             let (done_tx, done) = watch::channel(false);
             let cancel = self.cancellation.child_token();
+            let accepting = accepted_follow_up.is_some();
             let record = self.ledger.as_ref().and_then(|ledger| {
                 let mut record = ledger.record(&NewJob {
                     job: &id,
@@ -443,9 +462,33 @@ impl BackgroundJobs {
                 })?;
                 record.worktree.clone_from(&worktree);
                 record.resumed_from = resumed_from;
+                record.accepted_follow_up = accepted_follow_up;
                 Some(record)
             });
-            let first = record.clone().map(|record| (record, 1));
+            // A subscription follow-up's acceptance is on disk before the
+            // job is in the table, or there is no job: a restart retries a
+            // follow-up no record names, so it must not have started.
+            let first = if accepting {
+                let ledger = self.ledger.as_ref().zip(record.as_ref());
+                let saved = ledger
+                    .map(|(ledger, record)| blocking(|| ledger.save_revision_required(record, 1)));
+                match saved {
+                    Some(Ok(())) => None,
+                    Some(Err(error)) => {
+                        return Err(ToolError::failed(format!(
+                            "the job's record could not keep the follow-up it would take \
+                             ({error}), so the job did not start"
+                        )));
+                    }
+                    None => {
+                        return Err(ToolError::failed(
+                            "this session keeps no job records, so a follow-up job cannot start",
+                        ));
+                    }
+                }
+            } else {
+                record.clone().map(|record| (record, 1))
+            };
             state.record(
                 &context.call_id,
                 JobChange {
@@ -615,26 +658,17 @@ impl BackgroundJobs {
     }
 
     /// Write the record changes `writes`, outside the job table's lock, so
-    /// a slow disk never holds up the session's job calls. The write syncs
-    /// to disk, so on a runtime's worker thread the runtime is told it
-    /// blocks, and moves its other tasks elsewhere meanwhile.
+    /// a slow disk never holds up the session's job calls. A failed write is
+    /// logged and skipped.
     fn persist(&self, writes: impl IntoIterator<Item = RecordWrite>) {
         let Some(ledger) = &self.ledger else {
             return;
         };
-        let write = || {
+        blocking(|| {
             for (record, revision) in writes {
                 ledger.save_revision(&record, revision);
             }
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime)
-                if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-            {
-                tokio::task::block_in_place(write);
-            }
-            _ => write(),
-        }
+        });
     }
 
     /// The session's jobs as they stand, for the workbench.
@@ -1151,6 +1185,16 @@ pub(crate) struct JobMeta {
     pub(crate) worktree: Option<scv_protocol::WorktreeRef>,
     /// `<session>/<job>` of the interrupted job it runs again.
     pub(crate) resumed_from: Option<String>,
+    /// When set, [`BackgroundCapable::owner_call`] keeps [`Self::origin`].
+    /// A subscription follow-up sets it on a session that reports jobs, so
+    /// that session's report turn still sees the job. A session with no
+    /// report turn leaves it unset: the job is the owner's to watch and is
+    /// marked reported when it finishes.
+    pub(crate) keep_origin: bool,
+    /// The subscription follow-up this job is accepting. On disk in the
+    /// job's record before the job starts; when that write fails,
+    /// [`BackgroundJobs::start`] fails and starts nothing.
+    pub(crate) accepted_follow_up: Option<String>,
 }
 
 /// What an owner's prompt to the workbench became.
@@ -1412,6 +1456,18 @@ fn task_line(prompt: &str) -> String {
     task
 }
 
+/// Run the disk write `write`. The write syncs to disk, so on a runtime's
+/// worker thread the runtime is told it blocks, and moves its other tasks
+/// elsewhere meanwhile.
+fn blocking<T>(write: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(write)
+        }
+        _ => write(),
+    }
+}
+
 fn unknown_job(job: &str) -> ToolError {
     ToolError::invalid_arguments(format!(
         "unknown background job {:?}; agent_status lists this session's jobs",
@@ -1663,6 +1719,8 @@ impl Tool for BackgroundCapable {
                         origin: JobOrigin::Model,
                         worktree,
                         resumed_from: None,
+                        keep_origin: false,
+                        accepted_follow_up: None,
                     },
                 )?;
                 Ok(ToolOutput::success(started.to_string()))
@@ -1864,6 +1922,8 @@ impl BackgroundCapable {
                 origin: JobOrigin::Model,
                 worktree,
                 resumed_from: None,
+                keep_origin: false,
+                accepted_follow_up: None,
             },
         )?;
         let first = reviewers.first().cloned().unwrap_or_default();
@@ -1988,9 +2048,15 @@ impl BackgroundCapable {
         };
         let (agent, routed) = self.inner.route(&arguments)?;
         let meta = JobMeta {
-            origin: JobOrigin::Owner,
+            origin: if meta.keep_origin {
+                meta.origin
+            } else {
+                JobOrigin::Owner
+            },
             worktree: worktree.or(meta.worktree),
             resumed_from: meta.resumed_from,
+            keep_origin: meta.keep_origin,
+            accepted_follow_up: meta.accepted_follow_up,
         };
         let Some(handle) = parse_args::<AgentArgs>(&routed)?
             .session

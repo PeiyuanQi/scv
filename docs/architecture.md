@@ -57,7 +57,10 @@ SCV provides:
   durable activity logs and a job ledger, agent states with their reasons,
   the owner's own jobs, sending prompts into a delegated conversation,
   approvals answered while the owner watches, and resuming jobs a restart or
-  crash interrupted, through the TUI dashboard and `scv jobs`;
+  crash interrupted, through the TUI dashboard and `scv jobs`; a chat thread
+  can subscribe to one existing job, so later owner messages on that thread
+  are delivered to it, and the subscription survives a restart without
+  resuming the job on its own;
 - a versioned newline-delimited JSON protocol;
 - one Unix-socket daemon that owns agent state and per-connection sessions;
 - a TUI dashboard (chat tabs per workspace, agent views, panes, a sidebar,
@@ -103,7 +106,7 @@ The repository is one Cargo workspace with these packages:
 | `scv-client` | The instance layout (`Layout`: every path under `SCV_HOME`, the daemon socket and project ledger among them, and the instance's service unit name), the chat log (`history`: its episode files, writer, and readers), framed reading and writing (`Connection`, `read_frame`), private instance files (`fs::replace_private`, whose temporary files are named for their target), `Secret` values that never print, byte-bounded text, the delegation-depth variable, and a bounded daemon control helper whose failures are a typed `ControlError`; depends on protocol, not server. |
 | `scv-core` | Agent loop, conversation model, provider/tool/context traits, approvals, and event sink. |
 | `scv-provider-openai` | Streaming OpenAI-compatible Responses transport. |
-| `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation with its activity logs, job ledger, and worktrees, the workbench that reads and acts on them, and the credential files each delegated agent CLI reads (`stores`). |
+| `scv-tools` | Workspace-scoped file tools, shell execution, native-agent delegation with its activity logs, job ledger, task subscriptions, and worktrees, the workbench that reads and acts on them, and the credential files each delegated agent CLI reads (`stores`). |
 | `scv-server` | Configuration, session lifecycle, component supervision, protocol dispatch, cancellation, approval routing, event serialization, kept session queues, the workbench's daemon side (its own sessions for the owner's jobs and its control actions), and the optional durable project ledger/orchestrator. |
 | `scv-tui` | Terminal state, the dashboard (tabs, panes, sidebar, agent views, notifications, key bindings), rendering, input editing, scrolling, approvals, socket client, and headless stdio client. |
 | `scv-channels` | The chat and mail channels. The bridge the chat channels share: the `Channel` trait the daemon runs accounts through (`ChannelKind`, `Accounts`, `run`), the internal `Transport` each platform implements, durable claims and delivery state, held replies, per-conversation daemon sessions and limits, owner-only answering and remote tools, background reports, mail chats (`purpose = "mail"`, which run no turn and store only quarantined mail notices), and the `hub` the daemon shares with running accounts (owner work, chats' sessions, notices, keyed mail notices and how each went, running email accounts' counts, questions to the owner, restart context). Behind Cargo features, all on by default: `wechat` (iLink authentication, polling, and sending, and its credentials), `feishu` (app registration by QR scan, the event long connection with catch-up from chat history, sending, and its credentials, for Feishu and Lark), `slack` (tokens entered by hand, Socket Mode events with catch-up from conversation history, sending, files both ways, and its credentials), and `email` (mail triage and approval-gated actions: IMAP, the Gmail API, Microsoft Graph, and SMTP). |
@@ -115,7 +118,7 @@ The TUI depends on client and protocol, never server. Tools and providers depend
 on core, and tools also on protocol, whose wire types the `scv` agent speaks
 to a nested SCV; core contains no concrete transport, provider, tool, server, or TUI
 dependency. Protocol remains dependency-light. All packages share version
-`0.4.10` and exact workspace dependency pins.
+`0.4.11` and exact workspace dependency pins.
 
 ## Finding your way
 
@@ -155,7 +158,7 @@ What lives where in the largest crates:
 | Crate | Module | Contents |
 | --- | --- | --- |
 | `scv-server` | `lib.rs` | Module list and the public API (`run_socket`, `run_stdio`, `config`, build info, the restart watchdog) |
-| | `daemon.rs` | The socket listener and its lock, `run_stdio`, and reconciling delegated runs and workbench records |
+| | `daemon.rs` | The socket listener and its lock, `run_stdio`, reconciling delegated runs and workbench records, and reloading task subscriptions without resuming their jobs |
 | | `workbench.rs` | The workbench's daemon side: one session per workspace for the owner's jobs (`Hosts`), the workbench `daemon.control` actions, and maintenance |
 | | `connection.rs` | One connection: bounded frame reading and a handler per `ClientMessage` |
 | | `control.rs` | `daemon.control`: status, components, delegations, scheduled restarts, questions to the owner, and mail action status and withdrawal |
@@ -178,7 +181,7 @@ What lives where in the largest crates:
 | | `delegate/native.rs` | The per-turn CLI backend |
 | | `delegate/acp/`, `delegate/scv.rs`, `delegate/live.rs` | Long-running delegations over ACP (`rpc`, `session`, `permission`, `progress`, `tool`) and the SCV protocol, on one live-child runtime |
 | | `delegate/adapters.rs`, `delegate/choice.rs`, `delegate/options.rs` | One descriptor per delegated agent CLI, how the `agent` tool describes each agent and names the others after a failure, and the model and effort values each ACP agent last offered (public as `scv_tools::agent_options`) |
-| | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, the per-conversation line busy calls wait in (`background/lane.rs`), and the durable job ledger (`background/ledger.rs`, public as `scv_tools::background::ledger`), multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
+| | `delegate/background.rs`, `delegate/conversation.rs`, `delegate/records.rs` | Background jobs, the per-conversation line busy calls wait in (`background/lane.rs`), the durable job ledger (`background/ledger.rs`, public as `scv_tools::background::ledger`), task subscriptions (`background/subscription.rs`, public as `scv_tools::background::subscription`), multi-turn conversations, and records of running delegations (public as `scv_tools::delegation`) |
 | | `delegate/activity.rs`, `delegate/worktree.rs` | Each delegated run's activity log and state (public as `scv_tools::activity`), and the git worktrees jobs run in (public as `scv_tools::worktree`) |
 | | `workbench.rs` | The workbench: snapshots assembled from the records and live sessions (whether each conversation can be taken over now included), run logs, and the owner's actions (start, send, cancel, resume, dismiss, attended approvals, and attaching to a conversation taken over in its agent's terminal, after stopping the job running its turn once its line is held) |
 | | `delegate/takeover.rs`, `delegate/pty.rs` | The owner's takeover of a conversation in its agent's own terminal: which agents may be offered, the daemon-held pseudo-terminal the agent's interactive UI runs on, its screen (kept with the `vt100` parser, credentials masked), and its lifecycle |
@@ -187,7 +190,7 @@ What lives where in the largest crates:
 | | `delegate/mode.rs` | The permission mode the policy expects of a delegated agent, reading it from a Codex run's rollout, the approval summary's sentence about it, and the result's `mode` |
 | | `delegate/stores.rs` | Each agent CLI's credential files in its native format (Codex and Grok imports, API keys, pi and nested-SCV endpoints, Gemini CLI status and logout), public as `scv_tools::stores` |
 | `scv-channels` | `channel.rs` | The `Channel` trait, `ChannelKind`, `ChannelCredentials`, `Accounts`, and `run`, through which the daemon and CLI reach every channel |
-| | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), and a conversation's daemon session |
+| | `lib.rs`, `intake.rs`, `session.rs` | The bridge, what it does with each received message (`classify`: ignore, busy, a turn, or the owner's answer to a question), the daemon's task-subscription answer for an owner message on a bound thread (deliver it, settle it, or leave it for the usual turn), whether that account still grants tools to the thread, and a conversation's daemon session |
 | | `state.rs`, `hub.rs`, `media.rs`, `chatlog.rs` | Durable account state (a `Store` generic over the account's state type), what the daemon shares with running bridges, chat media, and logging the owner's direct chat and its threads |
 | | `mail_chat.rs` | A mail chat's fixed replies and commands (`mail status`, `mail help`, `approve`, `deny`, `mail reply`, `forward`, `compose`, `revise`, `archive`, `read`, `trash`, `spam`) |
 | | `retry.rs` | `Backoff` for polling and redelivery, and `retry_send` for one outbound request |
@@ -276,7 +279,24 @@ reconciles delegated runs at startup and every 60 seconds, marks jobs and
 runs whose process died as interrupted and prunes old records. Delegated
 processes never outlive the daemon's sessions; what survives a restart is
 their record, from which the owner resumes an interrupted job in the agent's
-own conversation.
+own conversation. A task subscription survives there too, cursor and pending
+deliveries included. Reloading it does not resume a job that has nothing
+pending and does not redeliver a message already accepted, including one
+whose thread is no longer bound. A delivered message keeps the receiving
+account, the text, and the reply handles across a crash between the
+subscription record and its history. The subscription file stays within the
+size a reload reads. Acceptance is
+the job ledger record that names the message, written before the job
+starts, and the job does not start if it cannot be written; the cursor
+catches up from that record, and a pending plan is not acceptance. A
+hand-back or a return to intake keeps its decision on the subscription
+record with its return, however old the id, and a reload that cannot
+write the history it recovered keeps those decisions on the record until
+the history holds them. Only the daemon's lock writes
+subscription files; maintenance reads them to choose what to keep. A pending delivery is retried only while the account still
+grants tools to that thread's chat. The next owner message on the
+bound thread resumes a finished or interrupted job. Ledger records a live
+subscription still resolves through are not pruned with the rest.
 
 The managed daemon is started as a user-level systemd service and runs under
 `[policy] mode`, `auto` unless the configuration or `scv start --policy`

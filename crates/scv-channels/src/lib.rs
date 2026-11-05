@@ -73,6 +73,82 @@ pub(crate) const FAILURE_REPLY: &str = "SCV could not complete that request.";
 /// The reply to a turn whose answer has neither text nor files.
 pub(crate) const EMPTY_REPLY: &str = "SCV completed without a text response.";
 
+/// What the daemon's task subscription does with an owner message before the
+/// bridge opens a turn. The bridge does not decide whether the message is the
+/// job's work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowUp {
+    /// No subscription covers this thread, or the job is withheld. Open the
+    /// usual turn.
+    Turn,
+    /// The subscribed job took the message. Do not open a turn.
+    Delivered,
+    /// Already delivered, handed back, or returned to intake. Do not open a
+    /// turn and do not give it to the job again.
+    Settled,
+    /// The subscription holds the message and will retry the delivery. Do
+    /// not open a turn.
+    Held,
+    /// Nothing could be recorded, and nothing was kept to retry. Do not mark
+    /// the id seen: the platform must present the message again.
+    Unstored,
+    /// The job's conversation cannot be resumed. Tell the owner once. The
+    /// message stays pending and is retried. Do not open a turn.
+    Unresumable,
+}
+
+/// What the owner hears once when a follow-up cannot resume the job's own
+/// conversation. It is not a model turn, and it does not start a new one.
+const UNRESUMABLE_NOTICE: &str = "SCV could not resume the subscribed job's conversation, so this message is still waiting. It will keep trying. Unsubscribe the thread to stop.";
+
+/// A message the worker handed back after the bridge had already given it
+/// to the job. The bridge runs it as an ordinary turn, answered with the
+/// same handles the inbound message carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnedFollowUp {
+    pub thread: String,
+    pub message_id: String,
+    pub text: String,
+    /// The transport's handle for answering the inbound message. Empty when
+    /// the record was written before handles were kept.
+    pub reply_to: String,
+    /// The transport's handle for posting into the thread. Empty in the
+    /// direct chat.
+    pub thread_reply: String,
+}
+
+/// The daemon's task subscriptions. Channels do not read the job ledger.
+#[async_trait]
+pub trait TaskFollowUps: Send + Sync {
+    /// `account` is `<channel>:<account>`. `thread` is the conversation key
+    /// intake already uses.
+    async fn follow_up(
+        &self,
+        account: &str,
+        thread: &str,
+        message_id: &str,
+        text: &str,
+        reply_to: &str,
+        thread_reply: &str,
+    ) -> FollowUp;
+
+    /// Messages this account should run as ordinary turns. `account` is
+    /// `<channel>:<account>`. `owner` is the account's owner. Empty when
+    /// nothing of this account is waiting. Does not drop them;
+    /// [`Self::ack_returns`] does, after their claim is durable. A mail
+    /// chat does not call this.
+    async fn take_returns(&self, account: &str, owner: &str) -> Vec<ReturnedFollowUp> {
+        let _ = (account, owner);
+        Vec::new()
+    }
+
+    /// `claimed` returns (`thread`, message id) are on this account's
+    /// durable claim. They can leave the subscription's queue.
+    async fn ack_returns(&self, account: &str, owner: &str, claimed: &[(&str, &str)]) {
+        let _ = (account, owner, claimed);
+    }
+}
+
 /// Text SCV wrote itself, not the model, as the chat shows it: `text` alone
 /// when `label`, the transport's [`Transport::system_label`], is empty, and
 /// otherwise `label` and `text` in a Markdown code block.
@@ -562,6 +638,8 @@ pub(crate) struct BridgeRun<'a> {
     /// owner work and chats and can queue notices.
     pub(crate) link: &'a hub::Link,
     pub(crate) report: &'a (dyn Fn(bool) + Send + Sync),
+    /// Task subscriptions. Absent when this process has none.
+    pub(crate) follow_ups: Option<&'a dyn TaskFollowUps>,
 }
 
 /// Run one account over `transport` until the returned future is dropped or
@@ -592,6 +670,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         log,
         link,
         report,
+        follow_ups,
     } = run;
     let _lock = store.lock(account)?;
     let mut state = store.bind_state(account, running)?;
@@ -652,6 +731,7 @@ pub(crate) async fn serve<C: state::Credentials, T: Transport>(
         replies: Notify::new(),
         late,
         removals: Notify::new(),
+        follow_ups,
     };
     bridge.prune_media();
     // Replies recovered from an earlier run go out before the first poll.
@@ -836,6 +916,106 @@ struct Bridge<'a, C, T> {
     late: mpsc::UnboundedSender<LateReaction<'a>>,
     /// Wakes the removal loop when a reaction is to come off.
     removals: Notify,
+    /// Task subscriptions. Consulted for an owner message before a turn.
+    follow_ups: Option<&'a dyn TaskFollowUps>,
+}
+
+/// Text offered to a subscribed job. A file stays on the platform: this
+/// path does not download it. A message that is only files says what
+/// arrived. One that also has text keeps that text and says a file came
+/// with it. A non-empty platform transcript is included in that note.
+fn offered_text(message: &Message) -> String {
+    let notes = message
+        .media
+        .iter()
+        .map(|item| {
+            let noun = item.kind.noun();
+            let article = if noun.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            let note = if item.name.is_empty() {
+                format!(
+                    "[The owner sent {article} {noun} with this message. The file is not attached to the job.]"
+                )
+            } else {
+                format!(
+                    "[The owner sent {article} {noun} ({}) with this message. The file is not attached to the job.]",
+                    item.name
+                )
+            };
+            match item
+                .transcript
+                .as_deref()
+                .map(str::trim)
+                .filter(|transcript| !transcript.is_empty())
+            {
+                Some(transcript) => format!("{note} It says: \"{transcript}\""),
+                None => note,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if notes.is_empty() {
+        return message.text.clone();
+    }
+    if message.text.trim().is_empty() {
+        return notes;
+    }
+    format!("{}\n\n{notes}", message.text.trim_end())
+}
+
+/// Whether an owner message may be given to a subscribed job. The same
+/// grant as intake: their direct chat, or a thread in it, and only when
+/// `remote_tools` grants that owner tools. A binding does not override
+/// `remote_tools = "none"`.
+fn may_deliver_follow_up(sender: &intake::Sender<'_>, tool_owner: Option<&ToolOwner>) -> bool {
+    sender.owner_chat && tool_owner.is_some_and(|granted| granted.user_id == sender.message.sender)
+}
+
+/// Whether a follow-up the daemon is retrying may still be given to the job.
+/// The same grant as intake, read now from the account that received it
+/// (`<channel>:<account>`): `remote_tools = "owner"`, a known owner, and
+/// `thread`'s chat is that owner. A missing account, a mail account, or
+/// `remote_tools = "none"` does not grant it. A binding does not override
+/// that.
+pub fn follow_up_grant_holds(layout: &scv_client::Layout, account: &str, thread: &str) -> bool {
+    let Some((channel, name)) = account.split_once(':') else {
+        return false;
+    };
+    let Ok(kind) = ChannelKind::parse(channel) else {
+        return false;
+    };
+    if !kind.is_chat() {
+        return false;
+    }
+    let Ok((Some(credentials), settings)) = kind.accounts(layout).snapshot(name) else {
+        return false;
+    };
+    if settings.purpose == state::Purpose::Mail
+        || settings.remote_tools != state::RemoteTools::Owner
+    {
+        return false;
+    }
+    credentials
+        .owner()
+        .is_some_and(|owner| !owner.is_empty() && intake::chat_of(thread) == owner)
+}
+
+/// Whether a handed-back turn runs with remote tools, and how long it may
+/// run. Intake's rule: tools only when the thread's chat is the owner who
+/// is granted them (their direct chat, or a thread in it), never another
+/// chat and never a group. The owner's limit applies only together with
+/// those tools.
+fn returned_turn(thread: &str, owner: &str, tool_owner: Option<&ToolOwner>) -> (bool, Duration) {
+    let chat = intake::chat_of(thread);
+    let tools = tool_owner.is_some_and(|granted| granted.user_id == owner && chat == owner);
+    let limit = match tool_owner {
+        Some(granted) if tools => granted.turn_timeout,
+        _ => TURN_TIMEOUT,
+    };
+    (tools, limit)
 }
 
 impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
@@ -843,6 +1023,189 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
     /// [`system_text`].
     fn system(&self, text: &str) -> String {
         system_text(self.transport.system_label(), text)
+    }
+
+    /// Whether a task subscription took this owner message. The bridge's
+    /// state lock must not be held: this saves the seen id when the job took
+    /// it, or when the cursor already covers it.
+    async fn job_took(&self, id: &str, sender: &intake::Sender<'_>) -> Result<bool> {
+        let Some(hook) = self.follow_ups else {
+            return Ok(false);
+        };
+        let account = format!("{}:{}", self.transport.channel(), self.account);
+        let follow = hook
+            .follow_up(
+                &account,
+                &sender.key,
+                id,
+                &offered_text(sender.message),
+                &sender.message.reply_to,
+                sender
+                    .message
+                    .thread
+                    .as_ref()
+                    .map_or("", |thread| thread.reply_to.as_str()),
+            )
+            .await;
+        if follow == FollowUp::Turn {
+            return Ok(false);
+        }
+        if follow == FollowUp::Unstored {
+            bail!("task subscription could not record the message");
+        }
+        if follow == FollowUp::Unresumable {
+            self.reply_seen(id, sender, UNRESUMABLE_NOTICE).await?;
+            return Ok(true);
+        }
+        let mut state = self.state.lock().await;
+        mark_seen(&mut state, id);
+        self.save(&state).await?;
+        Ok(true)
+    }
+
+    /// Mark `id` seen and queue `notice` as SCV's own reply. No turn runs.
+    async fn reply_seen(&self, id: &str, sender: &intake::Sender<'_>, notice: &str) -> Result<()> {
+        let mut state = self.state.lock().await;
+        mark_seen(&mut state, id);
+        if let Some(log) = self.log_for(&sender.key, &sender.message.sender) {
+            log.record(owner_entry(sender.message));
+            log.system(notice);
+        }
+        let mut pending = new_pending(
+            id,
+            &sender.message.sender,
+            &sender.message.reply_to,
+            &self.system(notice),
+            MAX_REPLY_BYTES,
+        );
+        pending.key = sender.key.clone();
+        pending.transient = true;
+        state.pending.push(pending);
+        self.save(&state).await?;
+        drop(state);
+        self.replies.notify_one();
+        Ok(())
+    }
+
+    /// Run messages a worker handed back as ordinary turns, on this account
+    /// only. A mail chat runs no turn and takes nothing. The original
+    /// inbound was already marked seen when the job was offered it. Tools
+    /// and the turn limit are the account's, the same way intake decides
+    /// them, and the reply uses the handles the inbound message carried.
+    async fn deliver_returns(
+        &self,
+        conversations: &mut HashMap<String, Conversation>,
+        start: &Starter,
+        tool_owner: Option<&ToolOwner>,
+    ) -> Result<()> {
+        if self.mail {
+            return Ok(());
+        }
+        let Some(hook) = self.follow_ups else {
+            return Ok(());
+        };
+        let Some(owner) = self.owner else {
+            return Ok(());
+        };
+        let account = format!("{}:{}", self.transport.channel(), self.account);
+        for returned in hook.take_returns(&account, owner).await {
+            self.enqueue_returned(&account, owner, returned, conversations, start, tool_owner)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn enqueue_returned(
+        &self,
+        account: &str,
+        owner: &str,
+        returned: ReturnedFollowUp,
+        conversations: &mut HashMap<String, Conversation>,
+        start: &Starter,
+        tool_owner: Option<&ToolOwner>,
+    ) -> Result<()> {
+        let id = format!("return:{}", returned.message_id);
+        let already = {
+            let mut state = self.state.lock().await;
+            let already = state.seen.iter().any(|seen| seen == &id)
+                || state.in_flight.iter().any(|claim| claim.message_id == id)
+                || state.pending.iter().any(|pending| pending.message_id == id);
+            if !already {
+                state.in_flight.push(state::InFlight {
+                    message_id: id.clone(),
+                    to_user_id: owner.to_owned(),
+                    context_token: returned.reply_to.clone(),
+                    key: returned.thread.clone(),
+                    reaction: None,
+                });
+                self.save(&state).await?;
+            }
+            already
+        };
+        // The claim is durable (or already was). The subscription can drop
+        // its copy. A crash before the save above leaves the return to be
+        // offered again.
+        if let Some(hook) = self.follow_ups {
+            hook.ack_returns(
+                account,
+                owner,
+                &[(&returned.thread, returned.message_id.as_str())],
+            )
+            .await;
+        }
+        if already {
+            return Ok(());
+        }
+        let (tools, limit) = returned_turn(&returned.thread, owner, tool_owner);
+        let mut job = Job {
+            message_id: id,
+            text: returned.text,
+            media: Vec::new(),
+            reference: None,
+            origin: None,
+            key: returned.thread,
+            limit,
+            new: false,
+        };
+        let key = job.key.clone();
+        loop {
+            if let Some(conversation) = conversations.get_mut(&key) {
+                match conversation.jobs.send(job) {
+                    Ok(()) => {
+                        conversation.last_used = Instant::now();
+                        return Ok(());
+                    }
+                    Err(mpsc::error::SendError(returned_job)) => {
+                        job = returned_job;
+                        conversations.remove(&key);
+                    }
+                }
+            } else {
+                let (jobs, queue) = mpsc::unbounded_channel();
+                // A group receives no unprompted reports. A direct chat, or
+                // a thread in one, does, into the thread the message came from.
+                let direct = !intake::chat_of(&key).contains('\0');
+                let recipient = direct.then(|| Recipient {
+                    peer: owner.to_owned(),
+                    key: key.clone(),
+                    reply_to: returned.thread_reply.clone(),
+                });
+                let watching = Arc::new(AtomicBool::new(false));
+                start
+                    .send((tools, recipient, queue, Arc::clone(&watching)))
+                    .map_err(|_| {
+                        anyhow!("{} conversation runner stopped", self.transport.label())
+                    })?;
+                conversations.insert(
+                    key.clone(),
+                    Conversation {
+                        jobs,
+                        last_used: Instant::now(),
+                        watching,
+                    },
+                );
+            }
+        }
     }
 
     /// The chat log of the conversation keyed `key`, whose sender is `peer`,
@@ -963,6 +1326,8 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
             backoff.reset();
             // Conversations close their queues after idling.
             conversations.retain(|_, conversation| !conversation.jobs.is_closed());
+            self.deliver_returns(&mut conversations, start, tool_owner)
+                .await?;
             for inbound in &batch.messages {
                 self.accept(inbound, tool_owner, &mut conversations, start)
                     .await?;
@@ -1030,6 +1395,13 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     }
                 }
                 Verdict::Busy(sender) => {
+                    if self.follow_ups.is_some() && may_deliver_follow_up(&sender, tool_owner) {
+                        drop(state);
+                        if self.job_took(id, &sender).await? {
+                            return Ok(());
+                        }
+                        state = self.state.lock().await;
+                    }
                     tracing::warn!("at the work limit; asking a sender to retry later");
                     break (sender, Err(BUSY_REPLY));
                 }
@@ -1042,7 +1414,16 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                     owner,
                     limit,
                     evict,
-                } => break (sender, Ok((owner, limit, evict))),
+                } => {
+                    if self.follow_ups.is_some() && may_deliver_follow_up(&sender, tool_owner) {
+                        drop(state);
+                        if self.job_took(id, &sender).await? {
+                            return Ok(());
+                        }
+                        state = self.state.lock().await;
+                    }
+                    break (sender, Ok((owner, limit, evict)));
+                }
             }
         };
         let message = sender.message;

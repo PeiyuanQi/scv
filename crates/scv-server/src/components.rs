@@ -227,6 +227,8 @@ struct ChannelAccount {
     /// The account owner holds remote tools.
     tools: bool,
     link: scv_channels::hub::Link,
+    /// Task subscriptions shared by every account this daemon runs.
+    follow_ups: Arc<crate::subscription::FollowUps>,
 }
 
 #[async_trait]
@@ -265,6 +267,7 @@ impl Component for ChannelAccount {
             link: &self.link,
             health: &report,
             stop: &cancellation,
+            follow_ups: Some(self.follow_ups.as_ref()),
         };
         // A channel that finishes started work (an email account's mail
         // action under way) returns by itself once cancelled, within its
@@ -301,6 +304,7 @@ pub(crate) struct Components {
     /// Asks the owner yes/no questions; set only in the socket daemon.
     confirmer: Option<Arc<crate::confirm::Confirmer>>,
     ledger: Arc<Mutex<crate::project::ProjectLedger>>,
+    follow_ups: Arc<crate::subscription::FollowUps>,
 }
 
 impl Components {
@@ -319,6 +323,7 @@ impl Components {
             crate::project::ProjectLedger::open(&instance.layout).context("open project ledger")?;
         let has_projects = ledger.has_projects();
         let ledger = Arc::new(Mutex::new(ledger));
+        let follow_ups = Arc::new(crate::subscription::FollowUps::open(&instance.layout));
         let mut components = Self {
             supervisor: Supervisor::default(),
             desired: BTreeMap::new(),
@@ -329,6 +334,7 @@ impl Components {
             restarter: None,
             confirmer: None,
             ledger,
+            follow_ups,
         };
         if has_projects {
             components.ensure_project_orchestrator();
@@ -360,6 +366,11 @@ impl Components {
     /// What the daemon shares with the channel bridges it runs.
     pub(crate) fn hub(&self) -> Arc<scv_channels::hub::Hub> {
         Arc::clone(&self.hub)
+    }
+
+    /// Task subscriptions. Reloading them does not resume a job.
+    pub(crate) fn follow_ups(&self) -> Arc<crate::subscription::FollowUps> {
+        Arc::clone(&self.follow_ups)
     }
 
     pub(crate) fn status(&self) -> DaemonStatus {
@@ -509,6 +520,7 @@ impl Components {
                         workspace,
                         tools,
                         link,
+                        follow_ups: Arc::clone(&self.follow_ups),
                     }),
                     health,
                 );
@@ -578,6 +590,10 @@ impl Components {
             | DaemonCommand::WorkbenchApprove { .. }
             | DaemonCommand::WorkbenchResume { .. }
             | DaemonCommand::WorkbenchDismiss { .. }
+            | DaemonCommand::Subscribe { .. }
+            | DaemonCommand::Unsubscribe { .. }
+            | DaemonCommand::SubscribeExtra { .. }
+            | DaemonCommand::HandBack { .. }
             | DaemonCommand::JobResult { .. }
             | DaemonCommand::Worktrees
             | DaemonCommand::WorktreeRemove { .. }

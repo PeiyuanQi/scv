@@ -13,10 +13,10 @@
 //! - `worktrees/`: git worktrees SCV created so a background job's agent
 //!   works apart from its repository's own checkout;
 //! - `state/`: runtime data SCV writes: the daemon socket and lock, delegated
-//!   run records and activity logs, the background job ledger, saved session
-//!   queues, conversation markers, review journals, import records, the
-//!   model and effort values each agent offers, channel delivery state and
-//!   locks, and chat media.
+//!   run records and activity logs, the background job ledger, task
+//!   subscriptions, saved session queues, conversation markers, review
+//!   journals, import records, the model and effort values each agent offers,
+//!   channel delivery state and locks, and chat media.
 //!
 //! Anything else in the home is not read by SCV; [`Layout::strays`] lists it.
 //!
@@ -183,6 +183,13 @@ impl Layout {
     /// (`<session>/<job>.json`).
     pub fn jobs(&self) -> PathBuf {
         self.state().join("jobs")
+    }
+
+    /// Task subscriptions: one record per bound chat thread
+    /// (`<id>.json`), beside the job ledger. A subscription names a job
+    /// that already exists; it is not a job and not part of [`Self::jobs`].
+    pub fn subscriptions(&self) -> PathBuf {
+        self.state().join("subscriptions")
     }
 
     /// Queues of sessions that keep theirs (`persist_queue`), one

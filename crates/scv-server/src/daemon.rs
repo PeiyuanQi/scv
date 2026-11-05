@@ -155,6 +155,7 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
         let mut components = components.lock().await;
         components.set_restarter(Arc::clone(&restarter));
         components.set_confirmer(confirmer);
+        components.follow_ups().set_hosts(Arc::clone(&hosts));
     }
     let notices = tokio::spawn(restart::announce(
         layout.clone(),
@@ -171,16 +172,25 @@ pub async fn run_socket(layout: &Layout, overrides: ConfigOverrides) -> Result<(
     let delegation_registry = Arc::clone(&registry);
     let delegation_cancel = cancellation.clone();
     let maintained = Arc::clone(&hosts);
+    let subscriptions = components.lock().await.follow_ups();
     let mut delegation_task = tokio::spawn(async move {
         // The first tick is immediate: orphans from before a restart go
         // first, and jobs and runs they left unfinished become interrupted.
+        // Reloading subscriptions reads their cursors and does not resume a job.
         let mut interval = tokio::time::interval(DELEGATION_RECONCILE_INTERVAL);
         loop {
             tokio::select! {
                 biased;
                 () = delegation_cancel.cancelled() => break,
                 _ = interval.tick() => {
+                    // Orphans from before a restart are reconciled before a
+                    // pending follow-up is retried, so delivery sees the job
+                    // as interrupted. Reloading reads cursors and does not
+                    // resume a job. An interrupted job with nothing pending
+                    // stays interrupted.
+                    subscriptions.reload();
                     reconcile_delegations(Arc::clone(&delegation_registry)).await;
+                    subscriptions.retry_pending().await;
                     let zombies = delegations::reap_orphaned_zombies();
                     if zombies > 0 {
                         tracing::debug!("Reaped {zombies} exited orphan processes");

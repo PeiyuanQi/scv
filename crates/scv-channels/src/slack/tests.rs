@@ -1064,6 +1064,7 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
             log: crate::chatlog::LogOptions::test(directory.path(), CHANNEL),
             link: &detached,
             report: &report,
+            follow_ups: None,
         },
         &store,
         |credentials| Ok(credentials == &account()),

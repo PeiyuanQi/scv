@@ -541,6 +541,78 @@ impl Connection {
     }
 
     async fn control(&self, request_id: String, command: DaemonCommand) -> Result<Flow> {
+        if is_subscription_command(&command) {
+            let Some(components) = &self.components else {
+                self.reject(
+                    &request_id,
+                    ErrorCode::Unsupported,
+                    "Task subscriptions require the daemon socket",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            };
+            let follow = components.lock().await.follow_ups();
+            let result = match &command {
+                DaemonCommand::Subscribe {
+                    thread,
+                    session,
+                    job,
+                    why,
+                } => follow
+                    .bind_owner(thread, session, job, why)
+                    .map(|subscription| {
+                        format!(
+                            "Bound {} to {}/{}.",
+                            scv_tools::background::subscription::visible_thread(thread),
+                            subscription.session,
+                            subscription.job
+                        )
+                    }),
+                DaemonCommand::Unsubscribe { thread } => follow.stop(thread).map(|()| {
+                    format!(
+                        "Stopped delivery on {}. Bind it again to follow another job.",
+                        scv_tools::background::subscription::visible_thread(thread)
+                    )
+                }),
+                DaemonCommand::SubscribeExtra { thread, extra } => {
+                    follow.attach_thread(thread, extra).map(|()| {
+                        format!(
+                            "Delivering {} to the job bound on {}.",
+                            scv_tools::background::subscription::visible_thread(extra),
+                            scv_tools::background::subscription::visible_thread(thread)
+                        )
+                    })
+                }
+                DaemonCommand::HandBack {
+                    thread,
+                    message_id,
+                    parent,
+                } => follow.hand_back_message(
+                    &self.registry,
+                    thread.as_deref(),
+                    message_id.as_deref(),
+                    parent.as_deref(),
+                ),
+                _ => unreachable!("subscription commands are matched above"),
+            };
+            match result {
+                Ok(note) => {
+                    let mut status = components.lock().await.status();
+                    status.workbench_note = Some(note);
+                    send_event(
+                        &self.output,
+                        ServerEvent::DaemonStatus { request_id, status },
+                        self.server_frame_limit(),
+                    )
+                    .await?;
+                }
+                Err(message) => {
+                    self.reject(&request_id, ErrorCode::WorkbenchError, &message)
+                        .await?;
+                }
+            }
+            return Ok(Flow::Continue);
+        }
         if workbench::is_workbench_command(&command) {
             let Some(hosts) = &self.hosts else {
                 self.reject(
@@ -1524,6 +1596,17 @@ impl Connection {
 
 /// The name the terminal UI connects with, as `initialize` gives it.
 const TUI_CLIENT: &str = "scv-tui";
+
+/// Bind, stop, attach, or hand back a task subscription.
+fn is_subscription_command(command: &DaemonCommand) -> bool {
+    matches!(
+        command,
+        DaemonCommand::Subscribe { .. }
+            | DaemonCommand::Unsubscribe { .. }
+            | DaemonCommand::SubscribeExtra { .. }
+            | DaemonCommand::HandBack { .. }
+    )
+}
 
 /// Who a session serves, as the job ledger and the workbench name it: its
 /// chat channel, or else the program that connected.

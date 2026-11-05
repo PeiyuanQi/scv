@@ -61,6 +61,7 @@ fn record(session: &str, job: &str, state: AgentState, owner: ProcessIdentity) -
         interrupted: None,
         resumed_as: None,
         resumed_from: None,
+        accepted_follow_up: None,
         dismissed: false,
     }
 }
@@ -817,6 +818,75 @@ fn maintenance_settles_what_dead_processes_left_and_hosts_are_stable() {
     assert_eq!(host, host_session(Path::new("/w/project")));
     assert_ne!(host, host_session(Path::new("/w/other")));
     assert!(ledger::valid_name(&host));
+}
+
+/// Every file under `dir`, by name, with its bytes.
+fn files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name, std::fs::read(entry.path()).unwrap())
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn maintenance_cannot_clobber_a_newer_unsubscribe_or_hand_back_of_a_subscription() {
+    use crate::delegate::background::subscription::{Plan, Subscriptions, Worker};
+    const THREAD: &str = "owner\0thread\0omt_1";
+    const EXTRA: &str = "owner\0thread\0omt_2";
+    let bench = bench();
+    let me = ProcessIdentity::current().unwrap();
+    ledger::save(
+        &bench.layout.jobs(),
+        &record("s", "job-1", AgentState::Working, me),
+    )
+    .unwrap();
+    let root = bench.layout.subscriptions();
+    // The daemon's own book, which changes records under its lock.
+    let mut book = Subscriptions::open(&root, &bench.layout.jobs());
+    book.bind(THREAD, "s", "job-1", "owner", "follow it")
+        .unwrap();
+    book.attach(THREAD, EXTRA).unwrap();
+    book.decide(EXTRA, "m1", "not this job", Worker::Accept)
+        .unwrap();
+    book.commit_delivery(EXTRA, "m1").unwrap();
+    book.decide(THREAD, "m0", "body 0", Worker::Accept).unwrap();
+    // The daemon is between a delivery's sidecar write and its record write:
+    // the record still holds m0 pending, which opening the files repairs.
+    let id = book.subscription(THREAD).unwrap().id.clone();
+    let record_path = root.join(format!("{id}.json"));
+    let before_delivery = std::fs::read(&record_path).unwrap();
+    book.commit_delivery(THREAD, "m0").unwrap();
+    std::fs::write(&record_path, &before_delivery).unwrap();
+    let on_disk = files(&root);
+    bench.workbench.maintain();
+    assert_eq!(
+        files(&root),
+        on_disk,
+        "maintenance reads the subscriptions and writes none of them"
+    );
+    // The daemon goes on: a hand-back and an unsubscribe land after that
+    // read, and stay.
+    assert!(matches!(
+        book.hand_back(EXTRA, "m1", "").unwrap(),
+        Plan::HandedBack(_)
+    ));
+    book.stop(THREAD).unwrap();
+    let changed = files(&root);
+    bench.workbench.maintain();
+    assert_eq!(files(&root), changed);
+    let reopened = Subscriptions::open(&root, &bench.layout.jobs());
+    let record = reopened.subscription(THREAD).unwrap();
+    assert!(record.authorization.stopped);
+    assert_eq!(record.extra_threads, Vec::<String>::new());
+    assert_eq!(record.pending, []);
+    assert_eq!(record.returns.len(), 1);
+    assert_eq!(record.returns[0].message_id, "m1");
 }
 
 #[test]
@@ -1637,6 +1707,37 @@ impl TurnsSession {
         .await
         .unwrap_or_else(|_| panic!("ran {:?}, not {prompts:?}", lock(&self.prompts)));
     }
+}
+
+#[tokio::test]
+async fn a_follow_up_delivered_into_a_workbench_session_does_not_stay_pending() {
+    let bench = bench();
+    // `turns_session` builds its jobs with no report wake, as `Hosts::build`
+    // does for a workbench session.
+    let live = turns_session(&bench, "workbench-host");
+    let sent = bench
+        .workbench
+        .deliver_to_job(
+            "workbench-host",
+            "codex-1",
+            "also run clippy",
+            Some("old/job-1".into()),
+            Some(r#"{"thread":"t","message_id":"m1"}"#.into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent, Sent::Job("workbench-host/job-1".into()));
+    assert_eq!(live.tool.jobs.pending(), 1);
+    live.release.add_permits(1);
+    recorded(&bench, "workbench-host", "job-1", AgentState::Completed).await;
+    assert_eq!(
+        live.tool.jobs.pending(),
+        0,
+        "a finished follow-up in a session with no report turn must not stay pending"
+    );
+    let done = ledger::load(&bench.layout.jobs(), "workbench-host", "job-1").unwrap();
+    assert!(done.reported);
+    assert!(bench.workbench.dismiss("workbench-host", "job-1").is_ok());
 }
 
 /// Wait until `job` of `session` is recorded `state`.

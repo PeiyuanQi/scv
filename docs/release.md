@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.10`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.10` pins.
+The current workspace release is `0.4.11`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.11` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -52,6 +52,34 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.11
+
+`0.4.11` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3.
+It adds task subscriptions ([Task subscriptions](tools.md#task-subscriptions)):
+`scv jobs subscribe`, `subscribe-extra`, `unsubscribe`, and `hand-back` bind
+a chat thread to a background job that already exists, so later owner
+messages on that thread go to that job's own conversation instead of a new
+turn. A binding starts no job and grants nothing beyond delivery: it does not
+override `remote_tools`, and it does not permit merging, publishing, or
+messaging anyone. Subscriptions are kept in `state/subscriptions/`. A restart
+reloads them and resumes a job only for a message still pending from before
+it, and the ledger keeps a record a live subscription still resolves through
+past its seven days. The
+`subscribe`, `unsubscribe`, `subscribe_extra`, and `hand_back`
+`daemon.control` actions are additive: a daemon before `0.4.11` answers them
+with `invalid_json`.
+
+What changes for code that embeds SCV's crates: `scv-protocol`'s
+`DaemonCommand` gains `Subscribe`, `Unsubscribe`, `SubscribeExtra`, and
+`HandBack`; `scv-channels`'s `AccountRun` gains `follow_ups`; and
+`scv-tools`'s `background::ledger::JobRecord` gains `accepted_follow_up`, so
+struct literals and exhaustive matches need them. `scv-channels` adds
+`TaskFollowUps`, `FollowUp`, `ReturnedFollowUp`, and
+`follow_up_grant_holds`; `scv-client`'s `Layout` adds `subscriptions`; and
+`scv-tools` adds `background::subscription`, `background::ledger::prune_keeping`,
+and the `Workbench` methods `deliver_to_job`, `resume_with`,
+`job_conversation`, and `job_for_run`.
 
 ## Upgrading to 0.4.10
 

@@ -75,7 +75,13 @@ seven places:
     ├── runs/<handle>.jsonl, <handle>.state.json  each delegated run's activity
     │                  log and state, kept 7 days (0700/0600)
     ├── jobs/<session>/<job>.json  the background job ledger, kept 7 days
-    │                  after a job finishes (0700/0600)
+    │                  after a job finishes, except records a live task
+    │                  subscription still resolves through (0700/0600)
+    ├── subscriptions/<id>.json  a chat thread's subscription to one existing
+    │                  job, beside the ledger, with <id>.history.json holding
+    │                  every fan-out decision. An unreadable history does not
+    │                  make an id outside the record's window deliverable
+    │                  (0700/0600)
     ├── sessions/<session>.json  a TUI session's queue, until the TUI leaves
     │                  or it is restored (0600)
     ├── conversations/
@@ -115,7 +121,7 @@ The rules behind it:
   `scv config show` reports each file without reading it.
 - **State is not configuration.** `state/` holds only what SCV writes and
   reads back: the daemon socket, delegated-run records and activity logs,
-  the job ledger, kept queues, review journals, the model and effort values
+  the job ledger, task subscriptions, kept queues, review journals, the model and effort values
   each agent offers, channel delivery checkpoints, chat media, and locks. Nothing there is meant to be edited; review journals
   are there to be read (see [Reviewed jobs](tools.md#the-journal)).
 - **Worktrees are work.** `worktrees/` holds checkouts agents worked in,

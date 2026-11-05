@@ -177,6 +177,10 @@ workbench".
 {"type":"daemon.control","request_id":"w6","command":{"action":"workbench_approve","id":"7c2e…","approved":true}}
 {"type":"daemon.control","request_id":"w7","command":{"action":"workbench_resume","session":"5d1c…","job":"job-3"}}
 {"type":"daemon.control","request_id":"w8","command":{"action":"workbench_dismiss","session":"5d1c…","job":"job-3"}}
+{"type":"daemon.control","request_id":"w12","command":{"action":"subscribe","thread":"ou_owner\\u0000thread\\u0000omt_1","session":"5d1c…","job":"job-3","why":"follow this job from the thread"}}
+{"type":"daemon.control","request_id":"w13","command":{"action":"unsubscribe","thread":"ou_owner\\u0000thread\\u0000omt_1"}}
+{"type":"daemon.control","request_id":"w15","command":{"action":"subscribe_extra","thread":"ou_owner\\u0000thread\\u0000omt_1","extra":"ou_owner\\u0000thread\\u0000omt_2"}}
+{"type":"daemon.control","request_id":"w14","command":{"action":"hand_back","parent":"ab12cd34/5d1c…/codex-3f9a2c"}}
 {"type":"daemon.control","request_id":"w11","command":{"action":"job_result","session":"5d1c…","job":"job-3"}}
 {"type":"daemon.control","request_id":"w9","command":{"action":"worktrees"}}
 {"type":"daemon.control","request_id":"w10","command":{"action":"worktree_remove","path":"/home/u/.scv/worktrees/shop-1a2b3c4d/codex-9f3e21","force":false}}
@@ -202,6 +206,22 @@ existing absolute directory) with the given `agent` call arguments;
 the agent can and queues otherwise; `queue`; `steer`, which fails when it
 cannot); `workbench_cancel`, `workbench_resume`, and `workbench_dismiss` act
 on one job; `workbench_approve` answers a waiting approval request.
+`subscribe` binds that thread to a job already in the ledger. The daemon
+records the session owner as who authorized it and the fixed scope "deliver
+follow-ups on this thread to this job". It does not start a job. The `thread`
+value is the conversation key, with a real NUL around `thread` (JSON
+`\u0000`). The `scv jobs` command accepts that separator as the characters
+`\0thread\0`, because a command-line argument cannot contain a NUL. A stopped
+subscription, or one whose job will not be resumed, can be bound again;
+a live one cannot. `unsubscribe` stops delivery and leaves the record.
+`subscribe_extra` delivers another conversation key to the job `thread`
+already subscribes to. The authorization is unchanged. The worker can drop
+that extra thread; the bound thread stays. `hand_back` is the worker saying
+an offered follow-up is not the job's work:
+the message returns to ordinary intake on the account that received it, an
+extra thread is dropped, and the bound thread stays. With `thread` and
+`message_id` omitted, `parent` (the caller's `SCV_PARENT` chain) selects the
+follow-up that job's own record accepted. Each replies with `workbench_note`.
 `job_result` reads one job and replies with `daemon.status.job_result`: its
 `session`, `job`, and `agent`; its `state` and `detail` as the snapshot
 lists them; and, once it has ended, its agent's `reply` or its `error`,

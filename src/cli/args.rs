@@ -250,6 +250,66 @@ pub(crate) enum JobsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Bind a chat thread to a background job that already exists. Later
+    /// owner messages on that thread are delivered to the job. Does not
+    /// start a job.
+    Subscribe {
+        /// The job (`job-3`, or `<session prefix>/job-3`).
+        job: String,
+        /// Conversation key. The owner's direct chat is that account's
+        /// `user_id` from `scv channels status`. A thread in that chat is
+        /// `<user id>\0thread\0<thread id>` (Feishu's thread id, or Slack's
+        /// `<channel>:<thread ts>`). Write the separator as the characters
+        /// `\0thread\0`: an argument cannot contain a NUL byte.
+        #[arg(long)]
+        thread: String,
+        /// Why this thread should follow the job.
+        #[arg(long)]
+        why: String,
+        /// Print the daemon's reply as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deliver another thread to the job a thread already subscribes to.
+    /// The worker can drop this thread. The bound thread stays.
+    SubscribeExtra {
+        /// The conversation key already bound. A thread uses the same
+        /// `\0thread\0` separator as `subscribe`.
+        #[arg(long)]
+        thread: String,
+        /// The extra conversation key.
+        #[arg(long)]
+        extra: String,
+        /// Print the daemon's reply as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop delivery on a subscribed thread. The record stays, and a later
+    /// message does not resume the job.
+    Unsubscribe {
+        /// The conversation key the owner bound, or an extra thread on it.
+        /// A thread uses the same `\0thread\0` separator as `subscribe`.
+        #[arg(long)]
+        thread: String,
+        /// Print the daemon's reply as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hand a follow-up back to ordinary intake. From the subscribed job,
+    /// with no thread or message, hands back the message that job accepted.
+    /// An extra thread is dropped; the thread the owner bound stays.
+    HandBack {
+        /// The conversation key. Omitted from the subscribed job. A thread
+        /// uses the same `\0thread\0` separator as `subscribe`.
+        #[arg(long)]
+        thread: Option<String>,
+        /// The inbound message id. Omitted from the subscribed job.
+        #[arg(long)]
+        message: Option<String>,
+        /// Print the daemon's reply as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
     /// Forget a finished or interrupted job's record.
     Dismiss {
         job: String,

@@ -436,7 +436,7 @@ approval is never stopped for a takeover, since that would withdraw the
 request: neither attaching, nor interrupting, nor a key typed into the
 terminal answers, denies, or withdraws an approval.
 
-Activity logs, the job ledger, and kept queues are private files (0700
+Activity logs, the job ledger, task subscriptions, and kept queues are private files (0700
 directories, 0600 files) under `state/`, written atomically or appended by
 the SCV process that owns them. Activity logs hold the agent's message text
 and the same one-line tool summaries as progress, never tool output; every
@@ -444,7 +444,23 @@ line is scrubbed as it is written, whoever produced it (credential-looking
 values hidden, URL queries dropped, control characters removed), and agent
 text is untrusted, so the TUI and `scv jobs` render it inert. Scrubbing is a
 heuristic, and logs can still contain whatever the agent wrote, so they are
-pruned seven days after their run ends. A kept queue holds the owner's
+pruned seven days after their run ends. A ledger record a live task
+subscription still resolves through is kept past that, so a later follow-up
+can find the job; stopping the subscription lets the prune remove it. A job
+that has taken a follow-up names that message on its record
+(`accepted_follow_up`). Dismissing the job does not clear it, so the text
+is not sent again, and handing the job back returns that message rather
+than a later one in the same chain. The subscription's history is the other
+half of that record: an id it cannot be sure of is not delivered, and a
+message that could not be recorded stays queued for retry instead of being
+marked seen and dropped. A decided id stays decided after its thread is no
+longer bound, so binding that thread again does not run it. The record
+itself stays within the 256 KiB a reload can read; pending messages, returns,
+and decided ids are not dropped to make it fit. A handed-back message runs only in the account
+that received it, including after the offer list has rolled off and after a
+crash between the subscription record and its history, because
+that account is kept with the message. A full return queue keeps every
+unclaimed message. A mail chat does not run it. A kept queue holds the owner's
 queued prompts and is removed when the TUI leaves, by closing the connection
 or losing it; only a daemon that stops keeps it, and a queue restored into a
 session the TUI left before hearing of goes back as it was. Worktrees are
@@ -720,8 +736,14 @@ filesystem, shell, or delegated-agent tools. An account's `remote_tools =
 "owner"` setting, changeable only through local CLI or daemon control, grants
 the authenticated account owner full tools with every approval request
 auto-approved, except one a [command gate](#approval-behavior) puts to the
-owner, which is asked as a question in chat. That
-makes the owner's chat account equivalent to local shell access as the daemon
+owner, which is asked as a question in chat. Task-subscription delivery
+follows that grant: an owner message is given to a bound job only in a direct
+chat, or a thread in it, on an account with `remote_tools = "owner"`. With
+`remote_tools = "none"` the same message stays an ordinary tool-free turn. A
+retry checks that grant again, and does not give a message already held to
+the job after the account no longer has it. A binding does not override
+`remote_tools`. That makes the owner's chat
+account equivalent to local shell access as the daemon
 user: anyone who can
 send messages from it can read and change files, run commands, and launch
 delegated agents without confirmation. Other senders (on an account that

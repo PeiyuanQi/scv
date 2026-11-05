@@ -267,6 +267,9 @@ async fn a_cancelled_channel_account_stops_before_touching_anything() {
         instance: crate::test_support::test_instance("/missing"),
         tools: false,
         link: scv_channels::hub::Link::detached(),
+        follow_ups: Arc::new(crate::subscription::FollowUps::open(
+            &crate::test_support::test_instance("/missing").layout,
+        )),
     };
     let health = HealthReporter(Arc::new(Mutex::new(initial_health(
         ChannelKind::Wechat,
@@ -504,6 +507,9 @@ async fn a_cancelled_email_account_is_not_dropped_before_its_own_run_returns() {
         instance: crate::test_support::test_instance("/missing"),
         tools: false,
         link: scv_channels::hub::Link::detached(),
+        follow_ups: Arc::new(crate::subscription::FollowUps::open(
+            &crate::test_support::test_instance("/missing").layout,
+        )),
     };
     assert_eq!(
         account.stop_grace(),

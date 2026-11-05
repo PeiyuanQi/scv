@@ -16,6 +16,7 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
         layout.conversations(),
         layout.runs(),
         layout.jobs(),
+        layout.subscriptions(),
         layout.session_queues(),
         layout.worktrees(),
         layout.reviews(),
@@ -41,6 +42,7 @@ fn every_path_lives_under_one_of_the_top_level_entries() {
     assert_eq!(layout.reviews(), Path::new("/h/state/reviews"));
     assert_eq!(layout.runs(), Path::new("/h/state/runs"));
     assert_eq!(layout.jobs(), Path::new("/h/state/jobs"));
+    assert_eq!(layout.subscriptions(), Path::new("/h/state/subscriptions"));
     assert_eq!(layout.session_queues(), Path::new("/h/state/sessions"));
     assert_eq!(layout.worktrees(), Path::new("/h/worktrees"));
 }

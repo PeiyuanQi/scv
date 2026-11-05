@@ -1094,6 +1094,62 @@ so its entry claims neither and names the journal to check:
   Review: interrupted by a restart · result unknown, check journal rev-1759961234-3fa9c1 before relying on it
 ```
 
+## Task subscriptions
+
+A thread in the owner's direct chat can be bound to one background job that
+already exists (see [tools](tools.md#task-subscriptions)). The owner binds it
+with `scv jobs subscribe`. The key is that account's `user_id` from
+`scv channels status` for the direct chat, or
+`<user id>\0thread\0<thread id>` for a thread, typed with `\0thread\0`
+because a command-line argument cannot hold a NUL. The binding is the
+daemon's record, not the chat log and not the channel's delivery state.
+Intake still classifies the message. When that classification would open a
+turn with the owner's remote tools, or would answer with the busy notice
+on that same grant, for an owner message on a thread with a live
+subscription, the bridge asks the daemon instead of opening the turn.
+Without that grant the message stays an ordinary turn. An owner message on
+a thread with no subscription is an ordinary turn, including the busy notice.
+
+The daemon records the message as pending, then gives the text to the job's
+conversation, or resumes the job when it has finished or was interrupted.
+The bridge marks the message seen and does not run a turn only once the job
+has taken it, or once the daemon is holding it to retry. A failure leaves
+the message pending: the bridge still does not open a turn, and the daemon
+retries the delivery only while the account still grants tools to that
+thread's chat. Otherwise the message stays pending. A message whose id was
+already accepted is marked seen and is not given to the job again, including
+after the channel's seen list has dropped it.
+
+The bridge does not decide whether the message is the job's work. The worker
+hands it back with `scv jobs hand-back`, including after the job has taken
+the message and after the subscription was stopped. With no arguments, that
+is the message this job accepted, not
+a later job's. The account that received the message runs it as one ordinary
+turn from the daemon's return queue. That turn has remote tools only when
+the thread's chat is the owner the account grants them to, and it uses the
+owner's turn limit only then; otherwise it is an ordinary turn. The reply uses the inbound
+message's reply handle, so a thread is answered inside the thread, and a
+report from that turn posts into the thread. Another account does not take
+it, including after a crash between the subscription record and its history, and
+a mail chat never does: it runs no turn and holds no subscription. An extra
+thread on that subscription is dropped. A message already decided on that
+thread stays decided, including when the thread is bound again. The thread the owner bound is not.
+Another thread is attached with `scv jobs subscribe-extra`. An image-only
+follow-up is described to the job by name, and so is a file that arrived
+with text. A non-empty platform transcript is included with that note.
+The file is not downloaded into the job.
+A later sight of a handed-back or already-returned id is marked seen and
+does not open another turn. If the job was dismissed or cancelled, or the
+authorization is missing or stopped, the job receives nothing and the bridge
+continues with the usual turn; that id is remembered, so the turn is not
+opened again after the seen list drops it. That thread can be bound to
+another job. A restart reloads the subscriptions and retries a pending
+delivery, and a message whose decision could not be stored. It does not
+resume a job that has nothing pending, and it does not send again a message
+whose accepting job record is already on disk. When the job's conversation
+cannot be resumed, the bridge tells the owner once and keeps the message
+pending. Mail is not part of this.
+
 ## Restarts and notices
 
 An owner can ask SCV from a chat to change, publish, and deploy SCV itself:

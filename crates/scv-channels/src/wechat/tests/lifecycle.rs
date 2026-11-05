@@ -202,6 +202,7 @@ impl<'a> Bridge<'a> {
                     log: crate::chatlog::LogOptions::test(self.directory, "wechat"),
                     link: self.link.unwrap_or(&detached),
                     report: self.report,
+                    follow_ups: None,
                 },
                 self.store,
             ),
@@ -583,6 +584,7 @@ async fn mismatched_credentials_never_contact_poll_or_send() {
             log: crate::chatlog::LogOptions::test(directory.path(), "wechat"),
             link: &detached,
             report: &|_| panic!("no contact"),
+            follow_ups: None,
         },
         &store,
     )

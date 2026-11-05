@@ -353,6 +353,78 @@ async fn a_resumed_jobs_record_keeps_what_it_resumes_after_it_ends() {
     assert_eq!(done.started_by, scv_protocol::JobOrigin::Owner);
 }
 
+#[tokio::test]
+async fn a_subscription_follow_up_is_reported_to_the_session() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = recorded(root.path());
+    fixture
+        .tool
+        .owner_call(
+            json!({"prompt":"continue"}),
+            std::env::temp_dir(),
+            SendMode::Queue,
+            JobMeta {
+                origin: scv_protocol::JobOrigin::Model,
+                keep_origin: true,
+                ..JobMeta::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture.release.notify_one();
+    settled(&mut fixture).await;
+    let done = record(root.path(), "job-1");
+    assert_eq!(done.started_by, scv_protocol::JobOrigin::Model);
+    assert!(!done.reported);
+    assert_eq!(fixture.jobs.take_unreported().len(), 1);
+}
+
+#[tokio::test]
+async fn a_follow_up_whose_acceptance_cannot_be_recorded_does_not_start() {
+    let root = tempfile::tempdir().unwrap();
+    // The session's ledger directory is a file, so no record can be written.
+    std::fs::write(root.path().join("session-1"), "").unwrap();
+    let seen = Arc::new(Mutex::new(None));
+    let (finished_tx, mut finished) = mpsc::unbounded_channel();
+    let jobs = Arc::new(BackgroundJobs::new(2, Some(finished_tx)).with_ledger(
+        JobLedger::new(root.path(), "session-1", "TUI", std::path::Path::new("/w")).unwrap(),
+    ));
+    let tool = BackgroundCapable::plain(offering(JobNamer(Arc::clone(&seen))), Arc::clone(&jobs));
+    let error = tool
+        .owner_call(
+            json!({"prompt":"also run clippy"}),
+            std::env::temp_dir(),
+            SendMode::Queue,
+            JobMeta {
+                accepted_follow_up: Some(r#"{"thread":"t","message_id":"m1"}"#.into()),
+                ..JobMeta::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("did not start"), "{}", error.message);
+    assert!(jobs.live().is_empty());
+    assert_eq!(jobs.pending(), 0);
+    tokio::task::yield_now().await;
+    assert!(finished.try_recv().is_err());
+    assert_eq!(*lock(&seen), None, "the follow-up never reached the agent");
+    // Any other job's record stays best effort: the same failing write does
+    // not stop it.
+    tool.owner_call(
+        json!({"prompt":"ordinary work"}),
+        std::env::temp_dir(),
+        SendMode::Queue,
+        JobMeta::default(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), finished.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(lock(&seen).is_some());
+}
+
 #[test]
 fn jobs_are_numbered_after_the_ones_runs_name_without_records() {
     let root = tempfile::tempdir().unwrap();
