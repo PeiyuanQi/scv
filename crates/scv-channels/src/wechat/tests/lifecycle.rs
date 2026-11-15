@@ -4,8 +4,8 @@
 use super::*;
 use crate::{
     BUSY_REPLY, FAILURE_REPLY, HELD_HEADER, LATEST_HEADER, MAX_CONCURRENT_TURNS,
-    MAX_QUEUED_PER_CONVERSATION, MAX_REPLY_BYTES, MAX_TOTAL_REPLY_BYTES, ToolOwner, new_pending,
-    owner_turn_timeout, recover_interrupted,
+    MAX_QUEUED_PER_CONVERSATION, MAX_REPLY_BYTES, MAX_TOTAL_REPLY_BYTES, ToolOwner, failure_reply,
+    new_pending, owner_turn_timeout, recover_interrupted,
 };
 use serde_json::json;
 use std::os::fd::AsFd;
@@ -1435,7 +1435,7 @@ async fn tool_progress_never_reaches_wechat() {
 }
 
 #[tokio::test]
-async fn a_failed_turn_replies_with_the_generic_failure_message() {
+async fn a_failed_turn_replies_with_its_error() {
     let directory = tempfile::tempdir().unwrap();
     let mut ilink = FakeIlink::start().await;
     let store = saved_store(directory.path(), &ilink.base);
@@ -1448,11 +1448,13 @@ async fn a_failed_turn_replies_with_the_generic_failure_message() {
         ilink.push(vec![text_message("m1", "sender", "hello")]);
         let (mut side, _) = accept_session(&daemon).await;
         assert_eq!(next_turn(&mut side).await, "hello");
-        // The provider's own error text stays on the host.
-        send_frame(&mut side, json!({"type":"turn.failed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"code":"provider_error","message":"provider stream error: Our servers are currently overloaded (gave up after 3 attempts)"})).await;
+        // The server's error, which is already redacted and bounded, goes
+        // out after the generic sentence.
+        let error = "provider stream error: Our servers are currently overloaded (gave up after 3 attempts)";
+        send_frame(&mut side, json!({"type":"turn.failed","request_id":"r","session_id":"s","turn_id":"t","seq":1,"code":"provider_error","message":error})).await;
         let body = ilink.sent().await;
         assert_eq!(body["msg"]["context_token"], "ctx-m1");
-        assert_eq!(sent_text(&body), system(FAILURE_REPLY));
+        assert_eq!(sent_text(&body), system(&failure_reply(error)));
         wait_until(|| store.load_state("default").unwrap().pending.is_empty()).await;
         cancel.cancel();
     };
@@ -1726,7 +1728,7 @@ async fn an_owner_turn_that_times_out_is_cancelled_without_ending_its_background
             (Some("turn.cancel"), Some("slow"))
         );
         let failure = ilink.sent().await;
-        assert_eq!(sent_text(&failure), system(FAILURE_REPLY));
+        assert_eq!(sent_text(&failure), system(&failure_reply("timed out")));
         // The late end of the abandoned turn is ignored, and the same session
         // still delivers the job's report: no new session was opened.
         send_frame(&mut side, json!({"type":"turn.cancelled","request_id":request,"session_id":"s","turn_id":"slow","seq":31})).await;
@@ -2331,7 +2333,7 @@ async fn scvs_own_messages_go_in_a_labelled_code_block_and_the_models_answers_do
         assert_eq!(failure["msg"]["context_token"], "ctx-m2");
         assert_eq!(
             sent_text(&failure),
-            "```\nsystem msg: SCV could not complete that request.\n```"
+            "```\nsystem msg: SCV could not complete that request.\nError: overloaded\n```"
         );
         wait_until(delivered).await;
         // A question to the owner, whose asker wrote a code block into it:

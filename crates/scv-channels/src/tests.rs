@@ -444,6 +444,28 @@ fn recovered_replies_and_notices_are_scvs_own_words_and_carry_the_system_label()
     );
 }
 
+#[test]
+fn a_failure_reply_shows_its_error_on_one_bounded_line() {
+    assert_eq!(
+        failure_reply("turn cancelled"),
+        format!("{FAILURE_REPLY}\nError: turn cancelled")
+    );
+    assert_eq!(
+        failure_reply("  provider error:\n\tbad\r\n request  "),
+        format!("{FAILURE_REPLY}\nError: provider error: bad request")
+    );
+    // Nothing to show: the generic sentence alone.
+    assert_eq!(failure_reply(" \n "), FAILURE_REPLY);
+    // A long error is cut on a character boundary, and says so.
+    let long = failure_reply(&"é".repeat(MAX_FAILURE_ERROR_BYTES));
+    let error = long
+        .strip_prefix(&format!("{FAILURE_REPLY}\nError: "))
+        .unwrap();
+    let kept = error.strip_suffix(" [truncated]").unwrap();
+    assert_eq!(kept, "é".repeat(MAX_FAILURE_ERROR_BYTES / 2));
+    assert!(!error.contains('\n'));
+}
+
 /// A part's fence and what its code block holds, checking that the part is
 /// one complete block: a fence line, the content, and a closing fence line
 /// of the same fence, padded with spaces at most.

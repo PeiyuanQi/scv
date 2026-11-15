@@ -72,6 +72,22 @@ pub(crate) const MAX_TOTAL_REPLY_BYTES: usize = 4 * MAX_REPLY_BYTES;
 pub(crate) const FAILURE_REPLY: &str = "SCV could not complete that request.";
 /// The reply to a turn whose answer has neither text nor files.
 pub(crate) const EMPTY_REPLY: &str = "SCV completed without a text response.";
+/// Bytes of a failed turn's error its reply shows; a longer one is cut.
+const MAX_FAILURE_ERROR_BYTES: usize = 500;
+/// The reply to a turn that failed with `error`: [`FAILURE_REPLY`], then the
+/// error on one line, at most [`MAX_FAILURE_ERROR_BYTES`] of it.
+pub(crate) fn failure_reply(error: &str) -> String {
+    const MARKER: &str = " [truncated]";
+    let error = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    if error.is_empty() {
+        return FAILURE_REPLY.to_owned();
+    }
+    if error.len() <= MAX_FAILURE_ERROR_BYTES {
+        return format!("{FAILURE_REPLY}\nError: {error}");
+    }
+    let kept = scv_client::text::utf8_prefix(&error, MAX_FAILURE_ERROR_BYTES);
+    format!("{FAILURE_REPLY}\nError: {}{MARKER}", kept.trim_end())
+}
 
 /// What the daemon's task subscription does with an owner message before the
 /// bridge opens a turn. The bridge does not decide whether the message is the
@@ -1947,15 +1963,18 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                 }
                 match result {
                     Ok(Ok(response)) => response,
-                    Ok(Err(_)) => {
+                    Ok(Err(error)) => {
+                        let error = format!("{error:#}");
+                        tracing::warn!(error = %error, "channel turn failed");
                         // A turn the server failed leaves a healthy session,
                         // and with it any background jobs it runs.
                         if session.as_ref().is_none_or(session::Session::is_broken) {
                             session = None;
                         }
-                        session::Response::System(FAILURE_REPLY.to_owned())
+                        session::Response::System(failure_reply(&error))
                     }
                     Err(_) => {
+                        tracing::warn!(limit = ?job.limit, "channel turn timed out");
                         // Out of time: cancel the turn but keep a session
                         // that has background jobs running.
                         let keep = match session.as_mut() {
@@ -1968,7 +1987,7 @@ impl<C: state::Credentials, T: Transport> Bridge<'_, C, T> {
                         if !keep {
                             session = None;
                         }
-                        session::Response::System(FAILURE_REPLY.to_owned())
+                        session::Response::System(failure_reply("timed out"))
                     }
                 }
             };

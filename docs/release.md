@@ -2,8 +2,8 @@
 
 Status: final design
 
-The current workspace release is `0.4.11`. All crates share that version, and
-dependencies between workspace packages use exact `=0.4.11` pins.
+The current workspace release is `0.4.12`. All crates share that version, and
+dependencies between workspace packages use exact `=0.4.12` pins.
 
 SCV supports the latest patch release of stable Rust 1.88 or newer on:
 
@@ -52,6 +52,17 @@ processes manually: they do not honor the new account locks. Legacy credentials
 and unbound delivery state are loaded conservatively; changing an account's
 identity or API origin requires explicit logout before login. See
 [channel identity and durable state](channels.md#identity-and-durable-state).
+
+## Upgrading to 0.4.12
+
+`0.4.12` keeps the instance layout (`CONFIG_LAYOUT` 1) and protocol version 3.
+A chat turn that fails or times out is now answered with "SCV could not
+complete that request." and, on the next line, `Error: ` and its error,
+flattened to one line and cut to 500 bytes (see
+[Sessions and safety](channels.md#sessions-and-safety)). When the daemon
+cannot be reached, that error names its socket's path, and on an account that
+answers anyone, other senders see it too. A claim recovered after a crash or
+restart still gets the sentence alone.
 
 ## Upgrading to 0.4.11
 

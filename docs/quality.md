@@ -102,6 +102,10 @@ Daemon and component changes require focused coverage for:
   accepted (including a returned regional host) with the TLS port pinned and
   redirects not followed, oversized responses rejected before parsing, and
   replies chunked on UTF-8 boundaries within the byte limit;
+- a failed or timed-out turn answered with the generic failure sentence and
+  its error flattened to one line, cut on a character boundary at 500 bytes,
+  on WeChat, Feishu, and Slack, while a recovered claim gets the sentence
+  alone;
 - WeChat's `system msg: ` code block on SCV's own messages: a daemon notice,
   the failure reply, a question, and its acknowledgement sent in it while the
   model's answer and each continuation part go without it; the busy, voice,
