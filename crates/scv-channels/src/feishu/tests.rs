@@ -787,7 +787,15 @@ async fn caught_up_message_finishes_its_reaction(remove_code: i64, done_code: i6
             .request("/open-apis/im/v1/messages/om_away/reply")
             .await;
         let content: Value = serde_json::from_str(reply.body["content"].as_str().unwrap()).unwrap();
-        assert_eq!(content["text"], crate::FAILURE_REPLY);
+        // The reply says why: the connect error, whose OS part varies.
+        let text = content["text"].as_str().unwrap();
+        assert!(
+            text.starts_with(&crate::failure_reply(&format!(
+                "SCV server not started or not found at {}",
+                socket.display()
+            ))),
+            "{text}"
+        );
         assert_ne!(reply.body["uuid"].as_str().unwrap(), "");
         let removed = fake
             .request("/open-apis/im/v1/messages/om_away/reactions/r-onit")
@@ -1028,7 +1036,16 @@ async fn full_bridge_never_takes_a_caught_up_yes_from_before_the_question_as_its
         let reply = fake
             .request("/open-apis/im/v1/messages/om_before/reply")
             .await;
-        assert_eq!(text_of(&reply), crate::FAILURE_REPLY);
+        let text = text_of(&reply);
+        assert!(
+            text.as_str()
+                .unwrap()
+                .starts_with(&crate::failure_reply(&format!(
+                    "SCV server not started or not found at {}",
+                    socket.display()
+                ))),
+            "{text}"
+        );
         // The owner's yes sent now answers the question, without a turn.
         fake.send_event(
             "frame-1",
@@ -1644,7 +1661,14 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
         let reply = fake.request("/open-apis/im/v1/messages/om_t/reply").await;
         assert_eq!(reply.body["reply_in_thread"], true);
         let content: Value = serde_json::from_str(reply.body["content"].as_str().unwrap()).unwrap();
-        assert_eq!(content["text"], crate::FAILURE_REPLY);
+        let text = content["text"].as_str().unwrap();
+        assert!(
+            text.starts_with(&crate::failure_reply(&format!(
+                "SCV server not started or not found at {}",
+                socket.display()
+            ))),
+            "{text}"
+        );
         tokio::time::timeout(WAIT, async {
             loop {
                 let state = store.load_state("default").unwrap();

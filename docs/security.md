@@ -705,7 +705,8 @@ assistant text, 256 KiB per tool argument object, and 32 tool calls per model
 response. A limit violation cancels the response and fails the turn before any
 not-yet-started call from that response is executed. Provider error text is
 redacted of the credential, flattened, and bounded before it reaches clients or
-logs; channel senders receive only a generic failure reply.
+logs; a channel sender whose turn fails gets it after a generic failure
+sentence (see [Supervised remote bridge](#supervised-remote-bridge)).
 
 ## Supervised remote bridge
 
@@ -753,10 +754,14 @@ conversations never share the owner's direct-chat session. A Feishu or Slack
 thread runs on a session of its own with its chat's authority: the owner's tools in
 a thread of their direct chat, none in a group's thread. Logout clears the
 grant before deleting credentials. Owner replies are ordinary assistant output and may quote
-tool results the model chose to include; bridge failure details remain
-sanitized. Bridge failures produce short sanitized
-replies; raw diagnostics, credentials, tool output, and host paths are not
-forwarded as diagnostics to the chat. Status reports identity and live health,
+tool results the model chose to include. A turn that fails or runs out of
+time is answered with a generic sentence and its error on one line of at
+most 500 bytes: the server's message (a provider's, redacted as above),
+`timed out`, or the bridge's own error, which names the daemon socket's path
+when the daemon cannot be reached. On an account that answers anyone, other
+senders see it too. Other bridge
+failures produce short sanitized replies; raw diagnostics, credentials, and
+tool output are not forwarded as diagnostics to the chat. Status reports identity and live health,
 with sanitized errors and successful-contact timestamps, never bearer tokens.
 Saved credentials alone do not establish connectivity.
 

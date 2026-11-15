@@ -1348,12 +1348,18 @@ session (a timed-out turn with background jobs running is cancelled instead;
 see Background reports). Replies are delivered in the order turns complete, and a delivery
 that keeps failing is retried with backoff without stopping polling or other
 turns. Completed assistant output is
-sent only after `turn.completed`; failures become short non-sensitive replies.
+sent only after `turn.completed`. A turn that fails or times out is answered
+with "SCV could not complete that request." and, on the next line, `Error: `
+and its error: the server's message (`turn.failed`, or an `error` for the
+turn), `turn cancelled`, `timed out`, or the bridge's own, such as the daemon
+being unreachable at its socket's path. The error is flattened to one line
+and cut to 500 bytes, marked `[truncated]`, and also logged as a warning.
 Network failures use bounded exponential backoff. Retained duplicate message
-IDs and interrupted claims do not start another turn. Pending sends retain
+IDs and interrupted claims do not start another turn; recovery answers an
+interrupted claim with the generic sentence alone. Pending sends retain
 their client IDs across recovery; remote exactly-once delivery is not promised.
-Raw diagnostics, tool arguments, tool output, tokens, and host paths are not
-forwarded as failure details to the chat.
+Raw diagnostics, tool arguments, tool output, and tokens are not forwarded as
+failure details to the chat.
 
 Remote tool authority is a per-account setting, `remote_tools`, that only local
 CLI or daemon control can change:

@@ -648,7 +648,10 @@ async fn a_failed_turn_takes_the_working_reaction_off_with_its_failure_reply() {
             assert_eq!(next_turn(&mut side).await, "hello");
             // The daemon goes away mid-turn.
             drop(side);
-            assert_eq!(peer.sent().await.text, FAILURE_REPLY);
+            assert_eq!(
+                peer.sent().await.text,
+                failure_reply("SCV server closed the channel session")
+            );
             eventually(|| bench.transport.reactions().len() == 2).await;
             assert_eq!(
                 bench.transport.reactions(),
@@ -2596,7 +2599,7 @@ async fn a_handed_back_message_uses_the_owners_tool_limit() {
             assert_eq!(start["no_tools"], false);
             assert_eq!(next_turn(&mut side).await, "land it");
             // The owner's limit, not the ordinary turn limit, ends the turn.
-            assert_eq!(peer.sent().await.text, FAILURE_REPLY);
+            assert_eq!(peer.sent().await.text, failure_reply("timed out"));
         })
         .await;
 }

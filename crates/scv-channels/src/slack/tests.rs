@@ -1078,7 +1078,15 @@ async fn full_bridge_answers_a_caught_up_thread_message_inside_its_thread() {
         let posted = fake.request("/chat.postMessage").await;
         assert_eq!(posted.body["channel"], "D123");
         assert_eq!(posted.body["thread_ts"], root);
-        assert_eq!(posted.body["text"], crate::FAILURE_REPLY);
+        // The reply says why: the connect error, whose OS part varies.
+        let text = posted.body["text"].as_str().unwrap();
+        assert!(
+            text.starts_with(&crate::failure_reply(&format!(
+                "SCV server not started or not found at {}",
+                socket.display()
+            ))),
+            "{text}"
+        );
         let removed = fake.request("/reactions.remove").await;
         assert_eq!(removed.body, working);
         tokio::time::timeout(WAIT, async {
